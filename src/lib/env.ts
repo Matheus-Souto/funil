@@ -1,12 +1,24 @@
 import { z } from "zod";
 
+function isHttpBaseUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return (u.protocol === "http:" || u.protocol === "https:") && !value.endsWith("/");
+  } catch {
+    return false;
+  }
+}
+
 const schema = z.object({
   MODE: z.enum(["single", "multi"]).default("single"),
-  BASE_URL: z.string().min(1),
+  BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
   PLATFORM_DOMAIN: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1),
   OWNER_DATABASE_URL: z.string().min(1),
-  SECRET: z.string().min(32, "deve ter no mínimo 32 caracteres"),
+  SECRET: z
+    .string()
+    .min(32, "deve ter no mínimo 32 caracteres")
+    .refine((v) => !v.toLowerCase().includes("troque"), "é um valor de exemplo; gere um segredo próprio (openssl rand -base64 48)"),
   DATA_DIR: z.string().min(1).default("./data"),
   TURNSTILE_SITE_KEY: z.string().min(1).optional(),
   TURNSTILE_SECRET: z.string().min(1).optional(),
@@ -40,6 +52,12 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
       return missing ? `${name} (faltando)` : `${name}: ${i.message}`;
     });
     throw new Error(`Variáveis de ambiente inválidas: ${problems.join("; ")}`);
+  }
+  if (parsed.data.MODE === "multi" && parsed.data.PLATFORM_DOMAIN === undefined) {
+    throw new Error("Variáveis de ambiente inválidas: PLATFORM_DOMAIN é obrigatória com MODE=multi");
+  }
+  if ((parsed.data.TURNSTILE_SITE_KEY === undefined) !== (parsed.data.TURNSTILE_SECRET === undefined)) {
+    throw new Error("Variáveis de ambiente inválidas: TURNSTILE_SITE_KEY e TURNSTILE_SECRET devem ser definidas juntas ou nenhuma");
   }
   if (source.NODE_ENV === "production" && parsed.data.ASAAS_BASE_URL !== undefined && !isLoopbackUrl(parsed.data.ASAAS_BASE_URL)) {
     throw new Error(

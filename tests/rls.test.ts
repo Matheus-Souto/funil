@@ -100,3 +100,54 @@ test("propriedade: o que se lê em withStore(s) é exatamente o que foi inserido
     { numRuns: 20 },
   );
 });
+
+// Exceções justificadas: tabelas com coluna store_id que NÃO têm RLS por store_isolation.
+const RLS_EXCEPTIONS: Record<string, string> = {
+  membership: "consultada ANTES de haver loja no contexto (login: usuário+loja; sessão: join com session); sem segredos, só papel",
+  session: "resolvida pelo hash do token ANTES de haver loja no contexto: é ela que diz qual é a loja; id_hash é segredo de 256 bits",
+  job: "store_id anulável: jobs de sistema sem loja; a fila é lida pelo worker (papel app) sem app.store_id e re-escopa com withStore(job.storeId)",
+};
+
+async function storeTables() {
+  const tables = await t.ownerDb.execute<{ table_name: string; rls: boolean; forced: boolean; policy: string | null }>(sql`
+    select c.relname as table_name,
+           c.relrowsecurity as rls,
+           c.relforcerowsecurity as forced,
+           (select p.polname from pg_policy p where p.polrelid = c.oid and p.polname = 'store_isolation') as policy
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_attribute a on a.attrelid = c.oid and a.attname = 'store_id' and not a.attisdropped
+     where n.nspname = 'public' and c.relkind = 'r'
+     order by c.relname`);
+  return [...tables].map((r) => ({ name: r.table_name, complete: r.rls && r.forced && r.policy === "store_isolation" }));
+}
+
+test("toda tabela pública com store_id tem RLS habilitado + FORCE + política store_isolation (ou exceção justificada)", async () => {
+  const rows = await storeTables();
+  expect(rows.length).toBeGreaterThan(5);
+  const broken = rows
+    .filter((r) => !r.complete && !(r.name in RLS_EXCEPTIONS))
+    .map((r) => r.name)
+    .sort();
+  expect(broken).toEqual([]);
+  // A lista de exceções não pode ficar velha: cada exceção precisa existir e realmente não ter RLS completo.
+  for (const name of Object.keys(RLS_EXCEPTIONS)) {
+    const r = rows.find((x) => x.name === name);
+    expect(r, `exceção ${name} não existe mais`).toBeDefined();
+    expect(r!.complete, `exceção ${name} já tem RLS; remova da lista`).toBe(false);
+  }
+});
+
+test("a verificação de RLS pega uma tabela com store_id sem enable_store_rls (e aceita a que chamou)", async () => {
+  await t.ownerDb.execute(sql`create table rls_probe_missing (id int, store_id uuid not null)`);
+  await t.ownerDb.execute(sql`create table rls_probe_ok (id int, store_id uuid not null)`);
+  await t.ownerDb.execute(sql`select enable_store_rls('rls_probe_ok')`);
+  try {
+    const rows = await storeTables();
+    expect(rows.find((r) => r.name === "rls_probe_missing")?.complete).toBe(false);
+    expect(rows.find((r) => r.name === "rls_probe_ok")?.complete).toBe(true);
+  } finally {
+    await t.ownerDb.execute(sql`drop table rls_probe_missing`);
+    await t.ownerDb.execute(sql`drop table rls_probe_ok`);
+  }
+});

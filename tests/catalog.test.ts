@@ -58,9 +58,9 @@ describe("storage", () => {
   test("recusa .., caminho absoluto e NUL", async () => {
     const s = createStorage(() => join(tmpdir(), "funil-storage-b"));
     for (const key of ["../x", "a/../../x", "/etc/passwd", "a\0b", "", "a//b", "a\\b"]) {
-      expect(s.put(key, new Uint8Array([1]))).rejects.toThrow("Chave de armazenamento inválida");
-      expect(s.get(key)).rejects.toThrow();
-      expect(s.delete(key)).rejects.toThrow();
+      await expect(s.put(key, new Uint8Array([1]))).rejects.toThrow("Chave de armazenamento inválida");
+      await expect(s.get(key)).rejects.toThrow();
+      await expect(s.delete(key)).rejects.toThrow();
     }
   });
 

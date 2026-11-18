@@ -47,3 +47,41 @@ test("TRUST_PROXY: obrigatório em produção fora de loopback; padrão 0 em loo
 test("MODE inválido falha", () => {
   expect(() => parseEnv({ ...base, MODE: "x" })).toThrow(/MODE/);
 });
+
+test("SECRET de exemplo é recusado com mensagem clara", () => {
+  for (const secret of [
+    "troque-por-um-segredo-aleatorio-de-32-ou-mais-caracteres",
+    "TROQUE-ESTE-SEGREDO-por-um-valor-aleatorio-longo",
+  ]) {
+    expect(() => parseEnv({ ...base, SECRET: secret })).toThrow(/SECRET.*exemplo/);
+  }
+});
+
+test(".env.example não traz um SECRET que passe na validação", async () => {
+  const text = await Bun.file(new URL("../.env.example", import.meta.url)).text();
+  const line = text.split("\n").find((l) => l.startsWith("SECRET="));
+  const value = line?.slice("SECRET=".length).trim() ?? "";
+  expect(() => parseEnv({ ...base, SECRET: value })).toThrow(/SECRET/);
+});
+
+test("MODE=multi exige PLATFORM_DOMAIN", () => {
+  expect(() => parseEnv({ ...base, MODE: "multi" })).toThrow(/PLATFORM_DOMAIN/);
+  expect(parseEnv({ ...base, MODE: "multi", PLATFORM_DOMAIN: "lojas.example.com" }).PLATFORM_DOMAIN).toBe("lojas.example.com");
+  expect(parseEnv({ ...base, MODE: "single" }).MODE).toBe("single");
+});
+
+test("BASE_URL precisa ser URL http(s) sem barra final", () => {
+  for (const url of ["localhost:3000", "ftp://x.com", "loja.example.com", "http://x.com/", "https://x.com/loja/", "lixo"]) {
+    expect(() => parseEnv({ ...base, BASE_URL: url })).toThrow(/BASE_URL/);
+  }
+  for (const url of ["http://localhost:3000", "https://loja.example.com", "https://x.com/base"]) {
+    expect(parseEnv({ ...base, BASE_URL: url }).BASE_URL).toBe(url);
+  }
+});
+
+test("TURNSTILE_SITE_KEY e TURNSTILE_SECRET juntos ou nenhum", () => {
+  expect(() => parseEnv({ ...base, TURNSTILE_SITE_KEY: "k" })).toThrow(/TURNSTILE/);
+  expect(() => parseEnv({ ...base, TURNSTILE_SECRET: "s" })).toThrow(/TURNSTILE/);
+  expect(parseEnv({ ...base, TURNSTILE_SITE_KEY: "k", TURNSTILE_SECRET: "s" }).TURNSTILE_SECRET).toBe("s");
+  expect(parseEnv(base).TURNSTILE_SITE_KEY).toBeUndefined();
+});
