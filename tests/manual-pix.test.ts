@@ -9,6 +9,7 @@ import { job, orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { createOrder } from "@/lib/orders/create";
 import { buildPixBrCode } from "@/lib/payments/brcode";
+import { transitionOrder } from "@/lib/orders/state";
 import { allocateManualAmount, isUniqueViolation, manualPixBrCode, releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -143,6 +144,25 @@ describe("alocação do valor único", () => {
     expect(isUniqueViolation(e)).toBe(true);
   });
 
+  test("pedido vencido liberado entre o select e a expiração não derruba o novo comprador", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const a = await newOrder(storeId, offer.id);
+    await t.ownerDb.update(orders).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(orders.id, a.id));
+    const next = await withStore(storeId, (tx) =>
+      allocateManualAmount(ctxOf(storeId, tx), 990, {
+        beforeExpire: async (c, id) => {
+          await tx.update(orders).set({ status: "paid" }).where(eq(orders.id, id));
+          expect(c.storeId).toBe(storeId);
+        },
+      }),
+    );
+    // o pedido pago já não segura o valor
+    expect(next.amountCents).toBe(991);
+    const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, a.id));
+    expect(row!.status).toBe("paid");
+  });
+
   test("pedido Pix do Asaas não recebe valor manual", async () => {
     const { storeId } = await seedStore();
     const offer = await seedOffer(storeId, 990, "asaas");
@@ -159,10 +179,13 @@ describe("BR Code do pedido e conexão", () => {
     expect(out).toEqual({ key: "12345678909", name: "Jose da Silva", city: "Sao Paulo" });
     const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "pix_manual"));
     expect(conn).toEqual({ config: out, secret: null });
-    for (const key of ["Ana@Exemplo.com", "+5511999999999", "123e4567-e89b-12d3-a456-426614174000", "12345678000199"]) {
+    for (const key of ["Ana@Exemplo.com", "+5511999999999", "123e4567-e89b-12d3-a456-426614174000", "11222333000181"]) {
       await runAction(savePixManual, call, { key, name: "N", city: "C" });
     }
-    for (const key of ["abc", "12345", "+1555", "a@b", "x".repeat(40)]) {
+    const bad = await runAction(savePixManual, call, { key: "11999999999", name: "N", city: "C" }).catch((e: unknown) => e);
+    expect(bad).toMatchObject({ code: "invalid_input" });
+    expect((bad as Error).message).toContain("+55DDDNÚMERO");
+    for (const key of ["abc", "12345", "+1555", "a@b", "x".repeat(40), "12345678900", "11222333000182", "00000000000", "11111111111111"]) {
       await expect(runAction(savePixManual, call, { key, name: "N", city: "C" })).rejects.toMatchObject({ code: "invalid_input" });
     }
     await expect(runAction(savePixManual, { ...call, actor: { kind: "user", userId: "u", role: "admin" } }, { key: "a@b.co", name: "N", city: "C" })).rejects.toMatchObject({ code: "forbidden" });
@@ -195,6 +218,34 @@ describe("orders.release", () => {
     expect(jobs.filter((j) => (j.payload as { orderId?: string }).orderId === o.id)).toHaveLength(1);
     // segunda liberação: já não está pendente
     await expect(runAction(releaseOrder, { storeId, actor: owner, origin: "panel" }, { orderId: o.id })).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  test("pedido expirado (pagou depois de 24 h) é liberado, com os jobs de pago uma vez; segunda liberação conflita", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const o = await newOrder(storeId, offer.id);
+    await t.ownerDb.update(orders).set({ expiresAt: new Date(Date.now() - 1000), status: "expired" }).where(eq(orders.id, o.id));
+    const call = { storeId, actor: owner, origin: "panel" as const };
+    await runAction(releaseOrder, call, { orderId: o.id });
+    const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, o.id));
+    expect(row!.status).toBe("paid");
+    const mine = async (type: string) =>
+      (await t.ownerDb.select().from(job).where(eq(job.type, type))).filter((j) => (j.payload as { orderId?: string }).orderId === o.id);
+    expect(await mine("deliver_order")).toHaveLength(1);
+    expect(await mine("meta_event")).toHaveLength(1);
+    expect(await mine("notify_seller")).toHaveLength(1);
+    expect(await t.ownerDb.select().from(payment).where(eq(payment.orderId, o.id))).toHaveLength(1);
+    await expect(runAction(releaseOrder, call, { orderId: o.id })).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  test("a máquina geral continua estrita: expired -> paid sem a opção é conflict", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const o = await newOrder(storeId, offer.id);
+    await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, o.id));
+    await expect(withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), o.id, "paid", "webhook"))).rejects.toMatchObject({ code: "conflict" });
+    const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, o.id));
+    expect(row!.status).toBe("expired");
   });
 
   test("pedido Asaas -> conflict; inexistente -> not_found; support -> forbidden; mcp/ai -> approval_required", async () => {

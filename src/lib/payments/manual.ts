@@ -19,12 +19,21 @@ export function isUniqueViolation(e: unknown): boolean {
 }
 
 /** Marca como expirados os Pix manuais pendentes já vencidos da loja, liberando o valor. */
-async function expireStale(ctx: Ctx): Promise<void> {
+async function expireStale(ctx: Ctx, beforeExpire?: (ctx: Ctx, orderId: string) => Promise<void>): Promise<void> {
   const stale = await ctx.tx
     .select({ id: orders.id })
     .from(orders)
     .where(and(eq(orders.method, "pix_manual"), eq(orders.status, "pending"), lt(orders.expiresAt, new Date())));
-  for (const o of stale) await transitionOrder(ctx, o.id, "expired", "expirou");
+  for (const o of stale) {
+    await beforeExpire?.(ctx, o.id);
+    try {
+      await transitionOrder(ctx, o.id, "expired", "expirou");
+    } catch (e) {
+      // Liberado/pago entre o select e a transição: já não segura o valor; o comprador novo não pode falhar por isso.
+      if (e instanceof ActionError && e.code === "conflict") continue;
+      throw e;
+    }
+  }
 }
 
 /**
@@ -36,10 +45,10 @@ async function expireStale(ctx: Ctx): Promise<void> {
 export async function allocateManualAmount(
   ctx: Ctx,
   totalCents: number,
-  opts: { skip?: readonly number[] } = {},
+  opts: { skip?: readonly number[]; beforeExpire?: (ctx: Ctx, orderId: string) => Promise<void> } = {},
 ): Promise<{ amountCents: number; expiresAt: Date }> {
   await ctx.tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"pix_manual:" + ctx.storeId}, 0))`);
-  await expireStale(ctx);
+  await expireStale(ctx, opts.beforeExpire);
 
   const taken = await ctx.tx
     .select({ amount: orders.manualAmountCents })
@@ -85,6 +94,29 @@ export async function manualPixBrCode(
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function validCpf(d: string): boolean {
+  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
+  for (const n of [9, 10]) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += Number(d[i]) * (n + 1 - i);
+    const dv = ((sum * 10) % 11) % 10;
+    if (dv !== Number(d[n])) return false;
+  }
+  return true;
+}
+
+function validCnpj(d: string): boolean {
+  if (!/^\d{14}$/.test(d) || /^(\d)\1{13}$/.test(d)) return false;
+  for (const n of [12, 13]) {
+    const w = n === 12 ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += Number(d[i]) * w[i]!;
+    const r = sum % 11;
+    if ((r < 2 ? 0 : 11 - r) !== Number(d[n])) return false;
+  }
+  return true;
+}
+
 /** Validação frouxa do formato da chave; devolve a forma normalizada ou null. */
 export function normalizePixKey(raw: string): string | null {
   const v = raw.trim();
@@ -92,7 +124,7 @@ export function normalizePixKey(raw: string): string | null {
   if (UUID.test(v)) return v.toLowerCase();
   if (/^\+55\d{10,11}$/.test(v)) return v;
   const digits = v.replace(/[.\-/\s]/g, "");
-  if (/^\d{11}$/.test(digits) || /^\d{14}$/.test(digits)) return digits;
+  if (validCpf(digits) || validCnpj(digits)) return digits;
   return null;
 }
 
@@ -107,7 +139,7 @@ export const savePixManual = defineAction({
   permission: "connections.write",
   async run(ctx, input) {
     const key = normalizePixKey(input.key);
-    if (!key) throw new ActionError("invalid_input", "Chave Pix inválida: use CPF, CNPJ, e-mail, telefone (+55) ou chave aleatória");
+    if (!key) throw new ActionError("invalid_input", "Chave Pix inválida: use CPF ou CNPJ válidos, e-mail, telefone no formato +55DDDNÚMERO (ex.: +5511999999999) ou chave aleatória");
     const config = { key, name: sanitizeText(input.name, 25, "LOJA"), city: sanitizeText(input.city, 15, "BRASIL") };
     await saveIntegration(ctx.tx, ctx.storeId, "pix_manual", config);
     return config;
@@ -116,7 +148,7 @@ export const savePixManual = defineAction({
 
 export const releaseOrder = defineAction({
   name: "orders.release",
-  description: "Libera manualmente um pedido Pix manual pendente depois de conferir o recebimento.",
+  description: "Libera manualmente um pedido Pix manual pendente ou expirado depois de conferir o recebimento.",
   input: z.object({ orderId: z.uuid() }),
   permission: "orders.release",
   sensitive: true,
@@ -124,8 +156,9 @@ export const releaseOrder = defineAction({
     const [o] = await ctx.tx.select().from(orders).where(eq(orders.id, orderId));
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
     if (o.method !== "pix_manual") throw new ActionError("conflict", "Só pedidos de Pix manual podem ser liberados à mão");
-    if (o.status !== "pending") throw new ActionError("conflict", `Pedido não está pendente (${o.status})`);
-    const r = await transitionOrder(ctx, o.id, "paid", "liberado manualmente");
+    // Pendente ou já expirado: quem pagou depois da validade ainda precisa ser liberado.
+    if (o.status !== "pending" && o.status !== "expired") throw new ActionError("conflict", `Pedido não está pendente (${o.status})`);
+    const r = await transitionOrder(ctx, o.id, "paid", "liberado manualmente", { allowFromExpired: true });
     if (!r.changed) throw new ActionError("conflict", "Pedido já foi liberado");
     await ctx.tx.insert(payment).values({
       storeId: ctx.storeId,

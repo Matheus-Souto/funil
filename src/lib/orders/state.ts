@@ -21,7 +21,12 @@ export const ALLOWED: Record<OrderStatus, readonly OrderStatus[]> = {
  * Efeitos colaterais (jobs) só saem quando uma linha foi realmente atualizada, na mesma transação.
  * Mesmo estado -> `{ changed: false }`; transição inválida -> `conflict`.
  */
-export async function transitionOrder(ctx: Ctx, orderId: string, to: OrderStatus, reason: string): Promise<{ changed: boolean }> {
+export async function transitionOrder(
+  ctx: Ctx,
+  orderId: string, to: OrderStatus,
+  reason: string,
+  opts: { allowFromExpired?: boolean } = {},
+): Promise<{ changed: boolean }> {
   const read = async () => {
     const [row] = await ctx.tx.select({ status: orders.status }).from(orders).where(eq(orders.id, orderId));
     return row?.status as OrderStatus | undefined;
@@ -29,7 +34,9 @@ export async function transitionOrder(ctx: Ctx, orderId: string, to: OrderStatus
   const from = await read();
   if (!from) throw new ActionError("not_found", "Pedido não encontrado");
   if (from === to) return { changed: false };
-  if (!ALLOWED[from].includes(to)) throw new ActionError("conflict", `Transição inválida: ${from} -> ${to}`);
+  // expired -> paid só existe para a liberação manual (comprador que pagou depois da validade); a máquina geral segue estrita.
+  const manualLate = opts.allowFromExpired === true && from === "expired" && to === "paid";
+  if (!manualLate && !ALLOWED[from].includes(to)) throw new ActionError("conflict", `Transição inválida: ${from} -> ${to}`);
 
   const updated = await ctx.tx
     .update(orders)
