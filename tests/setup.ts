@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { mock } from "bun:test";
 
 // `server-only` lança erro fora do bundler do Next; nos testes vira um módulo vazio.
@@ -11,3 +14,5 @@ const testEnv: Record<string, string> = {
   SECRET: "test-secret-test-secret-test-secret-0123",
 };
 for (const [k, v] of Object.entries(testEnv)) process.env[k] ??= v;
+// Arquivos de teste vão para um diretório temporário, nunca para ./data.
+process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), "funil-data-"));
