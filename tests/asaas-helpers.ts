@@ -3,6 +3,8 @@ import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
+import { runDueJobs } from "@/lib/jobs";
+import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
@@ -60,3 +62,13 @@ export const newCardOrder = (storeId: string, offerId: string, email: string, cp
       userAgent: "bun-test",
     }),
   );
+
+/**
+ * Roda os jobs `refund_order` vencidos com o handler registrado no módulo de handlers (como o worker faz).
+ * Os demais tipos vencidos (sem handler aqui) são adiados; repete até a fila vencida esvaziar.
+ */
+export async function runRefundJobs(now: Date = new Date()): Promise<void> {
+  const handler = getHandlers().refund_order;
+  if (!handler) throw new Error("refund_order não está registrado em getHandlers()");
+  for (let i = 0; i < 100 && (await runDueJobs({ refund_order: handler }, 50, now)) > 0; i++);
+}

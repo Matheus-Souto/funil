@@ -43,6 +43,8 @@ export const orders = pgTable(
     hasBump: boolean("has_bump").notNull().default(false),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     paidAt: timestamp("paid_at", { withTimezone: true }),
+    /** Estorno no Asaas pedido pelo painel; o job `refund_order` o executa e só então o pedido vira `refunded`. */
+    refundRequestedAt: timestamp("refund_requested_at", { withTimezone: true }),
     firstTouch: jsonb("first_touch"),
     lastTouch: jsonb("last_touch"),
     ref: text("ref"),

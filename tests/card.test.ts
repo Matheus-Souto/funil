@@ -12,7 +12,7 @@ import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
 import { refundOrder } from "@/lib/payments/refund";
 import { createTestDb, type TestDb } from "./db";
-import { createFakeAsaas, newAsaasOrder, newCardOrder, owner, seedAsaasStore } from "./asaas-helpers";
+import { createFakeAsaas, newAsaasOrder, newCardOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
 import type { FakeAsaas } from "./fakes/asaas";
 
 let t: TestDb;
@@ -581,7 +581,8 @@ describe("payWithCard: parcelado", () => {
     expect((await orderRow(storeId, o.id)).status).toBe("paid");
 
     await runAction(refundOrder, { storeId, actor: owner, origin: "panel" }, { orderId: o.id });
-    expect(fake.calls.some((c) => c.method === "POST" && c.path === `/installments/${inst!.id}/refund`)).toBe(true);
+    await runRefundJobs(new Date(Date.now() + 1000));
+    expect(fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund")).map((c) => c.path)).toEqual([`/installments/${inst!.id}/refund`]);
     expect((await orderRow(storeId, o.id)).status).toBe("refunded");
   });
 

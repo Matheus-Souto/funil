@@ -4,6 +4,7 @@ import { orders, store } from "@/lib/db/schema";
 import { ActionError } from "@/lib/actions/core";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
+import { refundOrderJob } from "@/lib/payments/refund";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
 /**
@@ -49,7 +50,7 @@ export function createExpireOrdersHandler(beforeTransition?: (tx: Tx, orderId: s
 export const expireOrdersHandler: JobHandler = createExpireOrdersHandler();
 
 /** Registro de handlers do worker. Tasks seguintes chamam `registerHandler` (deliver_order, meta_event, ...). */
-const registry: JobHandlers = { expire_orders: expireOrdersHandler };
+const registry: JobHandlers = { expire_orders: expireOrdersHandler, refund_order: refundOrderJob };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {
   registry[type] = handler;

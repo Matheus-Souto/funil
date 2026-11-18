@@ -8,7 +8,14 @@ import { db, type Tx } from "@/lib/db/client";
 import { job } from "@/lib/db/schema";
 import { log, redact } from "@/lib/log";
 
-export type JobType = "deliver_order" | "meta_event" | "notify_seller" | "revoke_downloads" | "restore_downloads" | "expire_orders";
+export type JobType =
+  | "deliver_order"
+  | "meta_event"
+  | "notify_seller"
+  | "revoke_downloads"
+  | "restore_downloads"
+  | "expire_orders"
+  | "refund_order";
 export type Job = typeof job.$inferSelect;
 /** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
 export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;
@@ -26,6 +33,16 @@ export const NO_HANDLER_DELAY_MS = 10 * 60 * 1000;
 
 export async function enqueue(tx: Tx, j: { storeId: string | null; type: JobType; payload: unknown; runAt?: Date }): Promise<void> {
   await tx.insert(job).values({ storeId: j.storeId, type: j.type, payload: j.payload ?? {}, ...(j.runAt ? { runAt: j.runAt } : {}) });
+}
+
+/** Há job deste tipo para o pedido ainda na fila ou rodando? (evita enfileirar o mesmo efeito duas vezes) */
+export async function hasOpenJob(tx: Tx, type: JobType, orderId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: job.id })
+    .from(job)
+    .where(and(eq(job.type, type), inArray(job.status, ["queued", "running"]), sql`${job.payload}->>'orderId' = ${orderId}`))
+    .limit(1);
+  return row !== undefined;
 }
 
 /** Agenda um job global só se não houver outro `queued` do mesmo tipo. Devolve se inseriu. */

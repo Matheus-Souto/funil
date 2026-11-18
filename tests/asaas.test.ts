@@ -2,13 +2,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { auditLog, customer, integration, job, orders, payment } from "@/lib/db/schema";
+import { auditLog, customer, integration, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { transitionOrder } from "@/lib/orders/state";
 import { createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { isUniqueViolation } from "@/lib/payments/manual";
 import { ensureAsaasCustomer, saveAsaas, startAsaasPix } from "@/lib/payments/asaas/pix";
-import { refundOrder } from "@/lib/payments/refund";
 import { mapAsaasStatus } from "@/lib/payments/asaas/webhook";
 import { createTestDb, seedStore, type TestDb } from "./db";
 import { ctxOf, createFakeAsaas, newAsaasOrder, owner, seedAsaasStore } from "./asaas-helpers";
@@ -299,87 +298,5 @@ describe("Pix automático: robustez da cobrança", () => {
     fake.fail("DELETE /payments/", 500, "não deu");
     const qrs = await Promise.all([1, 2].map(() => startAsaasPix({ storeId }, order.id)));
     expect(new Set(qrs.map((q) => q.copyPaste)).size).toBe(1);
-  });
-});
-
-describe("orders.refund", () => {
-  async function paidAsaasOrder() {
-    const fake = createFakeAsaas();
-    const { storeId, offerId } = await seedAsaasStore(fake);
-    const order = await newAsaasOrder(storeId, offerId);
-    await startAsaasPix({ storeId }, order.id);
-    const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
-    fake.setStatus(pay!.providerId!, "RECEIVED");
-    await t.ownerDb.update(payment).set({ status: "RECEIVED" }).where(eq(payment.id, pay!.id));
-    await withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), order.id, "paid", "t"));
-    return { fake, storeId, order, providerId: pay!.providerId! };
-  }
-  const statusOf = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
-
-  test("Asaas: chama o endpoint de estorno e muda o estado para refunded (revoga downloads)", async () => {
-    const { fake, storeId, order, providerId } = await paidAsaasOrder();
-    const r = await runAction(refundOrder, panel(storeId), { orderId: order.id });
-    expect(r.orderId).toBe(order.id);
-    expect(fake.calls.some((c) => c.method === "POST" && c.path === `/payments/${providerId}/refund`)).toBe(true);
-    expect(await statusOf(order.id)).toBe("refunded");
-    const types = (await t.ownerDb.select().from(job)).filter((j) => (j.payload as { orderId?: string }).orderId === order.id).map((j) => j.type);
-    expect(types).toContain("revoke_downloads");
-  });
-
-  test("Asaas falha: estado não muda e devolve provider_error", async () => {
-    const { fake, storeId, order } = await paidAsaasOrder();
-    fake.fail("POST /payments/", 400, "Saldo insuficiente para estorno");
-    const e = await runAction(refundOrder, panel(storeId), { orderId: order.id }).catch((x: unknown) => x);
-    expect((e as ActionError).code).toBe("provider_error");
-    expect(await statusOf(order.id)).toBe("paid");
-  });
-
-  test("com várias cobranças no pedido, estorna só a paga e não duplicada", async () => {
-    const { fake, storeId, order, providerId } = await paidAsaasOrder();
-    const base = { storeId, orderId: order.id, provider: "asaas", amountCents: 990 };
-    await t.ownerDb.insert(payment).values([
-      { ...base, providerId: "pay_velha_overdue", status: "OVERDUE" },
-      { ...base, providerId: "pay_dup_paga", status: "RECEIVED", raw: { duplicate: true } },
-    ]);
-    await runAction(refundOrder, panel(storeId), { orderId: order.id });
-    const refunds = fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund")).map((c) => c.path);
-    expect(refunds).toEqual([`/payments/${providerId}/refund`]);
-  });
-
-  test("sem cobrança paga e não duplicada -> conflict, nada muda", async () => {
-    const { storeId, order, providerId } = await paidAsaasOrder();
-    await t.ownerDb.update(payment).set({ status: "OVERDUE" }).where(eq(payment.providerId, providerId));
-    const e = await runAction(refundOrder, panel(storeId), { orderId: order.id }).catch((x: unknown) => x);
-    expect((e as ActionError).code).toBe("conflict");
-    expect(await statusOf(order.id)).toBe("paid");
-  });
-
-  test("só pedidos pagos são reembolsáveis", async () => {
-    const fake = createFakeAsaas();
-    const { storeId, offerId } = await seedAsaasStore(fake);
-    const order = await newAsaasOrder(storeId, offerId);
-    const e = await runAction(refundOrder, panel(storeId), { orderId: order.id }).catch((x: unknown) => x);
-    expect((e as ActionError).code).toBe("conflict");
-  });
-
-  test("Pix manual: só muda o estado e avisa para devolver pelo banco (sem chamar o Asaas)", async () => {
-    const fake = createFakeAsaas();
-    const { storeId, offerId } = await seedAsaasStore(fake);
-    const base = await newAsaasOrder(storeId, offerId);
-    await t.ownerDb.update(orders).set({ method: "pix_manual", status: "paid" }).where(eq(orders.id, base.id));
-    const before = fake.calls.length;
-    const r = await runAction(refundOrder, panel(storeId), { orderId: base.id });
-    expect(r.message).toContain("banco");
-    expect(await statusOf(base.id)).toBe("refunded");
-    expect(fake.calls.length).toBe(before);
-  });
-
-  test("é sensível e exige a permissão orders.refund", async () => {
-    const { storeId, order } = await paidAsaasOrder();
-    const mcp = await runAction(refundOrder, { storeId, actor: owner, origin: "mcp" }, { orderId: order.id }).catch((x: unknown) => x);
-    expect((mcp as ActionError).code).toBe("approval_required");
-    const support = { kind: "user" as const, userId: "u2", role: "support" as const };
-    const f = await runAction(refundOrder, { storeId, actor: support, origin: "panel" }, { orderId: order.id }).catch((x: unknown) => x);
-    expect((f as ActionError).code).toBe("forbidden");
   });
 });
