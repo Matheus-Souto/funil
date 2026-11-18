@@ -8,9 +8,23 @@ test("seal/open ida e volta", () => {
   expect(open(s)).toBe("chave-asaas");
 });
 
-test("open recusa texto adulterado", () => {
+// Adultera de forma determinística: inverte o bit 0 do byte 0 da parte `index` (iv=1, tag=2, ciphertext=3).
+function tamper(sealed: string, index: 1 | 2 | 3): string {
+  const parts = sealed.split(".");
+  const bytes = Buffer.from(parts[index], "base64url");
+  bytes[0] ^= 1;
+  parts[index] = bytes.toString("base64url");
+  return parts.join(".");
+}
+
+test.each([
+  ["iv", 1],
+  ["tag", 2],
+  ["ciphertext", 3],
+] as const)("open recusa %s adulterado", (_nome, index) => {
   const s = seal("x");
-  expect(() => open(s.slice(0, -2) + "AA")).toThrow();
+  expect(tamper(s, index)).not.toBe(s);
+  expect(() => open(tamper(s, index))).toThrow();
 });
 
 test("open recusa formato inválido e outra chave", () => {

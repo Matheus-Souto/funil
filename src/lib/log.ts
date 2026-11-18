@@ -1,6 +1,6 @@
 const SENSITIVE_KEY = /^(number|ccv|cvv|cardNumber|creditCard|expiryMonth|expiryYear|card)$/i;
-// 13+ dígitos, com um espaço ou hífen opcional entre eles. Corridas longas são removidas inteiras.
-const PAN = /\d(?:[ -]?\d){12,}/g;
+// 13+ dígitos separados por qualquer espaço (inclui tab, NBSP, quebra de linha), ponto ou hífen. Corridas longas são removidas inteiras.
+const PAN = /\d(?:[\s.-]*\d){12,}/g;
 const MASK = "[redacted]";
 
 function walk(v: unknown, seen: WeakSet<object>): unknown {

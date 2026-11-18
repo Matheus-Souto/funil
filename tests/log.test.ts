@@ -25,6 +25,19 @@ test("redact troca valores de chaves sensíveis por [redacted]", () => {
   });
 });
 
+test("redact pega PAN com separadores múltiplos ou diferentes", () => {
+  for (const pan of [
+    "4444  4444 4444 4444",
+    "4444 - 4444 - 4444 - 4444",
+    "4444\t4444\t4444\t4444",
+    "4444.4444.4444.4444",
+    "4444\u00a04444\u00a04444\u00a04444",
+    "4444 4444\n4444 4444",
+  ]) {
+    expect(redact(`cartão ${pan} fim`)).toBe("cartão [redacted] fim");
+  }
+});
+
 test("redact preserva textos normais, trata ciclos, Error e Date", () => {
   expect(redact("pedido 123 total 4500")).toBe("pedido 123 total 4500");
   const a: Rec = { n: 1 };
@@ -36,10 +49,13 @@ test("redact preserva textos normais, trata ciclos, Error e Date", () => {
 });
 
 const digits = (n: number) => fc.array(fc.integer({ min: 0, max: 9 }), { minLength: n, maxLength: n }).map((d) => d.join(""));
+const separator = fc.stringMatching(/^[ \t.\n\u00a0-]{1,3}$/);
 const pan = fc
-  .tuple(fc.integer({ min: 13, max: 19 }), fc.constantFrom("", " ", "-"))
-  .chain(([n, sep]) =>
-    digits(n).map((d) => (sep === "" ? d : (d.match(/.{1,4}/g) as string[]).join(sep))),
+  .tuple(fc.integer({ min: 13, max: 19 }), fc.constantFrom("none", "mixed"))
+  .chain(([n, kind]) =>
+    fc
+      .tuple(digits(n), fc.array(kind === "none" ? fc.constant("") : separator, { minLength: n, maxLength: n }))
+      .map(([d, seps]) => [...d].map((c, i) => (i < n - 1 ? c + seps[i] : c)).join("")),
   );
 const noDigitText = fc.string().map((s) => s.replace(/\d/g, "x"));
 const wrapped = fc
@@ -53,7 +69,7 @@ test("propriedade: PAN gerado nunca sobrevive ao redact (texto, objetos e arrays
         shape === 0 ? text : shape === 1 ? { a: { b: [text] } } : shape === 2 ? [[{ k: text }]] : { msg: text, n: [{ deep: [text] }] };
       const json = JSON.stringify(redact(input));
       expect(json).not.toContain(p);
-      expect(json.replace(/[ -]/g, "")).not.toMatch(/\d{13}/);
+      expect(json.replace(/(\\n|\\t|[ .\u00a0-])/g, "")).not.toMatch(/\d{13}/);
     }),
   );
 });
