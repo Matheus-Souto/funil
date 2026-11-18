@@ -7,6 +7,7 @@ import { orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
+import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
 import { classifyRefund, refundMarkerOf, refundStatuses } from "./refunds";
@@ -203,12 +204,42 @@ export const noteUnreachableAsaasPayment = defineAction({
   },
 });
 
-/** Erro do Asaas que não se resolve reenviando (4xx, menos 429). Rede (0), 429 e 5xx são transitórios. */
-function permanentAsaasError(e: unknown): number | null {
+/** Status HTTP do erro do Asaas (0 = rede/timeout), ou null se não for erro do cliente Asaas. */
+function asaasHttpStatus(e: unknown): number | null {
   if (!(e instanceof ActionError) || e.code !== "provider_error") return null;
   const status = (e.details as { status?: unknown } | undefined)?.status;
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 429 ? status : null;
+  return typeof status === "number" ? status : null;
 }
+
+/** 401/403: a chave da loja foi revogada, girada ou desativada. Transitório para nós: o vendedor corrige e o Asaas reenvia. */
+const KEY_REJECTED = new Set([401, 403]);
+
+/** Erro do Asaas que não se resolve reenviando (4xx, menos 401/403/429). Rede (0), 401/403, 429 e 5xx são transitórios. */
+function permanentAsaasError(e: unknown): number | null {
+  const status = asaasHttpStatus(e);
+  return status !== null && status >= 400 && status < 500 && status !== 429 && !KEY_REJECTED.has(status) ? status : null;
+}
+
+/** No máximo um aviso de chave recusada por loja por hora (janela fixa na tabela rate_limit, atômica). */
+export const KEY_ALERT_WINDOW_SEC = 3600;
+
+/**
+ * A chave do Asaas da loja foi recusada (401/403) na reconsulta do webhook: avisa o vendedor (`notify_seller`,
+ * reason `chave_asaas_invalida`) no máximo uma vez por hora por loja. Os eventos não se perdem: o webhook responde 500
+ * e o Asaas reenvia (ou pausa a fila) até a chave ser corrigida.
+ */
+export const alertAsaasKeyRejected = defineAction({
+  name: "payments.alertAsaasKeyRejected",
+  description: "Avisa o vendedor (no máximo 1 vez por hora) que a chave do Asaas da loja foi recusada pelo Asaas.",
+  input: z.object({ httpStatus: z.number().int() }),
+  permission: "system",
+  async run(ctx, { httpStatus }) {
+    if (!(await checkRateLimit(`asaas:key_rejected:${ctx.storeId}`, 1, KEY_ALERT_WINDOW_SEC))) return { alerted: false };
+    await enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_seller", payload: { reason: "chave_asaas_invalida", httpStatus } });
+    log.warn("chave do Asaas recusada; vendedor avisado para reconectar", { storeId: ctx.storeId, httpStatus });
+    return { alerted: true };
+  },
+});
 
 export type AsaasPaymentInput = {
   paymentId: string;
@@ -243,7 +274,8 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
 /**
  * Webhook do Asaas. Nunca confia no corpo: valida o token da loja, reconsulta `GET /payments/{id}` e aplica o estado real.
  * 401 sem revelar se a loja existe; 200 para eventos ignorados/repetidos e para 4xx permanente na reconsulta (sem loop
- * de reenvio; ver `noteUnreachableAsaasPayment`); 500 só para falha de rede, 429 ou 5xx do Asaas (para o Asaas reenviar).
+ * de reenvio; ver `noteUnreachableAsaasPayment`); 500 para falha de rede, 401/403 (chave recusada: avisa o vendedor),
+ * 429 ou 5xx do Asaas (para o Asaas reenviar).
  */
 export async function handleAsaasWebhook(storeId: string, headers: Headers, raw: unknown): Promise<{ status: number }> {
   if (!UUID.test(storeId)) return { status: 404 };
@@ -264,6 +296,15 @@ export async function handleAsaasWebhook(storeId: string, headers: Headers, raw:
     if (fresh.id !== parsed.data.payment.id) return { status: 200 };
     applyInput = await asaasPaymentInput(client, fresh);
   } catch (e) {
+    const http = asaasHttpStatus(e);
+    if (http !== null && KEY_REJECTED.has(http)) {
+      // Chave revogada/girada/desativada: NUNCA descartar o evento (o comprador pode ter pago). 500 -> o Asaas reenvia.
+      log.warn("webhook Asaas: chave recusada na reconsulta; evento será reenviado pelo Asaas", { storeId, httpStatus: http });
+      await runAction(alertAsaasKeyRejected, { storeId, actor: { kind: "system" }, origin: "webhook" }, { httpStatus: http }).catch((err: unknown) =>
+        log.error("webhook Asaas: falha ao avisar chave recusada", { storeId, error: err }),
+      );
+      return { status: 500 };
+    }
     const permanent = permanentAsaasError(e);
     if (permanent === null) {
       log.warn("webhook Asaas: falha ao reconsultar cobrança", { storeId, error: e });

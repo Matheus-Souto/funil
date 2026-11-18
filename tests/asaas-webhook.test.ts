@@ -376,12 +376,11 @@ describe("reconsulta com erro permanente (4xx) não vira 500 em loop", () => {
     expect(await notifies(s.order.id)).toHaveLength(0);
   });
 
-  test("404 de cobrança desconhecida, 400 e 401: 200 sem efeito", async () => {
+  test("404 de cobrança desconhecida e 400: 200 sem efeito", async () => {
     const s = await setup();
     for (const [status, code] of [
       [404, "not_found"],
       [400, "invalid_action"],
-      [401, "invalid_access_token"],
     ] as const) {
       s.fake.clearFailures();
       s.fake.fail("GET /payments/", status, "erro", code);
@@ -403,5 +402,48 @@ describe("reconsulta com erro permanente (4xx) não vira 500 em loop", () => {
     s.fake.clearFailures();
     s.fake.loseResponse("GET /payments/");
     expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(500);
+  });
+});
+
+describe("chave do Asaas recusada na reconsulta (401/403)", () => {
+  const keyAlerts = async (storeId: string) =>
+    (await t.ownerDb.select().from(job)).filter(
+      (j) => j.type === "notify_seller" && j.storeId === storeId && (j.payload as { reason?: string }).reason === "chave_asaas_invalida",
+    );
+
+  test("401 -> 500 (o Asaas reenvia depois que a chave for corrigida) e um único aviso ao vendedor em N eventos", async () => {
+    const s = await setup();
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    s.fake.fail("GET /payments/", 401, "A chave de API fornecida é inválida", "invalid_access_token");
+    for (let i = 0; i < 4; i++) {
+      expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(500);
+    }
+    const alerts = await keyAlerts(s.storeId);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.payload).toMatchObject({ reason: "chave_asaas_invalida", httpStatus: 401 });
+    expect(await statusOf(s.order.id)).toBe("pending");
+    // Chave corrigida: o reenvio do Asaas confirma o pagamento.
+    s.fake.clearFailures();
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("paid");
+  });
+
+  test("403 também -> 500 com aviso; avisos são por loja", async () => {
+    const fake = createFakeAsaas();
+    const a = await setup(990, fake);
+    const b = await setup(990, fake);
+    fake.fail("GET /payments/", 403, "Acesso negado", "forbidden");
+    expect((await handleAsaasWebhook(a.storeId, hdr(a.webhookToken), event(a.paymentId))).status).toBe(500);
+    expect((await handleAsaasWebhook(a.storeId, hdr(a.webhookToken), event(a.paymentId))).status).toBe(500);
+    expect((await handleAsaasWebhook(b.storeId, hdr(b.webhookToken), event(b.paymentId))).status).toBe(500);
+    expect(await keyAlerts(a.storeId)).toHaveLength(1);
+    expect(await keyAlerts(b.storeId)).toHaveLength(1);
+  });
+
+  test("404 continua 200 e não gera aviso de chave", async () => {
+    const s = await setup();
+    s.fake.fail("GET /payments/", 404, "Cobrança não encontrada", "not_found");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    expect(await keyAlerts(s.storeId)).toHaveLength(0);
   });
 });
