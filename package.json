@@ -9,10 +9,13 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test tests/",
-    "check": "bun run lint && bun run typecheck && bun run test",
+    "test": "bun test tests/ && bash tests/verify/gate.test.sh",
+    "check": "bun run lint && bun run typecheck && bun run hygiene && bun run test",
     "migration": "drizzle-kit generate",
-    "migrate": "bun scripts/migrate.ts"
+    "migrate": "bun scripts/migrate.ts",
+    "hygiene": "bun scripts/check-test-hygiene.ts",
+    "verify": "bash scripts/verify.sh",
+    "verify:reset": "rm -f .verify/state.json"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.4",
