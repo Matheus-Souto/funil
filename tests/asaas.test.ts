@@ -165,6 +165,7 @@ describe("Pix automático", () => {
       cpfCnpj: "52998224725",
       mobilePhone: "11999999999",
       externalReference: order.customerId,
+      notificationDisabled: true,
     });
     const [c] = await t.ownerDb.select().from(customer).where(eq(customer.id, order.customerId));
     expect(c!.asaasCustomerId).toBe(a);

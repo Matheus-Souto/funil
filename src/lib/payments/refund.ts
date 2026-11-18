@@ -32,7 +32,11 @@ export const refundOrder = defineAction({
     const pay = rows.find((r) => r.providerId && mapAsaasStatus(r.status) === "paid" && (r.raw as { duplicate?: boolean } | null)?.duplicate !== true);
     if (!pay?.providerId) throw new ActionError("conflict", "Pedido sem cobrança paga no Asaas para estornar");
     // Se o Asaas falhar, o erro (provider_error) aborta a transação: o estado não muda.
-    await (await asaasClientFor(ctx.tx, ctx.storeId)).refundPayment(pay.providerId);
+    const client = await asaasClientFor(ctx.tx, ctx.storeId);
+    // Cartão parcelado: estorna o parcelamento inteiro (estornar só a cobrança devolveria uma parcela).
+    const installment = (pay.raw as { installment?: string } | null)?.installment;
+    if (installment) await client.refundInstallment(installment);
+    else await client.refundPayment(pay.providerId);
     await transitionOrder(ctx, o.id, "refunded", "reembolso Asaas");
     await ctx.tx.update(payment).set({ status: "REFUNDED" }).where(eq(payment.id, pay.id));
     return { orderId: o.id, message: "Reembolso enviado ao Asaas." };

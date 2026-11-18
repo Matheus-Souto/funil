@@ -7,7 +7,7 @@ import { customer, orders, payment } from "@/lib/db/schema";
 import { env as appEnv } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { asaasClientFor, centsToReais, createAsaasClient } from "./client";
+import { asaasClientFor, asaasDueDate, centsToReais, createAsaasClient } from "./client";
 
 /** Estado "aberto" da cobrança Pix (índice único parcial: uma por pedido). */
 const OPEN = "PENDING";
@@ -54,6 +54,7 @@ export async function ensureAsaasCustomer(call: { storeId: string }, customerId:
 export async function startAsaasPix(
   call: { storeId: string },
   orderId: string,
+  opts: { now?: Date } = {},
 ): Promise<{ qrImage: string; copyPaste: string; expiresAt: string }> {
   const { storeId } = call;
   const lockAndCheck = async (tx: Parameters<Parameters<typeof withStore>[1]>[0]) => {
@@ -81,7 +82,8 @@ export async function startAsaasPix(
         customer: asaasCustomer,
         billingType: "PIX",
         value: centsToReais(a.o.totalCents),
-        dueDate: new Date().toISOString().slice(0, 10),
+        // Amanhã no calendário de São Paulo: a cobrança não vence (OVERDUE) antes da validade local de 24 h.
+        dueDate: asaasDueDate(opts.now ?? new Date(), 1),
         externalReference: a.o.id,
       },
       { timeoutMs: PIX_TIMEOUT_MS },

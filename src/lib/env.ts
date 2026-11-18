@@ -12,6 +12,8 @@ const schema = z.object({
   TURNSTILE_SECRET: z.string().min(1).optional(),
   ASAAS_BASE_URL: z.string().min(1).optional(),
   APP_DB_PASSWORD: z.string().min(1).optional(),
+  // Quantos proxies reversos confiáveis ficam na frente do app (0 = nenhum). Define de onde sai o IP do cliente.
+  TRUST_PROXY: z.coerce.number().int().min(0).max(5).default(0),
 });
 
 export type Env = z.infer<typeof schema>;

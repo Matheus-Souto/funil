@@ -29,6 +29,11 @@ export function mapAsaasStatus(s: string): OrderStatus | null {
   }
 }
 
+function rawOf(installment: string | null, duplicate: boolean): Record<string, unknown> | null {
+  const r = { ...(installment ? { installment } : {}), ...(duplicate ? { duplicate: true } : {}) };
+  return Object.keys(r).length > 0 ? r : null;
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const body = z.object({ event: z.string().optional(), payment: z.object({ id: z.string().min(1).max(100) }) });
@@ -42,9 +47,11 @@ export const applyAsaasPayment = defineAction({
     status: z.string(),
     valueCents: z.number().int(),
     externalReference: z.string().nullable(),
+    /** Id do parcelamento (cartão parcelado): cada parcela é uma cobrança; `valueCents` é então o total do parcelamento. */
+    installment: z.string().min(1).max(100).nullable().optional(),
   }),
   permission: "system",
-  auditInput: (i) => ({ paymentId: i.paymentId, status: i.status, valueCents: i.valueCents }),
+  auditInput: (i) => ({ paymentId: i.paymentId, status: i.status, valueCents: i.valueCents, installment: i.installment ?? null }),
   async run(ctx, p) {
     if (!p.externalReference || !UUID.test(p.externalReference)) return { applied: false, reason: "sem_pedido" };
     const [o] = await ctx.tx
@@ -61,8 +68,12 @@ export const applyAsaasPayment = defineAction({
       .where(and(eq(payment.provider, "asaas"), eq(payment.providerId, p.paymentId)));
     if (global && global.orderId !== o.id) return { applied: false, reason: "pagamento_de_outro_pedido" };
     const row = rows.find((r) => r.providerId === p.paymentId);
+    const installment = p.installment ?? null;
+    // Outra parcela de um parcelamento que o pedido já conhece: é a mesma venda, não cobrança órfã nem em dobro.
+    const sibling =
+      !row && installment !== null ? rows.find((r) => (r.raw as { installment?: string } | null)?.installment === installment) : undefined;
     const target0 = mapAsaasStatus(p.status);
-    const orphan = !row && rows.length > 0;
+    const orphan = !row && !sibling && rows.length > 0;
 
     // Cobrança marcada como duplicada (pagamento em dobro): só acompanha o status da linha, nunca mexe no pedido.
     if (row && (row.raw as { duplicate?: boolean } | null)?.duplicate === true) {
@@ -83,7 +94,7 @@ export const applyAsaasPayment = defineAction({
           status: p.status,
           amountCents: p.valueCents,
           // Só é duplicada se o pedido já estava resolvido; se esta cobrança é quem paga o pedido, é a cobrança "boa".
-          raw: o.status !== "pending" && o.status !== "expired" ? { duplicate: true } : null,
+          raw: rawOf(installment, o.status !== "pending" && o.status !== "expired"),
         })
         .onConflictDoNothing();
       if (o.status !== "pending" && o.status !== "expired") {
@@ -94,12 +105,20 @@ export const applyAsaasPayment = defineAction({
         });
         return { applied: false, reason: "pagamento_em_dobro" };
       }
-    } else if (!row) {
+    } else if (!row && !sibling) {
       await ctx.tx
         .insert(payment)
-        .values({ storeId: ctx.storeId, orderId: o.id, provider: "asaas", providerId: p.paymentId, status: p.status, amountCents: o.totalCents })
+        .values({
+          storeId: ctx.storeId,
+          orderId: o.id,
+          provider: "asaas",
+          providerId: p.paymentId,
+          status: p.status,
+          amountCents: o.totalCents,
+          raw: rawOf(installment, false),
+        })
         .onConflictDoNothing();
-    } else if (row.status !== p.status) {
+    } else if (row && row.status !== p.status) {
       await ctx.tx.update(payment).set({ status: p.status }).where(eq(payment.id, row.id));
     }
 
@@ -137,9 +156,17 @@ export async function handleAsaasWebhook(storeId: string, headers: Headers, raw:
   if (!parsed.success) return { status: 200 };
 
   let fresh;
+  let installment: string | null = null;
+  let valueCents: number;
   try {
     const client = await withStore(storeId, (tx) => asaasClientFor(tx, storeId));
     fresh = await client.getPayment(parsed.data.payment.id);
+    valueCents = reaisToCents(Number(fresh.value));
+    if (typeof fresh.installment === "string" && fresh.installment) {
+      // Cartão parcelado: cada parcela é uma cobrança; o pedido é liquidado pelo total do parcelamento (reconsultado).
+      installment = fresh.installment;
+      valueCents = reaisToCents(Number((await client.getInstallment(installment)).value));
+    }
   } catch (e) {
     log.warn("webhook Asaas: falha ao reconsultar cobrança", { storeId, error: e });
     return { status: 500 };
@@ -153,8 +180,9 @@ export async function handleAsaasWebhook(storeId: string, headers: Headers, raw:
       {
         paymentId: fresh.id,
         status: String(fresh.status),
-        valueCents: reaisToCents(Number(fresh.value)),
+        valueCents,
         externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
+        installment,
       },
     );
   } catch (e) {

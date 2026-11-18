@@ -13,7 +13,7 @@ const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(16, 65)]).toS
 export const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 /** Loja com Asaas conectado (via ação, contra o fake) e uma oferta Pix automático. */
-export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990) {
+export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990, opts: { maxInstallments?: number } = {}) {
   setAsaasFetchForTests(fake.fetch);
   const { storeId } = await seedStore();
   const call = { storeId, actor: owner, origin: "panel" as const };
@@ -26,6 +26,7 @@ export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990) {
     priceCents,
     methods: ["pix", "card"],
     pixMode: "asaas",
+    maxInstallments: opts.maxInstallments ?? 1,
   });
   return { storeId, offerId: offer.id, webhookToken: saved.webhookToken };
 }
@@ -44,3 +45,17 @@ export const newAsaasOrder = (storeId: string, offerId: string, email = "ana@exa
   );
 
 export { createFakeAsaas };
+
+/** Pedido de cartão (Asaas). `cpf: null` cria o cliente sem CPF (o do titular é usado na cobrança). */
+export const newCardOrder = (storeId: string, offerId: string, email: string, cpf: string | null = "52998224725") =>
+  withStore(storeId, (tx) =>
+    createOrder(ctxOf(storeId, tx), {
+      offerId,
+      withBump: false,
+      method: "card_asaas",
+      customer: { name: "Bia", email, phone: "11988887777", ...(cpf ? { cpf } : {}) },
+      touch: { first: null, last: null },
+      clientIp: "127.0.0.1",
+      userAgent: "bun-test",
+    }),
+  );
