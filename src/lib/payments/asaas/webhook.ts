@@ -92,6 +92,7 @@ export const applyAsaasPayment = defineAction({
     if (refund === "done" && mapAsaasStatus(p.status) === "paid") p = { ...p, status: "REFUNDED" };
     if (refund === "cancelled" && o.status === "paid" && o.refundRequestedAt) {
       await ctx.tx.update(orders).set({ refundRequestedAt: null }).where(eq(orders.id, o.id));
+      await enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_seller", payload: { orderId: o.id, reason: "estorno_cancelado" } });
       log.warn("estorno cancelado no Asaas; o pedido continua pago (confira no Asaas e peça de novo se for o caso)", {
         orderId: o.id,
         paymentId: p.paymentId,

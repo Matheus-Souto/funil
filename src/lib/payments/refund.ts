@@ -1,7 +1,7 @@
 // Reembolso. Pix manual: só marca (a devolução é pelo banco do vendedor). Asaas: ASSÍNCRONO — a ação valida, grava
 // `refund_requested_at` e enfileira `refund_order`; o job fala com o Asaas FORA de transação e só depois, numa
 // transação curta, muda o pedido para `refunded`. Nenhuma chamada HTTP segura trava de pedido nem conexão do pool.
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
@@ -136,12 +136,15 @@ export const refundOrderJob: JobHandler = async (j) => {
   }
 
   if (state === "cancelled") {
-    await withStore(storeId, (tx) =>
-      tx
+    await withStore(storeId, async (tx) => {
+      const cleared = await tx
         .update(orders)
         .set({ refundRequestedAt: null })
-        .where(and(eq(orders.id, orderId), eq(orders.status, "paid"))),
-    );
+        .where(and(eq(orders.id, orderId), eq(orders.status, "paid"), isNotNull(orders.refundRequestedAt)))
+        .returning({ id: orders.id });
+      // Só quem limpou avisa (a retentativa do job ou o webhook que chegar depois não duplicam o aviso).
+      if (cleared.length > 0) await enqueue(tx, { storeId, type: "notify_seller", payload: { orderId, reason: "estorno_cancelado" } });
+    });
     log.warn("estorno cancelado no Asaas; o pedido continua pago (confira no Asaas e peça de novo se for o caso)", { orderId, paymentId: providerId });
     return;
   }

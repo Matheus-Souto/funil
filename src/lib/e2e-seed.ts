@@ -7,16 +7,25 @@ import { eq } from "drizzle-orm";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { getPanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer } from "@/lib/catalog/offers";
+import { saveSmtp } from "@/lib/delivery/mailer";
 import { withStore } from "@/lib/db/client";
 import { orders } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
+import { refundOrder } from "@/lib/payments/refund";
 
 const ACTIONS: Record<string, Action<unknown, unknown>> = {
   "offers.create": createOffer as Action<unknown, unknown>,
   "connections.savePixManual": savePixManual as Action<unknown, unknown>,
   "connections.saveAsaas": saveAsaas as Action<unknown, unknown>,
+  "connections.saveSmtp": saveSmtp as Action<unknown, unknown>,
+};
+
+/** Operações por `publicId` (o smoke só conhece o id público do pedido): liberar o Pix manual e reembolsar. */
+const BY_PUBLIC_ID: Record<string, Action<unknown, unknown>> = {
+  release: releaseOrder as Action<unknown, unknown>,
+  refund: refundOrder as Action<unknown, unknown>,
 };
 
 /** Ligada só com E2E_SEED_ROUTES=1 (o env recusa essa variável fora de BASE_URL em loopback). */
@@ -41,14 +50,15 @@ export async function handleE2e(
   const body = (await req.json().catch(() => null)) as { action?: string; input?: unknown; publicId?: string } | null;
   const call = { storeId: panel.storeId, actor: panel.actor, origin: "panel" as const };
   try {
-    if (op === "action" && body?.action && ACTIONS[body.action]) {
+    if (op === "action" && body?.action && Object.hasOwn(ACTIONS, body.action)) {
       return json(200, await runAction(ACTIONS[body.action]!, call, body.input));
     }
-    if (op === "release" && typeof body?.publicId === "string") {
+    const byPublicId = Object.hasOwn(BY_PUBLIC_ID, op) ? BY_PUBLIC_ID[op] : undefined;
+    if (byPublicId && typeof body?.publicId === "string") {
       const publicId = body.publicId;
       const [o] = await withStore(panel.storeId, (tx) => tx.select({ id: orders.id }).from(orders).where(eq(orders.publicId, publicId)));
       if (!o) return json(404, { error: "not_found" });
-      return json(200, await runAction(releaseOrder, call, { orderId: o.id }));
+      return json(200, await runAction(byPublicId, call, { orderId: o.id }));
     }
   } catch (e) {
     if (e instanceof ActionError) return json(400, { error: e.code, message: e.message });

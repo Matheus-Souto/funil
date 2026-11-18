@@ -31,6 +31,13 @@ const refundJobs = (orderId: string) =>
     .from(job)
     .where(and(eq(job.type, "refund_order"), sql`${job.payload}->>'orderId' = ${orderId}`));
 const later = (s: number) => new Date(Date.now() + s * 1000);
+const cancelNotices = async (orderId: string) =>
+  (
+    await t.ownerDb
+      .select()
+      .from(job)
+      .where(and(eq(job.type, "notify_seller"), sql`${job.payload}->>'orderId' = ${orderId}`, sql`${job.payload}->>'reason' = 'estorno_cancelado'`))
+  ).length;
 
 async function paidAsaasOrder() {
   const fake = createFakeAsaas();
@@ -295,6 +302,7 @@ describe("refund_order: estorno que fica pendente no Asaas (refunds[])", () => {
     }
     expect(await statusOf(s.order.id)).toBe("paid");
     expect(await requestedAt(s.order.id)).toBeNull();
+    expect(await cancelNotices(s.order.id)).toBe(1); // aviso por e-mail ao vendedor (notify_seller)
     // O job não age mais sobre um pedido cujo pedido de estorno foi cancelado.
     const [j] = await refundJobs(s.order.id);
     await getHandlers().refund_order!(j!, new AbortController().signal);
@@ -329,5 +337,8 @@ describe("refund_order: estorno que fica pendente no Asaas (refunds[])", () => {
     expect(s.refundCalls()).toBe(1);
     expect(await statusOf(s.order.id)).toBe("paid");
     expect(await requestedAt(s.order.id)).toBeNull();
+    expect(await cancelNotices(s.order.id)).toBe(1);
+    await runRefundJobs(new Date(t0.getTime() + 3600_000));
+    expect(await cancelNotices(s.order.id)).toBe(1); // nada de aviso repetido
   });
 });

@@ -630,6 +630,9 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     expect(warn).toBeDefined();
     // (o storeId vai no log, mas o redact de PAN pode mascarar trechos de UUID com muitos dígitos: não comparar aqui)
     expect(JSON.parse(warn!).data).toMatchObject({ declines: 10, windowMin: 15 });
+    // e-mail ao vendedor: um notify_seller sem pedido, motivo disjuntor_cartao
+    const notices = await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"));
+    expect(notices.filter((j) => j.storeId === storeId).map((j) => j.payload)).toEqual([{ reason: "disjuntor_cartao" }]);
 
     const later = new Date(t0.getTime() + 5 * 60_000);
     const o = await newCardOrder(storeId, offerId, email());

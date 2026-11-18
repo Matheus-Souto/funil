@@ -22,6 +22,7 @@ import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
+import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
@@ -381,7 +382,7 @@ async function reconcileWithAsaas(storeId: string, orderId: string): Promise<"pa
   return "none";
 }
 
-/** Conta uma recusa na loja; na 10ª em 15 min liga o disjuntor por 1 h e avisa o vendedor (log). */
+/** Conta uma recusa na loja; na 10ª em 15 min liga o disjuntor por 1 h e avisa o vendedor (log e e-mail via notify_seller). */
 async function countStoreDecline(storeId: string, t: Date): Promise<void> {
   const key = `card:decline:store:${storeId}`;
   const breakerKey = `card:breaker:store:${storeId}`;
@@ -389,6 +390,10 @@ async function countStoreDecline(storeId: string, t: Date): Promise<void> {
   const n = await countRecentEvents(key, BREAKER.windowSec, t);
   if (n < BREAKER.declines || (await hadRecentEvent(breakerKey, BREAKER.holdSec, t))) return;
   await recordEvent(breakerKey, t);
+  // Aviso por e-mail ao vendedor (no máximo 1 por disparo: o disjuntor fica ligado 1 h). Falha aqui não muda a recusa.
+  await withStore(storeId, (tx) => enqueue(tx, { storeId, type: "notify_seller", payload: { reason: "disjuntor_cartao" } })).catch((e: unknown) =>
+    log.error("falha ao enfileirar o aviso do disjuntor de cartão", { storeId, error: e }),
+  );
   log.warn("loja com muitas recusas de cartão (possível teste de cartão): verificação anti-robô exigida por 1 h", {
     storeId,
     declines: n,

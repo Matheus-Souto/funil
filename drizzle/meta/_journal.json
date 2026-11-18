@@ -92,6 +92,13 @@
       "when": 1795035490756,
       "tag": "0012_payment_pix_qr",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795036862175,
+      "tag": "0013_delivery",
+      "breakpoints": true
     }
   ]
 }
