@@ -29,6 +29,13 @@
       "when": 1795023996823,
       "tag": "0003_orders_integrations_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795024296978,
+      "tag": "0004_job_locked_at",
+      "breakpoints": true
     }
   ]
 }

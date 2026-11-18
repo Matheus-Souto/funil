@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { runAction } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { job, orders } from "@/lib/db/schema";
 import { enqueue, runDueJobs, scheduleOnce, type JobType } from "@/lib/jobs";
-import { expireOrdersHandler } from "@/lib/jobs/handlers";
+import { createExpireOrdersHandler, expireOrdersHandler } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -92,6 +92,56 @@ describe("runDueJobs", () => {
     expect([...seen].sort()).toEqual([0, 1, 2, 3]);
   });
 
+  test("handler que lança deixa o job queued com o run_at do backoff", async () => {
+    await enq("notify_seller", { k: "throw" }, null, T0);
+    const id = (await newest("notify_seller")).id;
+    await runDueJobs({ notify_seller: async () => { throw new Error("x"); } }, 1, T0);
+    const r = await row(id);
+    expect([r.status, r.attempts, r.lockedAt]).toEqual(["queued", 1, null]);
+    expect(r.runAt.getTime()).toBe(T0.getTime() + 60_000);
+    await t.ownerDb.update(job).set({ status: "done" }).where(eq(job.id, id));
+  });
+
+  test("running travado há 11 min volta à fila e roda; há 5 min não", async () => {
+    const mkRunning = async (lockedMinAgo: number) => {
+      await enq("deliver_order", {}, null, at(-10_000));
+      const id = (await newest("deliver_order")).id;
+      await t.ownerDb
+        .update(job)
+        .set({ status: "running", attempts: 1, lockedAt: new Date(T0.getTime() - lockedMinAgo * 60_000) })
+        .where(eq(job.id, id));
+      return id;
+    };
+    const stuck = await mkRunning(11);
+    const fresh = await mkRunning(5);
+    const seen: string[] = [];
+    await runDueJobs({ deliver_order: async (j) => void seen.push(j.id) }, 10, T0);
+    expect(seen).toContain(stuck);
+    expect(seen).not.toContain(fresh);
+    expect((await row(stuck)).status).toBe("done");
+    expect((await row(stuck)).attempts).toBe(2);
+    expect((await row(fresh)).status).toBe("running");
+    await t.ownerDb.delete(job).where(eq(job.id, fresh));
+  });
+
+  test("nenhuma transação aberta enquanto o handler roda", async () => {
+    await enq("meta_event", {}, null, T0);
+    let idle = -1;
+    await runDueJobs(
+      {
+        meta_event: async () => {
+          const rows = await t.ownerDb.execute<{ n: number }>(
+            sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and state like 'idle in transaction%'`,
+          );
+          idle = rows[0]!.n;
+        },
+      },
+      1,
+      T0,
+    );
+    expect(idle).toBe(0);
+  });
+
   test("scheduleOnce não duplica enquanto houver um queued", async () => {
     await t.ownerDb.delete(job).where(eq(job.type, "expire_orders"));
     expect(await scheduleOnce("expire_orders", T0)).toBe(true);
@@ -148,5 +198,48 @@ describe("expire_orders", () => {
     expect(await st(ids.b1)).toBe("expired");
     expect(await st(ids.b2)).toBe("paid");
     expect(await st(ids.b3)).toBe("pending");
+  });
+
+  test("pedido que vira pago entre o select e a transição é pulado (conflict) e os demais expiram", async () => {
+    const a = await seedStore();
+    const oa = await seedOffer(a.storeId);
+    const raced = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
+    const other = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
+    const h = createExpireOrdersHandler(async (tx, id) => {
+      if (id === raced) await tx.update(orders).set({ status: "paid" }).where(eq(orders.id, id));
+    });
+    await h({} as never);
+    const st = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
+    expect(await st(raced)).toBe("paid");
+    expect(await st(other)).toBe("expired");
+  });
+
+  test("pedido travado por outra transação é pulado, sem bloquear", async () => {
+    const a = await seedStore();
+    const oa = await seedOffer(a.storeId);
+    const locked = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
+    await withStore(a.storeId, async (tx) => {
+      await tx.select().from(orders).where(eq(orders.id, locked)).for("update");
+      await expireOrdersHandler({} as never);
+    });
+    expect((await t.ownerDb.select().from(orders).where(eq(orders.id, locked)))[0]!.status).toBe("pending");
+  });
+
+  test("erro numa loja não impede as outras e o job falha no fim", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    const oa = await seedOffer(a.storeId);
+    const ob = await seedOffer(b.storeId);
+    const past = new Date(Date.now() - 60_000);
+    const bad = await mk(a.storeId, oa.id, past, "pending");
+    const good = await mk(b.storeId, ob.id, past, "pending");
+    const h = createExpireOrdersHandler(async (_tx, id) => {
+      if (id === bad) throw new Error("boom");
+    });
+    const err = await h({} as never).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    const st = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
+    expect(await st(bad)).toBe("pending");
+    expect(await st(good)).toBe("expired");
   });
 });

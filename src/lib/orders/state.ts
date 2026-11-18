@@ -45,7 +45,10 @@ export async function transitionOrder(ctx: Ctx, orderId: string, to: OrderStatus
   }
 
   const storeId = ctx.storeId;
-  if (to === "paid") {
+  if (to === "paid" && from === "disputed") {
+    // Chargeback revertido a favor da loja: devolve o acesso; não é uma venda nova (sem e-mail, Meta nem aviso).
+    await enqueue(ctx.tx, { storeId, type: "restore_downloads", payload: { orderId } });
+  } else if (to === "paid") {
     await enqueue(ctx.tx, { storeId, type: "deliver_order", payload: { orderId } });
     await enqueue(ctx.tx, { storeId, type: "meta_event", payload: { event: "Purchase", orderId } });
     await enqueue(ctx.tx, { storeId, type: "notify_seller", payload: { orderId } });

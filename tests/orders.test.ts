@@ -144,6 +144,19 @@ describe("transitionOrder", () => {
     expect(await jobsOf(b.id, "revoke_downloads")).toHaveLength(1);
   });
 
+  test("disputed -> paid só enfileira restore_downloads (não é venda nova)", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const o = await newOrder(storeId, offer.id);
+    await transition(storeId, o.id, "paid");
+    await transition(storeId, o.id, "disputed");
+    expect((await transition(storeId, o.id, "paid")).changed).toBe(true);
+    expect(await jobsOf(o.id, "deliver_order")).toHaveLength(1);
+    expect(await jobsOf(o.id, "meta_event")).toHaveLength(1);
+    expect(await jobsOf(o.id, "notify_seller")).toHaveLength(1);
+    expect(await jobsOf(o.id, "restore_downloads")).toHaveLength(1);
+  });
+
   test("falha na transação desfaz o efeito (jobs na mesma transação)", async () => {
     const { storeId } = await seedStore();
     const offer = await seedOffer(storeId);
@@ -167,14 +180,16 @@ describe("transitionOrder", () => {
         let model: OrderStatus = "pending";
         let paid = 0;
         let revoke = 0;
+        let restore = 0;
         for (const to of seq) {
           const r = await transition(storeId, o.id, to).catch((e: unknown) => e);
           if (to === model) {
             expect(r).toEqual({ changed: false });
           } else if (ALLOWED[model].includes(to)) {
             expect(r).toEqual({ changed: true });
+            const prev = model;
             model = to;
-            if (to === "paid") paid++;
+            if (to === "paid") prev === "disputed" ? restore++ : paid++;
             if (to === "refunded" || to === "disputed") revoke++;
           } else {
             expect((r as ActionError).code).toBe("conflict");
@@ -186,6 +201,7 @@ describe("transitionOrder", () => {
         expect(await jobsOf(o.id, "meta_event")).toHaveLength(paid);
         expect(await jobsOf(o.id, "notify_seller")).toHaveLength(paid);
         expect(await jobsOf(o.id, "revoke_downloads")).toHaveLength(revoke);
+        expect(await jobsOf(o.id, "restore_downloads")).toHaveLength(restore);
       }),
       { numRuns: 25 },
     );

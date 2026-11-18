@@ -16,6 +16,7 @@ export const job = pgTable(
     attempts: integer("attempts").notNull().default(0),
     status: text("status").notNull().default("queued"),
     lastError: text("last_error"),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
   },
   (t) => [
     check("job_status_check", sql`${t.status} in ('queued','running','done','failed')`),
