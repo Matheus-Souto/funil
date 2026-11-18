@@ -130,6 +130,23 @@ describe("login", () => {
     expect(rows).toHaveLength(5);
   });
 
+  test("10 logins errados em paralelo: só 5 são avaliados; depois nem a senha certa entra", async () => {
+    const { storeId } = await seedStore();
+    const u = await seedUser(storeId);
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, () => login({ email: u.email, password: "errada-errada-1", storeId })),
+    );
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(u.email)));
+    expect(rows).toHaveLength(5);
+    await rejects(login({ email: u.email, password: PASSWORD, storeId }));
+    // senha certa em paralelo com o bloqueio também não passa
+    const par = await Promise.allSettled(Array.from({ length: 3 }, () => login({ email: u.email, password: PASSWORD, storeId })));
+    expect(par.every((r) => r.status === "rejected")).toBe(true);
+    await t.ownerDb.update(loginAttempt).set({ at: sql`now() - interval '16 minutes'` }).where(eq(loginAttempt.emailHash, sha256(u.email)));
+    expect(await login({ email: u.email, password: PASSWORD, storeId })).toBeString();
+  });
+
   test("o bloqueio vale também para e-mail inexistente e guarda só o hash do e-mail", async () => {
     const { storeId } = await seedStore();
     const email = "fantasma@exemplo.com";

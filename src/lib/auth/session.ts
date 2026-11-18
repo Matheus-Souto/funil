@@ -49,30 +49,37 @@ const bad = () => new ActionError("forbidden", "E-mail ou senha inválidos");
 // Hash de mentira para gastar o mesmo tempo quando o e-mail não existe.
 let dummyHash: Promise<string> | undefined;
 
-/** Falhas recentes: bloqueado se as 5 últimas são de menos de 15 min (o bloqueio dura 15 min após a última). */
-async function isLocked(emailHash: string): Promise<boolean> {
-  const rows = await db
-    .select({ recent: gt(loginAttempt.at, sql`now() - make_interval(mins => ${LOCK_MINUTES})`) })
-    .from(loginAttempt)
-    .where(eq(loginAttempt.emailHash, emailHash))
-    .orderBy(desc(loginAttempt.at))
-    .limit(MAX_FAILURES);
-  return rows.length === MAX_FAILURES && rows.every((r) => r.recent);
-}
-
-async function recordFailure(emailHash: string): Promise<void> {
-  await db.insert(loginAttempt).values({ emailHash });
-  await db.delete(loginAttempt).where(lt(loginAttempt.at, sql`now() - interval '1 day'`));
+/**
+ * Reserva atômica de uma tentativa por e-mail: sob `pg_advisory_xact_lock` conta as 5 últimas
+ * tentativas; se as 5 são de menos de 15 min, está bloqueado (o bloqueio dura 15 min após a última).
+ * Se não, grava a tentativa ANTES do scrypt, então tentativas paralelas não passam de 5.
+ * Devolve `true` se bloqueado. Tentativas bloqueadas não são gravadas.
+ */
+async function reserveAttempt(emailHash: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${emailHash}))`);
+    const rows = await tx
+      .select({ recent: gt(loginAttempt.at, sql`now() - make_interval(mins => ${LOCK_MINUTES})`) })
+      .from(loginAttempt)
+      .where(eq(loginAttempt.emailHash, emailHash))
+      .orderBy(desc(loginAttempt.at))
+      .limit(MAX_FAILURES);
+    if (rows.length === MAX_FAILURES && rows.every((r) => r.recent)) return true;
+    await tx.insert(loginAttempt).values({ emailHash });
+    await tx.delete(loginAttempt).where(lt(loginAttempt.at, sql`now() - interval '1 day'`));
+    return false;
+  });
 }
 
 /**
  * Login por e-mail e senha na loja `storeId`. Devolve o token da sessão.
  * Erro único e genérico para e-mail desconhecido, senha errada, sem vínculo e conta bloqueada.
+ * Limite: 5 tentativas malsucedidas por e-mail em 15 min; sucesso apaga as tentativas do e-mail.
  */
 export async function login(input: { email: string; password: string; storeId: string }): Promise<string> {
   const email = normalizeEmail(input.email);
   const emailHash = sha256(email);
-  const locked = await isLocked(emailHash);
+  const locked = await reserveAttempt(emailHash);
 
   const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
   dummyHash ??= hashPassword("senha-de-mentira-só-para-o-tempo");
@@ -85,11 +92,7 @@ export async function login(input: { email: string; password: string; storeId: s
         .limit(1)
     : [];
 
-  if (locked) throw bad();
-  if (!user || !passwordOk || !member) {
-    await recordFailure(emailHash);
-    throw bad();
-  }
+  if (locked || !user || !passwordOk || !member) throw bad();
   await db.delete(loginAttempt).where(eq(loginAttempt.emailHash, emailHash));
   return createSession(user.id, input.storeId);
 }
