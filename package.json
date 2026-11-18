@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test tests/ && bash tests/verify/gate.test.sh",
+    "test": "bun test tests/ && bash tests/verify/gate.test.sh && bash tests/verify/hook.test.sh && bash tests/verify/state.test.sh",
     "check": "bun run lint && bun run typecheck && bun run hygiene && bun run test",
     "migration": "drizzle-kit generate",
     "migrate": "bun scripts/migrate.ts",
