@@ -6,6 +6,7 @@ import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJob, sweepWatermarksJob } from "@/lib/delivery/jobs";
 import { refundOrderJob } from "@/lib/payments/refund";
+import { metaEventJob } from "@/lib/tracking/meta";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
 /**
@@ -59,6 +60,7 @@ const registry: JobHandlers = {
   revoke_downloads: revokeDownloadsJob,
   restore_downloads: restoreDownloadsJob,
   sweep_watermarks: sweepWatermarksJob,
+  meta_event: metaEventJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {

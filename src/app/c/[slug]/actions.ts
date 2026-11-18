@@ -9,6 +9,7 @@ import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { clientIpFrom } from "@/lib/payments/asaas/card-http";
 import { resolveStore } from "@/lib/stores";
+import { fbcFromFbclid } from "@/lib/tracking/touch";
 
 export type StartResult =
   | { ok: true; publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas" }
@@ -31,7 +32,7 @@ function fieldsOf(details: unknown): Record<string, string> | undefined {
 /** Sem cookie `_fbc`: deriva do `fbclid` do toque (`fb.1.<ms>.<fbclid>`), como o Pixel faria. */
 function fbcFromClick(touch: unknown): string | undefined {
   const fbclid = (touch as { last?: { fbclid?: unknown } } | null)?.last?.fbclid;
-  return typeof fbclid === "string" && fbclid ? `fb.1.${Date.now()}.${fbclid.slice(0, 400)}` : undefined;
+  return typeof fbclid === "string" ? fbcFromFbclid(fbclid) : undefined;
 }
 
 export async function startCheckoutAction(input: unknown): Promise<StartResult> {

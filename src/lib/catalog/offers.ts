@@ -3,6 +3,10 @@ import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { offer, product } from "@/lib/db/schema";
+import { PIXEL_ID_RE, pixelIdFor } from "@/lib/tracking/meta";
+
+/** Pixel próprio da oferta (sobrescreve o da conexão Meta da loja). */
+const pixelIdField = z.string().trim().regex(PIXEL_ID_RE, "Pixel ID: só números (5 a 20)");
 
 const id = z.uuid();
 const slug = z.string().regex(/^[a-z0-9-]{3,60}$/, "Use 3 a 60 caracteres: letras minúsculas, números e hífen");
@@ -44,7 +48,7 @@ const createInput = z
     bumpPriceCents: priceCents.nullish(),
     bumpLabel: text.nullish(),
     thankYouText: text.nullish(),
-    pixelId: z.string().trim().max(100).nullish(),
+    pixelId: pixelIdField.nullish(),
     active: z.boolean().default(true),
   })
   .superRefine((v, ctx) => {
@@ -108,7 +112,7 @@ export const updateOffer = defineAction({
     maxInstallments: maxInstallments.optional(),
     bumpLabel: text.nullable().optional(),
     thankYouText: text.nullable().optional(),
-    pixelId: z.string().trim().max(100).nullable().optional(),
+    pixelId: pixelIdField.nullable().optional(),
     active: z.boolean().optional(),
   }),
   permission: "offers.write",
@@ -216,6 +220,7 @@ export const getPublicOffer = defineAction({
       maxInstallments: o.maxInstallments,
       bump: hasBump ? { productName: row.bumpName!, priceCents: o.bumpPriceCents!, label: o.bumpLabel } : null,
       thankYouText: o.thankYouText,
+      pixelId: await pixelIdFor(ctx.tx, ctx.storeId, o.pixelId),
     };
   },
 });

@@ -1,10 +1,10 @@
-// Ganchos do Meta Pixel no checkout (Task 13): `InitiateCheckout` com o mesmo `eventId` enviado em `checkout.start`
-// e `AddPaymentInfo` ao enviar o pagamento. Por enquanto não fazem nada (sem script de terceiros na página).
+// Ganchos do Meta Pixel chamados pelo formulário do checkout. O Pixel em si é carregado por `CheckoutPixel`
+// (pixel.tsx) só quando há Pixel configurado; sem ele, `trackPixel` não faz nada.
+import { trackPixel } from "@/lib/tracking/fbq";
+
 export const checkoutTracking = {
-  onInitiateCheckout(eventId: string): void {
-    void eventId;
-  },
-  onAddPaymentInfo(method: "pix" | "card"): void {
-    void method;
+  /** Ao enviar o pagamento (Pix ou cartão). */
+  onAddPaymentInfo(method: "pix" | "card", valueCents: number): void {
+    trackPixel("AddPaymentInfo", { currency: "BRL", value: valueCents / 100, payment_type: method === "card" ? "cartao" : "pix" });
   },
 };

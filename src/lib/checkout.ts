@@ -24,6 +24,8 @@ import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { MANUAL_RESERVE_AFTER_EXPIRY_MS, manualPixBrCode } from "@/lib/payments/manual";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
+import { enqueueInitiateCheckout, pixelIdFor } from "@/lib/tracking/meta";
+import { META_EVENT_ID_RE, touchRecordSchema } from "@/lib/tracking/touch";
 import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 
 export const CHECKOUT_LIMIT_MESSAGE = "Você já tem um Pix aguardando pagamento. Use o código anterior ou aguarde alguns minutos.";
@@ -52,11 +54,8 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 // ---------------------------------------------------------------------------------------------------------------
 // Entrada
 
-const touchRecord = z
-  .record(z.string().max(40), z.string().max(500))
-  .refine((r) => Object.keys(r).length <= 20, "Toque com campos demais");
 export const touchSchema = z
-  .object({ first: touchRecord.nullable(), last: touchRecord.nullable() })
+  .object({ first: touchRecordSchema.nullable(), last: touchRecordSchema.nullable() })
   .transform((t) => (Buffer.byteLength(JSON.stringify(t)) > TOUCH_MAX_BYTES ? { first: null, last: null } : t));
 export type CheckoutTouch = z.input<typeof touchSchema>;
 
@@ -86,8 +85,8 @@ const startInput = z.object({
   ref: z.string().max(100).optional(),
   fbc: z.string().max(500).optional(),
   fbp: z.string().max(500).optional(),
-  /** Id do evento InitiateCheckout gerado na página (Meta, Task 13). */
-  eventId: z.uuid().optional(),
+  /** Id do evento InitiateCheckout gerado na página (o Pixel usa o mesmo): UUID ou 16-64 caracteres url-safe. */
+  eventId: z.string().regex(META_EVENT_ID_RE, "eventId inválido").optional(),
   /** Preenchidos pela borda HTTP (nunca pelo navegador). */
   clientIp: z.string().min(1).max(64),
   userAgent: z.string().max(500),
@@ -194,6 +193,8 @@ export const checkoutStart = defineAction({
         order = await create("pix_asaas", valid, true);
       }
     }
+    // Pedido criado: InitiateCheckout do servidor com o id do navegador (na mesma transação: só sai se o pedido existir).
+    await enqueueInitiateCheckout(ctx.tx, ctx.storeId, order.id, input.eventId);
     return { publicId: order.publicId, method: order.method as "pix_manual" | "pix_asaas" | "card_asaas", orderId: order.id };
   },
 });
@@ -336,7 +337,8 @@ const orderPublicView = defineAction({
       const [c] = await ctx.tx.select({ name: customer.name }).from(customer).where(eq(customer.id, o.customerId));
       buyerName = c?.name ?? "";
     }
-    return { o, offer: of!, items, manual, asaas, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
+    const pixelId = await pixelIdFor(ctx.tx, ctx.storeId, of?.pixelId);
+    return { o, offer: of!, items, manual, asaas, pixelId, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
 });
 
@@ -369,6 +371,8 @@ export interface OrderPublic {
   };
   /** Pix do Asaas pendente sem QR guardado: a página oferece "Gerar novo código Pix". */
   pixUnavailable?: boolean;
+  /** Meta Pixel da oferta (ou da loja); null = sem Pixel na página. */
+  pixelId: string | null;
 }
 
 /**
@@ -397,6 +401,7 @@ export async function getOrderPublic(storeId: string, publicId: string): Promise
     thankYouText: v.offer.thankYouText,
     buyerFirstName: v.buyerFirstName,
     offer: { slug: v.offer.slug, name: v.offer.name, methods: v.offer.methods },
+    pixelId: v.pixelId,
   };
   if (v.manual) {
     const qrSvg = await QRCode.toString(v.manual.copyPaste, { type: "svg", margin: 0, errorCorrectionLevel: "M" });
@@ -439,43 +444,4 @@ export async function handleOrderStatus(
     if (e instanceof ActionError) return json(e.code === "invalid_input" ? 404 : STATUS[e.code], { error: e.code === "invalid_input" ? "not_found" : e.code });
     throw e;
   }
-}
-
-// ---------------------------------------------------------------------------------------------------------------
-// Toque (UTM, indicação, Meta) na entrada do checkout. A Task 13 troca por `parseTouch` (src/lib/tracking/touch.ts).
-
-const TOUCH_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"] as const;
-
-export function touchFromSearch(
-  search: Record<string, string | string[] | undefined>,
-  cookies: { fbc?: string; fbp?: string },
-  nowMs: number = Date.now(),
-): { touch: CheckoutTouch; ref?: string; fbc?: string; fbp?: string } {
-  const one = (k: string) => {
-    const v = search[k];
-    const s = Array.isArray(v) ? v[0] : v;
-    return typeof s === "string" && s.length > 0 ? s.slice(0, 500) : undefined;
-  };
-  const last: Record<string, string> = {};
-  for (const k of TOUCH_KEYS) {
-    const v = one(k);
-    if (v) last[k] = v;
-  }
-  let first: Record<string, string> | null = null;
-  const ft = one("ft");
-  if (ft) {
-    try {
-      const parsed = touchRecord.safeParse(JSON.parse(Buffer.from(ft, "base64url").toString("utf8")));
-      if (parsed.success) first = parsed.data;
-    } catch {
-      first = null;
-    }
-  }
-  const fbclid = last.fbclid;
-  return {
-    touch: { first, last: Object.keys(last).length > 0 ? last : null },
-    ref: one("ref")?.slice(0, 100),
-    fbc: cookies.fbc?.slice(0, 500) ?? (fbclid ? `fb.1.${nowMs}.${fbclid}` : undefined),
-    fbp: cookies.fbp?.slice(0, 500),
-  };
 }

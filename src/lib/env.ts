@@ -29,6 +29,8 @@ const schema = z.object({
   TRUST_PROXY: z.enum(["0", "1", "2", "3", "4", "5"]).default("0").transform(Number),
   // Liga a rota só do smoke E2E (/api/test-only). Recusada fora de BASE_URL em loopback (ver parseEnv).
   E2E_SEED_ROUTES: z.enum(["0", "1"]).optional(),
+  // Graph API do Meta falsa (smoke E2E). Recusada fora de BASE_URL em loopback, e o destino também precisa ser loopback.
+  META_GRAPH_BASE_URL: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -81,6 +83,14 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   }
   if (parsed.data.E2E_SEED_ROUTES === "1" && !isLoopbackUrl(parsed.data.BASE_URL)) {
     throw new Error("Variáveis de ambiente inválidas: E2E_SEED_ROUTES=1 só é aceita com BASE_URL em loopback (smoke E2E local)");
+  }
+  if (
+    parsed.data.META_GRAPH_BASE_URL !== undefined &&
+    !(isLoopbackUrl(parsed.data.BASE_URL) && isLoopbackUrl(parsed.data.META_GRAPH_BASE_URL))
+  ) {
+    throw new Error(
+      "Variáveis de ambiente inválidas: META_GRAPH_BASE_URL só é aceita com BASE_URL e destino em loopback (Meta falso do smoke E2E)",
+    );
   }
   if (source.NODE_ENV === "production" && cleaned.TRUST_PROXY === undefined && !isLoopbackUrl(parsed.data.BASE_URL)) {
     throw new Error(

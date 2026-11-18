@@ -7,8 +7,8 @@ import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import s from "../../(design)/buyer.module.css";
 import { Icon } from "../../(design)/icons";
 import { BuyerShell } from "../../(design)/shell";
-import { PurchaseTracking } from "./tracking-slot";
 import { regeneratePixAction } from "./actions";
+import { PurchasePixel } from "./pixel";
 import { CopyPixButton, OrderLive } from "./status";
 
 export const dynamic = "force-dynamic";
@@ -45,7 +45,7 @@ function OrderBody({ order, storeName, publicId, pixNotice }: { order: OrderPubl
       if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
       return <CardPending order={order} />;
     case "paid":
-      return <ThankYou order={order} storeName={storeName} />;
+      return <ThankYou order={order} storeName={storeName} publicId={publicId} />;
     case "expired":
       return <Expired order={order} />;
     default:
@@ -264,11 +264,11 @@ function CardPending({ order }: { order: OrderPublic }) {
   );
 }
 
-function ThankYou({ order, storeName }: { order: OrderPublic; storeName: string }) {
+function ThankYou({ order, storeName, publicId }: { order: OrderPublic; storeName: string; publicId: string }) {
   const paidWith = order.method === "card_asaas" ? "cartão" : "Pix";
   return (
     <main className={`${s.main} ${s.mainCenter}`}>
-      <PurchaseTracking order={order} />
+      {order.pixelId ? <PurchasePixel pixelId={order.pixelId} publicId={publicId} valueCents={order.totalCents} /> : null}
       <div className={s.hero}>
         <div className={s.heroIcon}>
           <Icon name="circle-check" size={38} />

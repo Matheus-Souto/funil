@@ -207,6 +207,7 @@ describe("offers", () => {
       maxInstallments: 1,
       bump: { productName: "Completo", priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
+      pixelId: null,
     });
     const json = JSON.stringify(res);
     for (const leak of ["fileKey", "file_key", "fileName", "storeId", "products/"]) expect(json).not.toContain(leak);

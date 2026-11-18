@@ -233,9 +233,8 @@ export function CheckoutForm(props: {
   useEffect(() => {
     if (viewed.current) return;
     viewed.current = true;
-    checkoutTracking.onInitiateCheckout(eventId);
     void recordCheckoutViewAction({ slug: offer.slug, touch });
-  }, [eventId, offer.slug, touch]);
+  }, [offer.slug, touch]);
 
   const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);
   const asaasPix = offer.pixMode === "asaas";
@@ -302,7 +301,7 @@ export function CheckoutForm(props: {
   }
 
   async function payPix() {
-    checkoutTracking.onAddPaymentInfo("pix");
+    checkoutTracking.onAddPaymentInfo("pix", total);
     const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), touch, ref: refCode, eventId });
     if (r.ok) {
       router.push(`/o/${r.publicId}`);
@@ -313,7 +312,7 @@ export function CheckoutForm(props: {
   }
 
   async function payCard() {
-    checkoutTracking.onAddPaymentInfo("card");
+    checkoutTracking.onAddPaymentInfo("card", total);
     const sig = JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
     let publicId = order.current?.sig === sig ? order.current.publicId : null;
     if (!publicId) {

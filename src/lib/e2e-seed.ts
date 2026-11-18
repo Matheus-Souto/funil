@@ -14,12 +14,14 @@ import { env } from "@/lib/env";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
+import { saveMeta } from "@/lib/tracking/meta";
 
 const ACTIONS: Record<string, Action<unknown, unknown>> = {
   "offers.create": createOffer as Action<unknown, unknown>,
   "connections.savePixManual": savePixManual as Action<unknown, unknown>,
   "connections.saveAsaas": saveAsaas as Action<unknown, unknown>,
   "connections.saveSmtp": saveSmtp as Action<unknown, unknown>,
+  "connections.saveMeta": saveMeta as Action<unknown, unknown>,
 };
 
 /** Operações por `publicId` (o smoke só conhece o id público do pedido): liberar o Pix manual e reembolsar. */
@@ -52,6 +54,14 @@ export async function handleE2e(
   try {
     if (op === "action" && body?.action && Object.hasOwn(ACTIONS, body.action)) {
       return json(200, await runAction(ACTIONS[body.action]!, call, body.input));
+    }
+    if (op === "attribution" && typeof body?.publicId === "string") {
+      // Origem gravada no pedido (UTM, indicação): o smoke confere o t.js de ponta a ponta. Só leitura.
+      const publicId = body.publicId;
+      const [o] = await withStore(panel.storeId, (tx) =>
+        tx.select({ firstTouch: orders.firstTouch, lastTouch: orders.lastTouch, ref: orders.ref }).from(orders).where(eq(orders.publicId, publicId)),
+      );
+      return o ? json(200, o) : json(404, { error: "not_found" });
     }
     const byPublicId = Object.hasOwn(BY_PUBLIC_ID, op) ? BY_PUBLIC_ID[op] : undefined;
     if (byPublicId && typeof body?.publicId === "string") {
