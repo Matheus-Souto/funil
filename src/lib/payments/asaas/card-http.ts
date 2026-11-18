@@ -1,19 +1,19 @@
 // Borda HTTP do cartão (POST /api/checkout/card): HTTPS, loja pelo host, corpo com teto, IP do cliente.
 // Só faz parse de HTTP e chama `payWithCard` (que não é uma ação registrada para não gravar o cartão na auditoria).
 //
-// IP do cliente (`TRUST_PROXY`):
-// - N > 0 (atrás de N proxies reversos confiáveis): o N-ésimo endereço da DIREITA em X-Forwarded-For, isto é, o que o
-//   nosso proxy mais externo viu no socket. Entradas mais à esquerda vêm do cliente e podem ser forjadas.
-// - 0 (padrão, sem proxy): o Next preenche X-Forwarded-For com o endereço do socket quando o cliente não mandou o
-//   cabeçalho (`??=`); o app não tem outro acesso ao socket. Sem proxy um cliente pode forjá-lo, por isso em produção
-//   (que exige HTTPS, ou seja, um proxy TLS) defina TRUST_PROXY.
+// IP do cliente (`TRUST_PROXY`, obrigatória em produção fora de loopback):
+// - 1 (ou N proxies confiáveis): o N-ésimo endereço da DIREITA em X-Forwarded-For, isto é, o que o nosso proxy (Caddy)
+//   acrescentou a partir do socket. Entradas à esquerda vêm do cliente e podem ser forjadas: nunca são usadas.
+// - 0 (sem proxy): X-Forwarded-For NÃO é lido. O Next só o preenche com o endereço do socket quando o cliente não
+//   mandou o cabeçalho (`??=` em base-server.js), então ele é forjável e o app router não expõe o socket. O IP vira a
+//   chave fixa "unknown": o limite por IP é pulado e valem os limites por e-mail e por cartão.
 import { isIP } from "node:net";
 import { ActionError, type ActionErrorCode } from "@/lib/actions/core";
 import { env } from "@/lib/env";
 import { readCapped } from "@/lib/http";
 import { log } from "@/lib/log";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
-import { payWithCard as defaultPayWithCard, type CardPaymentInput, type CardResult } from "./card";
+import { payWithCard as defaultPayWithCard, UNKNOWN_IP, type CardPaymentInput, type CardResult } from "./card";
 
 const MAX_BODY = 16 * 1024;
 const INTERNAL_MESSAGE = "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.";
@@ -42,14 +42,15 @@ function normalizeIp(v: string | undefined): string | null {
   return isIP(ip) ? ip : null;
 }
 
-/** IP do comprador (ver o comentário do topo). "0.0.0.0" se não houver um endereço válido. */
+/** IP do comprador (ver o comentário do topo); `UNKNOWN_IP` sem proxy confiável ou sem endereço válido. */
 export function clientIpFrom(headers: Headers, trustProxy: number): string {
+  if (trustProxy <= 0) return UNKNOWN_IP;
   const hops = (headers.get("x-forwarded-for") ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const pick = trustProxy > 0 ? hops[Math.max(0, hops.length - trustProxy)] : hops[hops.length - 1];
-  return normalizeIp(pick) ?? "0.0.0.0";
+  if (hops.length < trustProxy) return UNKNOWN_IP;
+  return normalizeIp(hops[hops.length - trustProxy]) ?? UNKNOWN_IP;
 }
 
 function isHttps(headers: Headers, trustProxy: number): boolean {

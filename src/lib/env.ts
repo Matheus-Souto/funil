@@ -13,7 +13,8 @@ const schema = z.object({
   ASAAS_BASE_URL: z.string().min(1).optional(),
   APP_DB_PASSWORD: z.string().min(1).optional(),
   // Quantos proxies reversos confiáveis ficam na frente do app (0 = nenhum). Define de onde sai o IP do cliente.
-  TRUST_PROXY: z.coerce.number().int().min(0).max(5).default(0),
+  // Obrigatória em produção, salvo BASE_URL em loopback (ver parseEnv).
+  TRUST_PROXY: z.enum(["0", "1", "2", "3", "4", "5"]).default("0").transform(Number),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -43,6 +44,11 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   if (source.NODE_ENV === "production" && parsed.data.ASAAS_BASE_URL !== undefined && !isLoopbackUrl(parsed.data.ASAAS_BASE_URL)) {
     throw new Error(
       "Variáveis de ambiente inválidas: ASAAS_BASE_URL em produção só pode apontar para loopback (127.0.0.1, localhost, ::1; uso de teste e smoke)",
+    );
+  }
+  if (source.NODE_ENV === "production" && cleaned.TRUST_PROXY === undefined && !isLoopbackUrl(parsed.data.BASE_URL)) {
+    throw new Error(
+      "Variáveis de ambiente inválidas: TRUST_PROXY é obrigatória em produção (1 atrás de um proxy reverso como o Caddy; 0 sem proxy). Ela define de onde vem o IP do comprador.",
     );
   }
   return parsed.data;

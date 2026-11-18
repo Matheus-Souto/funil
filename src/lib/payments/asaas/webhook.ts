@@ -7,7 +7,7 @@ import { orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
-import { asaasClientFor, reaisToCents } from "./client";
+import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
 
 export function mapAsaasStatus(s: string): OrderStatus | null {
   switch (s) {
@@ -139,6 +139,34 @@ export const applyAsaasPayment = defineAction({
   },
 });
 
+export type AsaasPaymentInput = {
+  paymentId: string;
+  status: string;
+  valueCents: number;
+  externalReference: string | null;
+  installment: string | null;
+};
+
+/**
+ * Entrada de `applyAsaasPayment` a partir de uma cobrança JÁ reconsultada no Asaas. Cartão parcelado: cada parcela é
+ * uma cobrança; o pedido é liquidado pelo total do parcelamento (também reconsultado). Faz HTTP: fora de transação.
+ */
+export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment): Promise<AsaasPaymentInput> {
+  let valueCents = reaisToCents(Number(fresh.value));
+  let installment: string | null = null;
+  if (typeof fresh.installment === "string" && fresh.installment) {
+    installment = fresh.installment;
+    valueCents = reaisToCents(Number((await client.getInstallment(installment)).value));
+  }
+  return {
+    paymentId: fresh.id,
+    status: String(fresh.status),
+    valueCents,
+    externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
+    installment,
+  };
+}
+
 /**
  * Webhook do Asaas. Nunca confia no corpo: valida o token da loja, reconsulta `GET /payments/{id}` e aplica o estado real.
  * 401 sem revelar se a loja existe; 200 para eventos ignorados/repetidos; 500 só se o Asaas falhar (para o Asaas reenviar).
@@ -155,36 +183,19 @@ export async function handleAsaasWebhook(storeId: string, headers: Headers, raw:
   const parsed = body.safeParse(raw);
   if (!parsed.success) return { status: 200 };
 
-  let fresh;
-  let installment: string | null = null;
-  let valueCents: number;
+  let applyInput: AsaasPaymentInput;
   try {
     const client = await withStore(storeId, (tx) => asaasClientFor(tx, storeId));
-    fresh = await client.getPayment(parsed.data.payment.id);
-    valueCents = reaisToCents(Number(fresh.value));
-    if (typeof fresh.installment === "string" && fresh.installment) {
-      // Cartão parcelado: cada parcela é uma cobrança; o pedido é liquidado pelo total do parcelamento (reconsultado).
-      installment = fresh.installment;
-      valueCents = reaisToCents(Number((await client.getInstallment(installment)).value));
-    }
+    const fresh = await client.getPayment(parsed.data.payment.id);
+    if (fresh.id !== parsed.data.payment.id) return { status: 200 };
+    applyInput = await asaasPaymentInput(client, fresh);
   } catch (e) {
     log.warn("webhook Asaas: falha ao reconsultar cobrança", { storeId, error: e });
     return { status: 500 };
   }
-  if (fresh.id !== parsed.data.payment.id) return { status: 200 };
 
   try {
-    await runAction(
-      applyAsaasPayment,
-      { storeId, actor: { kind: "system" }, origin: "webhook" },
-      {
-        paymentId: fresh.id,
-        status: String(fresh.status),
-        valueCents,
-        externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
-        installment,
-      },
-    );
+    await runAction(applyAsaasPayment, { storeId, actor: { kind: "system" }, origin: "webhook" }, applyInput);
   } catch (e) {
     log.error("webhook Asaas: falha ao aplicar estado", { storeId, error: e });
     return { status: 500 };

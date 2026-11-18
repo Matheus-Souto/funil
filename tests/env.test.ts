@@ -34,6 +34,16 @@ test("ASAAS_BASE_URL em produção só aceita loopback", () => {
   expect(parseEnv({ ...base, NODE_ENV: "production" }).ASAAS_BASE_URL).toBeUndefined();
 });
 
+test("TRUST_PROXY: obrigatório em produção fora de loopback; padrão 0 em loopback e fora de produção", () => {
+  const remote = { ...base, NODE_ENV: "production", BASE_URL: "https://loja.example.com" };
+  expect(() => parseEnv(remote)).toThrow(/TRUST_PROXY.*obrigatória em produção/);
+  expect(parseEnv({ ...remote, TRUST_PROXY: "1" }).TRUST_PROXY).toBe(1);
+  expect(parseEnv({ ...remote, TRUST_PROXY: "0" }).TRUST_PROXY).toBe(0);
+  expect(parseEnv({ ...base, NODE_ENV: "production", BASE_URL: "http://127.0.0.1:3000" }).TRUST_PROXY).toBe(0);
+  expect(parseEnv({ ...base, BASE_URL: "https://loja.example.com" }).TRUST_PROXY).toBe(0);
+  expect(() => parseEnv({ ...remote, TRUST_PROXY: "sim" })).toThrow(/TRUST_PROXY/);
+});
+
 test("MODE inválido falha", () => {
   expect(() => parseEnv({ ...base, MODE: "x" })).toThrow(/MODE/);
 });

@@ -5,7 +5,7 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, job, orders, payment } from "@/lib/db/schema";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
-import { payWithCard, DECLINE_MESSAGE, UNKNOWN_MESSAGE, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
+import { payWithCard, DECLINE_MESSAGE, UNKNOWN_IP, UNKNOWN_MESSAGE, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
 import { clientIpFrom, handleCardCheckout } from "@/lib/payments/asaas/card-http";
 import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
@@ -53,6 +53,8 @@ function input(orderPublicId: string, over: Partial<CardPaymentInput> & { number
   };
 }
 
+const lookups = (fake: FakeAsaas, orderId: string) =>
+  fake.calls.filter((c) => c.method === "GET" && c.path === "/payments" && c.query.get("externalReference") === orderId);
 const paymentPosts = (fake: FakeAsaas) => fake.calls.filter((c) => c.method === "POST" && c.path === "/payments");
 const attempts = (storeId: string, orderId: string) =>
   withStore(storeId, (tx) => tx.select().from(cardAttempt).where(eq(cardAttempt.orderId, orderId)));
@@ -359,6 +361,82 @@ describe("payWithCard: resultado desconhecido (timeout/rede)", () => {
     fake.clearFailures();
     const later = new Date(t0.getTime() + 3 * 60_000);
     expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later })).status).toBe("approved");
+    // Antes de permitir, conferiu no Asaas se a tentativa desconhecida cobrou (nenhuma cobrança: segue).
+    expect(lookups(fake, o.id)).toHaveLength(1);
+    expect(paymentPosts(fake)).toHaveLength(2);
+  });
+
+  test("conferência no Asaas após 2 min: cobrança paga liquida o pedido pelo caminho do webhook, sem nova cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 })).status).toBe("unknown");
+    fake.clearFailures();
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    expect(await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later })).toEqual({ status: "approved" });
+    expect(lookups(fake, o.id)).toHaveLength(1);
+    expect(paymentPosts(fake)).toHaveLength(1);
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+    const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, o.id)));
+    expect(pays.map((p) => p.status)).toEqual(["CONFIRMED"]);
+    const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(jobs.filter((j) => j.type === "deliver_order")).toHaveLength(1);
+  });
+
+  test("conferência no Asaas: cobrança em análise -> recusa a nova tentativa", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 });
+    fake.clearFailures();
+    const charged = [...fake.payments.values()].find((p) => p.externalReference === o.id)!;
+    fake.setStatus(charged.id, "AWAITING_RISK_ANALYSIS");
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe("Já existe um pagamento em análise para este pedido. Aguarde alguns minutos.");
+    expect(paymentPosts(fake)).toHaveLength(1);
+    expect((await orderRow(storeId, o.id)).status).toBe("pending");
+  });
+
+  test("conferência no Asaas falha -> recusa (fail closed), sem nova cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 });
+    fake.clearFailures();
+    fake.fail("GET /payments?", 500, "fora do ar");
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe(UNKNOWN_MESSAGE);
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("tentativa 'processing' abandonada (mais velha que a janela) também passa pela conferência", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    await withStore(storeId, (tx) =>
+      tx.insert(cardAttempt).values({
+        storeId,
+        orderId: o.id,
+        idempotencyKey: randomUUID(),
+        status: "processing",
+        createdAt: new Date(Date.now() - 10 * 60_000),
+      }),
+    );
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
+    expect(lookups(fake, o.id)).toHaveLength(1);
+  });
+
+  test("sem tentativa anterior desconhecida, não consulta o Asaas", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
+    expect(lookups(fake, o.id)).toHaveLength(0);
   });
 
   test("falha antes da cobrança (Asaas desconectado) não trava o pedido", async () => {
@@ -386,6 +464,40 @@ describe("payWithCard: limites e Turnstile", () => {
     const e = await payWithCard(call, input(o.publicId, { clientIp: ip, number: "4000000000099999" }), fastDeps).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("rate_limited");
     expect(paymentPosts(fake)).toHaveLength(10);
+  });
+
+  test("IP desconhecido (sem proxy confiável): sem limite por IP; e-mail e cartão continuam valendo", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    for (let i = 0; i < 11; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: `42000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const rows = await t.ownerDb.execute(sql`select key from rate_limit where key like 'card:ip:%unknown%'`);
+    expect(rows).toHaveLength(0);
+    expect((paymentPosts(fake)[0]!.body as { remoteIp: string }).remoteIp).toBe("0.0.0.0");
+    const pan = "4200000000088888";
+    for (let i = 0; i < 3; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps);
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+  });
+
+  test("IP desconhecido: uma recusa exige Turnstile para o mesmo e-mail", async () => {
+    const { call, storeId, offerId } = await setup();
+    const mail = email();
+    const deps: CardDeps = { ...fastDeps, verifyTurnstile: async (tok) => tok === "ok" };
+    const o1 = await newCardOrder(storeId, offerId, mail);
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: UNKNOWN_IP, number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, mail);
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: UNKNOWN_IP }), deps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    // outro comprador (outro e-mail) não é afetado pela recusa
+    const o3 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o3.publicId, { clientIp: UNKNOWN_IP }), deps)).status).toBe("approved");
   });
 
   test("4ª tentativa do mesmo cartão na hora -> rate_limited", async () => {
@@ -545,12 +657,20 @@ describe("rota POST /api/checkout/card", () => {
   const req = (body: string, headers: Record<string, string> = {}, url = "http://127.0.0.1:3000/api/checkout/card") =>
     new Request(url, { method: "POST", headers: { "content-type": "application/json", host: "127.0.0.1:3000", ...headers }, body });
 
-  test("clientIpFrom: sem proxy confiável usa o endereço que o Next anotou; com N proxies, o N-ésimo da direita", () => {
-    expect(clientIpFrom(new Headers({ "x-forwarded-for": "10.0.0.5" }), 0)).toBe("10.0.0.5");
-    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, 203.0.113.4" }), 1)).toBe("203.0.113.4");
+  test("clientIpFrom: com proxy confiável, a entrada mais à direita; entradas forjadas à esquerda não mudam a chave", () => {
+    for (const xff of ["203.0.113.4", "6.6.6.6, 203.0.113.4", "1.1.1.1, 2.2.2.2, 203.0.113.4"]) {
+      expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 1)).toBe("203.0.113.4");
+    }
     expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, 203.0.113.4, 10.0.0.1" }), 2)).toBe("203.0.113.4");
-    expect(clientIpFrom(new Headers({ "x-forwarded-for": "::ffff:127.0.0.1" }), 0)).toBe("127.0.0.1");
-    expect(clientIpFrom(new Headers(), 0)).toBe("0.0.0.0");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, ::ffff:127.0.0.1" }), 1)).toBe("127.0.0.1");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, lixo" }), 1)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 1)).toBe(UNKNOWN_IP);
+  });
+
+  test("clientIpFrom: sem proxy confiável nunca lê X-Forwarded-For (chave fixa 'unknown')", () => {
+    expect(UNKNOWN_IP).toBe("unknown");
+    for (const xff of ["10.0.0.5", "6.6.6.6, 203.0.113.4"]) expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 0)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 0)).toBe(UNKNOWN_IP);
   });
 
   test("loja desconhecida -> 404; corpo > 16 KB -> 413; JSON inválido -> 400", async () => {
@@ -586,9 +706,10 @@ describe("rota POST /api/checkout/card", () => {
     expect(JSON.parse(text)).toEqual({ error: "not_found", message: "Pedido não encontrado" });
 
     let seenIp = "";
-    await handleCardCheckout(req(body, { "x-forwarded-for": "203.0.113.50" }), {
+    await handleCardCheckout(req(body, { "x-forwarded-for": "6.6.6.6, 203.0.113.50" }), {
       resolveStore: async () => ({ ...store, id: storeId }),
       nodeEnv: "test",
+      trustProxy: 1,
       payWithCard: async (_c, i) => {
         seenIp = i.clientIp;
         return { status: "approved" };

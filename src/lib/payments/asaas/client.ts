@@ -128,6 +128,12 @@ export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?:
     createPayment: (body: CreatePaymentBody, o: { timeoutMs?: number } = {}) =>
       call<AsaasPayment>("POST", "/payments", body, o.timeoutMs, body.billingType === "CREDIT_CARD"),
     getPayment: (id: string) => call<AsaasPayment>("GET", `/payments/${encodeURIComponent(id)}`),
+    /** GET /payments?externalReference=… (até 100; um pedido nunca tem tantas cobranças). */
+    listPaymentsByExternalReference: async (ref: string): Promise<AsaasPayment[]> => {
+      const r = await call<{ data?: unknown }>("GET", `/payments?externalReference=${encodeURIComponent(ref)}&limit=100`);
+      if (!Array.isArray(r.data)) throw providerError("Resposta inválida do Asaas", { status: 200, errorCodes: [] } satisfies AsaasErrorDetails);
+      return r.data as AsaasPayment[];
+    },
     getPixQrCode: (id: string) =>
       call<{ encodedImage: string; payload: string; expirationDate: string }>("GET", `/payments/${encodeURIComponent(id)}/pixQrCode`),
     deletePayment: (id: string) => call<{ deleted: boolean }>("DELETE", `/payments/${encodeURIComponent(id)}`),

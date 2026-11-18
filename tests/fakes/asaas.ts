@@ -15,6 +15,7 @@ export interface FakePayment {
 export interface FakeCall {
   method: string;
   path: string;
+  query: URLSearchParams;
   body: unknown;
   headers: Headers;
 }
@@ -57,17 +58,25 @@ export function createFakeAsaas(opts: { apiKey?: string } = {}) {
     const path = url.pathname.replace(/^.*\/v3(?=\/)/, "").replace(/^\/fake-asaas/, "");
     const raw = req.method === "GET" ? "" : await req.text();
     const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : undefined;
-    calls.push({ method: req.method, path, body, headers: req.headers });
+    calls.push({ method: req.method, path, query: url.searchParams, body, headers: req.headers });
 
     if (req.headers.get("access_token") !== apiKey) return err(401, "A chave de API fornecida é inválida", "invalid_access_token");
     const key = `${req.method} ${path}`;
-    for (const [prefix, f] of failures) if (key.startsWith(prefix)) return err(f.status, f.description);
-    const res = await handle(key, body);
-    for (const prefix of lost) if (key.startsWith(prefix)) throw new TypeError("fetch failed");
+    // Falhas programadas casam por prefixo de "METHOD /path?query" (ex.: "GET /payments?" só pega a listagem).
+    const full = `${key}${url.search}`;
+    for (const [prefix, f] of failures) if (full.startsWith(prefix)) return err(f.status, f.description);
+    const res = await handle(key, body, url.searchParams);
+    for (const prefix of lost) if (full.startsWith(prefix)) throw new TypeError("fetch failed");
     return res;
   }
 
-  async function handle(key: string, body: Record<string, unknown> | undefined): Promise<Response> {
+  async function handle(key: string, body: Record<string, unknown> | undefined, query: URLSearchParams): Promise<Response> {
+    if (key === "GET /payments") {
+      const ref = query.get("externalReference");
+      const data = [...payments.values()].filter((p) => !p.deleted && (ref === null || p.externalReference === ref));
+      return json(200, { object: "list", hasMore: false, totalCount: data.length, limit: 100, offset: 0, data });
+    }
+
 
     if (key === "GET /finance/balance") return json(200, { balance: 123.45 });
 

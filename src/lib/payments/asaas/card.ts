@@ -12,10 +12,13 @@
 //   5. transação curta: fecha a tentativa, grava `payment` e, aprovado, `transitionOrder("paid")`.
 // Timeout/erro de rede em 4: o resultado é desconhecido (o Asaas pode ter cobrado). Não dizemos "recusado":
 // a tentativa vira `error` e o webhook (externalReference = id do pedido) liquida o pedido.
+// Contra cobrança em dobro: nos 2 min seguintes uma nova tentativa é recusada (atalho); depois disso, antes de
+// permitir, conferimos no Asaas (GET /payments?externalReference=<pedido>): paga -> liquida pelo caminho do webhook;
+// em análise -> recusa; nenhuma -> segue; consulta falhou -> recusa (fail closed).
 import { createHash } from "node:crypto";
-import { and, eq, gt, isNull, or } from "drizzle-orm";
+import { and, eq, gt, isNull, lte, or } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, type Ctx } from "@/lib/actions/core";
+import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, offer, orders, payment } from "@/lib/db/schema";
 import { log } from "@/lib/log";
@@ -24,10 +27,15 @@ import { checkCardFingerprint, checkRateLimit, hadRecentEvent, recordEvent } fro
 import { verifyTurnstile } from "@/lib/payments/turnstile";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
 import { ensureAsaasCustomer } from "./pix";
-import { mapAsaasStatus } from "./webhook";
+import { applyAsaasPayment, asaasPaymentInput, mapAsaasStatus } from "./webhook";
 
+/** IP desconhecido (sem proxy confiável o app não lê X-Forwarded-For): sem limite por IP; valem e-mail e cartão. */
+export const UNKNOWN_IP = "unknown";
 export const DECLINE_MESSAGE = "Pagamento recusado. Confira os dados ou pague com Pix.";
 export const UNKNOWN_MESSAGE = "Não foi possível confirmar o pagamento. Verifique em instantes antes de tentar de novo.";
+export const ANALYSIS_MESSAGE = "Já existe um pagamento em análise para este pedido. Aguarde alguns minutos.";
+/** Cobrança no Asaas ainda sem desfecho (cartão em análise/autorizado): uma nova tentativa poderia cobrar em dobro. */
+const OPEN_STATUSES = new Set(["PENDING", "AUTHORIZED", "AWAITING_RISK_ANALYSIS"]);
 const BUSY_MESSAGE =
   "Já existe um pagamento com cartão em processamento para este pedido. Verifique em instantes antes de tentar de novo.";
 
@@ -118,6 +126,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   const { storeId } = call;
   const now = deps.now ?? (() => new Date());
   const ip = input.clientIp;
+  const t = now();
 
   // 1. Leitura curta.
   const pre = await withStore(storeId, async (tx) => {
@@ -126,7 +135,21 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     const [existing] = await tx.select().from(cardAttempt).where(eq(cardAttempt.idempotencyKey, input.idempotencyKey));
     const [of] = await tx.select({ maxInstallments: offer.maxInstallments }).from(offer).where(eq(offer.id, o.offerId));
     const [c] = await tx.select().from(customer).where(eq(customer.id, o.customerId));
-    return { o, existing, maxInstallments: of?.maxInstallments ?? 1, cust: c! };
+    // Tentativa anterior de desfecho desconhecido, já fora da janela de bloqueio: exige conferir no Asaas.
+    const [unresolved] = await tx
+      .select({ id: cardAttempt.id })
+      .from(cardAttempt)
+      .where(
+        and(
+          eq(cardAttempt.orderId, o.id),
+          or(
+            and(eq(cardAttempt.status, "error"), eq(cardAttempt.errorMessage, UNKNOWN)),
+            and(eq(cardAttempt.status, "processing"), lte(cardAttempt.createdAt, new Date(t.getTime() - PROCESSING_STALE_MS))),
+          ),
+        ),
+      )
+      .limit(1);
+    return { o, existing, maxInstallments: of?.maxInstallments ?? 1, cust: c!, unresolved: unresolved !== undefined };
   });
   const order = pre.o;
   if (pre.existing) return awaitAttempt(storeId, pre.existing, order.id, deps);
@@ -138,16 +161,26 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   if (input.installments > pre.maxInstallments) {
     throw new ActionError("invalid_input", `Esta oferta permite até ${pre.maxInstallments} parcela(s)`, [{ path: ["installments"] }]);
   }
-  const t = now();
   const limited = () => new ActionError("rate_limited", "Muitas tentativas de pagamento. Aguarde e tente mais tarde ou pague com Pix.");
-  if (!(await checkRateLimit(`card:ip:${ip}`, LIMITS.ip, HOUR, t))) throw limited();
-  if (!(await checkRateLimit(`card:email:${sha256(pre.cust.email.toLowerCase())}`, LIMITS.email, HOUR, t))) throw limited();
+  const knownIp = ip !== UNKNOWN_IP;
+  const emailHash = sha256(pre.cust.email.toLowerCase());
+  // IP desconhecido (sem proxy confiável): uma chave única para todos seria um limite global; vale só e-mail e cartão.
+  if (knownIp && !(await checkRateLimit(`card:ip:${ip}`, LIMITS.ip, HOUR, t))) throw limited();
+  if (!(await checkRateLimit(`card:email:${emailHash}`, LIMITS.email, HOUR, t))) throw limited();
   if (!checkCardFingerprint(input.card.number, LIMITS.card, HOUR, t.getTime())) throw limited();
-  if (await hadRecentEvent(`card:decline:ip:${ip}`, HOUR, t)) {
+  const recentDecline =
+    (knownIp && (await hadRecentEvent(`card:decline:ip:${ip}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
+  if (recentDecline) {
     const verify = deps.verifyTurnstile ?? verifyTurnstile;
     if (!(await verify(input.turnstileToken, ip))) {
       throw new ActionError("rate_limited", "Confirme que você não é um robô e tente de novo.", { captcha: true });
     }
+  }
+
+  // 2b. Tentativa anterior de desfecho desconhecido: confere no Asaas antes de arriscar uma segunda cobrança.
+  if (pre.unresolved) {
+    if (await recentlyBusy(storeId, order.id, t)) throw new ActionError("conflict", BUSY_MESSAGE);
+    if ((await reconcileWithAsaas(storeId, order.id)) === "paid") return approved();
   }
 
   // 3. Transação curta: trava o pedido e grava a tentativa.
@@ -159,23 +192,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     if (again) return { replay: again };
     if (o!.status === "paid") return { paid: true };
     if (o!.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
-    const [busy] = await tx
-      .select({ id: cardAttempt.id })
-      .from(cardAttempt)
-      .where(
-        and(
-          eq(cardAttempt.orderId, order.id),
-          or(
-            and(eq(cardAttempt.status, "processing"), gt(cardAttempt.createdAt, new Date(t.getTime() - PROCESSING_STALE_MS))),
-            and(
-              eq(cardAttempt.status, "error"),
-              eq(cardAttempt.errorMessage, UNKNOWN),
-              gt(cardAttempt.createdAt, new Date(t.getTime() - UNKNOWN_BLOCK_MS)),
-            ),
-          ),
-        ),
-      )
-      .limit(1);
+    const [busy] = await tx.select({ id: cardAttempt.id }).from(cardAttempt).where(busyWhere(order.id, t)).limit(1);
     if (busy) throw new ActionError("conflict", BUSY_MESSAGE);
     // O Asaas exige CPF/CNPJ no cliente: sem CPF no pedido, usa o do titular (não é dado do cartão).
     if (!pre.cust.cpf) {
@@ -232,7 +249,8 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
       phone: pre.cust.phone,
       mobilePhone: pre.cust.phone,
     },
-    remoteIp: ip,
+    // Asaas exige remoteIp; sem proxy confiável não sabemos o IP real (configuração de produção exige TRUST_PROXY).
+    remoteIp: knownIp ? ip : "0.0.0.0",
   };
 
   let charged: AsaasPayment;
@@ -244,7 +262,8 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     const asaas = { status: d?.status ?? 0, errorCodes: d?.errorCodes ?? [] };
     if (asaas.status === 400) {
       await closeAttempt(storeId, attempt.id, { status: "declined" });
-      await recordEvent(`card:decline:ip:${ip}`, t);
+      if (knownIp) await recordEvent(`card:decline:ip:${ip}`, t);
+      await recordEvent(`card:decline:email:${emailHash}`, t);
       log.warn("cartão recusado pelo Asaas", { orderId: order.id, attemptId: attempt.id, asaas });
       return declined();
     }
@@ -260,6 +279,61 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: UNKNOWN }).catch(() => undefined);
     throw e;
   }
+}
+
+/** Tentativa em andamento (< 5 min) ou de desfecho desconhecido há menos de 2 min: atalho que recusa sem consultar. */
+function busyWhere(orderId: string, t: Date) {
+  return and(
+    eq(cardAttempt.orderId, orderId),
+    or(
+      and(eq(cardAttempt.status, "processing"), gt(cardAttempt.createdAt, new Date(t.getTime() - PROCESSING_STALE_MS))),
+      and(eq(cardAttempt.status, "error"), eq(cardAttempt.errorMessage, UNKNOWN), gt(cardAttempt.createdAt, new Date(t.getTime() - UNKNOWN_BLOCK_MS))),
+    ),
+  );
+}
+
+async function recentlyBusy(storeId: string, orderId: string, t: Date): Promise<boolean> {
+  const rows = await withStore(storeId, (tx) => tx.select({ id: cardAttempt.id }).from(cardAttempt).where(busyWhere(orderId, t)).limit(1));
+  return rows.length > 0;
+}
+
+/**
+ * Consulta no Asaas as cobranças do pedido (fora de transação). Paga -> aplica pelo mesmo caminho do webhook
+ * (`applyAsaasPayment`: grava `payment` e `transitionOrder("paid")`) e devolve "paid"; em análise -> `conflict`;
+ * nenhuma -> "none". Qualquer falha -> `conflict` com a mensagem de "verifique em instantes" (fail closed).
+ */
+async function reconcileWithAsaas(storeId: string, orderId: string): Promise<"paid" | "none"> {
+  const failClosed = (e: unknown): never => {
+    if (e instanceof ActionError && e.code === "conflict") throw e;
+    log.warn("cartão: conferência no Asaas falhou; nova tentativa recusada", { orderId, error: e });
+    throw new ActionError("conflict", UNKNOWN_MESSAGE);
+  };
+  let charges: AsaasPayment[];
+  let client: Awaited<ReturnType<typeof asaasClientFor>>;
+  try {
+    client = await withStore(storeId, (tx) => asaasClientFor(tx, storeId));
+    charges = await client.listPaymentsByExternalReference(orderId);
+  } catch (e) {
+    return failClosed(e);
+  }
+  const paid = charges.find((c) => mapAsaasStatus(String(c.status)) === "paid");
+  if (paid) {
+    try {
+      const applyInput = await asaasPaymentInput(client, paid);
+      await runAction(applyAsaasPayment, { storeId, actor: { kind: "system" }, origin: "system" }, applyInput);
+      const [o] = await withStore(storeId, (tx) => tx.select({ status: orders.status }).from(orders).where(eq(orders.id, orderId)));
+      if (o?.status === "paid") {
+        log.info("cartão: cobrança de tentativa anterior estava paga; pedido liquidado pela conferência", { orderId, paymentId: paid.id });
+        return "paid";
+      }
+    } catch (e) {
+      return failClosed(e);
+    }
+    // Paga, mas o pedido não liberou (ex.: valor menor): não arrisca outra cobrança.
+    throw new ActionError("conflict", UNKNOWN_MESSAGE);
+  }
+  if (charges.some((c) => OPEN_STATUSES.has(String(c.status)))) throw new ActionError("conflict", ANALYSIS_MESSAGE);
+  return "none";
 }
 
 async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged: AsaasPayment): Promise<CardResult> {
