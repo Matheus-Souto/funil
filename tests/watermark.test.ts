@@ -2,13 +2,20 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { PDFDocument, StandardFonts, degrees } from "pdf-lib";
 import { storage } from "@/lib/storage";
 import {
+  FAILURE_QUARANTINE_MS,
   WATERMARK_CONCURRENCY,
-  fitToFont,
+  WATERMARK_MAX_QUEUE,
+  WatermarkFailedError,
+  deleteWatermarks,
   ensureWatermarkedPdf,
+  fileVersion,
+  fitToFont,
   setWatermarkerForTests,
   watermarkPdf,
   watermarkText,
+  type WatermarkRequest,
 } from "@/lib/delivery/watermark";
+import { PdfBusyError, inspectInSandbox, watermarkInSandbox, watermarkLimiter } from "@/lib/pdf/sandbox";
 import { pageOperators, pageTexts } from "./pdf-text";
 
 async function makeDoc(pages: number, opts: { rotate?: number; size?: [number, number] } = {}): Promise<Uint8Array> {
@@ -82,33 +89,55 @@ describe("watermarkPdf", () => {
   });
 });
 
-describe("ensureWatermarkedPdf (cache em storage e concorrência limitada)", () => {
-  test("gera uma vez e guarda em wm/<orderId>/<productId>.pdf; chamadas simultâneas compartilham a geração", async () => {
+describe("ensureWatermarkedPdf (cache em storage, fila e quarentena)", () => {
+  const putProduct = async () => {
     const fileKey = `products/t/${crypto.randomUUID()}.pdf`;
     await storage.put(fileKey, await makeDoc(1));
-    const orderId = crypto.randomUUID();
-    const productId = crypto.randomUUID();
+    return fileKey;
+  };
+  const req = (fileKey: string, over: Partial<WatermarkRequest> = {}): WatermarkRequest => ({
+    orderId: crypto.randomUUID(),
+    productId: crypto.randomUUID(),
+    fileKey,
+    fileSha256: "a".repeat(64),
+    text: "Licenciado para A — a@b.co",
+    ...over,
+  });
+
+  test("padrão: carimba no Worker isolado e guarda em wm/<orderId>/<productId>/<versão>.pdf (lido em fluxo)", async () => {
+    const r = req(await putProduct());
+    const key = await ensureWatermarkedPdf(r);
+    expect(key).toBe(`wm/${r.orderId}/${r.productId}/${fileVersion(r.fileKey, r.fileSha256)}.pdf`);
+    const cached = await storage.get(key);
+    expect((await pageTexts(cached!))[0]).toContain("Licenciado para A — a@b.co");
+    const s = await storage.stream(key);
+    expect(s!.size).toBe(cached!.length);
+    expect(Buffer.from(await new Response(s!.body).arrayBuffer()).equals(Buffer.from(cached!))).toBe(true);
+  });
+
+  test("gera uma vez; chamadas simultâneas compartilham a geração; outra versão do arquivo = outra cópia", async () => {
+    const fileKey = await putProduct();
     let calls = 0;
     setWatermarkerForTests(async (pdf, text) => {
       calls++;
       return watermarkPdf(pdf, text);
     });
-    const job = { orderId, productId, fileKey, text: "Licenciado para A — a@b.co" };
-    const [a, b] = await Promise.all([ensureWatermarkedPdf(job), ensureWatermarkedPdf(job)]);
+    const r = req(fileKey);
+    const [a, b] = await Promise.all([ensureWatermarkedPdf(r), ensureWatermarkedPdf(r)]);
     expect(calls).toBe(1);
-    expect([a, b]).toEqual([`wm/${orderId}/${productId}.pdf`, `wm/${orderId}/${productId}.pdf`]);
-    const cached = await storage.get(a);
-    expect((await pageTexts(cached!))[0]).toContain("Licenciado para A — a@b.co");
-    const s = await storage.stream(a);
-    expect(s!.size).toBe(cached!.length);
-    expect(Buffer.from(await new Response(s!.body).arrayBuffer()).equals(Buffer.from(cached!))).toBe(true);
-    await ensureWatermarkedPdf(job);
+    expect(a).toBe(b);
+    await ensureWatermarkedPdf(r);
     expect(calls).toBe(1);
+    const other = await ensureWatermarkedPdf({ ...r, fileSha256: "b".repeat(64) });
+    expect(other).not.toBe(a);
+    expect(calls).toBe(2);
+    await deleteWatermarks(r.orderId);
+    expect(await storage.exists(a)).toBe(false);
+    expect(await storage.exists(other)).toBe(false);
   });
 
-  test(`no máximo ${WATERMARK_CONCURRENCY} gerações ao mesmo tempo por processo`, async () => {
-    const fileKey = `products/t/${crypto.randomUUID()}.pdf`;
-    await storage.put(fileKey, await makeDoc(1));
+  test(`uma geração por vez; até ${WATERMARK_MAX_QUEUE} esperando; acima disso PdfBusyError na hora`, async () => {
+    const fileKey = await putProduct();
     let running = 0;
     let peak = 0;
     const gates: Array<() => void> = [];
@@ -123,13 +152,12 @@ describe("ensureWatermarkedPdf (cache em storage e concorrência limitada)", () 
     const until = async (cond: () => boolean) => {
       while (!cond()) await tick();
     };
-    const all = Array.from({ length: 5 }, () =>
-      ensureWatermarkedPdf({ orderId: crypto.randomUUID(), productId: crypto.randomUUID(), fileKey, text: "x" }),
-    );
-    await until(() => gates.length === WATERMARK_CONCURRENCY);
-    for (let i = 0; i < 20; i++) await tick();
-    expect(running).toBe(WATERMARK_CONCURRENCY); // as outras 3 esperam a vez
-    for (let released = 0; released < 5; released++) {
+    const total = 1 + WATERMARK_MAX_QUEUE;
+    const all = Array.from({ length: total }, () => ensureWatermarkedPdf(req(fileKey)));
+    await until(() => gates.length === WATERMARK_CONCURRENCY && watermarkLimiter.queued === WATERMARK_MAX_QUEUE);
+    await expect(ensureWatermarkedPdf(req(fileKey))).rejects.toBeInstanceOf(PdfBusyError);
+    expect(running).toBe(WATERMARK_CONCURRENCY);
+    for (let released = 0; released < total; released++) {
       await until(() => gates.length > 0);
       gates.shift()!();
     }
@@ -137,9 +165,51 @@ describe("ensureWatermarkedPdf (cache em storage e concorrência limitada)", () 
     expect(peak).toBe(WATERMARK_CONCURRENCY);
   });
 
+  test("falha de geração fica em quarentena por 10 min por item (não tenta de novo antes)", async () => {
+    const fileKey = await putProduct();
+    let now = 1_000_000;
+    let calls = 0;
+    setWatermarkerForTests(async () => {
+      calls++;
+      throw new Error("PDF: tempo-limite de 60000 ms estourado");
+    }, () => now);
+    const r = req(fileKey);
+    await expect(ensureWatermarkedPdf(r)).rejects.toBeInstanceOf(WatermarkFailedError);
+    await expect(ensureWatermarkedPdf(r)).rejects.toThrow("falhou há pouco");
+    expect(calls).toBe(1);
+    now += FAILURE_QUARANTINE_MS + 1;
+    await expect(ensureWatermarkedPdf(r)).rejects.toBeInstanceOf(WatermarkFailedError);
+    expect(calls).toBe(2);
+    // outro item não é afetado pela quarentena
+    await expect(ensureWatermarkedPdf(req(fileKey))).rejects.toBeInstanceOf(WatermarkFailedError);
+    expect(calls).toBe(3);
+  });
+
   test("arquivo do produto sumido: erro claro", async () => {
-    await expect(
-      ensureWatermarkedPdf({ orderId: crypto.randomUUID(), productId: crypto.randomUUID(), fileKey: "products/x/nao-existe.pdf", text: "x" }),
-    ).rejects.toThrow("Arquivo do produto não encontrado");
+    await expect(ensureWatermarkedPdf(req("products/x/nao-existe.pdf"))).rejects.toThrow("Arquivo do produto não encontrado");
+  });
+});
+
+describe("Worker isolado (worker_threads)", () => {
+  test("carimba e inspeciona no Worker; PDF corrompido/criptografado viram códigos", async () => {
+    const out = await watermarkInSandbox(await makeDoc(2), "Licenciado para João Ñúñez 😀 — j@x.co");
+    expect((await pageTexts(out))[1]).toContain("Licenciado para João Ñúñez — j@x.co");
+    expect(await inspectInSandbox(await makeDoc(3))).toEqual({ pages: 3 });
+    expect(await inspectInSandbox(Buffer.from("%PDF-1.4\nlixo"))).toEqual({ error: "corrupt" });
+  });
+
+  test("tempo-limite: o Worker é encerrado e a tarefa falha", async () => {
+    await expect(watermarkInSandbox(await makeDoc(1), "x", { timeoutMs: 1 })).rejects.toThrow("tempo-limite");
+  });
+
+  test("o buffer do chamador não é transferido (continua utilizável), inclusive Buffer do Node", async () => {
+    const src = await makeDoc(1);
+    const len = src.length;
+    await watermarkInSandbox(src, "x");
+    expect(src.length).toBe(len);
+    expect((await PDFDocument.load(src)).getPageCount()).toBe(1);
+    const buf = Buffer.concat([Buffer.from(src)]);
+    await inspectInSandbox(buf);
+    expect(buf.length).toBe(len);
   });
 });

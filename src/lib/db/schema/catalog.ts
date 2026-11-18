@@ -12,6 +12,8 @@ export const product = pgTable("product", {
   fileKey: text("file_key").notNull(),
   fileName: text("file_name").notNull(),
   fileSize: integer("file_size").notNull(),
+  /** sha256 do PDF enviado: entra na versão das cópias carimbadas (nulo em produtos anteriores à coluna). */
+  fileSha256: text("file_sha256"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
 });

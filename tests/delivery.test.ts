@@ -5,10 +5,21 @@ import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core
 import { createOffer } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, integration, job, orders, store } from "@/lib/db/schema";
-import { handleDownload } from "@/lib/delivery/download";
-import { resendOrder } from "@/lib/delivery/jobs";
-import { saveSmtp, sendMail, setMailTransportForTests, testSmtp, type SentMail } from "@/lib/delivery/mailer";
+import { auditLog, downloadLink, downloadToken, emailLog, integration, job, orders, product, store } from "@/lib/db/schema";
+import { handleDownloadHead, handleDownloadPage, handleDownloadPost } from "@/lib/delivery/download";
+import { createSweepWatermarksHandler, resendOrder } from "@/lib/delivery/jobs";
+import {
+  SMTP_GENERIC_ERROR,
+  saveSmtp,
+  sendMail,
+  setMailTransportForTests,
+  setSmtpNetworkForTests,
+  testSmtp,
+  type SentMail,
+  type SmtpSettings,
+} from "@/lib/delivery/mailer";
+import { fileVersion, watermarkKey } from "@/lib/delivery/watermark";
+import { storage } from "@/lib/storage";
 import { runDueJobs, type Job } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
@@ -25,6 +36,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   setMailTransportForTests();
+  setSmtpNetworkForTests();
   await t.drop();
 });
 
@@ -32,25 +44,35 @@ afterAll(async () => {
 let outbox: SentMail[] = [];
 let sendError: Error | null = null;
 let verifyError: Error | null = null;
+/** O servidor aceitou o e-mail, mas a resposta se perdeu (o envio "falha" para nós). */
+let lostReply = false;
+let transports: SmtpSettings[] = [];
 const fakeTransport = () =>
-  setMailTransportForTests(() => ({
-    async verify() {
-      if (verifyError) throw verifyError;
-      return true;
-    },
-    async sendMail(m) {
-      if (sendError) throw sendError;
-      outbox.push(m);
-      return {};
-    },
-    close() {},
-  }));
+  setMailTransportForTests((cfg) => {
+    transports.push(cfg);
+    return {
+      async verify() {
+        if (verifyError) throw verifyError;
+        return true;
+      },
+      async sendMail(m) {
+        if (sendError) throw sendError;
+        outbox.push(m);
+        if (lostReply) throw Object.assign(new Error("Connection closed unexpectedly"), { code: "ECONNECTION" });
+        return {};
+      },
+      close() {},
+    };
+  });
 fakeTransport();
 afterEach(() => {
   outbox = [];
   sendError = null;
   verifyError = null;
+  lostReply = false;
+  transports = [];
   fakeTransport();
+  setSmtpNetworkForTests();
 });
 
 // ---- Loja, produtos e pedidos ----------------------------------------------------------------------------------
@@ -143,12 +165,20 @@ async function runJobs(orderId: string, type: "deliver_order" | "notify_seller" 
 const tokensIn = (text: string) => [...text.matchAll(/\/d\/([A-Za-z0-9_-]{43})\b/g)].map((m) => m[1]!);
 const lastMailTo = (to: string) => [...outbox].reverse().find((m) => m.to === to);
 
-const download = (shop: Pick<Shop, "resolve">, token: string, init: { ip?: string } = {}) =>
-  handleDownload(
-    new Request(`http://localhost:3000/d/${token}`, { headers: init.ip ? { "x-forwarded-for": init.ip } : {} }),
+const reqFor = (token: string, method: string, headers: Record<string, string> = {}) =>
+  new Request(`http://localhost:3000/d/${token}`, { method, headers: { host: "localhost:3000", ...headers } });
+/** O clique em "Baixar PDF": POST da mesma origem (é o que conta o download). */
+const download = (shop: Pick<Shop, "resolve">, token: string, init: { ip?: string; headers?: Record<string, string> } = {}) =>
+  handleDownloadPost(
+    reqFor(token, "POST", { origin: "http://localhost:3000", ...(init.ip ? { "x-forwarded-for": init.ip } : {}), ...init.headers }),
     token,
     { resolveStore: shop.resolve, trustProxy: init.ip ? 1 : 0 },
   );
+/** Abrir o link (GET): página com o botão, sem contar. */
+const view = (shop: Pick<Shop, "resolve">, token: string, init: { ip?: string } = {}) =>
+  handleDownloadPage(reqFor(token, "GET", init.ip ? { "x-forwarded-for": init.ip } : {}), token, { resolveStore: shop.resolve, trustProxy: init.ip ? 1 : 0 });
+const countsOf = async (orderId: string) =>
+  (await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, orderId))).map((l) => l.downloads).sort();
 
 async function deliveredOrder(shop: Shop, opts: { bump?: boolean; name?: string; email?: string } = {}) {
   const o = await paidOrder(shop, opts);
@@ -180,8 +210,13 @@ describe("deliver_order", () => {
       expect(l.maxDownloads).toBe(5);
       expect(l.downloads).toBe(0);
       expect(l.expiresAt.getTime()).toBeGreaterThan(Date.now() + 29.9 * 86_400_000);
-      expect(tokens).not.toContain(l.tokenHash);
-      expect(l.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+    }
+    const toks = await t.ownerDb.select().from(downloadToken).where(eq(downloadToken.storeId, shop.storeId));
+    expect(toks).toHaveLength(2);
+    for (const tk of toks) {
+      expect(tokens).not.toContain(tk.tokenHash);
+      expect(tk.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(links.map((l) => l.id)).toContain(tk.linkId);
     }
     const logs = await t.ownerDb.select().from(emailLog).where(eq(emailLog.orderId, order.id));
     expect(logs.map((l) => [l.kind, l.status])).toEqual([["delivery", "sent"]]);
@@ -361,8 +396,9 @@ describe("GET /d/[token]", () => {
   test("host que não é de loja nenhuma -> 410", async () => {
     const shop = await seedShop();
     const { tokens } = await deliveredOrder(shop);
-    const res = await handleDownload(new Request(`http://x/d/${tokens[0]}`), tokens[0]!, { resolveStore: async () => null });
-    expect(res.status).toBe(410);
+    const none = { resolveStore: async () => null };
+    expect((await handleDownloadPost(new Request(`http://x/d/${tokens[0]}`, { method: "POST" }), tokens[0]!, none)).status).toBe(410);
+    expect((await handleDownloadPage(new Request(`http://x/d/${tokens[0]}`), tokens[0]!, none)).status).toBe(410);
   });
 
   test("link vencido (30 dias) -> 410", async () => {
@@ -399,7 +435,7 @@ describe("GET /d/[token]", () => {
 });
 
 describe("orders.resend", () => {
-  test("support pode; traffic não; reenvio manda e-mail novo com o link girado (contador mantido)", async () => {
+  test("support pode; traffic não; reenvio ACRESCENTA um token ao mesmo link: o antigo continua valendo, contador único", async () => {
     const shop = await seedShop();
     const { order, tokens } = await deliveredOrder(shop);
     expect((await download(shop, tokens[0]!)).status).toBe(200);
@@ -410,9 +446,38 @@ describe("orders.resend", () => {
     await runJobs(order.id, "deliver_order");
     const again = tokensIn(lastMailTo("maria@exemplo.com")!.text);
     expect(again).toHaveLength(2);
-    expect((await download(shop, tokens[0]!)).status).toBe(410); // o link antigo deixou de valer
-    for (let i = 0; i < 4; i++) expect((await download(shop, again[0]!)).status).toBe(200);
-    expect((await download(shop, again[0]!)).status).toBe(410); // 1 + 4 = 5
+    expect(await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id))).toHaveLength(2); // mesmos links
+    expect((await download(shop, tokens[0]!)).status).toBe(200); // o link do 1º e-mail continua valendo
+    for (let i = 0; i < 3; i++) expect((await download(shop, again[0]!)).status).toBe(200);
+    expect((await download(shop, again[0]!)).status).toBe(410); // 1 + 1 + 3 = 5 no mesmo link
+    expect((await download(shop, tokens[0]!)).status).toBe(410);
+  });
+
+  test("SMTP fora do ar no reenvio: nada muda, o link antigo segue valendo e nenhum token novo é gravado", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    const before = await t.ownerDb.select().from(downloadToken).where(eq(downloadToken.storeId, shop.storeId));
+    await runAction(resendOrder, panel(shop.storeId, support), { orderId: order.id });
+    sendError = new Error("connect ECONNREFUSED");
+    await expect(runJobs(order.id, "deliver_order")).rejects.toThrow("ECONNREFUSED");
+    expect(await t.ownerDb.select().from(downloadToken).where(eq(downloadToken.storeId, shop.storeId))).toHaveLength(before.length);
+    expect((await download(shop, tokens[0]!)).status).toBe(200);
+    expect((await download(shop, tokens[1]!)).status).toBe(200);
+  });
+
+  test("resposta do SMTP perdida e retentativa: os links anteriores não morrem; o e-mail da retentativa funciona", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    await runAction(resendOrder, panel(shop.storeId, support), { orderId: order.id });
+    const [j] = (await jobsOf(order.id, "deliver_order")).filter((x) => x.status === "queued");
+    lostReply = true;
+    await expect(getHandlers().deliver_order!(j!, new AbortController().signal)).rejects.toThrow("Connection closed");
+    lostReply = false;
+    await getHandlers().deliver_order!(j!, new AbortController().signal); // retentativa do mesmo job
+    const second = tokensIn(lastMailTo("maria@exemplo.com")!.text);
+    expect((await download(shop, tokens[0]!)).status).toBe(200);
+    expect((await download(shop, second[0]!)).status).toBe(200);
+    expect(await countsOf(order.id)).toEqual([0, 2]);
   });
 
   test("renew: revoga os links e emite novos (5 downloads de novo); restore não ressuscita os renovados", async () => {
@@ -426,6 +491,12 @@ describe("orders.resend", () => {
     const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
     expect(links).toHaveLength(4);
     expect(links.filter((l) => l.revokedAt !== null)).toHaveLength(2);
+    // Todos os tokens dos links antigos foram revogados.
+    const old = links.filter((l) => l.revokedAt !== null).map((l) => l.id);
+    const oldTokens = (await t.ownerDb.select().from(downloadToken).where(eq(downloadToken.storeId, shop.storeId))).filter((x) => old.includes(x.linkId));
+    expect(oldTokens.length).toBeGreaterThan(0);
+    expect(oldTokens.every((x) => x.revokedAt !== null)).toBe(true);
+    expect((await download(shop, tokens[1]!)).status).toBe(410);
     // disputed -> paid: restore só desfaz revogação por status, não a renovação.
     await withStore(shop.storeId, (tx) => transitionOrder(systemCtx(shop.storeId, tx), order.id, "disputed", "cb"));
     await runJobs(order.id, "revoke_downloads");
@@ -530,7 +601,7 @@ describe("conexão SMTP", () => {
   test("salvar de novo sem senha mantém a senha guardada", async () => {
     const { storeId } = await seedStore();
     await runAction(saveSmtp, panel(storeId), SMTP);
-    const out = await runAction(saveSmtp, panel(storeId), { host: SMTP.host, user: SMTP.user, from: SMTP.from, port: 465, secure: true });
+    const out = await runAction(saveSmtp, panel(storeId), { host: SMTP.host, user: SMTP.user, from: SMTP.from, port: SMTP.port, secure: true });
     expect(out.hasPassword).toBe(true);
     await runAction(testSmtp, panel(storeId), { to: "eu@exemplo.com" });
     expect(lastMailTo("eu@exemplo.com")!.subject).toContain("teste");
@@ -547,5 +618,210 @@ describe("conexão SMTP", () => {
     expect(lastMailTo("eu@exemplo.com")).toBeDefined();
     const logs = await withStore(storeId, (tx) => tx.select().from(emailLog));
     expect(logs.map((l) => [l.kind, l.status])).toEqual([["test", "sent"]]);
+  });
+});
+
+describe("GET e HEAD não contam download (robôs de e-mail)", () => {
+  test("GET mostra 'Seu PDF está pronto' com formulário POST; GET e HEAD repetidos não contam; o POST conta", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    for (let i = 0; i < 8; i++) {
+      const res = await view(shop, tokens[0]!);
+      expect(res.status).toBe(200);
+      if (i === 0) {
+        const html = await res.text();
+        expect(html).toContain("Seu PDF está pronto");
+        expect(html).toContain(shop.mainName);
+        expect(html).toContain('<form method="post">');
+        expect(html).toContain("Baixar PDF");
+        expect(html).toContain("5 de 5");
+        expect(res.headers.get("content-security-policy")).toContain("form-action 'self'");
+        expect(res.headers.get("cache-control")).toBe("no-store");
+      }
+      const head = handleDownloadHead();
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+    }
+    expect(await countsOf(order.id)).toEqual([0, 0]);
+    expect((await download(shop, tokens[0]!)).status).toBe(200);
+    expect(await countsOf(order.id)).toEqual([0, 1]);
+    expect(await (await view(shop, tokens[0]!)).text()).toContain("4 de 5");
+  });
+
+  test("HEAD não consulta nem gera nada", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    await runJobs(o.id, "deliver_order");
+    // sem storeId nem token: responde 200 sem tocar no banco ou no storage
+    expect(handleDownloadHead().status).toBe(200);
+  });
+
+  test("GET de link inválido, esgotado ou de pedido reembolsado -> 410", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    expect((await view(shop, "z".repeat(43))).status).toBe(410);
+    for (let i = 0; i < 5; i++) await download(shop, tokens[0]!);
+    expect((await view(shop, tokens[0]!)).status).toBe(410);
+    await runAction(refundOrder, panel(shop.storeId), { orderId: order.id });
+    expect((await view(shop, tokens[1]!)).status).toBe(410);
+  });
+
+  test("POST de outro site: 303 de volta para a página do link, nada contado", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    const evil = await download(shop, tokens[0]!, { headers: { origin: "https://evil.example" } });
+    expect(evil.status).toBe(303);
+    expect(evil.headers.get("location")).toBe(`/d/${tokens[0]}`);
+    const fetchSite = await download(shop, tokens[0]!, { headers: { "sec-fetch-site": "cross-site" } });
+    expect(fetchSite.status).toBe(303);
+    const nullOrigin = await download(shop, tokens[0]!, { headers: { origin: "null" } });
+    expect(nullOrigin.status).toBe(303);
+    expect(await countsOf(order.id)).toEqual([0, 0]);
+    // O formulário da própria página: com Referrer-Policy no-referrer o navegador manda Origin: null + Sec-Fetch-Site.
+    const own = await download(shop, tokens[0]!, { headers: { origin: "null", "sec-fetch-site": "same-origin" } });
+    expect(own.status).toBe(200);
+    expect(await countsOf(order.id)).toEqual([0, 1]);
+  });
+});
+
+describe("cópias carimbadas: versão do arquivo, limpeza e varredura", () => {
+  const copyKey = async (orderId: string, productId: string) => {
+    const [p] = await t.ownerDb.select().from(product).where(eq(product.id, productId));
+    return watermarkKey(orderId, productId, fileVersion(p!.fileKey, p!.fileSha256));
+  };
+  const mainLink = async (orderId: string) =>
+    (await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, orderId))).find((l) => l.downloads > 0) ??
+    (await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, orderId)))[0]!;
+
+  test("a chave inclui a versão do arquivo (file_key + sha256): trocar o arquivo gera cópia nova", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    expect((await download(shop, tokens[0]!)).status).toBe(200);
+    const link = await mainLink(order.id);
+    const k1 = await copyKey(order.id, link.productId);
+    expect(await storage.exists(k1)).toBe(true);
+    await t.ownerDb.update(product).set({ fileSha256: "0".repeat(64) }).where(eq(product.id, link.productId));
+    const k2 = await copyKey(order.id, link.productId);
+    expect(k2).not.toBe(k1);
+    expect((await download(shop, tokens[0]!)).status).toBe(200);
+    expect(await storage.exists(k2)).toBe(true);
+  });
+
+  test("reembolso: revoke_downloads apaga as cópias do pedido", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    await download(shop, tokens[0]!);
+    const link = await mainLink(order.id);
+    const key = await copyKey(order.id, link.productId);
+    expect(await storage.exists(key)).toBe(true);
+    await runAction(refundOrder, panel(shop.storeId), { orderId: order.id });
+    await runJobs(order.id, "revoke_downloads");
+    expect(await storage.exists(key)).toBe(false);
+  });
+
+  test("renew apaga as cópias (depois do commit)", async () => {
+    const shop = await seedShop();
+    const { order, tokens } = await deliveredOrder(shop);
+    await download(shop, tokens[0]!);
+    const link = await mainLink(order.id);
+    const key = await copyKey(order.id, link.productId);
+    await runAction(resendOrder, panel(shop.storeId, support), { orderId: order.id, renew: true });
+    expect(await storage.exists(key)).toBe(false);
+  });
+
+  test("varredura diária: apaga cópia de link vencido, revogado e sem download há 7 dias; mantém a de link em uso", async () => {
+    const shop = await seedShop();
+    const used = await deliveredOrder(shop, { email: "usado@exemplo.com" });
+    const idle = await deliveredOrder(shop, { email: "parado@exemplo.com" });
+    const expired = await deliveredOrder(shop, { email: "vencido@exemplo.com" });
+    for (const o of [used, idle, expired]) await download(shop, o.tokens[0]!);
+    const keys = await Promise.all([used, idle, expired].map(async (o) => copyKey(o.order.id, (await mainLink(o.order.id)).productId)));
+    for (const k of keys) expect(await storage.exists(k)).toBe(true);
+    const now = new Date();
+    const days = (n: number) => new Date(now.getTime() - n * 86_400_000);
+    await t.ownerDb.update(downloadLink).set({ lastDownloadAt: days(8), createdAt: days(9) }).where(eq(downloadLink.orderId, idle.order.id));
+    await t.ownerDb.update(downloadLink).set({ expiresAt: days(1) }).where(eq(downloadLink.orderId, expired.order.id));
+    await createSweepWatermarksHandler(() => now)({ id: crypto.randomUUID(), storeId: null, type: "sweep_watermarks", payload: {} } as Job, new AbortController().signal);
+    expect(await storage.exists(keys[0]!)).toBe(true);
+    expect(await storage.exists(keys[1]!)).toBe(false);
+    expect(await storage.exists(keys[2]!)).toBe(false);
+  }, 20_000); // três entregas com carimbo real no Worker: passa do orçamento padrão de 5 s
+
+  test("sweep_watermarks está registrado e agendado como tipo de job", () => {
+    expect(typeof getHandlers().sweep_watermarks).toBe("function");
+  });
+});
+
+describe("SMTP: rede restrita no modo multi (SSRF) e senha", () => {
+  const strict = (addresses: Record<string, string[]>) =>
+    setSmtpNetworkForTests({ strict: true, lookup: async (h) => addresses[h] ?? [] });
+
+  test("recusa portas fora de 25/465/587/2525", async () => {
+    const { storeId } = await seedStore();
+    strict({ "smtp.exemplo.com": ["198.51.200.10"] });
+    await expect(runAction(saveSmtp, panel(storeId), { ...SMTP, port: 8080 })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(runAction(saveSmtp, panel(storeId), { ...SMTP, port: 1025 })).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  test("recusa host que resolve para endereço interno (loopback, privado, link-local, CGNAT, ULA, multicast) com mensagem genérica", async () => {
+    const { storeId } = await seedStore();
+    for (const ip of ["127.0.0.1", "10.0.0.5", "172.20.1.1", "192.168.0.10", "169.254.169.254", "100.64.1.1", "::1", "fd00::1", "fe80::1", "224.0.0.1", "::ffff:10.0.0.1", "0.0.0.0"]) {
+      strict({ "smtp.exemplo.com": [ip] });
+      const err = (await runAction(saveSmtp, panel(storeId), SMTP).catch((e: unknown) => e)) as ActionError;
+      expect(err.code, ip).toBe("provider_error");
+      expect(err.message, ip).toBe(SMTP_GENERIC_ERROR);
+    }
+    // um endereço público e outro interno: recusa (não escolhe o "bom")
+    strict({ "smtp.exemplo.com": ["198.51.200.10", "10.0.0.5"] });
+    await expect(runAction(saveSmtp, panel(storeId), SMTP)).rejects.toMatchObject({ message: SMTP_GENERIC_ERROR });
+    // IP literal interno também
+    strict({});
+    await expect(runAction(saveSmtp, panel(storeId), { ...SMTP, host: "10.1.2.3" })).rejects.toMatchObject({ message: SMTP_GENERIC_ERROR });
+    expect(await t.ownerDb.select().from(integration).where(eq(integration.storeId, storeId))).toHaveLength(0);
+  });
+
+  test("conecta no IP já resolvido (servername = host, sem nova resolução) no salvar, no teste e no envio", async () => {
+    const { storeId } = await seedStore();
+    strict({ "smtp.exemplo.com": ["198.51.200.10"] });
+    await runAction(saveSmtp, panel(storeId), SMTP);
+    expect(transports.at(-1)).toMatchObject({ host: "198.51.200.10", servername: "smtp.exemplo.com", port: 587 });
+    // DNS rebinding: agora o nome aponta para dentro. Envio e teste resolvem de novo e recusam.
+    strict({ "smtp.exemplo.com": ["127.0.0.1"] });
+    await expect(sendMail(storeId, { to: "a@b.co", subject: "x", html: "x", text: "x" })).rejects.toMatchObject({ message: SMTP_GENERIC_ERROR });
+    await expect(runAction(testSmtp, panel(storeId), { to: "a@b.co" })).rejects.toMatchObject({ message: SMTP_GENERIC_ERROR });
+    strict({ "smtp.exemplo.com": ["203.0.114.7"] });
+    await sendMail(storeId, { to: "a@b.co", subject: "x", html: "x", text: "x" });
+    expect(transports.at(-1)).toMatchObject({ host: "203.0.114.7", servername: "smtp.exemplo.com" });
+  });
+
+  test("modo restrito: erro de autenticação também vira a mensagem genérica", async () => {
+    const { storeId } = await seedStore();
+    strict({ "smtp.exemplo.com": ["198.51.200.10"] });
+    verifyError = Object.assign(new Error("535 Authentication failed"), { code: "EAUTH" });
+    await expect(runAction(saveSmtp, panel(storeId), SMTP)).rejects.toMatchObject({ message: SMTP_GENERIC_ERROR });
+  });
+
+  test("fora do modo restrito (single/dev) nada muda: 127.0.0.1:1025 é aceito", async () => {
+    const { storeId } = await seedStore();
+    await runAction(saveSmtp, panel(storeId), { ...SMTP, host: "127.0.0.1", port: 1025, user: undefined, password: undefined });
+    expect(transports.at(-1)).toMatchObject({ host: "127.0.0.1", port: 1025 });
+  });
+
+  test("trocar servidor, porta ou usuário exige a senha de novo (a senha guardada não vai para outro servidor)", async () => {
+    const { storeId } = await seedStore();
+    await runAction(saveSmtp, panel(storeId), SMTP);
+    const noPass = { host: SMTP.host, port: SMTP.port, secure: SMTP.secure, user: SMTP.user, from: SMTP.from };
+    for (const change of [{ host: "outro.exemplo.com" }, { port: 465 }, { user: "outro@exemplo.com" }]) {
+      const before = transports.length;
+      const err = (await runAction(saveSmtp, panel(storeId), { ...noPass, ...change }).catch((e: unknown) => e)) as ActionError;
+      expect(err.code, JSON.stringify(change)).toBe("invalid_input");
+      expect(err.message).toContain("informe a senha de novo");
+      expect(transports.length).toBe(before); // nem chegou a conectar
+    }
+    // mesmo servidor/porta/usuário: mantém a senha guardada
+    await runAction(saveSmtp, panel(storeId), { ...noPass, from: "novo@loja.com" });
+    expect(transports.at(-1)!.password).toBe(SMTP.password);
+    // com a senha: troca normalmente
+    await runAction(saveSmtp, panel(storeId), { ...SMTP, host: "outro.exemplo.com", password: "outra-senha" });
   });
 });

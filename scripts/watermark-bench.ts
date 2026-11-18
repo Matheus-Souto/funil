@@ -1,11 +1,13 @@
 // Mede tempo e memória do carimbo do PDF (Task 12, passo 5).
-// Uso: bun scripts/watermark-bench.ts [arquivo.pdf]   (BENCH_PAGES=N muda o tamanho do PDF gerado)
+// Uso: bun scripts/watermark-bench.ts [arquivo.pdf]   (BENCH_PAGES=N muda o tamanho do PDF gerado;
+//      BENCH_SANDBOX=1 mede o caminho do app: Worker isolado, inclusive a criação do Worker)
 // Sem arquivo, gera um PDF de 30 páginas A4 com uma imagem por página (~10 MB), parecido com um e-book ilustrado.
 // Referência aceitável: < 2 s e < 200 MB por geração (servidor de 1 GB, no máximo 2 gerações simultâneas).
 import { readFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { PDFDocument, PDFName, StandardFonts, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState } from "pdf-lib";
 import { watermarkPdf, watermarkText } from "@/lib/delivery/watermark";
+import { watermarkInSandbox } from "@/lib/pdf/sandbox";
 
 async function samplePdf(pages: number): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -53,7 +55,11 @@ const timer = setInterval(() => {
   peak = Math.max(peak, process.memoryUsage().rss);
 }, 5);
 const t0 = performance.now();
-const out = await watermarkPdf(input, watermarkText("João Ñúñez 😀", "joao.nunez@exemplo.com"));
+const sandbox = process.env.BENCH_SANDBOX === "1";
+const text = watermarkText("João Ñúñez 😀", "joao.nunez@exemplo.com");
+// No modo Worker, como no app: o buffer de entrada vai para o Worker sem cópia (lido de novo só para o relatório).
+const inLen = input.length;
+const out = sandbox ? await watermarkInSandbox(input, text, { transferInput: true }) : await watermarkPdf(input, text);
 const ms = performance.now() - t0;
 clearInterval(timer);
 peak = Math.max(peak, process.memoryUsage().rss);
@@ -61,9 +67,10 @@ peak = Math.max(peak, process.memoryUsage().rss);
 console.log(
   JSON.stringify({
     runtime: typeof Bun !== "undefined" ? `bun ${Bun.version}` : `node ${process.version}`,
+    mode: sandbox ? "worker" : "no processo",
     input: file ?? `gerado (${genPages} páginas com imagem)`,
     pages,
-    inMB: mb(input.length),
+    inMB: mb(inLen),
     outMB: mb(out.length),
     ms: Math.round(ms),
     rssBeforeMB: mb(rss0),

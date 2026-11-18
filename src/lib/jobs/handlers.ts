@@ -4,7 +4,7 @@ import { orders, store } from "@/lib/db/schema";
 import { ActionError } from "@/lib/actions/core";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
-import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJob } from "@/lib/delivery/jobs";
+import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJob, sweepWatermarksJob } from "@/lib/delivery/jobs";
 import { refundOrderJob } from "@/lib/payments/refund";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
@@ -58,6 +58,7 @@ const registry: JobHandlers = {
   notify_seller: notifySellerJob,
   revoke_downloads: revokeDownloadsJob,
   restore_downloads: restoreDownloadsJob,
+  sweep_watermarks: sweepWatermarksJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {

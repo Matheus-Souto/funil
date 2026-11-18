@@ -4,7 +4,7 @@ import { product } from "./catalog";
 import { store } from "./core";
 import { orders } from "./orders";
 
-// Com RLS (enable_store_rls na migration). Guarda SÓ o sha256 do token: o link em si só existe no e-mail enviado.
+// Com RLS (enable_store_rls na migration). Um link por item do pedido; os tokens (só sha256) ficam em download_token.
 // `revoked_reason`: 'order_status' (reembolso/contestação; restore_downloads desfaz) ou 'renewed' (orders.resend com
 // renew; nunca é desfeita).
 export const downloadLink = pgTable(
@@ -20,12 +20,13 @@ export const downloadLink = pgTable(
     productId: uuid("product_id")
       .notNull()
       .references(() => product.id),
-    tokenHash: text("token_hash").notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     maxDownloads: integer("max_downloads").notNull().default(5),
     downloads: integer("downloads").notNull().default(0),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     revokedReason: text("revoked_reason"),
+    /** Último download contado (a varredura diária apaga as cópias carimbadas sem uso há 7 dias). */
+    lastDownloadAt: timestamp("last_download_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -61,4 +62,24 @@ export const emailLog = pgTable(
     index("email_log_order_idx").on(t.orderId, t.kind),
     index("email_log_job_idx").on(t.jobId),
   ],
+);
+
+// Com RLS (enable_store_rls na migration). Tokens do link: cada e-mail enviado acrescenta um (os anteriores continuam
+// valendo); validade, contador e revogação por status ficam no link. `revoked_at` aqui só na renovação (renew).
+// Só o sha256 do token é guardado, e a linha só é gravada depois que o e-mail com o token saiu.
+export const downloadToken = pgTable(
+  "download_token",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "cascade" }),
+    linkId: uuid("link_id")
+      .notNull()
+      .references(() => downloadLink.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("download_token_link_idx").on(t.linkId)],
 );

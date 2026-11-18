@@ -1,19 +1,19 @@
 // Handlers da fila para entrega e avisos, e a ação `orders.resend`.
 // At-least-once: todo handler é idempotente e decide pelo estado ATUAL do pedido (insensível à ordem dos jobs);
 // re-escopa com withStore(job.storeId); nenhuma rede (SMTP) dentro de transação; respeita o AbortSignal do worker.
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { txidOf } from "@/lib/checkout";
-import { withStore, type Tx } from "@/lib/db/client";
-import { customer, emailLog, orderItem, orders, product, store } from "@/lib/db/schema";
+import { db, withStore, type Tx } from "@/lib/db/client";
+import { customer, downloadLink, emailLog, orderItem, orders, product, store } from "@/lib/db/schema";
 import { brl, dateTimeSP } from "@/lib/format";
 import { enqueue, hasOpenJob, type Job, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
-import { LINK_TTL_MS, MAX_DOWNLOADS, issueDownloadLinks, restoreLinks, revokeLinks, storeBaseUrl } from "./links";
+import { LINK_TTL_MS, MAX_DOWNLOADS, deliveryLinks, newTokens, restoreLinks, revokeLinks, saveTokens, storeBaseUrl } from "./links";
 import { logEmail, sendMail } from "./mailer";
 import { deliveryEmail, methodLabel, sellerEmail } from "./templates";
-import { ensureWatermarkedPdf, watermarkText } from "./watermark";
+import { deleteWatermarks, ensureWatermarkedPdf, watermarkText } from "./watermark";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -65,10 +65,10 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     const [c] = await tx.select().from(customer).where(eq(customer.id, o.customerId));
     const [s] = await tx.select().from(store).where(eq(store.id, storeId));
     if (!c || !s) throw new Error("pedido sem cliente ou loja");
-    const links = await issueDownloadLinks(tx, { id: o.id, storeId }, { baseUrl: storeBaseUrl(s) });
+    const links = await deliveryLinks(tx, { id: o.id, storeId });
     const files = links.length
       ? await tx
-          .select({ id: product.id, fileKey: product.fileKey })
+          .select({ id: product.id, fileKey: product.fileKey, fileSha256: product.fileSha256 })
           .from(product)
           .where(inArray(product.id, links.map((l) => l.productId)))
       : [];
@@ -78,8 +78,10 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     log.info("deliver_order: nada a enviar", { orderId, reason: prep.skip });
     return;
   }
-  const { o, c, s, links, files } = prep;
+  const { o, c, s, files } = prep;
   throwIfAborted(signal);
+  // Tokens só em memória até o e-mail sair: SMTP falhando (ou caindo no meio) não muda nem invalida nada.
+  const links = newTokens(prep.links, storeBaseUrl(s));
 
   const buyerName = o.buyerName ?? c.name;
   const mail = deliveryEmail({
@@ -103,16 +105,19 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     );
     throw e;
   }
-  await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "sent" }));
+  await withStore(storeId, async (tx) => {
+    await saveTokens(tx, storeId, links);
+    await logEmail(tx, { ...logRow, status: "sent" });
+  });
 
   // PDFs carimbados para o cache (fora do caminho da requisição de download). Melhor esforço: o link gera se faltar.
   const text = watermarkText(buyerName, c.email);
   for (const l of links) {
     if (signal.aborted) break;
-    const fileKey = files.find((f) => f.id === l.productId)?.fileKey;
-    if (!fileKey) continue;
+    const file = files.find((f) => f.id === l.productId);
+    if (!file) continue;
     try {
-      await ensureWatermarkedPdf({ orderId, productId: l.productId, fileKey, text });
+      await ensureWatermarkedPdf({ orderId, productId: l.productId, fileKey: file.fileKey, fileSha256: file.fileSha256, text });
     } catch (e) {
       log.warn("não foi possível pré-gerar o PDF carimbado; será gerado no download", { orderId, productId: l.productId, error: e });
     }
@@ -125,15 +130,18 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
 export const revokeDownloadsJob: JobHandler = async (j) => {
   const tg = target(j, true);
   if (!tg) return;
-  await withStore(tg.storeId, async (tx) => {
+  const revoked = await withStore(tg.storeId, async (tx) => {
     const [o] = await tx.select({ status: orders.status }).from(orders).where(eq(orders.id, tg.orderId!)).for("update");
     if (o?.status !== "refunded" && o?.status !== "disputed") {
       log.info("revoke_downloads: pedido não está reembolsado/contestado; nada a revogar", { orderId: tg.orderId, status: o?.status });
-      return;
+      return false;
     }
-    const n = await revokeLinks(tx, tg.orderId!, "order_status");
-    log.info("links de download revogados", { orderId: tg.orderId, count: n });
+    const rows = await revokeLinks(tx, tg.orderId!, "order_status");
+    log.info("links de download revogados", { orderId: tg.orderId, count: rows.length });
+    return true;
   });
+  // Cópias carimbadas saem do disco (um restore gera de novo sob demanda). Depois do commit; idempotente.
+  if (revoked) await deleteWatermarks(tg.orderId!);
 };
 
 /** `restore_downloads` {orderId}: só se o pedido está AGORA pago; desfaz só a revogação por status (sem e-mail). */
@@ -276,6 +284,67 @@ export const notifySellerJob: JobHandler = async (j, signal) => {
   await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "sent" }));
 };
 
+// ---- sweep_watermarks -----------------------------------------------------------------------------------------
+
+export const SWEEP_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Links mais velhos que isto já venceram (30 dias) e foram varridos antes. */
+const SWEEP_LOOKBACK_MS = 45 * 24 * 60 * 60 * 1000;
+
+/**
+ * `sweep_watermarks` (global, diário): apaga as cópias carimbadas de itens cujo link não serve mais (vencido, revogado
+ * ou esgotado) ou sem download há 7 dias (sem download: 7 dias desde a criação). Um link ativo e recente do mesmo item
+ * mantém a cópia. Loja a loja (RLS); falha numa loja não impede as outras, mas o job falha no fim para tentar de novo.
+ */
+export function createSweepWatermarksHandler(now: () => Date = () => new Date()): JobHandler {
+  return async (_j, signal) => {
+    const t = now();
+    const stores = await db.select({ id: store.id }).from(store);
+    let failed = 0;
+    let swept = 0;
+    for (const { id: storeId } of stores) {
+      if (signal.aborted) break;
+      try {
+        const rows = await withStore(storeId, (tx) =>
+          tx
+            .select({
+              orderId: downloadLink.orderId,
+              productId: downloadLink.productId,
+              revokedAt: downloadLink.revokedAt,
+              expiresAt: downloadLink.expiresAt,
+              downloads: downloadLink.downloads,
+              maxDownloads: downloadLink.maxDownloads,
+              lastDownloadAt: downloadLink.lastDownloadAt,
+              createdAt: downloadLink.createdAt,
+            })
+            .from(downloadLink)
+            .where(gte(downloadLink.createdAt, new Date(t.getTime() - SWEEP_LOOKBACK_MS))),
+        );
+        const keep = new Set<string>();
+        const all = new Map<string, { orderId: string; productId: string }>();
+        for (const r of rows) {
+          const item = `${r.orderId}/${r.productId}`;
+          all.set(item, { orderId: r.orderId, productId: r.productId });
+          const active = !r.revokedAt && r.expiresAt > t && r.downloads < r.maxDownloads;
+          const recent = (r.lastDownloadAt ?? r.createdAt).getTime() >= t.getTime() - SWEEP_IDLE_MS;
+          if (active && recent) keep.add(item);
+        }
+        for (const [item, { orderId, productId }] of all) {
+          if (keep.has(item)) continue;
+          await deleteWatermarks(orderId, productId);
+          swept++;
+        }
+      } catch (e) {
+        failed++;
+        log.error("falha ao varrer cópias carimbadas da loja", { storeId, error: e });
+      }
+    }
+    log.info("varredura de cópias carimbadas", { items: swept });
+    if (failed > 0) throw new Error(`sweep_watermarks falhou em ${failed} loja(s)`);
+  };
+}
+
+export const sweepWatermarksJob: JobHandler = createSweepWatermarksHandler();
+
 // ---- orders.resend ---------------------------------------------------------------------------------------------
 
 export const resendOrder = defineAction({
@@ -287,10 +356,13 @@ export const resendOrder = defineAction({
     const [o] = await ctx.tx.select({ id: orders.id, status: orders.status }).from(orders).where(eq(orders.id, orderId)).for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
     if (o.status !== "paid") throw new ActionError("conflict", `Só pedidos pagos têm acesso para reenviar (${o.status})`);
-    const revoked = renew ? await revokeLinks(ctx.tx, o.id, "renewed") : 0;
+    const revoked = renew ? (await revokeLinks(ctx.tx, o.id, "renewed")).length : 0;
     // Já há entrega na fila: ela sai com os links atuais (ou novos, se renew acabou de revogar).
     if (await hasOpenJob(ctx.tx, "deliver_order", o.id)) return { orderId: o.id, queued: false, revoked };
     await enqueue(ctx.tx, { storeId: ctx.storeId, type: "deliver_order", payload: { orderId: o.id, resend: true } });
     return { orderId: o.id, queued: true, revoked };
+  },
+  async afterCommit(_call, _input, out) {
+    if (out.revoked > 0) await deleteWatermarks(out.orderId);
   },
 });

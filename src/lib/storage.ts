@@ -11,6 +11,8 @@ export interface Storage {
   /** Leitura em fluxo, sem carregar o arquivo na memória (ex.: servir um PDF grande). `null` se não existe. */
   stream(key: string): Promise<{ size: number; body: ReadableStream<Uint8Array> } | null>;
   delete(key: string): Promise<void>;
+  /** Apaga a "pasta" `prefix` inteira (ex.: `wm/<orderId>`). Não existe = nada a fazer. */
+  deletePrefix(prefix: string): Promise<void>;
 }
 
 const isMissing = (e: unknown) => (e as NodeJS.ErrnoException).code === "ENOENT";
@@ -86,6 +88,9 @@ export function createStorage(root: () => string): Storage {
     },
     async delete(key) {
       await rm(pathFor(key), { force: true });
+    },
+    async deletePrefix(prefix) {
+      await rm(pathFor(prefix), { force: true, recursive: true });
     },
   };
 }

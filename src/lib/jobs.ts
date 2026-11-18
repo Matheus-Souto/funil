@@ -15,7 +15,8 @@ export type JobType =
   | "revoke_downloads"
   | "restore_downloads"
   | "expire_orders"
-  | "refund_order";
+  | "refund_order"
+  | "sweep_watermarks";
 export type Job = typeof job.$inferSelect;
 /** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
 export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;

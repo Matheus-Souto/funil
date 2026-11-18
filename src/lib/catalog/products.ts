@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { EncryptedPDFError, PDFDocument } from "pdf-lib";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { offer, product } from "@/lib/db/schema";
+import { sha256Bytes } from "@/lib/crypto";
+import type { PdfInspection } from "@/lib/pdf/core";
+import { PdfBusyError, inspectInSandbox } from "@/lib/pdf/sandbox";
 import { storage } from "@/lib/storage";
 
 export const MAX_PDF_BYTES = 52_428_800;
@@ -11,25 +13,29 @@ export const MAX_PDF_PAGES = 500;
 
 /**
  * Única regra de validação do PDF (a rota de upload e a ação chamam o mesmo caminho).
- * Devolve a mensagem de erro para o usuário, ou `null` se o arquivo serve.
+ * Devolve a mensagem de erro para o usuário, ou `null` se o arquivo serve. A abertura do PDF roda isolada num Worker
+ * (teto de memória e tempo, src/lib/pdf/sandbox.ts); fila cheia lança `PdfBusyError`.
  */
 export async function checkPdfBytes(bytes: Uint8Array): Promise<string | null> {
   if (bytes.length === 0 || Buffer.from(bytes.subarray(0, 5)).toString("latin1") !== "%PDF-") {
     return "Envie um arquivo PDF válido.";
   }
   if (bytes.length > MAX_PDF_BYTES) return "O PDF passa de 50 MB.";
-  let pages: number;
+  let r: PdfInspection;
   try {
-    // getPageCount também lança em PDF sem árvore de páginas; qualquer falha aqui é "corrompido".
-    pages = (await PDFDocument.load(bytes, { updateMetadata: false })).getPageCount();
+    r = await inspectInSandbox(bytes);
   } catch (e) {
-    if (e instanceof EncryptedPDFError || (e instanceof Error && /encrypted/i.test(e.message))) {
-      return "O PDF está protegido por senha ou criptografado. Envie uma versão sem proteção.";
-    }
-    return "O PDF está corrompido ou tem estrutura inválida. Gere o arquivo de novo e envie outra vez.";
+    if (e instanceof PdfBusyError) throw e;
+    // Tempo-limite, falta de memória no Worker etc.
+    return "Não conseguimos processar este PDF (grande ou complexo demais). Gere o arquivo de novo, de preferência otimizado, e envie outra vez.";
   }
-  if (pages < 1) return "O PDF não tem páginas.";
-  if (pages > MAX_PDF_PAGES) return `O PDF tem ${pages} páginas; o máximo é ${MAX_PDF_PAGES}.`;
+  if ("error" in r) {
+    return r.error === "encrypted"
+      ? "O PDF está protegido por senha ou criptografado. Envie uma versão sem proteção."
+      : "O PDF está corrompido ou tem estrutura inválida. Gere o arquivo de novo e envie outra vez.";
+  }
+  if (r.pages < 1) return "O PDF não tem páginas.";
+  if (r.pages > MAX_PDF_PAGES) return `O PDF tem ${r.pages} páginas; o máximo é ${MAX_PDF_PAGES}.`;
   return null;
 }
 
@@ -58,7 +64,13 @@ export const createProduct = defineAction({
   auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: i.file.length }),
   // Validação do PDF (CPU) antes de abrir a transação.
   async prepare(_call, input) {
-    const problem = await checkPdfBytes(input.file);
+    let problem: string | null;
+    try {
+      problem = await checkPdfBytes(input.file);
+    } catch (e) {
+      if (e instanceof PdfBusyError) throw new ActionError("rate_limited", "Outro PDF está sendo processado agora. Tente de novo em instantes.");
+      throw e;
+    }
     if (problem) throw new ActionError("invalid_input", problem);
   },
   async run(ctx, input) {
@@ -67,7 +79,7 @@ export const createProduct = defineAction({
     const fileKey = fileKeyFor(ctx.storeId, productId);
     const [row] = await ctx.tx
       .insert(product)
-      .values({ id: productId, storeId: ctx.storeId, name: input.name, fileKey, fileName: input.fileName, fileSize: bytes.length })
+      .values({ id: productId, storeId: ctx.storeId, name: input.name, fileKey, fileName: input.fileName, fileSize: bytes.length, fileSha256: sha256Bytes(bytes) })
       .returning(view);
     // Último passo: se a gravação falhar, a exceção desfaz a transação.
     await storage.put(fileKey, bytes);
