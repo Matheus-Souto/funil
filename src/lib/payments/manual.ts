@@ -1,4 +1,4 @@
-import { and, between, count, eq, lt, sql } from "drizzle-orm";
+import { and, between, count, eq, gt, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { orders, payment } from "@/lib/db/schema";
@@ -12,6 +12,11 @@ export const MANUAL_BUSY_TTL_MS = 2 * 60 * 60 * 1000;
 export const MANUAL_BUSY_THRESHOLD = 50;
 export const MAX_OFFSET = 99;
 export const ALLOCATION_ATTEMPTS = 3;
+/**
+ * Quarentena do valor único: o valor de um Pix manual expirado fica reservado por 48 h depois da validade.
+ * Quem paga o QR antigo depois de expirar não pode colidir com um pedido novo de mesmo valor (o vendedor liberaria o errado).
+ */
+export const MANUAL_RESERVE_AFTER_EXPIRY_MS = 48 * 60 * 60 * 1000;
 
 export function isUniqueViolation(e: unknown): boolean {
   const c = (e as { code?: string; cause?: { code?: string } } | null) ?? {};
@@ -38,7 +43,9 @@ async function expireStale(ctx: Ctx, beforeExpire?: (ctx: Ctx, orderId: string) 
 
 /**
  * Escolhe o valor único (total + offset de 1 a 99) de um novo Pix manual.
- * O valor não pode coincidir com nenhum outro Pix manual pendente da loja (o índice único vale para a loja inteira,
+ * O valor não pode coincidir com nenhum outro Pix manual pendente da loja, nem com um que expirou há menos de 48 h
+ * (a validade, `expires_at`, marca quando expirou); a reserva dos expirados é feita só aqui, sob o lock,
+ * porque o índice único parcial cobre apenas os pendentes (o índice único vale para a loja inteira,
  * então totais diferentes também disputam valores). Um lock consultivo por loja serializa as alocações concorrentes
  * até o commit; o índice único parcial é a rede de segurança, e `skip` permite ao chamador tentar o próximo offset.
  */
@@ -50,13 +57,14 @@ export async function allocateManualAmount(
   await ctx.tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"pix_manual:" + ctx.storeId}, 0))`);
   await expireStale(ctx, opts.beforeExpire);
 
+  const reservedSince = new Date(Date.now() - MANUAL_RESERVE_AFTER_EXPIRY_MS);
   const taken = await ctx.tx
     .select({ amount: orders.manualAmountCents })
     .from(orders)
     .where(
       and(
         eq(orders.method, "pix_manual"),
-        eq(orders.status, "pending"),
+        or(eq(orders.status, "pending"), and(eq(orders.status, "expired"), gt(orders.expiresAt, reservedSince))),
         between(orders.manualAmountCents, totalCents + 1, totalCents + MAX_OFFSET),
       ),
     );
@@ -137,6 +145,8 @@ export const savePixManual = defineAction({
     city: z.string().trim().min(1).max(100),
   }),
   permission: "connections.write",
+  // Trocar a chave redireciona todo o dinheiro do Pix manual: MCP/IA precisam de aprovação.
+  sensitive: true,
   async run(ctx, input) {
     const key = normalizePixKey(input.key);
     if (!key) throw new ActionError("invalid_input", "Chave Pix inválida: use CPF ou CNPJ válidos, e-mail, telefone no formato +55DDDNÚMERO (ex.: +5511999999999) ou chave aleatória");

@@ -120,16 +120,46 @@ describe("alocação do valor único", () => {
     expect((err as ActionError).message).toBe("pix_manual_exhausted");
   }, 60_000);
 
-  test("pedido expirado libera o offset", async () => {
+  test("pedido que acabou de expirar NÃO libera o offset (reserva de 48 h)", async () => {
     const { storeId } = await seedStore();
     const offer = await seedOffer(storeId);
     const a = await newOrder(storeId, offer.id);
     expect(a.manualAmountCents).toBe(991);
     await t.ownerDb.update(orders).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(orders.id, a.id));
     const b = await newOrder(storeId, offer.id);
-    expect(b.manualAmountCents).toBe(991);
+    expect(b.manualAmountCents).toBe(992);
     const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, a.id));
     expect(row!.status).toBe("expired");
+  });
+
+  test("reserva de 48 h: valor de pedido expirado há 47 h não é reutilizado; há 49 h é", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const h47 = await newOrder(storeId, offer.id);
+    const h49 = await newOrder(storeId, offer.id);
+    expect([h47.manualAmountCents, h49.manualAmountCents]).toEqual([991, 992]);
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000);
+    await t.ownerDb.update(orders).set({ status: "expired", expiresAt: hoursAgo(47) }).where(eq(orders.id, h47.id));
+    await t.ownerDb.update(orders).set({ status: "expired", expiresAt: hoursAgo(49) }).where(eq(orders.id, h49.id));
+    const c = await newOrder(storeId, offer.id);
+    expect(c.manualAmountCents).toBe(992);
+    const d = await newOrder(storeId, offer.id);
+    expect(d.manualAmountCents).toBe(993);
+  });
+
+  test("reserva vale só para a mesma loja e só para Pix manual expirado", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    const offerA = await seedOffer(a.storeId);
+    const offerB = await seedOffer(b.storeId);
+    const old = await newOrder(a.storeId, offerA.id);
+    await t.ownerDb.update(orders).set({ status: "expired", expiresAt: new Date(Date.now() - 3600_000) }).where(eq(orders.id, old.id));
+    expect((await newOrder(b.storeId, offerB.id)).manualAmountCents).toBe(991);
+    // Pedido pago (liberado) não reserva o valor.
+    const paid = await newOrder(b.storeId, offerB.id);
+    expect(paid.manualAmountCents).toBe(992);
+    await t.ownerDb.update(orders).set({ status: "paid" }).where(eq(orders.id, paid.id));
+    expect((await newOrder(b.storeId, offerB.id)).manualAmountCents).toBe(992);
   });
 
   test("`skip` pula offsets e o índice único parcial barra duplicatas pendentes", async () => {
@@ -190,6 +220,19 @@ describe("BR Code do pedido e conexão", () => {
       await expect(runAction(savePixManual, call, { key, name: "N", city: "C" })).rejects.toMatchObject({ code: "invalid_input" });
     }
     await expect(runAction(savePixManual, { ...call, actor: { kind: "user", userId: "u", role: "admin" } }, { key: "a@b.co", name: "N", city: "C" })).rejects.toMatchObject({ code: "forbidden" });
+  });
+
+  test("savePixManual é sensível: origem mcp/ai pede aprovação e a chave não muda", async () => {
+    const { storeId } = await seedStore();
+    const call = { storeId, actor: owner, origin: "panel" as const };
+    await runAction(savePixManual, call, { key: "dono@exemplo.com", name: "N", city: "C" });
+    for (const origin of ["mcp", "ai"] as const) {
+      await expect(runAction(savePixManual, { ...call, origin }, { key: "atacante@exemplo.com", name: "N", city: "C" })).rejects.toMatchObject({
+        code: "approval_required",
+      });
+    }
+    const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "pix_manual"));
+    expect((conn!.config as { key: string }).key).toBe("dono@exemplo.com");
   });
 
   test("manualPixBrCode usa a chave da loja, o valor único e o txid do pedido", async () => {
