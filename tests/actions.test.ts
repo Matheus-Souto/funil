@@ -282,6 +282,39 @@ test("compensate roda só se a transação falha depois de run ter sucesso", asy
   expect(calls).toEqual(["saida"]);
 });
 
+test("afterCommit roda depois do commit (vê o efeito confirmado), não roda se a transação falha e erro nele não falha a ação", async () => {
+  const { storeId } = await seedStore();
+  const seen: unknown[] = [];
+  const make = (name: string, boom = false) =>
+    defineAction(
+      {
+        name,
+        description: "x",
+        input: z.object({}),
+        permission: "products.read",
+        prepare: async () => "preparado",
+        run: async (ctx) => {
+          await ctx.tx.execute(sql`select 1`);
+          return "saida";
+        },
+        afterCommit: async (_c, _i, out, prepared) => {
+          const rows = await t.ownerDb.select().from(auditLog).where(sql`${auditLog.action} = ${name} and ${auditLog.ok}`);
+          seen.push([out, prepared, rows.length]);
+          if (boom) throw new Error("falha depois do commit");
+        },
+      },
+      def,
+    );
+  const broken: Actor = { kind: "user", userId: "a\u0000b", role: "owner" };
+  await runAction(make("t.after.a"), { storeId, actor: broken, origin: "panel" }, {}).catch(() => undefined);
+  expect(seen).toEqual([]);
+  expect(await runAction(make("t.after.b"), { storeId, actor: owner, origin: "panel" }, {})).toBe("saida");
+  // A linha de auditoria (gravada na transação da ação) já está confirmada quando afterCommit roda.
+  expect(seen).toEqual([["saida", "preparado", 1]]);
+  expect(await runAction(make("t.after.c", true), { storeId, actor: owner, origin: "panel" }, {})).toBe("saida");
+  expect(seen).toHaveLength(2);
+});
+
 describe("prepare (trabalho externo antes da transação)", () => {
   const mk = (log: string[], opts: { fail?: boolean; sensitive?: boolean } = {}) =>
     defineAction(

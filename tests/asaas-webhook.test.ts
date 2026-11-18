@@ -1,7 +1,8 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
 import { auditLog, job, orders, payment } from "@/lib/db/schema";
+import { log } from "@/lib/log";
 import { ALLOWED, type OrderStatus } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
@@ -334,4 +335,73 @@ describe("propriedade: webhook repetido, fora de ordem e contraditório", () => 
     // 25 execuções, cada uma com loja/produto/oferta/cobrança Pix novos: ~3-5 s sozinho, acima disso sob a suíte
     // inteira. O limite padrão de 5 s do bun não cabe; orçamento explícito (não é espera nem nova tentativa).
   }, 30_000);
+});
+
+describe("reconsulta com erro permanente (4xx) não vira 500 em loop", () => {
+  const notifies = async (orderId: string) => jobsOf(orderId, "notify_seller");
+  async function superseded() {
+    const s = await setup();
+    await t.ownerDb.update(payment).set({ status: "superseded" }).where(eq(payment.providerId, s.paymentId));
+    // A cobrança é da conta anterior: a chave atual não a encontra.
+    s.fake.fail(`GET /payments/${s.paymentId}`, 404, "Cobrança não encontrada", "not_found");
+    return s;
+  }
+  const rowOf = async (providerId: string) => (await t.ownerDb.select().from(payment).where(eq(payment.providerId, providerId)))[0]!;
+
+  test("404 de cobrança superseded: 200, evento registrado na linha e vendedor avisado uma vez", async () => {
+    const s = await superseded();
+    const warn = spyOn(log, "warn");
+    try {
+      expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+      expect(warn.mock.calls.length).toBeGreaterThan(0);
+    } finally {
+      warn.mockRestore();
+    }
+    const raw = (await rowOf(s.paymentId)).raw as { oldAccountEventAt?: string; oldAccountEvent?: string };
+    expect(typeof raw.oldAccountEventAt).toBe("string");
+    expect(raw.oldAccountEvent).toBe("PAYMENT_RECEIVED");
+    const n = await notifies(s.order.id);
+    expect(n).toHaveLength(1);
+    expect(n[0]!.payload).toMatchObject({ orderId: s.order.id, reason: "evento_conta_asaas_anterior", paymentId: s.paymentId });
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    expect(await notifies(s.order.id)).toHaveLength(1);
+    expect(await statusOf(s.order.id)).toBe("pending");
+  });
+
+  test("PAYMENT_DELETED (o cancelamento que nós pedimos na conta anterior) é registrado sem avisar o vendedor", async () => {
+    const s = await superseded();
+    const r = await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), { event: "PAYMENT_DELETED", payment: { id: s.paymentId } });
+    expect(r.status).toBe(200);
+    expect(((await rowOf(s.paymentId)).raw as { oldAccountEvent?: string }).oldAccountEvent).toBe("PAYMENT_DELETED");
+    expect(await notifies(s.order.id)).toHaveLength(0);
+  });
+
+  test("404 de cobrança desconhecida, 400 e 401: 200 sem efeito", async () => {
+    const s = await setup();
+    for (const [status, code] of [
+      [404, "not_found"],
+      [400, "invalid_action"],
+      [401, "invalid_access_token"],
+    ] as const) {
+      s.fake.clearFailures();
+      s.fake.fail("GET /payments/", status, "erro", code);
+      expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event("pay_desconhecida"))).status).toBe(200);
+      expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    }
+    expect(await notifies(s.order.id)).toHaveLength(0);
+    expect((await rowOf(s.paymentId)).raw).toBeNull();
+    expect(await statusOf(s.order.id)).toBe("pending");
+  });
+
+  test("429, 5xx e falha de rede continuam 500 (o Asaas reenvia)", async () => {
+    const s = await setup();
+    s.fake.fail("GET /payments/", 429, "muitas requisições");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(500);
+    s.fake.clearFailures();
+    s.fake.fail("GET /payments/", 503, "indisponível");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(500);
+    s.fake.clearFailures();
+    s.fake.loseResponse("GET /payments/");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(500);
+  });
 });

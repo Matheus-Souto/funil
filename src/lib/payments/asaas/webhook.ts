@@ -1,14 +1,18 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, runAction } from "@/lib/actions/core";
 import { timingSafeEqualStr } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
+import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
 import { classifyRefund, refundMarkerOf, refundStatuses } from "./refunds";
+
+/** Estado das cobranças Asaas abertas de uma conta anterior da loja (fora do índice de cobrança aberta). */
+export const SUPERSEDED = "superseded";
 
 export function mapAsaasStatus(s: string): OrderStatus | null {
   switch (s) {
@@ -159,6 +163,53 @@ export const applyAsaasPayment = defineAction({
   },
 });
 
+/**
+ * Evento de uma cobrança que a chave atual não consegue reconsultar (4xx permanente: em geral, cobrança da conta Asaas
+ * anterior da loja). Se for uma linha `superseded`, registra o evento nela e avisa o vendedor uma vez (pode ter havido
+ * pagamento na conta anterior); PAYMENT_DELETED (o cancelamento que nós mesmos pedimos) só é registrado.
+ */
+export const noteUnreachableAsaasPayment = defineAction({
+  name: "payments.noteUnreachableAsaasPayment",
+  description: "Registra evento do Asaas de uma cobrança que não pode ser reconsultada (ex.: conta Asaas anterior da loja).",
+  input: z.object({
+    paymentId: z.string().min(1).max(100),
+    httpStatus: z.number().int(),
+    event: z.string().max(64).nullable(),
+  }),
+  permission: "system",
+  async run(ctx, p) {
+    const [row] = await ctx.tx
+      .select()
+      .from(payment)
+      .where(and(eq(payment.provider, "asaas"), eq(payment.providerId, p.paymentId)))
+      .for("update");
+    if (!row || row.status !== SUPERSEDED) return { recorded: false, notified: false };
+    const raw = (row.raw as Record<string, unknown> | null) ?? {};
+    const notify = p.event !== "PAYMENT_DELETED" && !raw.oldAccountNotifiedAt;
+    const now = new Date().toISOString();
+    const patch = { oldAccountEventAt: now, oldAccountEvent: p.event, ...(notify ? { oldAccountNotifiedAt: now } : {}) };
+    await ctx.tx
+      .update(payment)
+      .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(payment.id, row.id));
+    if (notify) {
+      await enqueue(ctx.tx, {
+        storeId: ctx.storeId,
+        type: "notify_seller",
+        payload: { orderId: row.orderId, reason: "evento_conta_asaas_anterior", paymentId: p.paymentId },
+      });
+    }
+    return { recorded: true, notified: notify };
+  },
+});
+
+/** Erro do Asaas que não se resolve reenviando (4xx, menos 429). Rede (0), 429 e 5xx são transitórios. */
+function permanentAsaasError(e: unknown): number | null {
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return null;
+  const status = (e.details as { status?: unknown } | undefined)?.status;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 429 ? status : null;
+}
+
 export type AsaasPaymentInput = {
   paymentId: string;
   status: string;
@@ -191,7 +242,8 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
 
 /**
  * Webhook do Asaas. Nunca confia no corpo: valida o token da loja, reconsulta `GET /payments/{id}` e aplica o estado real.
- * 401 sem revelar se a loja existe; 200 para eventos ignorados/repetidos; 500 só se o Asaas falhar (para o Asaas reenviar).
+ * 401 sem revelar se a loja existe; 200 para eventos ignorados/repetidos e para 4xx permanente na reconsulta (sem loop
+ * de reenvio; ver `noteUnreachableAsaasPayment`); 500 só para falha de rede, 429 ou 5xx do Asaas (para o Asaas reenviar).
  */
 export async function handleAsaasWebhook(storeId: string, headers: Headers, raw: unknown): Promise<{ status: number }> {
   if (!UUID.test(storeId)) return { status: 404 };
@@ -212,8 +264,27 @@ export async function handleAsaasWebhook(storeId: string, headers: Headers, raw:
     if (fresh.id !== parsed.data.payment.id) return { status: 200 };
     applyInput = await asaasPaymentInput(client, fresh);
   } catch (e) {
-    log.warn("webhook Asaas: falha ao reconsultar cobrança", { storeId, error: e });
-    return { status: 500 };
+    const permanent = permanentAsaasError(e);
+    if (permanent === null) {
+      log.warn("webhook Asaas: falha ao reconsultar cobrança", { storeId, error: e });
+      return { status: 500 };
+    }
+    log.warn("webhook Asaas: cobrança não pode ser reconsultada com a chave atual (erro permanente); evento ignorado", {
+      storeId,
+      paymentId: parsed.data.payment.id,
+      httpStatus: permanent,
+    });
+    try {
+      await runAction(noteUnreachableAsaasPayment, { storeId, actor: { kind: "system" }, origin: "webhook" }, {
+        paymentId: parsed.data.payment.id,
+        httpStatus: permanent,
+        event: parsed.data.event?.slice(0, 64) ?? null,
+      });
+    } catch (err) {
+      log.error("webhook Asaas: falha ao registrar evento sem reconsulta", { storeId, error: err });
+      return { status: 500 };
+    }
+    return { status: 200 };
   }
 
   try {

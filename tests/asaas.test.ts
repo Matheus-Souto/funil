@@ -1,10 +1,11 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { auditLog, customer, integration, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
+import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { isUniqueViolation } from "@/lib/payments/manual";
@@ -375,6 +376,51 @@ describe("troca de conta/ambiente do Asaas", () => {
     );
   });
 
+  test("troca de conta: depois do commit, as cobranças descartadas são canceladas na conta ANTERIOR (chave antiga)", async () => {
+    const { sandbox, prod, route } = twoAccounts();
+    const { storeId, offerId } = await seedAsaasStore(sandbox);
+    const order = await newAsaasOrder(storeId, offerId);
+    setAsaasFetchForTests(route);
+    await startAsaasPix({ storeId }, order.id);
+    const [old] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    const atDelete: { status: string; idle: number }[] = [];
+    setAsaasFetchForTests((async (input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        const [row] = await t.ownerDb.select().from(payment).where(eq(payment.id, old!.id));
+        atDelete.push({ status: row!.status, idle: await idleInTransaction() });
+      }
+      return route(input, init);
+    }) as typeof fetch);
+    await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: prod.apiKey });
+    const del = sandbox.calls.filter((c) => c.method === "DELETE");
+    expect(del.map((c) => [c.path, c.headers.get("access_token")])).toEqual([[`/payments/${old!.providerId}`, sandbox.apiKey]]);
+    expect(sandbox.payments.get(old!.providerId!)!.deleted).toBe(true);
+    expect(prod.calls.some((c) => c.method === "DELETE")).toBe(false);
+    // Só depois do commit: a linha já estava superseded e nenhuma transação aberta.
+    expect(atDelete).toEqual([{ status: "superseded", idle: 0 }]);
+  });
+
+  test("troca de conta: falha ao cancelar na conta anterior não impede salvar (só log)", async () => {
+    const { sandbox, prod, route } = twoAccounts();
+    const { storeId, offerId } = await seedAsaasStore(sandbox);
+    setAsaasFetchForTests(route);
+    const order = await newAsaasOrder(storeId, offerId);
+    await startAsaasPix({ storeId }, order.id);
+    sandbox.fail("DELETE /payments/", 500, "indisponível");
+    const warn = spyOn(log, "warn");
+    try {
+      const r = await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: prod.apiKey });
+      expect(r.accountChanged).toBe(true);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("conta Asaas anterior"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+    const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
+    expect((conn!.config as { accountKey: string }).accountKey).toBe("production:wallet:wal_producao");
+    const [row] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    expect(row!.status).toBe("superseded");
+  });
+
   test("salvar de novo a mesma conta não descarta cobranças nem recria o cliente", async () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
@@ -386,6 +432,7 @@ describe("troca de conta/ambiente do Asaas", () => {
     await startAsaasPix({ storeId }, order.id);
     expect(fake.customers.size).toBe(1);
     expect(fake.payments.size).toBe(1);
+    expect(fake.calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
   test("troca de conta só descarta cobranças PENDING da própria loja", async () => {

@@ -7,7 +7,8 @@ import { customer, orders, payment } from "@/lib/db/schema";
 import { env as appEnv } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { asaasAccountKey, asaasClientFor, asaasConnectionFor, asaasDueDate, centsToReais, createAsaasClient } from "./client";
+import { asaasAccountKey, asaasClientFor, asaasConnectionFor, asaasDueDate, centsToReais, createAsaasClient, type AsaasEnv } from "./client";
+import { SUPERSEDED } from "./webhook";
 
 /** Estado "aberto" da cobrança Pix (índice único parcial: uma por pedido). */
 const OPEN = "PENDING";
@@ -133,14 +134,16 @@ async function discard(client: ReturnType<typeof createAsaasClient>, paymentId: 
 
 const webhookUrl = (storeId: string) => `${appEnv.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
 
-/** Estado das cobranças Asaas abertas de uma conta anterior da loja (fora do índice de cobrança aberta). */
-export const SUPERSEDED = "superseded";
+export { SUPERSEDED };
 
 /**
  * Conecta o Asaas: `prepare` testa a chave (GET /finance/balance) e identifica a conta (GET /wallets/) fora de
- * transação; só então `run` grava. Chave inválida => provider_error e nada é salvo (a rejeição é auditada).
+ * transação, e lê a conexão anterior (só leitura); só então `run` grava. Chave inválida => provider_error e nada é
+ * salvo (a rejeição é auditada).
  * Conta diferente da anterior (outra conta ou outro ambiente): as cobranças PENDING da loja viram `superseded`, para o
  * próximo `startAsaasPix` criar a cobrança na conta atual; os clientes são recriados sob demanda (`ensureAsaasCustomer`).
+ * Depois do commit (`afterCommit`), as cobranças descartadas são canceladas na conta ANTERIOR com a chave antiga
+ * (melhor esforço: falha só vai para o log; o webhook trata evento dessas cobranças sem loop de 500).
  */
 export const saveAsaas = defineAction({
   name: "connections.saveAsaas",
@@ -154,10 +157,15 @@ export const saveAsaas = defineAction({
   sensitive: true,
   // Nunca grava a chave de API na auditoria.
   auditInput: (i) => ({ env: i.env, rotateWebhookToken: i.rotateWebhookToken ?? false }),
-  async prepare(_call, input) {
+  async prepare(call, input) {
     const client = createAsaasClient({ apiKey: input.apiKey, env: input.env });
     await client.getBalance();
-    return { accountKey: await asaasAccountKey(client, input.env, input.apiKey) };
+    const accountKey = await asaasAccountKey(client, input.env, input.apiKey);
+    // Só leitura: a chave anterior fica em memória para cancelar, depois do commit, as cobranças da conta anterior.
+    const prev = await withStore(call.storeId, (tx) => getIntegration(tx, call.storeId, "asaas"));
+    const prevEnv: AsaasEnv = (prev?.config as { env?: string } | undefined)?.env === "production" ? "production" : "sandbox";
+    const previous = prev?.secret ? { apiKey: prev.secret, env: prevEnv } : null;
+    return { accountKey, previous };
   },
   async run(ctx, input, { accountKey }) {
     const current = await getIntegration(ctx.tx, ctx.storeId, "asaas");
@@ -165,15 +173,28 @@ export const saveAsaas = defineAction({
     const kept = cfg?.webhookToken;
     const webhookToken = kept && !input.rotateWebhookToken ? kept : randomToken();
     const accountChanged = current !== null && cfg?.accountKey !== accountKey;
+    let supersededCharges: string[] = [];
     if (accountChanged) {
-      const superseded = await ctx.tx
+      const rows = await ctx.tx
         .update(payment)
         .set({ status: SUPERSEDED })
         .where(and(eq(payment.provider, "asaas"), eq(payment.status, "PENDING")))
-        .returning({ id: payment.id });
-      log.info("conta Asaas trocada; cobranças abertas da conta anterior descartadas", { storeId: ctx.storeId, count: superseded.length });
+        .returning({ providerId: payment.providerId });
+      supersededCharges = rows.flatMap((r) => (r.providerId ? [r.providerId] : []));
+      log.info("conta Asaas trocada; cobranças abertas da conta anterior descartadas", { storeId: ctx.storeId, count: rows.length });
     }
     await saveIntegration(ctx.tx, ctx.storeId, "asaas", { env: input.env, webhookToken, accountKey }, input.apiKey);
-    return { env: input.env, webhookToken, webhookUrl: webhookUrl(ctx.storeId), accountChanged };
+    return { env: input.env, webhookToken, webhookUrl: webhookUrl(ctx.storeId), accountChanged, supersededCharges };
+  },
+  async afterCommit(call, _input, out, { previous }) {
+    if (!out.accountChanged || !previous || out.supersededCharges.length === 0) return;
+    const old = createAsaasClient(previous);
+    for (const id of out.supersededCharges) {
+      try {
+        await old.deletePayment(id);
+      } catch (e) {
+        log.warn("não foi possível cancelar a cobrança na conta Asaas anterior; confira lá", { storeId: call.storeId, paymentId: id, error: e });
+      }
+    }
   },
 });

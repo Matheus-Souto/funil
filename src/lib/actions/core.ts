@@ -47,6 +47,11 @@ export interface ActionDef<I, O, P = undefined> {
   run(ctx: Ctx, input: I, prepared: P): Promise<O>;
   /** Desfaz efeitos fora do banco (ex.: arquivos) se a transação falhar depois de `run` ter sucesso. Melhor esforço: erros são ignorados. */
   compensate?: (call: { storeId: string }, input: I, output: O) => Promise<void>;
+  /**
+   * Efeito externo que só pode acontecer DEPOIS do commit (ex.: cancelar no provedor algo que a transação descartou).
+   * Fora de transação; melhor esforço: erros são registrados em log e não mudam o resultado da ação.
+   */
+  afterCommit?: (call: { storeId: string }, input: I, output: O, prepared: P) => Promise<void>;
 }
 export type Action<I, O, P = any> = ActionDef<I, O, P>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -133,8 +138,9 @@ export async function runAction<I, O, P = any>(
   };
 
   let ran: { out: O } | undefined;
+  let committed: O;
   try {
-    return await withStore(storeId, async (tx) => {
+    committed = await withStore(storeId, async (tx) => {
       const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P);
       ran = { out };
       if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));
@@ -152,6 +158,14 @@ export async function runAction<I, O, P = any>(
     await auditFailure(storeId, audited, entry(capped(auditView()), false, describe(e)), e);
     throw e;
   }
+  if (action.afterCommit) {
+    try {
+      await action.afterCommit({ storeId }, input, committed, prepared as P);
+    } catch (afterErr) {
+      log.error("falha no efeito pós-commit da ação", { action: action.name, error: afterErr });
+    }
+  }
+  return committed;
 }
 
 /** Rejeições pré-execução de ator público que NÃO vão para audit_log. */
