@@ -114,7 +114,12 @@ export async function runAction<I, O, P = any>(
     }
     if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
   } catch (e) {
-    await auditFailure(storeId, audited, entry(rejection(e), false, describe(e)), e);
+    if (actor.kind === "public" && e instanceof ActionError && PUBLIC_UNAUDITED.has(e.code)) {
+      // Rejeição de requisição anônima: sem linha em audit_log (sem limite nem retenção = disco e pool). Só contador em log.
+      log.info("ação pública rejeitada", { action: action.name, code: e.code });
+    } else {
+      await auditFailure(storeId, audited, entry(rejection(e), false, describe(e)), e);
+    }
     throw e;
   }
 
@@ -148,6 +153,9 @@ export async function runAction<I, O, P = any>(
     throw e;
   }
 }
+
+/** Rejeições pré-execução de ator público que NÃO vão para audit_log. */
+const PUBLIC_UNAUDITED: ReadonlySet<ActionErrorCode> = new Set(["forbidden", "invalid_input", "approval_required"]);
 
 const MAX_AUDIT_BYTES = 8 * 1024;
 

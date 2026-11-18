@@ -167,11 +167,11 @@ test("matriz de papéis", () => {
   expect(hasPermission("traffic", "orders.read")).toBe(false);
 });
 
-test("rejeição pré-run de ator público audita só as chaves, nunca valores", async () => {
+test("rejeição pré-run de usuário audita só as chaves, nunca valores", async () => {
   const { storeId } = await seedStore();
   const gated = defineAction({ name: "t.gated", description: "x", input: z.object({}), permission: "orders.refund", run: async () => 1 }, def);
   const body = { cpf: "123.456.789-00", blob: "x".repeat(50_000), ["k".repeat(100)]: 1 };
-  const err = await runAction(gated, { storeId, actor: { kind: "public" }, origin: "public" }, body).catch((e) => e);
+  const err = await runAction(gated, { storeId, actor: support, origin: "panel" }, body).catch((e) => e);
   expect(err.code).toBe("forbidden");
   const [row] = await auditRows(storeId);
   expect(row!.ok).toBe(false);
@@ -180,6 +180,32 @@ test("rejeição pré-run de ator público audita só as chaves, nunca valores",
   expect(input.omitted).toBe("forbidden");
   expect(input.keys).toEqual(["cpf", "blob", "k".repeat(64)]);
   expect(JSON.stringify(row!.input)).not.toContain("123.456");
+});
+
+test("rejeições pré-execução de ator público (forbidden, invalid_input, approval_required) não gravam audit_log", async () => {
+  const { storeId } = await seedStore();
+  const pub: Actor = { kind: "public" };
+  const gated = defineAction({ name: "t.gated2", description: "x", input: z.object({}), permission: "orders.refund", run: async () => 1 }, def);
+  const strict = defineAction({ name: "t.strict", description: "x", input: z.object({ n: z.number() }), permission: "public", run: async () => 1 }, def);
+  const sens = defineAction({ name: "t.sens", description: "x", input: z.object({}), permission: "public", sensitive: true, run: async () => 1 }, def);
+  const body = { cpf: "123.456.789-00" };
+  const codes = [
+    (await runAction(gated, { storeId, actor: pub, origin: "public" }, body).catch((e) => e)).code,
+    (await runAction(strict, { storeId, actor: pub, origin: "public" }, body).catch((e) => e)).code,
+    (await runAction(sens, { storeId, actor: pub, origin: "ai" }, {}).catch((e) => e)).code,
+  ];
+  expect(codes).toEqual(["forbidden", "invalid_input", "approval_required"]);
+  expect(await auditRows(storeId)).toHaveLength(0);
+});
+
+test("ator público que falha DENTRO da execução continua auditado; user e system rejeitados também", async () => {
+  const { storeId } = await seedStore();
+  const boom = defineAction({ name: "t.boom2", description: "x", input: z.object({}), permission: "public", run: async () => { throw new ActionError("conflict", "x"); } }, def);
+  await runAction(boom, { storeId, actor: { kind: "public" }, origin: "public" }, {}).catch(() => undefined);
+  const strict = defineAction({ name: "t.strict2", description: "x", input: z.object({ n: z.number() }), permission: "public", run: async () => 1 }, def);
+  await runAction(strict, { storeId, actor: { kind: "system" }, origin: "system" }, {}).catch(() => undefined);
+  await runAction(strict, { storeId, actor: owner, origin: "panel" }, {}).catch(() => undefined);
+  expect((await auditRows(storeId)).map((r) => r.ok)).toEqual([false, false, false]);
 });
 
 test("corpo vazio ou não-objeto ainda grava linha ok=false", async () => {
