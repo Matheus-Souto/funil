@@ -1,7 +1,6 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, defineAction, runAction, type Actor, type Origin } from "@/lib/actions/core";
-import { hasPermission } from "@/lib/actions/permissions";
+import { ActionError, defineAction } from "@/lib/actions/core";
 import { randomToken } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { customer, orders, payment } from "@/lib/db/schema";
@@ -93,7 +92,7 @@ export async function startAsaasPix(
       providerId = await withStore(storeId, async (tx) => {
         const { o, open } = await lockAndCheck(tx);
         if (open?.providerId) {
-          surplus = true;
+          surplus = open.providerId !== created.id;
           return open.providerId;
         }
         // O webhook da própria cobrança pode ter chegado antes e criado a linha: não duplica.
@@ -127,21 +126,25 @@ async function discard(client: ReturnType<typeof createAsaasClient>, paymentId: 
 
 const webhookUrl = (storeId: string) => `${appEnv.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
 
-const saveInput = z.object({
-  env: z.enum(["sandbox", "production"]),
-  apiKey: z.string().trim().min(8).max(500),
-  rotateWebhookToken: z.boolean().optional(),
-});
-
-/** Grava a conexão. Só roda depois de `saveAsaas` ter testado a chave (`verified`). */
-export const persistAsaas = defineAction({
+/**
+ * Conecta o Asaas: `prepare` testa a chave (GET /finance/balance) fora de transação e só então `run` grava.
+ * Chave inválida => provider_error e nada é salvo (a rejeição é auditada).
+ */
+export const saveAsaas = defineAction({
   name: "connections.saveAsaas",
   description: "Conecta o Asaas da loja: testa a chave (saldo) e só então salva; gera o token do webhook.",
-  input: saveInput.extend({ verified: z.literal(true) }),
+  input: z.object({
+    env: z.enum(["sandbox", "production"]),
+    apiKey: z.string().trim().min(8).max(500),
+    rotateWebhookToken: z.boolean().optional(),
+  }),
   permission: "connections.write",
   sensitive: true,
   // Nunca grava a chave de API na auditoria.
   auditInput: (i) => ({ env: i.env, rotateWebhookToken: i.rotateWebhookToken ?? false }),
+  async prepare(_call, input) {
+    await createAsaasClient({ apiKey: input.apiKey, env: input.env }).getBalance();
+  },
   async run(ctx, input) {
     const current = await getIntegration(ctx.tx, ctx.storeId, "asaas");
     const kept = (current?.config as { webhookToken?: string } | undefined)?.webhookToken;
@@ -150,19 +153,3 @@ export const persistAsaas = defineAction({
     return { env: input.env, webhookToken, webhookUrl: webhookUrl(ctx.storeId) };
   },
 });
-
-/**
- * `connections.saveAsaas`: testa a chave com GET /finance/balance ANTES de abrir transação e só então grava
- * (chave inválida => provider_error e nada é salvo). Replica as barreiras da ação (permissão, aprovação, entrada)
- * antes de falar com o Asaas, para não servir de sonda a quem não pode.
- */
-export async function saveAsaas(call: { storeId: string; actor: Actor; origin: Origin }, raw: unknown) {
-  if (call.origin === "mcp" || call.origin === "ai") throw new ActionError("approval_required", "Ação sensível exige aprovação: connections.saveAsaas");
-  if (call.actor.kind !== "user" || !hasPermission(call.actor.role, "connections.write")) {
-    throw new ActionError("forbidden", "Sem permissão: connections.write");
-  }
-  const parsed = saveInput.safeParse(raw);
-  if (!parsed.success) throw new ActionError("invalid_input", "Entrada inválida");
-  await createAsaasClient({ apiKey: parsed.data.apiKey, env: parsed.data.env }).getBalance();
-  return runAction(persistAsaas, call, { ...parsed.data, verified: true as const });
-}

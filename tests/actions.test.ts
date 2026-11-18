@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { auditLog } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
@@ -253,4 +254,74 @@ test("compensate roda só se a transação falha depois de run ter sucesso", asy
   expect(calls).toEqual(["saida"]);
   await runAction(make("t.comp.b"), { storeId, actor: owner, origin: "panel" }, {});
   expect(calls).toEqual(["saida"]);
+});
+
+describe("prepare (trabalho externo antes da transação)", () => {
+  const mk = (log: string[], opts: { fail?: boolean; sensitive?: boolean } = {}) =>
+    defineAction(
+      {
+        name: "test.prepare",
+        description: "x",
+        input: z.object({ k: z.string() }),
+        permission: "connections.write",
+        sensitive: opts.sensitive,
+        prepare: async (_call, i: { k: string }) => {
+          log.push(`prepare:${i.k}`);
+          if (opts.fail) throw new ActionError("provider_error", "chave recusada");
+          return { checked: i.k };
+        },
+        run: async (_ctx, _i, prepared: { checked: string }) => {
+          log.push(`run:${prepared.checked}`);
+          return prepared.checked;
+        },
+      },
+      def,
+    );
+
+  test("roda depois de validar e antes da transação, e entrega o resultado ao run", async () => {
+    const { storeId } = await seedStore();
+    const log: string[] = [];
+    const idle = async () =>
+      Number((await t.ownerDb.execute(sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and state like 'idle in transaction%'`) as unknown as { n: number }[])[0]!.n);
+    const action = defineAction(
+      {
+        name: "test.prepare2",
+        description: "x",
+        input: z.object({ k: z.string() }),
+        permission: "connections.write",
+        prepare: async () => {
+          log.push(`idle=${await idle()}`);
+          return 7;
+        },
+        run: async (_ctx, _i, n: number) => n,
+      },
+      def,
+    );
+    expect(await runAction(action, { storeId, actor: owner, origin: "panel" }, { k: "a" })).toBe(7);
+    expect(log).toEqual(["idle=0"]);
+    expect(await runAction(mk(log), { storeId, actor: owner, origin: "panel" }, { k: "z" })).toBe("z");
+  });
+
+  test("falha do prepare: run não roda, erro é repassado e a auditoria registra ok=false", async () => {
+    const { storeId } = await seedStore();
+    const log: string[] = [];
+    const err = await runAction(mk(log, { fail: true }), { storeId, actor: owner, origin: "panel" }, { k: "x" }).catch((e) => e);
+    expect(err.code).toBe("provider_error");
+    expect(log).toEqual(["prepare:x"]);
+    const rows = (await auditRows(storeId)).filter((r) => r.action === "test.prepare");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ok: false });
+    expect(rows[0]!.error).toContain("provider_error");
+  });
+
+  test("não roda quando é forbidden, approval_required ou entrada inválida", async () => {
+    const { storeId } = await seedStore();
+    const log: string[] = [];
+    const a = mk(log, { sensitive: true });
+    expect((await runAction(a, { storeId, actor: support, origin: "panel" }, { k: "x" }).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(a, { storeId, actor: support, origin: "mcp" }, { k: "x" }).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(a, { storeId, actor: owner, origin: "mcp" }, { k: "x" }).catch((e) => e)).code).toBe("approval_required");
+    expect((await runAction(a, { storeId, actor: owner, origin: "panel" }, { k: 1 }).catch((e) => e)).code).toBe("invalid_input");
+    expect(log).toEqual([]);
+  });
 });

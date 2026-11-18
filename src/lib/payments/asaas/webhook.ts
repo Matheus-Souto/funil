@@ -64,12 +64,27 @@ export const applyAsaasPayment = defineAction({
     const target0 = mapAsaasStatus(p.status);
     const orphan = !row && rows.length > 0;
 
+    // Cobrança marcada como duplicada (pagamento em dobro): só acompanha o status da linha, nunca mexe no pedido.
+    if (row && (row.raw as { duplicate?: boolean } | null)?.duplicate === true) {
+      if (row.status !== p.status) await ctx.tx.update(payment).set({ status: p.status }).where(eq(payment.id, row.id));
+      return { applied: false, reason: "cobranca_duplicada" };
+    }
+
     if (orphan) {
       // Cobrança que o pedido não conhece (ex.: criada e perdida numa falha). Só importa se o dinheiro chegou.
       if (target0 !== "paid") return { applied: false, reason: "cobranca_orfa" };
       await ctx.tx
         .insert(payment)
-        .values({ storeId: ctx.storeId, orderId: o.id, provider: "asaas", providerId: p.paymentId, status: p.status, amountCents: p.valueCents })
+        .values({
+          storeId: ctx.storeId,
+          orderId: o.id,
+          provider: "asaas",
+          providerId: p.paymentId,
+          status: p.status,
+          amountCents: p.valueCents,
+          // Só é duplicada se o pedido já estava resolvido; se esta cobrança é quem paga o pedido, é a cobrança "boa".
+          raw: o.status !== "pending" && o.status !== "expired" ? { duplicate: true } : null,
+        })
         .onConflictDoNothing();
       if (o.status !== "pending" && o.status !== "expired") {
         log.warn("pagamento em dobro: cobrança órfã paga em pedido já resolvido; devolver ao comprador", {

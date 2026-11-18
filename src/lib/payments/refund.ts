@@ -4,6 +4,7 @@ import { ActionError, defineAction } from "@/lib/actions/core";
 import { orders, payment } from "@/lib/db/schema";
 import { transitionOrder } from "@/lib/orders/state";
 import { asaasClientFor } from "./asaas/client";
+import { mapAsaasStatus } from "./asaas/webhook";
 
 export const refundOrder = defineAction({
   name: "orders.refund",
@@ -22,11 +23,14 @@ export const refundOrder = defineAction({
       return { orderId: o.id, message: "Pedido marcado como reembolsado. Devolva o valor ao comprador pelo seu banco (o Pix manual não passa por aqui)." };
     }
 
-    const [pay] = await ctx.tx
+    const rows = await ctx.tx
       .select()
       .from(payment)
       .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas")));
-    if (!pay?.providerId) throw new ActionError("conflict", "Pedido sem cobrança no Asaas");
+    // Só a cobrança paga e não duplicada (OVERDUE, apagada ou em dobro nunca são estornadas aqui).
+    // Pela regra do webhook há no máximo uma assim: a segunda cobrança paga é marcada como duplicada.
+    const pay = rows.find((r) => r.providerId && mapAsaasStatus(r.status) === "paid" && (r.raw as { duplicate?: boolean } | null)?.duplicate !== true);
+    if (!pay?.providerId) throw new ActionError("conflict", "Pedido sem cobrança paga no Asaas para estornar");
     // Se o Asaas falhar, o erro (provider_error) aborta a transação: o estado não muda.
     await (await asaasClientFor(ctx.tx, ctx.storeId)).refundPayment(pay.providerId);
     await transitionOrder(ctx, o.id, "refunded", "reembolso Asaas");

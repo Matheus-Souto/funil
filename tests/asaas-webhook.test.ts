@@ -1,7 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
-import { withStore } from "@/lib/db/client";
 import { auditLog, job, orders, payment } from "@/lib/db/schema";
 import { ALLOWED, type OrderStatus } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
@@ -9,7 +8,7 @@ import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook, mapAsaasStatus } from "@/lib/payments/asaas/webhook";
 import { POST } from "@/app/api/webhooks/asaas/[storeId]/route";
 import { createTestDb, type TestDb } from "./db";
-import { ctxOf, createFakeAsaas, newAsaasOrder, seedAsaasStore } from "./asaas-helpers";
+import { createFakeAsaas, newAsaasOrder, seedAsaasStore } from "./asaas-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -228,6 +227,23 @@ describe("cobrança órfã (existe no Asaas, sem linha de pagamento no pedido)",
     expect(await statusOf(s.order.id)).toBe("paid");
     expect((await rowsOf(s.order.id)).map((r) => r.providerId)).toContain(id);
     expect(await jobsOf(s.order.id, "deliver_order")).toHaveLength(1);
+  });
+
+  test("estorno/chargeback da cobrança duplicada só atualiza a linha: o pedido segue pago e sem revogar downloads", async () => {
+    const s = await setup();
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId));
+    const id = orphan(s, "RECEIVED");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id));
+    for (const st of ["REFUNDED", "CHARGEBACK_REQUESTED"]) {
+      s.fake.payments.get(id)!.status = st;
+      expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id))).status).toBe(200);
+      expect(await statusOf(s.order.id)).toBe("paid");
+    }
+    expect(await jobsOf(s.order.id, "revoke_downloads")).toHaveLength(0);
+    const dup = (await rowsOf(s.order.id)).find((r) => r.providerId === id)!;
+    expect(dup.status).toBe("CHARGEBACK_REQUESTED");
+    expect(dup.raw).toEqual({ duplicate: true });
   });
 
   test("órfã paga com o pedido pendente: o dinheiro chegou, o pedido vira paid (uma entrega)", async () => {

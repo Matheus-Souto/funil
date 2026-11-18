@@ -29,7 +29,7 @@ export class ActionError extends Error {
   }
 }
 
-export interface ActionDef<I, O> {
+export interface ActionDef<I, O, P = undefined> {
   name: string;
   description: string;
   input: z.ZodType<I>;
@@ -38,17 +38,23 @@ export interface ActionDef<I, O> {
   audit?: boolean;
   /** Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB. */
   auditInput?: (input: I) => unknown;
-  run(ctx: Ctx, input: I): Promise<O>;
+  /**
+   * Trabalho externo (ex.: testar uma chave num provedor) que NÃO deve segurar transação. Roda depois de permissão,
+   * validação e portão de ação sensível, e antes de `withStore`; o resultado vai como 3º argumento de `run`.
+   * Falhas são auditadas como as demais rejeições (só chaves da entrada).
+   */
+  prepare?: (call: { storeId: string; actor: Actor; origin: Origin }, input: I) => Promise<P>;
+  run(ctx: Ctx, input: I, prepared: P): Promise<O>;
   /** Desfaz efeitos fora do banco (ex.: arquivos) se a transação falhar depois de `run` ter sucesso. Melhor esforço: erros são ignorados. */
   compensate?: (call: { storeId: string }, input: I, output: O) => Promise<void>;
 }
-export type Action<I, O> = ActionDef<I, O>;
+export type Action<I, O, P = any> = ActionDef<I, O, P>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /**
  * Define uma ação e a registra (nome único; duplicado lança).
  * `register: false` é para testes: devolve a ação sem tocar no registro global.
  */
-export function defineAction<I, O>(def: ActionDef<I, O>, opts: { register?: boolean } = {}): Action<I, O> {
+export function defineAction<I, O, P = undefined>(def: ActionDef<I, O, P>, opts: { register?: boolean } = {}): Action<I, O, P> {
   if (opts.register !== false) {
     if (registry.has(def.name)) throw new Error(`Ação já registrada: ${def.name}`);
     registry.set(def.name, def);
@@ -71,8 +77,9 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
 }
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
-export async function runAction<I, O>(
-  action: Action<I, O>,
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function runAction<I, O, P = any>(
+  action: Action<I, O, P>,
   call: { storeId: string; actor: Actor; origin: Origin },
   raw: unknown,
 ): Promise<O> {
@@ -92,6 +99,7 @@ export async function runAction<I, O>(
   const rejection = (e: unknown) => omitted(e instanceof ActionError ? e.code : "error");
 
   let input: I;
+  let prepared: P | undefined;
   try {
     authorize(action as Action<unknown, unknown>, actor);
     const parsed = action.input.safeParse(raw);
@@ -104,6 +112,7 @@ export async function runAction<I, O>(
     if (action.sensitive && (origin === "mcp" || origin === "ai")) {
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
+    if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
   } catch (e) {
     await auditFailure(storeId, audited, entry(rejection(e), false, describe(e)), e);
     throw e;
@@ -121,7 +130,7 @@ export async function runAction<I, O>(
   let ran: { out: O } | undefined;
   try {
     return await withStore(storeId, async (tx) => {
-      const out = await action.run({ storeId, actor, origin, tx }, input);
+      const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P);
       ran = { out };
       if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));
       return out;

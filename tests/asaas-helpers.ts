@@ -17,7 +17,7 @@ export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990) {
   setAsaasFetchForTests(fake.fetch);
   const { storeId } = await seedStore();
   const call = { storeId, actor: owner, origin: "panel" as const };
-  const saved = await saveAsaas(call, { env: "sandbox", apiKey: fake.apiKey });
+  const saved = await runAction(saveAsaas, call, { env: "sandbox", apiKey: fake.apiKey });
   const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", fileBase64: pdf });
   const offer = await runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,

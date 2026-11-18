@@ -76,21 +76,24 @@ describe("connections.saveAsaas", () => {
     const fake = createFakeAsaas();
     setAsaasFetchForTests(fake.fetch);
     const { storeId } = await seedStore();
-    const e = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: "chave-invalida-123" }).catch((x: unknown) => x);
+    const e = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: "chave-invalida-123" }).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("provider_error");
     expect(await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"))).toBeNull();
+    const audit = (await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId))).filter((r) => r.action === "connections.saveAsaas");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ ok: false });
   });
 
   test("salva com token do webhook, mantém o token ao salvar de novo e rotaciona só se pedido", async () => {
     const fake = createFakeAsaas();
     setAsaasFetchForTests(fake.fetch);
     const { storeId } = await seedStore();
-    const a = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
+    const a = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
     expect(a.webhookUrl).toBe(`http://localhost:3000/api/webhooks/asaas/${storeId}`);
     expect(a.webhookToken.length).toBeGreaterThanOrEqual(40);
-    const b = await saveAsaas(panel(storeId), { env: "production", apiKey: fake.apiKey });
+    const b = await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: fake.apiKey });
     expect(b.webhookToken).toBe(a.webhookToken);
-    const c = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey, rotateWebhookToken: true });
+    const c = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey, rotateWebhookToken: true });
     expect(c.webhookToken).not.toBe(a.webhookToken);
     const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
     expect(conn!.secret).toBe(fake.apiKey);
@@ -108,11 +111,13 @@ describe("connections.saveAsaas", () => {
 
   test("é sensível: origem mcp pede aprovação e suporte não pode", async () => {
     const { storeId } = await seedStore();
-    const mcp = await saveAsaas({ storeId, actor: owner, origin: "mcp" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
+    const mcp = await runAction(saveAsaas, { storeId, actor: owner, origin: "mcp" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
     expect((mcp as ActionError).code).toBe("approval_required");
     const support = { kind: "user" as const, userId: "u2", role: "support" as const };
-    const r = await saveAsaas({ storeId, actor: support, origin: "panel" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
+    const r = await runAction(saveAsaas, { storeId, actor: support, origin: "panel" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
     expect((r as ActionError).code).toBe("forbidden");
+    const m = await runAction(saveAsaas, { storeId, actor: support, origin: "mcp" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
+    expect((m as ActionError).code).toBe("forbidden");
   });
 });
 
@@ -226,7 +231,7 @@ describe("sem HTTP dentro de transação", () => {
       seen.push(await idleInTransaction());
       return fake.fetch(input, init);
     }) as typeof fetch);
-    await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
+    await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
     expect(seen).toEqual([0]);
   });
 });
@@ -268,6 +273,24 @@ describe("Pix automático: robustez da cobrança", () => {
     expect(isUniqueViolation(e)).toBe(true);
   });
 
+  test("webhook PAYMENT_CREATED da própria cobrança chega entre a criação e a gravação: a cobrança viva não é apagada", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    setAsaasFetchForTests((async (input: string | URL | Request, init?: RequestInit) => {
+      const res = await fake.fetch(input, init);
+      if (init?.method === "POST" && String(input).endsWith("/payments")) {
+        const { id } = (await res.clone().json()) as { id: string };
+        await t.ownerDb.insert(payment).values({ storeId, orderId: order.id, provider: "asaas", providerId: id, status: "PENDING", amountCents: 990 });
+      }
+      return res;
+    }) as typeof fetch);
+    const qr = await startAsaasPix({ storeId }, order.id);
+    expect(qr.copyPaste).toStartWith("00020126");
+    expect([...fake.payments.values()].filter((p) => p.deleted)).toHaveLength(0);
+    expect(await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id))).toHaveLength(1);
+  });
+
   test("falha em apagar a cobrança sobrando não quebra a chamada", async () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
@@ -286,6 +309,7 @@ describe("orders.refund", () => {
     await startAsaasPix({ storeId }, order.id);
     const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
     fake.setStatus(pay!.providerId!, "RECEIVED");
+    await t.ownerDb.update(payment).set({ status: "RECEIVED" }).where(eq(payment.id, pay!.id));
     await withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), order.id, "paid", "t"));
     return { fake, storeId, order, providerId: pay!.providerId! };
   }
@@ -306,6 +330,26 @@ describe("orders.refund", () => {
     fake.fail("POST /payments/", 400, "Saldo insuficiente para estorno");
     const e = await runAction(refundOrder, panel(storeId), { orderId: order.id }).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("provider_error");
+    expect(await statusOf(order.id)).toBe("paid");
+  });
+
+  test("com várias cobranças no pedido, estorna só a paga e não duplicada", async () => {
+    const { fake, storeId, order, providerId } = await paidAsaasOrder();
+    const base = { storeId, orderId: order.id, provider: "asaas", amountCents: 990 };
+    await t.ownerDb.insert(payment).values([
+      { ...base, providerId: "pay_velha_overdue", status: "OVERDUE" },
+      { ...base, providerId: "pay_dup_paga", status: "RECEIVED", raw: { duplicate: true } },
+    ]);
+    await runAction(refundOrder, panel(storeId), { orderId: order.id });
+    const refunds = fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund")).map((c) => c.path);
+    expect(refunds).toEqual([`/payments/${providerId}/refund`]);
+  });
+
+  test("sem cobrança paga e não duplicada -> conflict, nada muda", async () => {
+    const { storeId, order, providerId } = await paidAsaasOrder();
+    await t.ownerDb.update(payment).set({ status: "OVERDUE" }).where(eq(payment.providerId, providerId));
+    const e = await runAction(refundOrder, panel(storeId), { orderId: order.id }).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("conflict");
     expect(await statusOf(order.id)).toBe("paid");
   });
 
