@@ -5,3 +5,4 @@ data/
 .verify/*
 !.verify/.gitkeep
 !.verify/gate-mode
+.superpowers/
