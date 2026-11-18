@@ -8,6 +8,7 @@ import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
+import { classifyRefund, refundMarkerOf, refundStatuses } from "./refunds";
 
 export function mapAsaasStatus(s: string): OrderStatus | null {
   switch (s) {
@@ -49,10 +50,19 @@ export const applyAsaasPayment = defineAction({
     externalReference: z.string().nullable(),
     /** Id do parcelamento (cartão parcelado): cada parcela é uma cobrança; `valueCents` é então o total do parcelamento. */
     installment: z.string().min(1).max(100).nullable().optional(),
+    /** Status dos itens `refunds[]` da cobrança reconsultada (estorno só concluído com DONE). */
+    refunds: z.array(z.string().max(64)).max(50).optional(),
   }),
   permission: "system",
-  auditInput: (i) => ({ paymentId: i.paymentId, status: i.status, valueCents: i.valueCents, installment: i.installment ?? null }),
-  async run(ctx, p) {
+  auditInput: (i) => ({
+    paymentId: i.paymentId,
+    status: i.status,
+    valueCents: i.valueCents,
+    installment: i.installment ?? null,
+    refunds: i.refunds ?? [],
+  }),
+  async run(ctx, input) {
+    let p = input;
     if (!p.externalReference || !UUID.test(p.externalReference)) return { applied: false, reason: "sem_pedido" };
     const [o] = await ctx.tx
       .select()
@@ -72,6 +82,16 @@ export const applyAsaasPayment = defineAction({
     // Outra parcela de um parcelamento que o pedido já conhece: é a mesma venda, não cobrança órfã nem em dobro.
     const sibling =
       !row && installment !== null ? rows.find((r) => (r.raw as { installment?: string } | null)?.installment === installment) : undefined;
+    // Estorno: a cobrança pode seguir CONFIRMED/RECEIVED com refunds[DONE] (dinheiro devolvido) -> trata como REFUNDED.
+    const refund = classifyRefund(p.status, p.refunds ?? [], refundMarkerOf((row ?? sibling)?.raw, o.refundRequestedAt));
+    if (refund === "done" && mapAsaasStatus(p.status) === "paid") p = { ...p, status: "REFUNDED" };
+    if (refund === "cancelled" && o.status === "paid" && o.refundRequestedAt) {
+      await ctx.tx.update(orders).set({ refundRequestedAt: null }).where(eq(orders.id, o.id));
+      log.warn("estorno cancelado no Asaas; o pedido continua pago (confira no Asaas e peça de novo se for o caso)", {
+        orderId: o.id,
+        paymentId: p.paymentId,
+      });
+    }
     const target0 = mapAsaasStatus(p.status);
     const orphan = !row && !sibling && rows.length > 0;
 
@@ -145,6 +165,7 @@ export type AsaasPaymentInput = {
   valueCents: number;
   externalReference: string | null;
   installment: string | null;
+  refunds: string[];
 };
 
 /**
@@ -164,6 +185,7 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
     valueCents,
     externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
     installment,
+    refunds: refundStatuses(fresh),
   };
 }
 

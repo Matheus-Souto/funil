@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
@@ -8,6 +8,7 @@ import { transitionOrder } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
+import { log } from "@/lib/log";
 import { refundOrder } from "@/lib/payments/refund";
 import { createTestDb, type TestDb } from "./db";
 import { ctxOf, createFakeAsaas, newAsaasOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
@@ -215,5 +216,118 @@ describe("orders.refund (Asaas, assíncrono)", () => {
     const f = await runAction(refundOrder, { storeId, actor: support, origin: "panel" }, { orderId: order.id }).catch((x: unknown) => x);
     expect((f as ActionError).code).toBe("forbidden");
     expect(await refundJobs(order.id)).toHaveLength(0);
+  });
+});
+
+describe("refund_order: estorno que fica pendente no Asaas (refunds[])", () => {
+  const hook = (s: { storeId: string; webhookToken: string }, paymentId: string, ev = "PAYMENT_UPDATED") =>
+    handleAsaasWebhook(s.storeId, new Headers({ "asaas-access-token": s.webhookToken }), { event: ev, payment: { id: paymentId } });
+  const requestedAt = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.refundRequestedAt;
+
+  test("estorno PENDING: o pedido continua paid, o job conclui sem transição e não estorna de novo", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    expect(s.refundCalls()).toBe(1);
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("done");
+    const [j] = await refundJobs(s.order.id);
+    await getHandlers().refund_order!(j!, new AbortController().signal);
+    expect(s.refundCalls()).toBe(1);
+    expect(await statusOf(s.order.id)).toBe("paid");
+  });
+
+  test("queda entre o POST do estorno e a transição: a nova execução vê refunds[PENDING] e não faz outro POST", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    // O estorno é aceito pelo Asaas, mas a resposta se perde: o job falha e volta pelo backoff.
+    s.fake.loseResponse(`POST /payments/${s.providerId}/refund`);
+    const t0 = later(1);
+    await runRefundJobs(t0);
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("queued");
+    s.fake.clearFailures();
+    await runRefundJobs(new Date(t0.getTime() + 60_000));
+    expect(s.refundCalls()).toBe(1);
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("done");
+  });
+
+  test("estorno DONE (cobrança ainda CONFIRMED/RECEIVED): o webhook leva o pedido a refunded", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    s.fake.setRefundStatus(s.providerId, "DONE");
+    expect(s.fake.payments.get(s.providerId)!.status).toBe("RECEIVED");
+    expect((await hook(s, s.providerId, "PAYMENT_REFUNDED")).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("refunded");
+    const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.providerId, s.providerId));
+    expect(pay!.status).toBe("REFUNDED");
+  });
+
+  test("estorno DONE: uma nova execução do job também conclui (sem novo POST)", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    s.fake.setRefundStatus(s.providerId, "DONE");
+    const [j] = await refundJobs(s.order.id);
+    await getHandlers().refund_order!(j!, new AbortController().signal);
+    expect(s.refundCalls()).toBe(1);
+    expect(await statusOf(s.order.id)).toBe("refunded");
+  });
+
+  test("estorno CANCELLED: o pedido segue paid, refund_requested_at é limpo e o vendedor é avisado no log", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    expect(await requestedAt(s.order.id)).toBeInstanceOf(Date);
+    s.fake.setRefundStatus(s.providerId, "CANCELLED");
+    const warn = spyOn(log, "warn");
+    try {
+      expect((await hook(s, s.providerId)).status).toBe(200);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("estorno cancelado"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect(await requestedAt(s.order.id)).toBeNull();
+    // O job não age mais sobre um pedido cujo pedido de estorno foi cancelado.
+    const [j] = await refundJobs(s.order.id);
+    await getHandlers().refund_order!(j!, new AbortController().signal);
+    expect(s.refundCalls()).toBe(1);
+  });
+
+  test("estorno cancelado antes e o vendedor pede de novo: o job faz um POST novo", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    s.fake.setRefundStatus(s.providerId, "CANCELLED");
+    await hook(s, s.providerId);
+    s.fake.setRefundMode("immediate");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(2));
+    expect(s.refundCalls()).toBe(2);
+    expect(await statusOf(s.order.id)).toBe("refunded");
+  });
+
+  test("retentativa do job que encontra só estornos CANCELLED não estorna de novo: limpa e avisa", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    // POST aceito, resposta perdida (job falha); antes da retentativa o estorno é cancelado e o webhook não chegou.
+    s.fake.loseResponse(`POST /payments/${s.providerId}/refund`);
+    const t0 = later(1);
+    await runRefundJobs(t0);
+    s.fake.clearFailures();
+    s.fake.setRefundStatus(s.providerId, "CANCELLED");
+    await runRefundJobs(new Date(t0.getTime() + 60_000));
+    expect(s.refundCalls()).toBe(1);
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect(await requestedAt(s.order.id)).toBeNull();
   });
 });

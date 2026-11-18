@@ -48,6 +48,18 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
   const customers = new Map<string, Record<string, unknown>>();
   const installments = new Map<string, FakeInstallment>();
   const calls: FakeCall[] = [];
+  // "immediate": o estorno conclui na hora (status REFUNDED + refunds[DONE]). "pending": a cobrança continua paga e
+  // ganha refunds[PENDING]; `setRefundStatus` depois leva a DONE ou CANCELLED (como o Asaas faz com cartão).
+  let refundMode: "immediate" | "pending" = "immediate";
+  const applyRefund = (p: FakePayment) => {
+    const list = Array.isArray(p.refunds) ? (p.refunds as { status: string; value: number }[]) : [];
+    if (refundMode === "immediate") {
+      p.status = "REFUNDED";
+      p.refunds = [...list, { status: "DONE", value: p.value }];
+    } else {
+      p.refunds = [...list, { status: "PENDING", value: p.value }];
+    }
+  };
   // "METHOD /path" (prefixo): processa normalmente e depois perde a resposta (simula timeout com efeito no Asaas).
   const lost = new Set<string>();
   // Erros programados: "METHOD /path" (prefixo) -> resposta de erro.
@@ -148,8 +160,8 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       if (!inst) return err(404, "Parcelamento não encontrado", "not_found");
       if (im[1] === "GET" && !im[3]) return json(200, { object: "installment", ...inst });
       if (im[1] === "POST" && im[3]) {
-        for (const id of inst.payments) payments.get(id)!.status = "REFUNDED";
-        return json(200, { object: "installment", ...inst, status: "REFUNDED" });
+        for (const id of inst.payments) applyRefund(payments.get(id)!);
+        return json(200, { object: "installment", ...inst, status: refundMode === "immediate" ? "REFUNDED" : "RECEIVED" });
       }
     }
 
@@ -167,7 +179,7 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       }
       if (m[1] === "POST" && m[3] === "/refund") {
         if (p.status !== "RECEIVED" && p.status !== "CONFIRMED") return err(400, "Cobrança não pode ser estornada");
-        p.status = "REFUNDED";
+        applyRefund(p);
         return json(200, { object: "payment", ...p });
       }
     }
@@ -187,6 +199,16 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       const p = payments.get(id);
       if (!p) throw new Error(`cobrança desconhecida: ${id}`);
       p.status = status;
+    },
+    setRefundMode(mode: "immediate" | "pending") {
+      refundMode = mode;
+    },
+    /** Muda o status do último estorno da cobrança (PENDING -> DONE/CANCELLED); a cobrança em si não muda. */
+    setRefundStatus(id: string, status: string) {
+      const p = payments.get(id);
+      const list = p && Array.isArray(p.refunds) ? (p.refunds as { status: string }[]) : [];
+      if (list.length === 0) throw new Error(`cobrança sem estorno: ${id}`);
+      list[list.length - 1]!.status = status;
     },
     setValue(id: string, value: number) {
       const p = payments.get(id);
