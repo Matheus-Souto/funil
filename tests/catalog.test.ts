@@ -1,3 +1,4 @@
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import { auditLog, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { createProduct, decodePdfBase64, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { env } from "@/lib/env";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -105,6 +107,41 @@ describe("products", () => {
     expect(audits.length).toBe(1);
     expect(JSON.stringify(audits[0]!.input)).not.toContain(raw.slice(0, 20));
     expect((audits[0]!.input as { name: string }).name).toBe("Curso");
+  });
+
+  test("base64 acima do máximo é invalid_input sem decodificar", async () => {
+    const { storeId } = await seedStore();
+    const spy = spyOn(Buffer, "from");
+    try {
+      const tooBig = "A".repeat(Math.ceil(52_428_800 / 3) * 4 + 4);
+      expect(await code(call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", fileBase64: tooBig }))).toBe("invalid_input");
+      expect(spy.mock.calls.some((c) => (c as unknown[])[1] === "base64")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await call(listProducts, storeId, owner, {})).toEqual([]);
+  });
+
+  test("falha ao gravar o arquivo desfaz a transação (sem linha de produto)", async () => {
+    const { storeId } = await seedStore();
+    const spy = spyOn(storage, "put").mockRejectedValueOnce(new Error("disco cheio"));
+    try {
+      expect(await call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", fileBase64: b64(pdfBytes()) }).catch((e) => e.message)).toBe("disco cheio");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await call(listProducts, storeId, owner, {})).toEqual([]);
+  });
+
+  test("falha na auditoria depois do put não deixa arquivo órfão", async () => {
+    const { storeId } = await seedStore();
+    // NUL no ator faz o insert da auditoria (jsonb) falhar depois de run ter gravado o arquivo.
+    const broken: Actor = { kind: "user", userId: "a\u0000b", role: "owner" };
+    const err = await call(createProduct, storeId, broken, { name: "X", fileName: "x.pdf", fileBase64: b64(pdfBytes()) }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(await call(listProducts, storeId, owner, {})).toEqual([]);
+    const dir = join(env.DATA_DIR, "files", "products", storeId);
+    expect(await readdir(dir).catch(() => [] as string[])).toEqual([]);
   });
 
   test("traffic e support não criam; support lê", async () => {

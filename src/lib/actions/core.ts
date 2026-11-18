@@ -36,7 +36,11 @@ export interface ActionDef<I, O> {
   permission: Permission | "public" | "system";
   sensitive?: boolean;
   audit?: boolean;
+  /** Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB. */
+  auditInput?: (input: I) => unknown;
   run(ctx: Ctx, input: I): Promise<O>;
+  /** Desfaz efeitos fora do banco (ex.: arquivos) se a transação falhar depois de `run` ter sucesso. Melhor esforço: erros são ignorados. */
+  compensate?: (call: { storeId: string }, input: I, output: O) => Promise<void>;
 }
 export type Action<I, O> = ActionDef<I, O>;
 
@@ -105,15 +109,33 @@ export async function runAction<I, O>(
     throw e;
   }
 
+  const auditView = (): unknown => {
+    if (!action.auditInput) return input;
+    try {
+      return action.auditInput(input);
+    } catch {
+      return { omitted: "audit_input_error", keys: topKeys(raw) };
+    }
+  };
+
+  let ran: { out: O } | undefined;
   try {
     return await withStore(storeId, async (tx) => {
       const out = await action.run({ storeId, actor, origin, tx }, input);
-      if (audited) await tx.insert(auditLog).values(entry(capped(input), true));
+      ran = { out };
+      if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));
       return out;
     });
   } catch (e) {
     // A transação principal já foi desfeita; a auditoria de falha vai em outra.
-    await auditFailure(storeId, audited, entry(capped(input), false, describe(e)), e);
+    if (ran && action.compensate) {
+      try {
+        await action.compensate({ storeId }, input, ran.out);
+      } catch (cleanupErr) {
+        log.error("falha ao compensar ação", { action: action.name, error: cleanupErr });
+      }
+    }
+    await auditFailure(storeId, audited, entry(capped(auditView()), false, describe(e)), e);
     throw e;
   }
 }

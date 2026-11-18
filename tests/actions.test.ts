@@ -211,3 +211,46 @@ test("entrada válida acima de 8 KB é gravada truncada", async () => {
   expect(row!.ok).toBe(true);
   expect(row!.input).toEqual({ truncated: true, keys: ["blob"] });
 });
+
+test("auditInput substitui a entrada na auditoria (sucesso e falha) e ainda passa por redact", async () => {
+  const { storeId } = await seedStore();
+  const withView = (fail: boolean) =>
+    defineAction(
+      {
+        name: `t.auditInput.${fail}`,
+        description: "x",
+        input: z.object({ big: z.string(), label: z.string() }),
+        permission: "products.read",
+        auditInput: (i) => ({ label: i.label, size: i.big.length, card: "4111111111111111" }),
+        run: async () => {
+          if (fail) throw new ActionError("conflict", "falhou");
+          return 1;
+        },
+      },
+      def,
+    );
+  const input = { big: "SEGREDO-GRANDE", label: "ok" };
+  await runAction(withView(false), { storeId, actor: owner, origin: "panel" }, input);
+  await runAction(withView(true), { storeId, actor: owner, origin: "panel" }, input).catch(() => undefined);
+  const rows = (await auditRows(storeId)).filter((r) => r.action.startsWith("t.auditInput"));
+  expect(rows.length).toBe(2);
+  for (const r of rows) {
+    expect(JSON.stringify(r.input)).not.toContain("SEGREDO");
+    expect(r.input).toEqual({ label: "ok", size: 14, card: expect.not.stringContaining("4111") });
+  }
+});
+
+test("compensate roda só se a transação falha depois de run ter sucesso", async () => {
+  const { storeId } = await seedStore();
+  const calls: unknown[] = [];
+  const make = (name: string) =>
+    defineAction(
+      { name, description: "x", input: z.object({}), permission: "products.read", run: async () => "saida", compensate: async (_c, _i, out) => void calls.push(out) },
+      def,
+    );
+  const broken: Actor = { kind: "user", userId: "a\u0000b", role: "owner" };
+  await runAction(make("t.comp.a"), { storeId, actor: broken, origin: "panel" }, {}).catch(() => undefined);
+  expect(calls).toEqual(["saida"]);
+  await runAction(make("t.comp.b"), { storeId, actor: owner, origin: "panel" }, {});
+  expect(calls).toEqual(["saida"]);
+});

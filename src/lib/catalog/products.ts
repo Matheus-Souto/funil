@@ -18,27 +18,15 @@ export function decodePdfBase64(b64: string): Uint8Array | null {
   return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length);
 }
 
-/**
- * Os bytes ficam numa propriedade não enumerável: a auditoria (`redact` + JSON) vê `{}`
- * e o arquivo nunca é copiado para `audit_log.input`.
- */
-interface PdfFile {
-  readonly bytes: Uint8Array;
-}
-function pdfFile(bytes: Uint8Array): PdfFile {
-  const f = {} as { bytes: Uint8Array };
-  Object.defineProperty(f, "bytes", { value: bytes, enumerable: false });
-  return f;
+const pdfBase64 = z.string().max(MAX_BASE64_CHARS);
+
+/** Tamanho decodificado aproximado, sem decodificar (para auditoria). */
+function base64Size(s: string): number {
+  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((s.length * 3) / 4) - pad);
 }
 
-const pdfBase64 = z.string().transform((s, ctx): PdfFile => {
-  const bytes = decodePdfBase64(s);
-  if (!bytes) {
-    ctx.addIssue({ code: "custom", message: "Envie um PDF válido de até 50 MB" });
-    return z.NEVER;
-  }
-  return pdfFile(bytes);
-});
+const fileKeyFor = (storeId: string, productId: string) => `products/${storeId}/${productId}.pdf`;
 
 const name = z.string().trim().min(1).max(200);
 const fileName = z.string().trim().min(1).max(200);
@@ -57,22 +45,23 @@ export const createProduct = defineAction({
   description: "Cria um produto digital a partir de um PDF (base64).",
   input: z.object({ name, fileName, fileBase64: pdfBase64 }),
   permission: "products.write",
+  // O arquivo nunca vai para a auditoria: só nome, nome do arquivo e tamanho.
+  auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: base64Size(i.fileBase64) }),
   async run(ctx, input) {
+    const bytes = decodePdfBase64(input.fileBase64);
+    if (!bytes) throw new ActionError("invalid_input", "Envie um PDF válido de até 50 MB");
     const productId = randomUUID();
-    const fileKey = `products/${ctx.storeId}/${productId}.pdf`;
-    const { bytes } = input.fileBase64;
+    const fileKey = fileKeyFor(ctx.storeId, productId);
+    const [row] = await ctx.tx
+      .insert(product)
+      .values({ id: productId, storeId: ctx.storeId, name: input.name, fileKey, fileName: input.fileName, fileSize: bytes.length })
+      .returning(view);
+    // Último passo: se a gravação falhar, a exceção desfaz a transação.
     await storage.put(fileKey, bytes);
-    try {
-      const [row] = await ctx.tx
-        .insert(product)
-        .values({ id: productId, storeId: ctx.storeId, name: input.name, fileKey, fileName: input.fileName, fileSize: bytes.length })
-        .returning(view);
-      return row!;
-    } catch (e) {
-      await storage.delete(fileKey);
-      throw e;
-    }
+    return row!;
   },
+  // Falha depois do put (auditoria ou commit): remove o arquivo órfão.
+  compensate: (call, _input, out) => storage.delete(fileKeyFor(call.storeId, out.id)),
 });
 
 export const updateProduct = defineAction({

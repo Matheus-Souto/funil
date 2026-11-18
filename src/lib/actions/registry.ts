@@ -20,6 +20,6 @@ export function listActions(): ActionInfo[] {
     description: a.description,
     permission: a.permission,
     sensitive: a.sensitive ?? false,
-    inputSchema: z.toJSONSchema(a.input, { unrepresentable: "any" }),
+    inputSchema: z.toJSONSchema(a.input),
   }));
 }
