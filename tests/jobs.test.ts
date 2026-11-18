@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { runAction } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
@@ -238,8 +238,11 @@ describe("expire_orders", () => {
   test("pedido que vira pago entre o select e a transição é pulado (conflict) e os demais expiram", async () => {
     const a = await seedStore();
     const oa = await seedOffer(a.storeId);
-    const raced = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
-    const other = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
+    // Criados já vencidos, o 2º pedido Pix manual expiraria o 1º ao alocar o valor; por isso vencem depois de criados.
+    const future = new Date(Date.now() + 3_600_000);
+    const raced = await mk(a.storeId, oa.id, future, "pending");
+    const other = await mk(a.storeId, oa.id, future, "pending");
+    await t.ownerDb.update(orders).set({ expiresAt: new Date(Date.now() - 60_000) }).where(inArray(orders.id, [raced, other]));
     const h = createExpireOrdersHandler(async (tx, id) => {
       if (id === raced) await tx.update(orders).set({ status: "paid" }).where(eq(orders.id, id));
     });

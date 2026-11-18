@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "orders_manual_amount_pending_unique" ON "orders" USING btree ("store_id","manual_amount_cents") WHERE "orders"."method" = 'pix_manual' and "orders"."status" = 'pending';

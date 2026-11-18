@@ -1,0 +1,140 @@
+import { and, between, count, eq, lt, sql } from "drizzle-orm";
+import { z } from "zod";
+import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
+import { orders, payment } from "@/lib/db/schema";
+import { getIntegration, saveIntegration } from "@/lib/integrations";
+import { transitionOrder } from "@/lib/orders/state";
+import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
+
+export const MANUAL_TTL_MS = 24 * 60 * 60 * 1000;
+export const MANUAL_BUSY_TTL_MS = 2 * 60 * 60 * 1000;
+/** A partir de quantos pendentes no mesmo total a validade cai para 2 h. */
+export const MANUAL_BUSY_THRESHOLD = 50;
+export const MAX_OFFSET = 99;
+export const ALLOCATION_ATTEMPTS = 3;
+
+export function isUniqueViolation(e: unknown): boolean {
+  const c = (e as { code?: string; cause?: { code?: string } } | null) ?? {};
+  return c.code === "23505" || c.cause?.code === "23505";
+}
+
+/** Marca como expirados os Pix manuais pendentes já vencidos da loja, liberando o valor. */
+async function expireStale(ctx: Ctx): Promise<void> {
+  const stale = await ctx.tx
+    .select({ id: orders.id })
+    .from(orders)
+    .where(and(eq(orders.method, "pix_manual"), eq(orders.status, "pending"), lt(orders.expiresAt, new Date())));
+  for (const o of stale) await transitionOrder(ctx, o.id, "expired", "expirou");
+}
+
+/**
+ * Escolhe o valor único (total + offset de 1 a 99) de um novo Pix manual.
+ * O valor não pode coincidir com nenhum outro Pix manual pendente da loja (o índice único vale para a loja inteira,
+ * então totais diferentes também disputam valores). Um lock consultivo por loja serializa as alocações concorrentes
+ * até o commit; o índice único parcial é a rede de segurança, e `skip` permite ao chamador tentar o próximo offset.
+ */
+export async function allocateManualAmount(
+  ctx: Ctx,
+  totalCents: number,
+  opts: { skip?: readonly number[] } = {},
+): Promise<{ amountCents: number; expiresAt: Date }> {
+  await ctx.tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"pix_manual:" + ctx.storeId}, 0))`);
+  await expireStale(ctx);
+
+  const taken = await ctx.tx
+    .select({ amount: orders.manualAmountCents })
+    .from(orders)
+    .where(
+      and(
+        eq(orders.method, "pix_manual"),
+        eq(orders.status, "pending"),
+        between(orders.manualAmountCents, totalCents + 1, totalCents + MAX_OFFSET),
+      ),
+    );
+  const used = new Set<number>([...taken.map((r) => r.amount!), ...(opts.skip ?? [])]);
+  let offset = 1;
+  while (offset <= MAX_OFFSET && used.has(totalCents + offset)) offset++;
+  if (offset > MAX_OFFSET) throw new ActionError("conflict", "pix_manual_exhausted");
+
+  const [row] = await ctx.tx
+    .select({ n: count() })
+    .from(orders)
+    .where(and(eq(orders.method, "pix_manual"), eq(orders.status, "pending"), eq(orders.totalCents, totalCents)));
+  const ttl = (row?.n ?? 0) >= MANUAL_BUSY_THRESHOLD ? MANUAL_BUSY_TTL_MS : MANUAL_TTL_MS;
+  return { amountCents: totalCents + offset, expiresAt: new Date(Date.now() + ttl) };
+}
+
+/** BR Code do pedido, a partir da conexão `pix_manual` da loja. `null` se a loja não configurou a chave. */
+export async function manualPixBrCode(
+  ctx: Ctx,
+  order: { publicId: string; manualAmountCents: number | null },
+): Promise<string | null> {
+  if (order.manualAmountCents === null) return null;
+  const conn = await getIntegration(ctx.tx, ctx.storeId, "pix_manual");
+  const cfg = conn?.config as { key?: string; name?: string; city?: string } | undefined;
+  if (!cfg?.key) return null;
+  return buildPixBrCode({
+    key: cfg.key,
+    name: cfg.name ?? "",
+    city: cfg.city ?? "",
+    amountCents: order.manualAmountCents,
+    txid: order.publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 25),
+  });
+}
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Validação frouxa do formato da chave; devolve a forma normalizada ou null. */
+export function normalizePixKey(raw: string): string | null {
+  const v = raw.trim();
+  if (EMAIL.test(v) && v.length <= PIX_KEY_MAX && /^[\x21-\x7e]+$/.test(v)) return v.toLowerCase();
+  if (UUID.test(v)) return v.toLowerCase();
+  if (/^\+55\d{10,11}$/.test(v)) return v;
+  const digits = v.replace(/[.\-/\s]/g, "");
+  if (/^\d{11}$/.test(digits) || /^\d{14}$/.test(digits)) return digits;
+  return null;
+}
+
+export const savePixManual = defineAction({
+  name: "connections.savePixManual",
+  description: "Salva a chave Pix própria da loja (chave, nome e cidade do recebedor).",
+  input: z.object({
+    key: z.string().trim().min(1).max(100),
+    name: z.string().trim().min(1).max(100),
+    city: z.string().trim().min(1).max(100),
+  }),
+  permission: "connections.write",
+  async run(ctx, input) {
+    const key = normalizePixKey(input.key);
+    if (!key) throw new ActionError("invalid_input", "Chave Pix inválida: use CPF, CNPJ, e-mail, telefone (+55) ou chave aleatória");
+    const config = { key, name: sanitizeText(input.name, 25, "LOJA"), city: sanitizeText(input.city, 15, "BRASIL") };
+    await saveIntegration(ctx.tx, ctx.storeId, "pix_manual", config);
+    return config;
+  },
+});
+
+export const releaseOrder = defineAction({
+  name: "orders.release",
+  description: "Libera manualmente um pedido Pix manual pendente depois de conferir o recebimento.",
+  input: z.object({ orderId: z.uuid() }),
+  permission: "orders.release",
+  sensitive: true,
+  async run(ctx, { orderId }) {
+    const [o] = await ctx.tx.select().from(orders).where(eq(orders.id, orderId));
+    if (!o) throw new ActionError("not_found", "Pedido não encontrado");
+    if (o.method !== "pix_manual") throw new ActionError("conflict", "Só pedidos de Pix manual podem ser liberados à mão");
+    if (o.status !== "pending") throw new ActionError("conflict", `Pedido não está pendente (${o.status})`);
+    const r = await transitionOrder(ctx, o.id, "paid", "liberado manualmente");
+    if (!r.changed) throw new ActionError("conflict", "Pedido já foi liberado");
+    await ctx.tx.insert(payment).values({
+      storeId: ctx.storeId,
+      orderId: o.id,
+      provider: "manual",
+      providerId: null,
+      status: "paid",
+      amountCents: o.manualAmountCents ?? o.totalCents,
+    });
+    return { orderId: o.id };
+  },
+});

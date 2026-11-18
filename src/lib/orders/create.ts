@@ -1,6 +1,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { ActionError, type Ctx } from "@/lib/actions/core";
 import { randomToken } from "@/lib/crypto";
+import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
 import { customer, offer, orderItem, orders, product } from "@/lib/db/schema";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
@@ -58,31 +59,56 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     })
     .returning({ id: customer.id });
 
-  const [order] = await ctx.tx
-    .insert(orders)
-    .values({
-      storeId: ctx.storeId,
-      publicId: randomToken(16),
-      offerId: o.id,
-      customerId: cust!.id,
-      status: "pending",
-      method: input.method,
-      subtotalCents: total,
-      totalCents: total,
-      hasBump: bump !== null,
-      expiresAt: input.method === "card_asaas" ? null : new Date(Date.now() + PIX_TTL_MS),
-      firstTouch: input.touch.first,
-      lastTouch: input.touch.last,
-      ref: input.ref ?? null,
-      fbc: input.fbc ?? null,
-      fbp: input.fbp ?? null,
-      clientIp: input.clientIp,
-      userAgent: input.userAgent,
-    })
-    .returning();
+  const insertOrder = async (tx: Ctx["tx"], manual: { amountCents: number; expiresAt: Date } | null) => {
+    const [row] = await tx
+      .insert(orders)
+      .values({
+        storeId: ctx.storeId,
+        publicId: randomToken(16),
+        offerId: o.id,
+        customerId: cust!.id,
+        status: "pending",
+        method: input.method,
+        subtotalCents: total,
+        totalCents: total,
+        manualAmountCents: manual?.amountCents ?? null,
+        hasBump: bump !== null,
+        expiresAt: manual ? manual.expiresAt : input.method === "card_asaas" ? null : new Date(Date.now() + PIX_TTL_MS),
+        firstTouch: input.touch.first,
+        lastTouch: input.touch.last,
+        ref: input.ref ?? null,
+        fbc: input.fbc ?? null,
+        fbp: input.fbp ?? null,
+        clientIp: input.clientIp,
+        userAgent: input.userAgent,
+      })
+      .returning();
+    return row!;
+  };
+
+  let order: Order;
+  if (input.method === "pix_manual") {
+    // Valor único por pedido: o lock da alocação já serializa; o índice único parcial é a rede de segurança
+    // (savepoint por tentativa, para a violação não abortar a transação do chamador).
+    const skip: number[] = [];
+    for (let attempt = 1; ; attempt++) {
+      const manual = await allocateManualAmount(ctx, total, { skip });
+      try {
+        order = await ctx.tx.transaction((sp) => insertOrder(sp as Ctx["tx"], manual));
+        break;
+      } catch (e) {
+        if (!isUniqueViolation(e) || attempt >= ALLOCATION_ATTEMPTS) {
+          throw isUniqueViolation(e) ? new ActionError("conflict", "pix_manual_exhausted") : e;
+        }
+        skip.push(manual.amountCents);
+      }
+    }
+  } else {
+    order = await insertOrder(ctx.tx, null);
+  }
   await ctx.tx.insert(orderItem).values([
-    { storeId: ctx.storeId, orderId: order!.id, productId: o.productId, priceCents: o.priceCents, kind: "main" },
-    ...(bump ? [{ storeId: ctx.storeId, orderId: order!.id, productId: bump.productId, priceCents: bump.priceCents, kind: "bump" }] : []),
+    { storeId: ctx.storeId, orderId: order.id, productId: o.productId, priceCents: o.priceCents, kind: "main" },
+    ...(bump ? [{ storeId: ctx.storeId, orderId: order.id, productId: bump.productId, priceCents: bump.priceCents, kind: "bump" }] : []),
   ]);
-  return order!;
+  return order;
 }

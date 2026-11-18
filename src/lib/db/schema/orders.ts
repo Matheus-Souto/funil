@@ -57,6 +57,10 @@ export const orders = pgTable(
     check("orders_method_check", sql`${t.method} in ('pix_manual','pix_asaas','card_asaas')`),
     check("orders_amounts_check", sql`${t.subtotalCents} > 0 and ${t.totalCents} > 0`),
     index("orders_store_status_idx").on(t.storeId, t.status),
+    // Valor único do Pix manual: dois pendentes da mesma loja nunca compartilham o mesmo valor.
+    uniqueIndex("orders_manual_amount_pending_unique")
+      .on(t.storeId, t.manualAmountCents)
+      .where(sql`${t.method} = 'pix_manual' and ${t.status} = 'pending'`),
     index("orders_pending_expiry_idx").on(t.expiresAt).where(sql`${t.status} = 'pending'`),
   ],
 );
