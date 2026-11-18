@@ -124,6 +124,43 @@ describe("runDueJobs", () => {
     await t.ownerDb.delete(job).where(eq(job.id, fresh));
   });
 
+  test("finalização obsoleta de um worker lento não sobrescreve a reivindicação seguinte", async () => {
+    await enq("revoke_downloads", { stale: true }, null, T0);
+    const id = (await newest("revoke_downloads")).id;
+    const later = at(11 * 60);
+    const fail = async () => { throw new Error("falha"); };
+    await runDueJobs(
+      {
+        revoke_downloads: async () => {
+          // O worker A está lento: 11 min depois outro worker recupera o job, reivindica e falha.
+          await runDueJobs({ revoke_downloads: fail }, 1, later);
+          const mid = await row(id);
+          expect([mid.status, mid.attempts]).toEqual(["queued", 2]);
+          expect(mid.runAt.getTime()).toBe(later.getTime() + 300_000);
+          await fail(); // A termina tarde e também falha: não pode mexer na linha
+        },
+      },
+      1,
+      T0,
+    );
+    const r = await row(id);
+    expect([r.status, r.attempts, r.lockedAt]).toEqual(["queued", 2, null]);
+    expect(r.runAt.getTime()).toBe(later.getTime() + 300_000);
+    await t.ownerDb.update(job).set({ status: "done" }).where(eq(job.id, id));
+  });
+
+  test("locked_at vem de leitura nova do relógio a cada claim", async () => {
+    await enq("deliver_order", { c: 1 }, null, at(-1));
+    await enq("deliver_order", { c: 2 }, null, at(-1));
+    let tick = 0;
+    const clock = () => at(tick++);
+    const locks: number[] = [];
+    const h = { deliver_order: async (j: { lockedAt: Date | null }) => void locks.push(j.lockedAt!.getTime()) };
+    await runDueJobs(h, 2, clock);
+    expect(locks).toHaveLength(2);
+    expect(locks[1]).toBeGreaterThan(locks[0]!);
+  });
+
   test("nenhuma transação aberta enquanto o handler roda", async () => {
     await enq("meta_event", {}, null, T0);
     let idle = -1;

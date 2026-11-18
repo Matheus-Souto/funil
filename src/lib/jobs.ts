@@ -49,6 +49,7 @@ async function recoverStuck(now: Date): Promise<void> {
 
 /** Reivindica o próximo job vencido (tentativa já contada). Transação curta, FOR UPDATE SKIP LOCKED. */
 async function claim(now: Date): Promise<Job | undefined> {
+  // `now` é uma leitura nova do relógio a cada claim: locked_at reflete o momento real da reivindicação.
   return db.transaction(async (tx) => {
     const next = tx
       .select({ id: job.id })
@@ -66,34 +67,45 @@ async function claim(now: Date): Promise<Job | undefined> {
   });
 }
 
+export type Clock = () => Date;
+
 /**
- * Executa até `limit` jobs vencidos (`run_at <= now`). Handlers que tocam dados de loja devem usar
+ * Executa até `limit` jobs vencidos (`run_at <= now`). `now` é uma data fixa ou um relógio (lido a cada
+ * claim/finalização; injetável nos testes). A finalização só vale para a reivindicação que a gerou
+ * (`locked_at` igual): um worker lento cujo job foi recuperado e reivindicado por outro não sobrescreve nada. Handlers que tocam dados de loja devem usar
  * `withStore(job.storeId)`; `job` não tem RLS.
  */
-export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date = new Date()): Promise<number> {
-  await recoverStuck(now);
+export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date | Clock = () => new Date()): Promise<number> {
+  const clock: Clock = typeof now === "function" ? now : () => now;
+  await recoverStuck(clock());
   let ran = 0;
   while (ran < limit) {
-    const j = await claim(now);
+    const j = await claim(clock());
     if (!j) break;
     ran++;
     const handler = handlers[j.type as JobType];
-    const finish = (set: Partial<typeof job.$inferInsert>) =>
-      db.update(job).set({ lockedAt: null, ...set }).where(and(eq(job.id, j.id), eq(job.status, "running")));
+    const finish = async (set: (at: Date) => Partial<typeof job.$inferInsert>) => {
+      const res = await db
+        .update(job)
+        .set({ lockedAt: null, ...set(clock()) })
+        .where(and(eq(job.id, j.id), eq(job.status, "running"), eq(job.lockedAt, j.lockedAt!)))
+        .returning({ id: job.id });
+      if (res.length === 0) log.warn("finalização obsoleta ignorada (job reivindicado por outro worker)", { id: j.id, type: j.type });
+    };
     if (!handler) {
-      await finish({ status: "failed", lastError: "sem handler" });
+      await finish(() => ({ status: "failed", lastError: "sem handler" }));
       continue;
     }
     try {
       await handler(j);
-      await finish({ status: "done", lastError: null });
+      await finish(() => ({ status: "done", lastError: null }));
     } catch (e) {
       const wait = BACKOFF_SECONDS[j.attempts - 1];
       log.warn("job falhou", { id: j.id, type: j.type, attempts: j.attempts, error: errorText(e) });
-      await finish(
+      await finish((at) =>
         wait === undefined
           ? { status: "failed", lastError: errorText(e) }
-          : { status: "queued", lastError: errorText(e), runAt: new Date(now.getTime() + wait * 1000) },
+          : { status: "queued", lastError: errorText(e), runAt: new Date(at.getTime() + wait * 1000) },
       );
     }
   }
