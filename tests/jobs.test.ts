@@ -127,25 +127,23 @@ describe("runDueJobs", () => {
   test("finalização obsoleta de um worker lento não sobrescreve a reivindicação seguinte", async () => {
     await enq("revoke_downloads", { stale: true }, null, T0);
     const id = (await newest("revoke_downloads")).id;
-    const later = at(11 * 60);
-    const fail = async () => { throw new Error("falha"); };
-    await runDueJobs(
-      {
-        revoke_downloads: async () => {
-          // O worker A está lento: 11 min depois outro worker recupera o job, reivindica e falha.
-          await runDueJobs({ revoke_downloads: fail }, 1, later);
-          const mid = await row(id);
-          expect([mid.status, mid.attempts]).toEqual(["queued", 2]);
-          expect(mid.runAt.getTime()).toBe(later.getTime() + 300_000);
-          await fail(); // A termina tarde e também falha: não pode mexer na linha
+    const lockB = at(11 * 60);
+    for (const outcome of ["done", "throw"] as const) {
+      await t.ownerDb.update(job).set({ status: "queued", attempts: 0, lockedAt: null, runAt: T0 }).where(eq(job.id, id));
+      await runDueJobs(
+        {
+          revoke_downloads: async () => {
+            // Worker A está lento; o worker B já reivindicou o job (ainda running, claim mais novo).
+            await t.ownerDb.update(job).set({ status: "running", lockedAt: lockB, attempts: 2 }).where(eq(job.id, id));
+            if (outcome === "throw") throw new Error("falha tardia");
+          },
         },
-      },
-      1,
-      T0,
-    );
-    const r = await row(id);
-    expect([r.status, r.attempts, r.lockedAt]).toEqual(["queued", 2, null]);
-    expect(r.runAt.getTime()).toBe(later.getTime() + 300_000);
+        1,
+        T0,
+      );
+      const r = await row(id);
+      expect([r.status, r.attempts, r.lockedAt?.getTime(), r.lastError]).toEqual(["running", 2, lockB.getTime(), null]);
+    }
     await t.ownerDb.update(job).set({ status: "done" }).where(eq(job.id, id));
   });
 
