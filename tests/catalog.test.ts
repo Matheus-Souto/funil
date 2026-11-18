@@ -8,10 +8,11 @@ import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
 import { auditLog, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
-import { createProduct, decodePdfBase64, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
+import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { env } from "@/lib/env";
 import { createTestDb, seedStore, type TestDb } from "./db";
+import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -26,15 +27,14 @@ const traffic: Actor = { kind: "user", userId: "u2", role: "traffic" };
 const support: Actor = { kind: "user", userId: "u3", role: "support" };
 const pub: Actor = { kind: "public" };
 
-const pdfBytes = (extra = 16) => Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(extra, 65)]);
-const b64 = (b: Buffer) => b.toString("base64");
+const pdfBytes = () => VALID_PDF;
 
 const call = <I, O>(a: Parameters<typeof runAction<I, O>>[0], storeId: string, actor: Actor, raw: unknown, origin: Origin = "panel") =>
   runAction(a, { storeId, actor, origin }, raw);
 const code = async (p: Promise<unknown>) => ((await p.catch((e) => e)) as ActionError).code;
 
 async function mkProduct(storeId: string, name = "Produto") {
-  return call(createProduct, storeId, owner, { name, fileName: `${name}.pdf`, fileBase64: b64(pdfBytes()) });
+  return call(createProduct, storeId, owner, { name, fileName: `${name}.pdf`, file: pdfBytes() });
 }
 const offerInput = (productId: string, over: Record<string, unknown> = {}) => ({
   slug: "oferta-1",
@@ -77,56 +77,61 @@ describe("storage", () => {
 describe("products", () => {
   test("bytes que não são PDF viram invalid_input e nada é criado", async () => {
     const { storeId } = await seedStore();
-    const bad = { name: "X", fileName: "x.pdf", fileBase64: Buffer.from("não sou pdf").toString("base64") };
+    const bad = { name: "X", fileName: "x.pdf", file: Buffer.from("não sou pdf") };
     expect(await code(call(createProduct, storeId, owner, bad))).toBe("invalid_input");
     expect(await call(listProducts, storeId, owner, {})).toEqual([]);
   });
 
-  test("decodePdfBase64: limites de assinatura, tamanho e base64", () => {
-    expect(decodePdfBase64(b64(pdfBytes()))).toBeInstanceOf(Uint8Array);
-    expect(decodePdfBase64("!!!")).toBeNull();
-    expect(decodePdfBase64("")).toBeNull();
-    const limit = Buffer.alloc(52_428_800, 65);
-    limit.write("%PDF-");
-    expect(decodePdfBase64(b64(limit))?.length).toBe(52_428_800);
+  test("checkPdfBytes: assinatura, tamanho, estrutura, criptografia e páginas", async () => {
+    expect(await checkPdfBytes(VALID_PDF)).toBeNull();
+    expect(await checkPdfBytes(new Uint8Array())).toMatch(/PDF/);
+    expect(await checkPdfBytes(Buffer.from("texto qualquer"))).toMatch(/PDF/);
     const over = Buffer.alloc(52_428_801, 65);
     over.write("%PDF-");
-    expect(decodePdfBase64(b64(over))).toBeNull();
+    expect(await checkPdfBytes(over)).toMatch(/50 MB/);
+    expect(await checkPdfBytes(CORRUPT_PDF)).toMatch(/corrompido|inválido/i);
+    expect(await checkPdfBytes(ENCRYPTED_PDF)).toMatch(/protegido|criptograf|senha/i);
+    expect(await checkPdfBytes(await makePdf(500))).toBeNull();
+    expect(await checkPdfBytes(await makePdf(501))).toMatch(/500/);
   });
 
-  test("cria, grava o arquivo no armazenamento e auditoria não guarda o base64", async () => {
+  test("PDF criptografado, corrompido após %PDF- ou com páginas demais é invalid_input com mensagem clara e nada é criado", async () => {
     const { storeId } = await seedStore();
-    const raw = b64(pdfBytes(40));
-    const p = await call(createProduct, storeId, owner, { name: "Curso", fileName: "curso.pdf", fileBase64: raw });
-    expect(p.fileSize).toBe(pdfBytes(40).length);
+    for (const file of [ENCRYPTED_PDF, CORRUPT_PDF, await makePdf(501)]) {
+      const err = (await call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", file }).catch((e) => e)) as ActionError;
+      expect(err.code).toBe("invalid_input");
+      expect(err.message).toMatch(/PDF/);
+    }
+    expect(await call(listProducts, storeId, owner, {})).toEqual([]);
+    const dir = join(env.DATA_DIR, "files", "products", storeId);
+    expect(await readdir(dir).catch(() => [] as string[])).toEqual([]);
+  });
+
+  test("cria, grava o arquivo no armazenamento e a auditoria não guarda os bytes", async () => {
+    const { storeId } = await seedStore();
+    const raw = await makePdf(3);
+    const p = await call(createProduct, storeId, owner, { name: "Curso", fileName: "curso.pdf", file: raw });
+    expect(p.fileSize).toBe(raw.length);
     expect(p).not.toHaveProperty("fileKey");
     const [row] = await withStore(storeId, (tx) => tx.select().from(product).where(eq(product.id, p.id)));
     expect(row!.fileKey).toBe(`products/${storeId}/${p.id}.pdf`);
-    expect(Buffer.from((await storage.get(row!.fileKey))!).equals(pdfBytes(40))).toBe(true);
+    expect(Buffer.from((await storage.get(row!.fileKey))!).equals(Buffer.from(raw))).toBe(true);
     const audits = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "products.create")));
     expect(audits.length).toBe(1);
-    expect(JSON.stringify(audits[0]!.input)).not.toContain(raw.slice(0, 20));
-    expect((audits[0]!.input as { name: string }).name).toBe("Curso");
+    expect(audits[0]!.input).toEqual({ name: "Curso", fileName: "curso.pdf", fileSize: raw.length });
   });
 
-  test("base64 acima do máximo é invalid_input sem decodificar", async () => {
+  test("a ação aceita bytes, não base64 em texto (fileBase64 antigo é invalid_input)", async () => {
     const { storeId } = await seedStore();
-    const spy = spyOn(Buffer, "from");
-    try {
-      const tooBig = "A".repeat(Math.ceil(52_428_800 / 3) * 4 + 4);
-      expect(await code(call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", fileBase64: tooBig }))).toBe("invalid_input");
-      expect(spy.mock.calls.some((c) => (c as unknown[])[1] === "base64")).toBe(false);
-    } finally {
-      spy.mockRestore();
-    }
-    expect(await call(listProducts, storeId, owner, {})).toEqual([]);
+    const old = { name: "X", fileName: "x.pdf", fileBase64: Buffer.from(VALID_PDF).toString("base64") };
+    expect(await code(call(createProduct, storeId, owner, old))).toBe("invalid_input");
   });
 
   test("falha ao gravar o arquivo desfaz a transação (sem linha de produto)", async () => {
     const { storeId } = await seedStore();
     const spy = spyOn(storage, "put").mockRejectedValueOnce(new Error("disco cheio"));
     try {
-      expect(await call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", fileBase64: b64(pdfBytes()) }).catch((e) => e.message)).toBe("disco cheio");
+      expect(await call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", file: pdfBytes() }).catch((e) => e.message)).toBe("disco cheio");
     } finally {
       spy.mockRestore();
     }
@@ -137,7 +142,7 @@ describe("products", () => {
     const { storeId } = await seedStore();
     // NUL no ator faz o insert da auditoria (jsonb) falhar depois de run ter gravado o arquivo.
     const broken: Actor = { kind: "user", userId: "a\u0000b", role: "owner" };
-    const err = await call(createProduct, storeId, broken, { name: "X", fileName: "x.pdf", fileBase64: b64(pdfBytes()) }).catch((e) => e);
+    const err = await call(createProduct, storeId, broken, { name: "X", fileName: "x.pdf", file: pdfBytes() }).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(await call(listProducts, storeId, owner, {})).toEqual([]);
     const dir = join(env.DATA_DIR, "files", "products", storeId);
@@ -146,7 +151,7 @@ describe("products", () => {
 
   test("traffic e support não criam; support lê", async () => {
     const { storeId } = await seedStore();
-    const input = { name: "X", fileName: "x.pdf", fileBase64: b64(pdfBytes()) };
+    const input = { name: "X", fileName: "x.pdf", file: pdfBytes() };
     expect(await code(call(createProduct, storeId, traffic, input))).toBe("forbidden");
     expect(await code(call(createProduct, storeId, support, input))).toBe("forbidden");
     await mkProduct(storeId);

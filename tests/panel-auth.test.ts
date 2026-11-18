@@ -89,3 +89,31 @@ describe("painel exige sessão em cada página e server action", () => {
     });
   }
 });
+
+describe("rotas do painel exigem sessão", () => {
+  const API_DIR = join(import.meta.dir, "..", "src", "app", "admin", "api");
+  const routes = [...new Glob("**/route.ts").scanSync(API_DIR)].sort();
+
+  test("há rotas na varredura", () => {
+    expect(routes).toContain("products/upload/route.ts");
+  });
+
+  for (const f of routes) {
+    test(`${f}: cada método HTTP redireciona sem sessão e antes de ler o corpo`, async () => {
+      const mod = (await import(join(API_DIR, f))) as Record<string, unknown>;
+      const methods = Object.keys(mod).filter((k) => /^(GET|POST|PUT|PATCH|DELETE)$/.test(k));
+      expect(methods.length).toBeGreaterThan(0);
+      for (const m of methods) {
+        let read = false;
+        const body = new ReadableStream({ pull: () => void (read = true) }, { highWaterMark: 0 });
+        const req = new Request("http://localhost/x?name=a&fileName=a.pdf", {
+          method: m === "GET" ? "GET" : "POST",
+          headers: { "content-type": "application/pdf" },
+          ...(m === "GET" ? {} : { body, duplex: "half" }),
+        } as RequestInit);
+        expect(await redirectTarget(() => (mod[m] as (r: Request) => unknown)(req)), `${m} ${f}`).toBe("/admin/login");
+        expect(read).toBe(false);
+      }
+    });
+  }
+});

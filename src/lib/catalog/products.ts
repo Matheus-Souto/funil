@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EncryptedPDFError, PDFDocument } from "pdf-lib";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
@@ -6,25 +7,33 @@ import { offer, product } from "@/lib/db/schema";
 import { storage } from "@/lib/storage";
 
 export const MAX_PDF_BYTES = 52_428_800;
-const MAX_BASE64_CHARS = Math.ceil(MAX_PDF_BYTES / 3) * 4;
-const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+export const MAX_PDF_PAGES = 500;
 
-/** Decodifica base64 e valida PDF (`%PDF-`, até 50 MB). Devolve null se inválido. */
-export function decodePdfBase64(b64: string): Uint8Array | null {
-  if (b64.length === 0 || b64.length > MAX_BASE64_CHARS || b64.length % 4 !== 0 || !BASE64.test(b64)) return null;
-  const bytes = Buffer.from(b64, "base64");
-  if (bytes.length === 0 || bytes.length > MAX_PDF_BYTES) return null;
-  if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") return null;
-  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length);
+/**
+ * Única regra de validação do PDF (a rota de upload e a ação chamam o mesmo caminho).
+ * Devolve a mensagem de erro para o usuário, ou `null` se o arquivo serve.
+ */
+export async function checkPdfBytes(bytes: Uint8Array): Promise<string | null> {
+  if (bytes.length === 0 || Buffer.from(bytes.subarray(0, 5)).toString("latin1") !== "%PDF-") {
+    return "Envie um arquivo PDF válido.";
+  }
+  if (bytes.length > MAX_PDF_BYTES) return "O PDF passa de 50 MB.";
+  let pages: number;
+  try {
+    // getPageCount também lança em PDF sem árvore de páginas; qualquer falha aqui é "corrompido".
+    pages = (await PDFDocument.load(bytes, { updateMetadata: false })).getPageCount();
+  } catch (e) {
+    if (e instanceof EncryptedPDFError || (e instanceof Error && /encrypted/i.test(e.message))) {
+      return "O PDF está protegido por senha ou criptografado. Envie uma versão sem proteção.";
+    }
+    return "O PDF está corrompido ou tem estrutura inválida. Gere o arquivo de novo e envie outra vez.";
+  }
+  if (pages < 1) return "O PDF não tem páginas.";
+  if (pages > MAX_PDF_PAGES) return `O PDF tem ${pages} páginas; o máximo é ${MAX_PDF_PAGES}.`;
+  return null;
 }
 
-const pdfBase64 = z.string().max(MAX_BASE64_CHARS);
-
-/** Tamanho decodificado aproximado, sem decodificar (para auditoria). */
-function base64Size(s: string): number {
-  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor((s.length * 3) / 4) - pad);
-}
+const pdfBytes = z.instanceof(Uint8Array);
 
 const fileKeyFor = (storeId: string, productId: string) => `products/${storeId}/${productId}.pdf`;
 
@@ -42,14 +51,18 @@ const view = {
 
 export const createProduct = defineAction({
   name: "products.create",
-  description: "Cria um produto digital a partir de um PDF (base64).",
-  input: z.object({ name, fileName, fileBase64: pdfBase64 }),
+  description: "Cria um produto digital a partir de um PDF (bytes; chega pela rota de upload autenticada).",
+  input: z.object({ name, fileName, file: pdfBytes }),
   permission: "products.write",
   // O arquivo nunca vai para a auditoria: só nome, nome do arquivo e tamanho.
-  auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: base64Size(i.fileBase64) }),
+  auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: i.file.length }),
+  // Validação do PDF (CPU) antes de abrir a transação.
+  async prepare(_call, input) {
+    const problem = await checkPdfBytes(input.file);
+    if (problem) throw new ActionError("invalid_input", problem);
+  },
   async run(ctx, input) {
-    const bytes = decodePdfBase64(input.fileBase64);
-    if (!bytes) throw new ActionError("invalid_input", "Envie um PDF válido de até 50 MB");
+    const bytes = input.file;
     const productId = randomUUID();
     const fileKey = fileKeyFor(ctx.storeId, productId);
     const [row] = await ctx.tx

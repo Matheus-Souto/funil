@@ -1,3 +1,4 @@
+import { VALID_PDF } from "./pdf-fixtures";
 import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
@@ -9,7 +10,7 @@ import { seedStore } from "./db";
 import { createFakeAsaas, type FakeAsaas } from "./fakes/asaas";
 
 export const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
-const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(16, 65)]).toString("base64");
+const pdf = VALID_PDF;
 export const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 /** Loja com Asaas conectado (via ação, contra o fake) e uma oferta Pix automático. */
@@ -18,7 +19,7 @@ export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990, opts: { 
   const { storeId } = await seedStore();
   const call = { storeId, actor: owner, origin: "panel" as const };
   const saved = await runAction(saveAsaas, call, { env: "sandbox", apiKey: fake.apiKey });
-  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", fileBase64: pdf });
+  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", file: pdf });
   const offer = await runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",

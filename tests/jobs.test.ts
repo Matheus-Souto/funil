@@ -1,3 +1,4 @@
+import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq, inArray, sql } from "drizzle-orm";
 import { runAction } from "@/lib/actions/core";
@@ -187,10 +188,10 @@ describe("runDueJobs", () => {
 });
 
 describe("expire_orders", () => {
-  const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(16, 65)]).toString("base64");
+  const pdf = VALID_PDF;
   async function seedOffer(storeId: string) {
     const call = { storeId, actor: { kind: "user", userId: "u", role: "owner" } as const, origin: "panel" as const };
-    const p = await runAction(createProduct, call, { name: "P", fileName: "p.pdf", fileBase64: pdf });
+    const p = await runAction(createProduct, call, { name: "P", fileName: "p.pdf", file: pdf });
     return runAction(createOffer, call, { slug: "oferta", name: "O", productId: p.id, priceCents: 990, methods: ["pix"], pixMode: "manual" });
   }
   const mk = async (storeId: string, offerId: string, expiresAt: Date | null, status: string) => {

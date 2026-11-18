@@ -1,3 +1,4 @@
+import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
@@ -23,12 +24,12 @@ afterAll(async () => {
 
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
 const support: Actor = { kind: "user", userId: "u2", role: "support" };
-const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(16, 65)]).toString("base64");
+const pdf = VALID_PDF;
 const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 async function seedOffer(storeId: string, priceCents = 990, pixMode: "manual" | "asaas" = "manual") {
   const call = { storeId, actor: owner, origin: "panel" as const };
-  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", fileBase64: pdf });
+  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", file: pdf });
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
