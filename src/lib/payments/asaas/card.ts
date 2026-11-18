@@ -16,14 +16,15 @@
 // permitir, conferimos no Asaas (GET /payments?externalReference=<pedido>): paga -> liquida pelo caminho do webhook;
 // em análise -> recusa; nenhuma -> segue; consulta falhou -> recusa (fail closed).
 import { createHash } from "node:crypto";
-import { and, eq, gt, isNull, lte, or } from "drizzle-orm";
+import { and, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, offer, orders, payment } from "@/lib/db/schema";
+import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
-import { checkCardFingerprint, checkRateLimit, hadRecentEvent, recordEvent } from "@/lib/payments/ratelimit";
+import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
 import { verifyTurnstile } from "@/lib/payments/turnstile";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
 import { ensureAsaasCustomer } from "./pix";
@@ -31,18 +32,28 @@ import { applyAsaasPayment, asaasPaymentInput, mapAsaasStatus } from "./webhook"
 
 /** IP desconhecido (sem proxy confiável o app não lê X-Forwarded-For): sem limite por IP; valem e-mail e cartão. */
 export const UNKNOWN_IP = "unknown";
+export const UNAVAILABLE_MESSAGE = "Pagamento por cartão indisponível no momento. Tente pagar com Pix.";
 export const DECLINE_MESSAGE = "Pagamento recusado. Confira os dados ou pague com Pix.";
 export const UNKNOWN_MESSAGE = "Não foi possível confirmar o pagamento. Verifique em instantes antes de tentar de novo.";
 export const ANALYSIS_MESSAGE = "Já existe um pagamento em análise para este pedido. Aguarde alguns minutos.";
 /** Cobrança no Asaas ainda sem desfecho (cartão em análise/autorizado): uma nova tentativa poderia cobrar em dobro. */
 const OPEN_STATUSES = new Set(["PENDING", "AUTHORIZED", "AWAITING_RISK_ANALYSIS"]);
-const BUSY_MESSAGE =
+export const BUSY_MESSAGE =
   "Já existe um pagamento com cartão em processamento para este pedido. Verifique em instantes antes de tentar de novo.";
 
 const CARD_TIMEOUT_MS = 60_000;
 const HOUR = 3600;
 export const LIMITS = { ip: 10, email: 5, card: 3 } as const;
-/** Depois de um resultado desconhecido, novas tentativas no mesmo pedido ficam bloqueadas por 2 min. */
+/**
+ * Disjuntor por loja: ≥ 10 recusas de cartão em 15 min ⇒ por 1 h toda tentativa de cartão da loja exige Turnstile
+ * (sem Turnstile configurado: no máximo 20 tentativas de cartão por hora na loja).
+ */
+export const BREAKER = { declines: 10, windowSec: 15 * 60, holdSec: 3600, capWithoutTurnstile: 20 } as const;
+/** Códigos de erro do Asaas que significam recusa do cartão (doc: "invalid_creditCard"). Os demais: integração. */
+const DECLINE_CODES = new Set(["invalid_creditCard"]);
+/** HTTP em que o Asaas rejeitou a requisição sem processá-la (sem cobrança): erro de integração/configuração. */
+const REJECTED_STATUSES = new Set([400, 401, 403, 404, 422, 429]);
+/** Depois de um resultado desconhecido, novas tentativas no mesmo pedido ficam bloqueadas por 2 min (contados do fim). */
 const UNKNOWN_BLOCK_MS = 2 * 60_000;
 /** Tentativa `processing` mais velha que isto é tratada como abandonada (processo caiu no meio). */
 const PROCESSING_STALE_MS = 5 * 60_000;
@@ -52,6 +63,7 @@ const POLL_DEADLINE_MS = 65_000;
 /** Códigos internos em `card_attempt.error_message` (nunca texto do Asaas). */
 const NO_CHARGE = "sem_cobranca";
 const UNKNOWN = "resultado_desconhecido";
+const INTEGRATION = "erro_integracao";
 
 export interface CardPaymentInput {
   orderPublicId: string;
@@ -63,7 +75,9 @@ export interface CardPaymentInput {
   clientIp: string;
 }
 
-export type CardResult = { status: "approved"; message?: undefined } | { status: "declined" | "unknown"; message: string };
+export type CardResult =
+  | { status: "approved"; message?: undefined }
+  | { status: "declined" | "unknown" | "unavailable"; message: string };
 
 export interface CardDeps {
   /** Espera entre leituras quando outra requisição com a mesma chave está em andamento. */
@@ -71,6 +85,8 @@ export interface CardDeps {
   /** Relógio (limites, janela de bloqueio, dueDate e created_at da tentativa). */
   now?: () => Date;
   verifyTurnstile?: (token: string | undefined, ip: string) => Promise<boolean>;
+  /** Turnstile está configurado (padrão: TURNSTILE_SECRET definido). Decide o que o disjuntor da loja exige. */
+  turnstileConfigured?: boolean;
 }
 
 const digits = (s: string) => s.replace(/\D/g, "");
@@ -107,6 +123,7 @@ const schema = z.object({
 const approved = (): CardResult => ({ status: "approved" });
 const declined = (): CardResult => ({ status: "declined", message: DECLINE_MESSAGE });
 const unknown = (): CardResult => ({ status: "unknown", message: UNKNOWN_MESSAGE });
+const unavailable = (): CardResult => ({ status: "unavailable", message: UNAVAILABLE_MESSAGE });
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const defaultWait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -163,14 +180,20 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   }
   const limited = () => new ActionError("rate_limited", "Muitas tentativas de pagamento. Aguarde e tente mais tarde ou pague com Pix.");
   const knownIp = ip !== UNKNOWN_IP;
+  // IPv6 agrupado por /64: trocar de endereço dentro da mesma rede não escapa do limite.
+  const ipKey = ipRateKey(ip);
   const emailHash = sha256(pre.cust.email.toLowerCase());
+  const breakerKey = `card:breaker:store:${storeId}`;
   // IP desconhecido (sem proxy confiável): uma chave única para todos seria um limite global; vale só e-mail e cartão.
-  if (knownIp && !(await checkRateLimit(`card:ip:${ip}`, LIMITS.ip, HOUR, t))) throw limited();
+  if (knownIp && !(await checkRateLimit(`card:ip:${ipKey}`, LIMITS.ip, HOUR, t))) throw limited();
   if (!(await checkRateLimit(`card:email:${emailHash}`, LIMITS.email, HOUR, t))) throw limited();
   if (!checkCardFingerprint(input.card.number, LIMITS.card, HOUR, t.getTime())) throw limited();
+  const breakerOn = await hadRecentEvent(breakerKey, BREAKER.holdSec, t);
+  const turnstileOn = deps.turnstileConfigured ?? Boolean(env.TURNSTILE_SECRET);
+  if (breakerOn && !turnstileOn && !(await checkRateLimit(`card:store:${storeId}`, BREAKER.capWithoutTurnstile, HOUR, t))) throw limited();
   const recentDecline =
-    (knownIp && (await hadRecentEvent(`card:decline:ip:${ip}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
-  if (recentDecline) {
+    (knownIp && (await hadRecentEvent(`card:decline:ip:${ipKey}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
+  if (recentDecline || (breakerOn && turnstileOn)) {
     const verify = deps.verifyTurnstile ?? verifyTurnstile;
     if (!(await verify(input.turnstileToken, ip))) {
       throw new ActionError("rate_limited", "Confirme que você não é um robô e tente de novo.", { captcha: true });
@@ -221,7 +244,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     asaasCustomer = await ensureAsaasCustomer({ storeId }, order.customerId);
   } catch (e) {
     // Nenhuma cobrança foi enviada: libera o pedido para nova tentativa.
-    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: NO_CHARGE });
+    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: NO_CHARGE }, now());
     throw e;
   }
 
@@ -260,23 +283,39 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     // Só status e códigos de erro do Asaas: as descrições podem ecoar dados do cartão.
     const d = (e instanceof ActionError ? e.details : undefined) as Partial<AsaasErrorDetails> | undefined;
     const asaas = { status: d?.status ?? 0, errorCodes: d?.errorCodes ?? [] };
-    if (asaas.status === 400) {
-      await closeAttempt(storeId, attempt.id, { status: "declined" });
-      if (knownIp) await recordEvent(`card:decline:ip:${ip}`, t);
+    if (asaas.status === 400 && asaas.errorCodes.some((c) => DECLINE_CODES.has(c))) {
+      await closeAttempt(storeId, attempt.id, { status: "declined" }, now());
+      if (knownIp) await recordEvent(`card:decline:ip:${ipKey}`, t);
       await recordEvent(`card:decline:email:${emailHash}`, t);
+      await countStoreDecline(storeId, t);
       log.warn("cartão recusado pelo Asaas", { orderId: order.id, attemptId: attempt.id, asaas });
       return declined();
     }
-    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: UNKNOWN });
+    if (REJECTED_STATUSES.has(asaas.status)) {
+      // O Asaas rejeitou sem processar (sem cobrança): problema de integração/configuração da loja, não do cartão.
+      // Não conta como recusa (sem Turnstile nem disjuntor); fica visível para o vendedor no log, só com códigos.
+      await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: INTEGRATION }, now());
+      log.error("cartão: erro de integração com o Asaas; confira a conexão da loja", {
+        storeId,
+        orderId: order.id,
+        attemptId: attempt.id,
+        asaas,
+      });
+      return unavailable();
+    }
+    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: UNKNOWN }, now());
     log.warn("cartão: resultado desconhecido no Asaas; aguardando webhook", { orderId: order.id, attemptId: attempt.id, asaas });
     return unknown();
   }
 
   // 5. Transação curta: fecha a tentativa e aplica o resultado.
   try {
-    return await withStore(storeId, (tx) => applyCharge({ storeId, actor: { kind: "public" }, origin: "public", tx }, order.id, attempt.id, charged));
+    const resolvedAt = now();
+    return await withStore(storeId, (tx) =>
+      applyCharge({ storeId, actor: { kind: "public" }, origin: "public", tx }, order.id, attempt.id, charged, resolvedAt),
+    );
   } catch (e) {
-    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: UNKNOWN }).catch(() => undefined);
+    await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: UNKNOWN }, now()).catch(() => undefined);
     throw e;
   }
 }
@@ -287,7 +326,12 @@ function busyWhere(orderId: string, t: Date) {
     eq(cardAttempt.orderId, orderId),
     or(
       and(eq(cardAttempt.status, "processing"), gt(cardAttempt.createdAt, new Date(t.getTime() - PROCESSING_STALE_MS))),
-      and(eq(cardAttempt.status, "error"), eq(cardAttempt.errorMessage, UNKNOWN), gt(cardAttempt.createdAt, new Date(t.getTime() - UNKNOWN_BLOCK_MS))),
+      and(
+        eq(cardAttempt.status, "error"),
+        eq(cardAttempt.errorMessage, UNKNOWN),
+        // Conta do FIM da tentativa (a resposta pode ter demorado até 60 s); linhas antigas sem resolved_at: do início.
+        sql`coalesce(${cardAttempt.resolvedAt}, ${cardAttempt.createdAt}) > ${new Date(t.getTime() - UNKNOWN_BLOCK_MS).toISOString()}::timestamptz`,
+      ),
     ),
   );
 }
@@ -336,14 +380,29 @@ async function reconcileWithAsaas(storeId: string, orderId: string): Promise<"pa
   return "none";
 }
 
-async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged: AsaasPayment): Promise<CardResult> {
+/** Conta uma recusa na loja; na 10ª em 15 min liga o disjuntor por 1 h e avisa o vendedor (log). */
+async function countStoreDecline(storeId: string, t: Date): Promise<void> {
+  const key = `card:decline:store:${storeId}`;
+  const breakerKey = `card:breaker:store:${storeId}`;
+  await recordEvent(key, t);
+  const n = await countRecentEvents(key, BREAKER.windowSec, t);
+  if (n < BREAKER.declines || (await hadRecentEvent(breakerKey, BREAKER.holdSec, t))) return;
+  await recordEvent(breakerKey, t);
+  log.warn("loja com muitas recusas de cartão (possível teste de cartão): verificação anti-robô exigida por 1 h", {
+    storeId,
+    declines: n,
+    windowMin: BREAKER.windowSec / 60,
+  });
+}
+
+async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged: AsaasPayment, resolvedAt: Date): Promise<CardResult> {
   const { tx, storeId } = ctx;
   const [o] = await tx.select().from(orders).where(eq(orders.id, orderId)).for("update");
   const paid = mapAsaasStatus(String(charged.status)) === "paid";
   const installment = typeof charged.installment === "string" && charged.installment ? charged.installment : null;
   await tx
     .update(cardAttempt)
-    .set({ status: paid ? "approved" : "error", asaasPaymentId: charged.id, errorMessage: paid ? null : UNKNOWN })
+    .set({ status: paid ? "approved" : "error", asaasPaymentId: charged.id, errorMessage: paid ? null : UNKNOWN, resolvedAt })
     .where(eq(cardAttempt.id, attemptId));
 
   const rows = await tx.select().from(payment).where(and(eq(payment.orderId, orderId), eq(payment.provider, "asaas")));
@@ -386,11 +445,16 @@ async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged
   return approved();
 }
 
-async function closeAttempt(storeId: string, id: string, set: { status: "declined" | "error"; errorMessage?: string }): Promise<void> {
+async function closeAttempt(
+  storeId: string,
+  id: string,
+  set: { status: "declined" | "error"; errorMessage?: string },
+  resolvedAt: Date,
+): Promise<void> {
   await withStore(storeId, (tx) =>
     tx
       .update(cardAttempt)
-      .set({ status: set.status, errorMessage: set.errorMessage ?? null })
+      .set({ status: set.status, errorMessage: set.errorMessage ?? null, resolvedAt })
       .where(and(eq(cardAttempt.id, id), eq(cardAttempt.status, "processing"))),
   );
 }

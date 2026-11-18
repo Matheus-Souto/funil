@@ -1,11 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, job, orders, payment } from "@/lib/db/schema";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
-import { payWithCard, DECLINE_MESSAGE, UNKNOWN_IP, UNKNOWN_MESSAGE, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
+import {
+  payWithCard,
+  BUSY_MESSAGE,
+  DECLINE_MESSAGE,
+  UNAVAILABLE_MESSAGE,
+  UNKNOWN_IP,
+  UNKNOWN_MESSAGE,
+  type CardDeps,
+  type CardPaymentInput,
+} from "@/lib/payments/asaas/card";
 import { clientIpFrom, handleCardCheckout } from "@/lib/payments/asaas/card-http";
 import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
@@ -34,6 +43,7 @@ const DECLINE = "5184019740373151";
 const CVV = "987";
 const HOLDER = "TITULAR UNICO ZETA";
 
+const sha256hex = (v: string) => createHash("sha256").update(v).digest("hex");
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const fastDeps: CardDeps = { wait: tick };
 let ipSeq = 0;
@@ -284,7 +294,7 @@ describe("payWithCard: recusa e vazamento de dados (Review Focus 5)", () => {
   test("recusa cujo erro ecoa número e CVV: mensagem genérica; logs, resposta e tentativa sem dados do cartão", async () => {
     const { fake, call, storeId, offerId } = await setup();
     const o = await newCardOrder(storeId, offerId, email());
-    fake.fail("POST /payments", 400, `Cartão ${APPROVE} cvv ${CVV} validade 08/2034 de ${HOLDER} recusado`);
+    fake.fail("POST /payments", 400, `Cartão ${APPROVE} cvv ${CVV} validade 08/2034 de ${HOLDER} recusado`, "invalid_creditCard");
     const cap = captureOutput();
     let r;
     try {
@@ -449,6 +459,227 @@ describe("payWithCard: resultado desconhecido (timeout/rede)", () => {
     expect(a!.status).toBe("error");
     expect(a!.errorMessage).toBe("sem_cobranca");
   });
+});
+
+describe("payWithCard: janela de bloqueio conta do fim da tentativa", () => {
+  test("resposta perdida depois de 60 s: 90 s após o fim (150 s após o início) ainda recusa, sem consultar o Asaas", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const t0 = new Date();
+    let clock = t0;
+    fake.loseResponse("POST /payments");
+    setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+      if (init?.method === "POST" && String(i).endsWith("/payments")) clock = new Date(t0.getTime() + 60_000);
+      return fake.fetch(i, init);
+    }) as unknown as typeof fetch);
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => clock })).status).toBe("unknown");
+    const [a] = await attempts(storeId, o.id);
+    expect(a!.resolvedAt!.getTime()).toBe(t0.getTime() + 60_000);
+    fake.clearFailures();
+    setAsaasFetchForTests(fake.fetch);
+
+    const at = new Date(t0.getTime() + 150_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => at }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe(BUSY_MESSAGE);
+    expect(lookups(fake, o.id)).toHaveLength(0);
+    expect(paymentPosts(fake)).toHaveLength(1);
+
+    // passados 2 min do fim, segue para a conferência no Asaas (que acha a cobrança paga)
+    const after = new Date(t0.getTime() + 60_000 + 121_000);
+    expect(await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => after })).toEqual({ status: "approved" });
+    expect(lookups(fake, o.id)).toHaveLength(1);
+  });
+
+  test("recusa e aprovação também gravam resolved_at", async () => {
+    const { call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T15:00:00Z");
+    const o1 = await newCardOrder(storeId, offerId, email());
+    const o2 = await newCardOrder(storeId, offerId, email());
+    await payWithCard(call, input(o1.publicId), { ...fastDeps, now: () => t0 });
+    await payWithCard(call, input(o2.publicId, { number: DECLINE }), { ...fastDeps, now: () => t0 });
+    expect((await attempts(storeId, o1.id))[0]!.resolvedAt).toEqual(t0);
+    expect((await attempts(storeId, o2.id))[0]!.resolvedAt).toEqual(t0);
+  });
+});
+
+describe("payWithCard: 400 do Asaas — recusa do cartão x erro de integração", () => {
+  for (const [label, setFail] of [
+    ["código desconhecido", (f: FakeAsaas) => f.fail("POST /payments", 400, "O campo customer é inválido", "invalid_customer")],
+    ["código genérico", (f: FakeAsaas) => f.fail("POST /payments", 400, "Ação inválida")],
+    ["401 (chave revogada)", (f: FakeAsaas) => f.fail("POST /payments", 401, "Chave inválida", "invalid_access_token")],
+  ] as const) {
+    test(`${label}: "indisponível", não conta como recusa (sem Turnstile nem disjuntor), loga só o código`, async () => {
+      const { fake, call, storeId, offerId } = await setup();
+      const ip = nextIp();
+      const mail = email();
+      const o = await newCardOrder(storeId, offerId, mail);
+      setFail(fake);
+      let verified = 0;
+      const deps: CardDeps = {
+        ...fastDeps,
+        turnstileConfigured: true,
+        verifyTurnstile: async () => {
+          verified++;
+          return false;
+        },
+      };
+      const cap = captureOutput();
+      let r;
+      try {
+        r = await payWithCard(call, input(o.publicId, { clientIp: ip }), deps);
+      } finally {
+        cap.restore();
+      }
+      expect(r).toEqual({ status: "unavailable", message: UNAVAILABLE_MESSAGE });
+      expect(UNAVAILABLE_MESSAGE).toBe("Pagamento por cartão indisponível no momento. Tente pagar com Pix.");
+      const [a] = await attempts(storeId, o.id);
+      expect(a!.status).toBe("error");
+      expect(a!.errorMessage).toBe("erro_integracao");
+      expect(cap.text()).toContain("erro de integração");
+      expect(cap.text()).not.toContain("inválid");
+      const declines = await t.ownerDb.execute(
+        sql`select key from rate_limit where key = ${`card:decline:ip:${ip}`} or key = ${`card:decline:email:${sha256hex(mail)}`}
+            or key = ${`card:decline:store:${storeId}`} or key = ${`card:breaker:store:${storeId}`}`,
+      );
+      expect(declines).toHaveLength(0);
+      // nova tentativa no mesmo pedido, mesmo IP: sem bloqueio, sem conferência, sem Turnstile
+      fake.clearFailures();
+      expect((await payWithCard(call, input(o.publicId, { clientIp: ip }), deps)).status).toBe("approved");
+      expect(verified).toBe(0);
+      expect(lookups(fake, o.id)).toHaveLength(0);
+    });
+  }
+
+  test("400 sem lista de códigos também é erro de integração", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+      if (init?.method === "POST" && String(i).endsWith("/payments")) return Response.json({ message: "bad" }, { status: 400 });
+      return fake.fetch(i, init);
+    }) as unknown as typeof fetch);
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("unavailable");
+  });
+
+  test("invalid_creditCard é recusa do cartão", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    expect(await payWithCard(call, input(o.publicId), fastDeps)).toEqual({ status: "declined", message: DECLINE_MESSAGE });
+  });
+});
+
+describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
+  test("IPv6: endereços diferentes na mesma /64 contam juntos no limite por IP", async () => {
+    const { call, storeId, offerId } = await setup();
+    for (let i = 0; i < 10; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const ip = `2001:db8:77:${i % 2 === 0 ? "0" : "0000"}:${(i + 1).toString(16)}::${i + 7}`;
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: `43000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:0db8:0077:0000:ffff:ffff:ffff:ffff", number: "4300000000099999" }), fastDeps).catch(
+      (x: unknown) => x,
+    );
+    expect((e as ActionError).code).toBe("rate_limited");
+    const other = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(other.publicId, { clientIp: "2001:db8:77:1::1", number: "4300000000088888" }), fastDeps)).status).toBe(
+      "approved",
+    );
+  });
+
+  test("IPv6: recusa de um endereço exige Turnstile de outro endereço da mesma /64", async () => {
+    const { call, storeId, offerId } = await setup();
+    const deps: CardDeps = { ...fastDeps, verifyTurnstile: async (tok) => tok === "ok" };
+    const o1 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: "2001:db8:99:5::1", number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: "2001:db8:99:5:abcd::42" }), deps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    expect(e.details).toEqual({ captcha: true });
+  });
+
+  async function tripBreaker(fake: FakeAsaas, call: { storeId: string }, storeId: string, offerId: string, now: Date, deps: CardDeps) {
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    for (let i = 0; i < 10; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { number: `44100000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => now });
+      expect(r.status).toBe("declined");
+    }
+    fake.clearFailures();
+  }
+
+  test("disjuntor: 10 recusas na loja em 15 min exigem Turnstile de todos por 1 h; avisa o vendedor; depois volta ao normal", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T16:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: true, verifyTurnstile: async (tok) => tok === "ok" };
+    const cap = captureOutput();
+    try {
+      await tripBreaker(fake, call, storeId, offerId, t0, deps);
+    } finally {
+      cap.restore();
+    }
+    const warn = cap
+      .text()
+      .split("\n")
+      .find((l) => l.includes("muitas recusas de cartão"));
+    expect(warn).toBeDefined();
+    // (o storeId vai no log, mas o redact de PAN pode mascarar trechos de UUID com muitos dígitos: não comparar aqui)
+    expect(JSON.parse(warn!).data).toMatchObject({ declines: 10, windowMin: 15 });
+
+    const later = new Date(t0.getTime() + 5 * 60_000);
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o.publicId), { ...deps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    expect(e.details).toEqual({ captcha: true });
+    expect((await payWithCard(call, input(o.publicId, { turnstileToken: "ok" }), { ...deps, now: () => later })).status).toBe("approved");
+
+    // outra loja não é afetada
+    const b = await setup();
+    const ob = await newCardOrder(b.storeId, b.offerId, email());
+    expect((await payWithCard(b.call, input(ob.publicId, { number: "4410000000077777" }), { ...deps, now: () => later })).status).toBe("approved");
+
+    // passada 1 h do disparo, volta ao normal
+    const reset = new Date(t0.getTime() + 61 * 60_000);
+    const o2 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o2.publicId, { number: "4410000000066666" }), { ...deps, now: () => reset })).status).toBe("approved");
+  });
+
+  test("disjuntor: 9 recusas não disparam; recusas fora da janela de 15 min não somam", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T17:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: true, verifyTurnstile: async (tok) => tok === "ok" };
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    for (let i = 0; i < 18; i++) {
+      // 9 recusas em t0 e 9 em t0 + 16 min: nunca 10 dentro de 15 min
+      const at = new Date(t0.getTime() + (i < 9 ? 0 : 16 * 60_000));
+      const o = await newCardOrder(storeId, offerId, email());
+      expect((await payWithCard(call, input(o.publicId, { number: `44200000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => at })).status).toBe(
+        "declined",
+      );
+    }
+    fake.clearFailures();
+    const o = await newCardOrder(storeId, offerId, email());
+    const at = new Date(t0.getTime() + 17 * 60_000);
+    expect((await payWithCard(call, input(o.publicId), { ...deps, now: () => at })).status).toBe("approved");
+  }, 30_000);
+
+  test("disjuntor sem Turnstile configurado: no máximo 20 tentativas de cartão por hora na loja", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T18:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: false };
+    await tripBreaker(fake, call, storeId, offerId, t0, deps);
+    const at = new Date(t0.getTime() + 60_000);
+    for (let i = 0; i < 20; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { number: `44300000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => at });
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { number: "4430000000099999" }), { ...deps, now: () => at }).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+  }, 30_000);
 });
 
 describe("payWithCard: limites e Turnstile", () => {
@@ -656,7 +887,67 @@ describe("Asaas (pendências da Task 9)", () => {
 describe("rota POST /api/checkout/card", () => {
   const store = { id: "", slug: "s", name: "Loja" };
   const req = (body: string, headers: Record<string, string> = {}, url = "http://127.0.0.1:3000/api/checkout/card") =>
-    new Request(url, { method: "POST", headers: { "content-type": "application/json", host: "127.0.0.1:3000", ...headers }, body });
+    new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000", ...headers },
+      body,
+    });
+  const noOrigin = (body: string, headers: Record<string, string> = {}) =>
+    new Request("http://127.0.0.1:3000/api/checkout/card", {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "127.0.0.1:3000", ...headers },
+      body,
+    });
+
+  test("POST entre sites: Content-Type e Origin (ou Sec-Fetch-Site) exigidos, 403 antes de qualquer trabalho", async () => {
+    let resolved = 0;
+    let paid = 0;
+    const opts = {
+      nodeEnv: "test",
+      resolveStore: async () => {
+        resolved++;
+        return store;
+      },
+      payWithCard: async () => {
+        paid++;
+        return { status: "approved" as const };
+      },
+    };
+    const body = JSON.stringify(input("p"));
+    const bad: Request[] = [
+      req(body, { "content-type": "text/plain" }),
+      req(body, { "content-type": "application/x-www-form-urlencoded" }),
+      req(body, { origin: "https://evil.example" }),
+      req(body, { origin: "http://127.0.0.1:3001" }),
+      req(body, { origin: "null" }),
+      noOrigin(body),
+      noOrigin(body, { "sec-fetch-site": "cross-site" }),
+      noOrigin(body, { "sec-fetch-site": "same-site" }),
+    ];
+    for (const r of bad) {
+      const res = await handleCardCheckout(r, opts);
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("forbidden_origin");
+    }
+    expect(resolved).toBe(0);
+    expect(paid).toBe(0);
+
+    expect((await handleCardCheckout(req(body), opts)).status).toBe(200);
+    expect((await handleCardCheckout(req(body, { "content-type": "application/json; charset=utf-8" }), opts)).status).toBe(200);
+    expect((await handleCardCheckout(noOrigin(body, { "sec-fetch-site": "same-origin" }), opts)).status).toBe(200);
+    expect(paid).toBe(3);
+  });
+
+  test("POST entre sites é recusado antes da repetição idempotente (não revela o resultado de outra requisição)", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const inp = input(o.publicId);
+    expect((await payWithCard(call, inp, fastDeps)).status).toBe("approved");
+    const opts = { nodeEnv: "test", resolveStore: async () => ({ ...store, id: storeId }) };
+    const res = await handleCardCheckout(req(JSON.stringify(inp), { origin: "https://evil.example" }), opts);
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain("approved");
+  });
 
   test("clientIpFrom: com proxy confiável, a entrada mais à direita; entradas forjadas à esquerda não mudam a chave", () => {
     for (const xff of ["203.0.113.4", "6.6.6.6, 203.0.113.4", "1.1.1.1, 2.2.2.2, 203.0.113.4"]) {
@@ -685,12 +976,22 @@ describe("rota POST /api/checkout/card", () => {
   test("produção exige HTTPS, exceto em loopback; com proxy confiável vale x-forwarded-proto", async () => {
     const pay = async () => ({ status: "approved" as const });
     const prod = { resolveStore: async () => store, nodeEnv: "production", payWithCard: pay, trustProxy: 0 };
-    const remote = req("{}", { host: "loja.example.com" }, "http://loja.example.com/api/checkout/card");
-    expect((await handleCardCheckout(remote, prod)).status).toBe(403);
+    const remote = req("{}", { host: "loja.example.com", origin: "http://loja.example.com" }, "http://loja.example.com/api/checkout/card");
+    const remoteRes = await handleCardCheckout(remote, prod);
+    expect(remoteRes.status).toBe(403);
+    expect((await remoteRes.json()).error).toBe("https_required");
     expect((await handleCardCheckout(req("{}"), prod)).status).toBe(200);
-    const proxied = req("{}", { host: "loja.example.com", "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.4" }, "http://loja.example.com/api/checkout/card");
+    const proxied = req(
+      "{}",
+      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.4" },
+      "http://loja.example.com/api/checkout/card",
+    );
     expect((await handleCardCheckout(proxied, { ...prod, trustProxy: 1 })).status).toBe(200);
-    const forged = req("{}", { host: "loja.example.com", "x-forwarded-proto": "https" }, "http://loja.example.com/api/checkout/card");
+    const forged = req(
+      "{}",
+      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https" },
+      "http://loja.example.com/api/checkout/card",
+    );
     expect((await handleCardCheckout(forged, prod)).status).toBe(403);
   });
 

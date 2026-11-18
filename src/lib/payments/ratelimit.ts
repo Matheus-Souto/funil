@@ -1,6 +1,7 @@
 // Limites contra teste de cartão. IP e e-mail ficam no Postgres (`rate_limit`, sem RLS, global entre lojas);
 // a impressão digital do cartão fica SÓ em memória (Map com expiração) e nunca é persistida nem logada.
 import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 import { and, eq, gt, lt, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { rateLimit } from "@/lib/db/schema";
@@ -94,4 +95,48 @@ function prune(nowMs: number): void {
 /** Só para testes. */
 export function resetCardFingerprintsForTests(): void {
   fingerprints.clear();
+}
+
+/** Soma os eventos de `key` nos últimos `withinSec` segundos (janela deslizante, precisão de 1 min). */
+export async function countRecentEvents(key: string, withinSec: number, now: Date = new Date()): Promise<number> {
+  const since = new Date(now.getTime() - withinSec * 1000);
+  const [row] = await db
+    .select({ n: sql<number>`coalesce(sum(${rateLimit.count}), 0)::int` })
+    .from(rateLimit)
+    .where(and(eq(rateLimit.key, key), gt(rateLimit.windowStart, since)));
+  return Number(row?.n ?? 0);
+}
+
+/** 8 grupos de 16 bits de um IPv6 (aceita `::` e IPv4 no fim); `null` se não for IPv6 válido. */
+function ipv6Groups(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  const v4 = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(s);
+  if (v4) {
+    const p = v4[2]!.split(".").map(Number);
+    if (p.some((n) => n > 255)) return null;
+    s = `${v4[1]}${((p[0]! << 8) | p[1]!).toString(16)}:${((p[2]! << 8) | p[3]!).toString(16)}`;
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const part = (x: string) => (x === "" ? [] : x.split(":"));
+  const head = part(halves[0]!);
+  const tail = halves.length === 2 ? part(halves[1]!) : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0) return null;
+  const all = [...head, ...Array<string>(fill).fill("0"), ...tail];
+  if (all.length !== 8 || all.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return all.map((g) => parseInt(g, 16));
+}
+
+/**
+ * Chave de limite por IP. IPv4: o próprio endereço. IPv6: canonicalizado e agrupado pela /64 (um cliente costuma
+ * receber a /64 inteira e trocar de endereço à vontade dentro dela). IPv4 mapeado (::ffff:a.b.c.d) vira o IPv4.
+ */
+export function ipRateKey(ip: string): string {
+  const v = ip.trim().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  if (isIP(v) === 4) return v;
+  const g = ipv6Groups(v);
+  if (!g) return v;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return `${g[6]! >> 8}.${g[6]! & 255}.${g[7]! >> 8}.${g[7]! & 255}`;
+  return `${g.slice(0, 4).map((x) => x.toString(16)).join(":")}::/64`;
 }

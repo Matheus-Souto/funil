@@ -71,6 +71,13 @@
       "when": 1795030703646,
       "tag": "0009_customer_asaas_account_key",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795031393587,
+      "tag": "0010_card_attempt_resolved_at",
+      "breakpoints": true
     }
   ]
 }

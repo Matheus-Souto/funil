@@ -20,6 +20,8 @@ export const cardAttempt = pgTable(
     asaasPaymentId: text("asaas_payment_id"),
     errorMessage: text("error_message"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Quando a tentativa saiu de `processing` (recusa, aprovação, erro). A janela de bloqueio conta daqui. */
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
   (t) => [
     check("card_attempt_status_check", sql`${t.status} in ('processing','approved','declined','error')`),

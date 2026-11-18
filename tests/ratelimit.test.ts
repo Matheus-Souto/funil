@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import {
+  countRecentEvents,
+  ipRateKey,
   checkCardFingerprint,
   checkRateLimit,
   hadRecentEvent,
@@ -52,6 +54,31 @@ describe("checkRateLimit (Postgres)", () => {
     expect(await hadRecentEvent(key, 3600, at("2026-11-18T09:30:00Z"))).toBe(true);
     expect(await hadRecentEvent(key, 3600, at("2026-11-18T09:59:00Z"))).toBe(true);
     expect(await hadRecentEvent(key, 3600, at("2026-11-18T10:01:00Z"))).toBe(false);
+  });
+});
+
+describe("ipRateKey", () => {
+  test("IPv4 inalterado; IPv6 canonicalizado e agrupado por /64", () => {
+    expect(ipRateKey("203.0.113.9")).toBe("203.0.113.9");
+    const k = "2001:db8:1:2::/64";
+    for (const ip of ["2001:db8:1:2::1", "2001:0DB8:0001:0002:ffff:ffff:ffff:ffff", "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "[2001:db8:1:2::9]"]) {
+      expect(ipRateKey(ip)).toBe(k);
+    }
+    expect(ipRateKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(ipRateKey("::1")).toBe("0:0:0:0::/64");
+    expect(ipRateKey("64:ff9b::192.0.2.1")).toBe("64:ff9b:0:0::/64");
+    expect(ipRateKey("2001:db8:1:3::1")).not.toBe(k);
+  });
+});
+
+describe("countRecentEvents", () => {
+  test("soma os eventos da janela deslizante", async () => {
+    const key = "card:decline:store:test";
+    const t0 = at("2026-11-18T08:00:00Z");
+    for (let i = 0; i < 3; i++) await recordEvent(key, t0);
+    await recordEvent(key, at("2026-11-18T08:10:00Z"));
+    expect(await countRecentEvents(key, 15 * 60, at("2026-11-18T08:14:00Z"))).toBe(4);
+    expect(await countRecentEvents(key, 15 * 60, at("2026-11-18T08:16:00Z"))).toBe(1);
   });
 });
 

@@ -51,7 +51,7 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
   // "METHOD /path" (prefixo): processa normalmente e depois perde a resposta (simula timeout com efeito no Asaas).
   const lost = new Set<string>();
   // Erros programados: "METHOD /path" (prefixo) -> resposta de erro.
-  const failures = new Map<string, { status: number; description: string }>();
+  const failures = new Map<string, { status: number; description: string; code?: string }>();
 
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -69,7 +69,7 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
     const key = `${req.method} ${path}`;
     // Falhas programadas casam por prefixo de "METHOD /path?query" (ex.: "GET /payments?" só pega a listagem).
     const full = `${key}${url.search}`;
-    for (const [prefix, f] of failures) if (full.startsWith(prefix)) return err(f.status, f.description);
+    for (const [prefix, f] of failures) if (full.startsWith(prefix)) return err(f.status, f.description, f.code);
     const res = await handle(key, body, url.searchParams);
     for (const prefix of lost) if (full.startsWith(prefix)) throw new TypeError("fetch failed");
     return res;
@@ -193,8 +193,9 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       if (!p) throw new Error(`cobrança desconhecida: ${id}`);
       p.value = value;
     },
-    fail(prefix: string, status: number, description: string) {
-      failures.set(prefix, { status, description });
+    /** Erro programado; `code` padrão "invalid_action" (recusa de cartão real: "invalid_creditCard"). */
+    fail(prefix: string, status: number, description: string, code?: string) {
+      failures.set(prefix, { status, description, code });
     },
     clearFailures: () => {
       failures.clear();

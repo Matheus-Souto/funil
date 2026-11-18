@@ -72,9 +72,33 @@ function isLoopbackHost(host: string): boolean {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
 
+/**
+ * Só aceita POST do próprio checkout: `Content-Type: application/json` (não é "simple request": um formulário de outro
+ * site não consegue enviá-lo sem preflight) e `Origin` igual à origem da loja (o host da requisição, que identifica a
+ * loja), ou `Sec-Fetch-Site: same-origin` quando o navegador não manda Origin.
+ */
+function sameOriginJson(headers: Headers, trustProxy: number): boolean {
+  const type = (headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") return false;
+  const origin = headers.get("origin");
+  if (origin === null) return headers.get("sec-fetch-site") === "same-origin";
+  const host = headers.get("host");
+  if (!host) return false;
+  try {
+    const expected = new URL(`${isHttps(headers, trustProxy) ? "https" : "http"}://${host}`).origin;
+    return new URL(origin).origin === expected;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleCardCheckout(req: Request, opts: CardHttpOptions = {}): Promise<Response> {
   const nodeEnv = opts.nodeEnv ?? process.env.NODE_ENV;
   const trustProxy = opts.trustProxy ?? env.TRUST_PROXY;
+  // Antes de qualquer trabalho (loja, corpo, repetição idempotente): POST de outro site nunca chega ao pagamento.
+  if (!sameOriginJson(req.headers, trustProxy)) {
+    return json(403, { error: "forbidden_origin", message: "Requisição recusada." });
+  }
   const host = req.headers.get("host") ?? "";
   if (nodeEnv === "production" && !isHttps(req.headers, trustProxy) && !isLoopbackHost(host)) {
     return json(403, { error: "https_required", message: "Use uma conexão segura (HTTPS) para pagar com cartão." });
