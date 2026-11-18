@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "payment_order_open_asaas_unique" ON "payment" USING btree ("order_id") WHERE "payment"."provider" = 'asaas' and "payment"."status" = 'PENDING';

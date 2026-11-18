@@ -105,6 +105,10 @@ export const payment = pgTable(
     // Pagamento manual não tem provider_id; a unicidade só vale quando há id do provedor.
     uniqueIndex("payment_provider_id_unique").on(t.provider, t.providerId).where(sql`${t.providerId} is not null`),
     index("payment_order_idx").on(t.orderId),
+    // No máximo uma cobrança Asaas ainda aberta (PENDING) por pedido: chamadas simultâneas não criam duas.
+    uniqueIndex("payment_order_open_asaas_unique")
+      .on(t.orderId)
+      .where(sql`${t.provider} = 'asaas' and ${t.status} = 'PENDING'`),
   ],
 );
 

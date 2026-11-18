@@ -28,7 +28,7 @@ async function setup(price = 990, shared?: ReturnType<typeof createFakeAsaas>) {
   const fake = shared ?? createFakeAsaas();
   const s = await seedAsaasStore(fake, price);
   const order = await newAsaasOrder(s.storeId, s.offerId);
-  await withStore(s.storeId, (tx) => startAsaasPix(ctxOf(s.storeId, tx), order.id));
+  await startAsaasPix({ storeId: s.storeId }, order.id);
   const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
   return { fake, ...s, order, paymentId: pay!.providerId! };
 }
@@ -187,6 +187,66 @@ describe("efeito do webhook (sempre reconsulta)", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ origin: "webhook", ok: true });
     expect(rows[0]!.actor).toEqual({ kind: "system" });
+  });
+});
+
+describe("cobrança órfã (existe no Asaas, sem linha de pagamento no pedido)", () => {
+  /** Segunda cobrança no Asaas com o mesmo externalReference, que o banco desconhece. */
+  function orphan(s: Awaited<ReturnType<typeof setup>>, status: string): string {
+    const id = `pay_orfa_${Math.random().toString(36).slice(2, 10)}`;
+    s.fake.payments.set(id, { id, status, value: 9.9, externalReference: s.order.id, customer: "cus_x", billingType: "PIX", dueDate: "2099-01-01" });
+    return id;
+  }
+  const rowsOf = (orderId: string) => t.ownerDb.select().from(payment).where(eq(payment.orderId, orderId));
+  async function warnings(fn: () => Promise<unknown>): Promise<string> {
+    const orig = process.stdout.write.bind(process.stdout);
+    let out = "";
+    process.stdout.write = ((c: string | Uint8Array) => ((out += String(c)), true)) as typeof process.stdout.write;
+    try {
+      await fn();
+    } finally {
+      process.stdout.write = orig;
+    }
+    return out;
+  }
+
+  test("OVERDUE da órfã não expira o pedido vivo nem cria linha", async () => {
+    const s = await setup();
+    const id = orphan(s, "OVERDUE");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id))).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("pending");
+    expect(await rowsOf(s.order.id)).toHaveLength(1);
+  });
+
+  test("órfã paga com o pedido já pago: registra, avisa 'pagamento em dobro' e não entrega de novo", async () => {
+    const s = await setup();
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId));
+    const id = orphan(s, "RECEIVED");
+    const out = await warnings(async () => expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id))).status).toBe(200));
+    expect(out).toContain("pagamento em dobro");
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect((await rowsOf(s.order.id)).map((r) => r.providerId)).toContain(id);
+    expect(await jobsOf(s.order.id, "deliver_order")).toHaveLength(1);
+  });
+
+  test("órfã paga com o pedido pendente: o dinheiro chegou, o pedido vira paid (uma entrega)", async () => {
+    const s = await setup();
+    const id = orphan(s, "RECEIVED");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id));
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id));
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect(await jobsOf(s.order.id, "deliver_order")).toHaveLength(1);
+  });
+
+  test("órfã paga com o pedido expirado: libera o pedido", async () => {
+    const s = await setup();
+    s.fake.setStatus(s.paymentId, "OVERDUE");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId));
+    expect(await statusOf(s.order.id)).toBe("expired");
+    const id = orphan(s, "RECEIVED");
+    await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(id));
+    expect(await statusOf(s.order.id)).toBe("paid");
   });
 });
 

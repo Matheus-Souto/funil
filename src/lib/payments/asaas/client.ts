@@ -56,7 +56,7 @@ function errorMessage(status: number, body: unknown): string {
 export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?: typeof fetch }) {
   const doFetch = opts.fetch ?? asaasFetchOverride ?? fetch;
 
-  async function call<T>(method: "GET" | "POST", path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
     let res: Response;
     try {
       res = await doFetch(`${baseUrl(opts.env)}${path}`, {
@@ -93,6 +93,7 @@ export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?:
     getPayment: (id: string) => call<AsaasPayment>("GET", `/payments/${encodeURIComponent(id)}`),
     getPixQrCode: (id: string) =>
       call<{ encodedImage: string; payload: string; expirationDate: string }>("GET", `/payments/${encodeURIComponent(id)}/pixQrCode`),
+    deletePayment: (id: string) => call<{ deleted: boolean }>("DELETE", `/payments/${encodeURIComponent(id)}`),
     refundPayment: (id: string) => call<AsaasPayment>("POST", `/payments/${encodeURIComponent(id)}/refund`, {}),
     getBalance: () => call<{ balance: number }>("GET", "/finance/balance"),
   };

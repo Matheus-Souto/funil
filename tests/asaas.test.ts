@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { auditLog, customer, integration, job, orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { transitionOrder } from "@/lib/orders/state";
 import { createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { isUniqueViolation } from "@/lib/payments/manual";
 import { ensureAsaasCustomer, saveAsaas, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { refundOrder } from "@/lib/payments/refund";
 import { mapAsaasStatus } from "@/lib/payments/asaas/webhook";
@@ -75,7 +76,7 @@ describe("connections.saveAsaas", () => {
     const fake = createFakeAsaas();
     setAsaasFetchForTests(fake.fetch);
     const { storeId } = await seedStore();
-    const e = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: "chave-invalida-123" }).catch((x: unknown) => x);
+    const e = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: "chave-invalida-123" }).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("provider_error");
     expect(await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"))).toBeNull();
   });
@@ -84,12 +85,12 @@ describe("connections.saveAsaas", () => {
     const fake = createFakeAsaas();
     setAsaasFetchForTests(fake.fetch);
     const { storeId } = await seedStore();
-    const a = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
+    const a = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
     expect(a.webhookUrl).toBe(`http://localhost:3000/api/webhooks/asaas/${storeId}`);
     expect(a.webhookToken.length).toBeGreaterThanOrEqual(40);
-    const b = await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: fake.apiKey });
+    const b = await saveAsaas(panel(storeId), { env: "production", apiKey: fake.apiKey });
     expect(b.webhookToken).toBe(a.webhookToken);
-    const c = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey, rotateWebhookToken: true });
+    const c = await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey, rotateWebhookToken: true });
     expect(c.webhookToken).not.toBe(a.webhookToken);
     const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
     expect(conn!.secret).toBe(fake.apiKey);
@@ -107,10 +108,10 @@ describe("connections.saveAsaas", () => {
 
   test("é sensível: origem mcp pede aprovação e suporte não pode", async () => {
     const { storeId } = await seedStore();
-    const mcp = await runAction(saveAsaas, { storeId, actor: owner, origin: "mcp" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
+    const mcp = await saveAsaas({ storeId, actor: owner, origin: "mcp" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
     expect((mcp as ActionError).code).toBe("approval_required");
     const support = { kind: "user" as const, userId: "u2", role: "support" as const };
-    const r = await runAction(saveAsaas, { storeId, actor: support, origin: "panel" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
+    const r = await saveAsaas({ storeId, actor: support, origin: "panel" }, { env: "sandbox", apiKey: "chave-qualquer-1" }).catch((x: unknown) => x);
     expect((r as ActionError).code).toBe("forbidden");
   });
 });
@@ -120,7 +121,7 @@ describe("Pix automático", () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake, 990);
     const order = await newAsaasOrder(storeId, offerId);
-    const qr = await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id));
+    const qr = await startAsaasPix({ storeId }, order.id);
     expect(qr.copyPaste).toStartWith("00020126");
     expect(qr.qrImage.length).toBeGreaterThan(10);
     expect(qr.expiresAt).toBeTruthy();
@@ -139,8 +140,8 @@ describe("Pix automático", () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
-    await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id));
-    await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id));
+    await startAsaasPix({ storeId }, order.id);
+    await startAsaasPix({ storeId }, order.id);
     expect(fake.payments.size).toBe(1);
   });
 
@@ -148,8 +149,8 @@ describe("Pix automático", () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
-    const a = await withStore(storeId, (tx) => ensureAsaasCustomer(ctxOf(storeId, tx), order.customerId));
-    const b = await withStore(storeId, (tx) => ensureAsaasCustomer(ctxOf(storeId, tx), order.customerId));
+    const a = await ensureAsaasCustomer({ storeId }, order.customerId);
+    const b = await ensureAsaasCustomer({ storeId }, order.customerId);
     expect(b).toBe(a);
     const creates = fake.calls.filter((c) => c.method === "POST" && c.path === "/customers");
     expect(creates).toHaveLength(1);
@@ -164,12 +165,14 @@ describe("Pix automático", () => {
     expect(c!.asaasCustomerId).toBe(a);
   });
 
-  test("duas chamadas simultâneas não criam dois clientes", async () => {
+  test("chamadas simultâneas devolvem o mesmo id (o primeiro gravado vence)", async () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
-    await Promise.all([1, 2, 3].map(() => withStore(storeId, (tx) => ensureAsaasCustomer(ctxOf(storeId, tx), order.customerId))));
-    expect(fake.calls.filter((c) => c.method === "POST" && c.path === "/customers")).toHaveLength(1);
+    const ids = await Promise.all([1, 2, 3].map(() => ensureAsaasCustomer({ storeId }, order.customerId)));
+    expect(new Set(ids).size).toBe(1);
+    const [c] = await t.ownerDb.select().from(customer).where(eq(customer.id, order.customerId));
+    expect(c!.asaasCustomerId).toBe(ids[0]!);
   });
 
   test("falha do Asaas na cobrança vira provider_error e não grava payment", async () => {
@@ -177,7 +180,7 @@ describe("Pix automático", () => {
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
     fake.fail("POST /payments", 400, "Valor inválido");
-    const e = await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id)).catch((x: unknown) => x);
+    const e = await startAsaasPix({ storeId }, order.id).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("provider_error");
     expect(await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id))).toHaveLength(0);
   });
@@ -187,8 +190,91 @@ describe("Pix automático", () => {
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
     await withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), order.id, "paid", "t"));
-    const e = await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id)).catch((x: unknown) => x);
+    const e = await startAsaasPix({ storeId }, order.id).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("conflict");
+  });
+});
+
+/** Quantas conexões do banco de teste estão com transação aberta parada (HTTP dentro de transação deixa uma). */
+async function idleInTransaction(): Promise<number> {
+  const rows = await t.ownerDb.execute(
+    sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and state like 'idle in transaction%'`,
+  );
+  return Number((rows as unknown as { n: number }[])[0]!.n);
+}
+
+describe("sem HTTP dentro de transação", () => {
+  test("startAsaasPix: nenhuma chamada ao Asaas acontece com transação aberta", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    const seen: number[] = [];
+    setAsaasFetchForTests((async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(await idleInTransaction());
+      return fake.fetch(input, init);
+    }) as typeof fetch);
+    await startAsaasPix({ storeId }, order.id);
+    expect(seen.length).toBeGreaterThanOrEqual(3); // cliente, cobrança, QR
+    expect(seen.every((n) => n === 0)).toBe(true);
+  });
+
+  test("saveAsaas: o teste de chave (saldo) roda antes de abrir transação", async () => {
+    const fake = createFakeAsaas();
+    const { storeId } = await seedStore();
+    const seen: number[] = [];
+    setAsaasFetchForTests((async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(await idleInTransaction());
+      return fake.fetch(input, init);
+    }) as typeof fetch);
+    await saveAsaas(panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
+    expect(seen).toEqual([0]);
+  });
+});
+
+describe("Pix automático: robustez da cobrança", () => {
+  test("falha no QR depois de criar a cobrança: a linha de pagamento fica e a nova tentativa reaproveita a cobrança", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    fake.fail("GET /payments/", 500, "indisponível");
+    const e = await startAsaasPix({ storeId }, order.id).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("provider_error");
+    expect(await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id))).toHaveLength(1);
+    fake.clearFailures();
+    const qr = await startAsaasPix({ storeId }, order.id);
+    expect(qr.copyPaste).toStartWith("00020126");
+    expect(fake.payments.size).toBe(1);
+  });
+
+  test("3 chamadas simultâneas: uma linha aberta, todas devolvem a mesma cobrança e as sobras são canceladas no Asaas", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    const qrs = await Promise.all([1, 2, 3].map(() => startAsaasPix({ storeId }, order.id)));
+    expect(new Set(qrs.map((q) => q.copyPaste)).size).toBe(1);
+    const rows = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    expect(rows).toHaveLength(1);
+    const live = [...fake.payments.values()].filter((p) => !p.deleted);
+    expect(live.map((p) => p.id)).toEqual([rows[0]!.providerId!]);
+  });
+
+  test("o índice garante no máximo uma cobrança Pix aberta por pedido", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    const row = { storeId, orderId: order.id, provider: "asaas", status: "PENDING", amountCents: 990 };
+    await t.ownerDb.insert(payment).values({ ...row, providerId: "pay_dup_1" });
+    const e = await t.ownerDb.insert(payment).values({ ...row, providerId: "pay_dup_2" }).catch((x: unknown) => x);
+    expect(isUniqueViolation(e)).toBe(true);
+  });
+
+  test("falha em apagar a cobrança sobrando não quebra a chamada", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    fake.fail("DELETE /payments/", 500, "não deu");
+    const qrs = await Promise.all([1, 2].map(() => startAsaasPix({ storeId }, order.id)));
+    expect(new Set(qrs.map((q) => q.copyPaste)).size).toBe(1);
   });
 });
 
@@ -197,7 +283,7 @@ describe("orders.refund", () => {
     const fake = createFakeAsaas();
     const { storeId, offerId } = await seedAsaasStore(fake);
     const order = await newAsaasOrder(storeId, offerId);
-    await withStore(storeId, (tx) => startAsaasPix(ctxOf(storeId, tx), order.id));
+    await startAsaasPix({ storeId }, order.id);
     const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
     fake.setStatus(pay!.providerId!, "RECEIVED");
     await withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), order.id, "paid", "t"));

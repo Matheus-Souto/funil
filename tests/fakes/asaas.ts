@@ -8,6 +8,7 @@ export interface FakePayment {
   customer: string;
   billingType: string;
   dueDate: string;
+  deleted?: boolean;
   [k: string]: unknown;
 }
 
@@ -73,10 +74,14 @@ export function createFakeAsaas(opts: { apiKey?: string } = {}) {
       return json(200, { object: "payment", ...p });
     }
 
-    const m = /^(GET|POST) \/payments\/([^/]+)(\/pixQrCode|\/refund)?$/.exec(key);
+    const m = /^(GET|POST|DELETE) \/payments\/([^/]+)(\/pixQrCode|\/refund)?$/.exec(key);
     if (m) {
       const p = payments.get(decodeURIComponent(m[2]!));
       if (!p) return err(404, "Cobrança não encontrada", "not_found");
+      if (m[1] === "DELETE" && !m[3]) {
+        p.deleted = true;
+        return json(200, { deleted: true, id: p.id });
+      }
       if (m[1] === "GET" && !m[3]) return json(200, { object: "payment", ...p });
       if (m[1] === "GET" && m[3] === "/pixQrCode") {
         return json(200, { success: true, encodedImage: png, payload: `00020126fake${p.id}`, expirationDate: "2099-12-31 23:59:59" });

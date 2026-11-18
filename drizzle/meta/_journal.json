@@ -43,6 +43,13 @@
       "when": 1795024872860,
       "tag": "0005_pix_manual_amount_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795026440948,
+      "tag": "0006_asaas_open_payment_unique",
+      "breakpoints": true
     }
   ]
 }

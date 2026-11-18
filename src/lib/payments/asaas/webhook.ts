@@ -54,12 +54,32 @@ export const applyAsaasPayment = defineAction({
       .for("update");
     if (!o || (o.method !== "pix_asaas" && o.method !== "card_asaas")) return { applied: false, reason: "pedido_de_outra_loja_ou_metodo" };
 
-    const [row] = await ctx.tx
+    const rows = await ctx.tx.select().from(payment).where(and(eq(payment.provider, "asaas"), eq(payment.orderId, o.id)));
+    const [global] = await ctx.tx
       .select()
       .from(payment)
       .where(and(eq(payment.provider, "asaas"), eq(payment.providerId, p.paymentId)));
-    if (row && row.orderId !== o.id) return { applied: false, reason: "pagamento_de_outro_pedido" };
-    if (!row) {
+    if (global && global.orderId !== o.id) return { applied: false, reason: "pagamento_de_outro_pedido" };
+    const row = rows.find((r) => r.providerId === p.paymentId);
+    const target0 = mapAsaasStatus(p.status);
+    const orphan = !row && rows.length > 0;
+
+    if (orphan) {
+      // Cobrança que o pedido não conhece (ex.: criada e perdida numa falha). Só importa se o dinheiro chegou.
+      if (target0 !== "paid") return { applied: false, reason: "cobranca_orfa" };
+      await ctx.tx
+        .insert(payment)
+        .values({ storeId: ctx.storeId, orderId: o.id, provider: "asaas", providerId: p.paymentId, status: p.status, amountCents: p.valueCents })
+        .onConflictDoNothing();
+      if (o.status !== "pending" && o.status !== "expired") {
+        log.warn("pagamento em dobro: cobrança órfã paga em pedido já resolvido; devolver ao comprador", {
+          orderId: o.id,
+          paymentId: p.paymentId,
+          orderStatus: o.status,
+        });
+        return { applied: false, reason: "pagamento_em_dobro" };
+      }
+    } else if (!row) {
       await ctx.tx
         .insert(payment)
         .values({ storeId: ctx.storeId, orderId: o.id, provider: "asaas", providerId: p.paymentId, status: p.status, amountCents: o.totalCents })
