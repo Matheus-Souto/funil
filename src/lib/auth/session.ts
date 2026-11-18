@@ -51,7 +51,7 @@ let dummyHash: Promise<string> | undefined;
 
 /**
  * Reserva atômica de uma tentativa por e-mail: sob `pg_advisory_xact_lock` conta as 5 últimas
- * tentativas; se as 5 são de menos de 15 min, está bloqueado (o bloqueio dura 15 min após a última).
+ * tentativas; se as 5 são de menos de 15 min, está bloqueado (o bloqueio termina 15 min após a MAIS ANTIGA dessas 5; tentativas bloqueadas não são gravadas).
  * Se não, grava a tentativa ANTES do scrypt, então tentativas paralelas não passam de 5.
  * Devolve `true` se bloqueado. Tentativas bloqueadas não são gravadas.
  */

@@ -130,7 +130,7 @@ describe("login", () => {
     expect(rows).toHaveLength(5);
   });
 
-  test("10 logins errados em paralelo: só 5 são avaliados; depois nem a senha certa entra", async () => {
+  test("10 logins errados em paralelo: todos rejeitados e exatamente 5 tentativas gravadas; depois nem a senha certa entra", async () => {
     const { storeId } = await seedStore();
     const u = await seedUser(storeId);
     const results = await Promise.allSettled(
