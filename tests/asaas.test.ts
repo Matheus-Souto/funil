@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
@@ -96,7 +97,35 @@ describe("connections.saveAsaas", () => {
     expect(c.webhookToken).not.toBe(a.webhookToken);
     const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
     expect(conn!.secret).toBe(fake.apiKey);
-    expect(conn!.config).toEqual({ env: "sandbox", webhookToken: c.webhookToken });
+    expect(conn!.config).toEqual({ env: "sandbox", webhookToken: c.webhookToken, accountKey: `sandbox:wallet:${fake.walletId}` });
+  });
+
+  test("accountKey = ambiente + walletId da conta (GET /wallets/); sem carteira, impressão sha256 da chave", async () => {
+    const fake = createFakeAsaas();
+    setAsaasFetchForTests(fake.fetch);
+    const { storeId } = await seedStore();
+    await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: fake.apiKey });
+    const conn = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
+    expect((conn!.config as { accountKey: string }).accountKey).toBe(`production:wallet:${fake.walletId}`);
+    expect(fake.calls.some((c) => c.method === "GET" && c.path.startsWith("/wallets"))).toBe(true);
+
+    const noWallet = createFakeAsaas({ apiKey: "chave-sem-carteira-1", walletId: null });
+    setAsaasFetchForTests(noWallet.fetch);
+    await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: noWallet.apiKey });
+    const conn2 = await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"));
+    const key = (conn2!.config as { accountKey: string }).accountKey;
+    expect(key).toBe(`sandbox:key:${createHash("sha256").update(noWallet.apiKey).digest("hex").slice(0, 32)}`);
+    expect(key).not.toContain(noWallet.apiKey);
+  });
+
+  test("falha ao identificar a conta: nada é salvo", async () => {
+    const fake = createFakeAsaas();
+    setAsaasFetchForTests(fake.fetch);
+    fake.fail("GET /wallets", 500, "erro");
+    const { storeId } = await seedStore();
+    const e = await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey }).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("provider_error");
+    expect(await withStore(storeId, (tx) => getIntegration(tx, storeId, "asaas"))).toBeNull();
   });
 
   test("a chave de API nunca aparece em claro no banco nem na auditoria", async () => {
@@ -232,7 +261,7 @@ describe("sem HTTP dentro de transação", () => {
       return fake.fetch(input, init);
     }) as typeof fetch);
     await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey });
-    expect(seen).toEqual([0]);
+    expect(seen).toEqual([0, 0]); // saldo + conta (wallets)
   });
 });
 
@@ -298,5 +327,79 @@ describe("Pix automático: robustez da cobrança", () => {
     fake.fail("DELETE /payments/", 500, "não deu");
     const qrs = await Promise.all([1, 2].map(() => startAsaasPix({ storeId }, order.id)));
     expect(new Set(qrs.map((q) => q.copyPaste)).size).toBe(1);
+  });
+});
+
+describe("troca de conta/ambiente do Asaas", () => {
+  /** Duas contas Asaas separadas (sandbox e produção), escolhidas pela chave de API enviada. */
+  function twoAccounts() {
+    const sandbox = createFakeAsaas();
+    const prod = createFakeAsaas({ apiKey: "prod-key-987654", walletId: "wal_producao" });
+    const route = (async (input: string | URL | Request, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get("access_token");
+      return (key === prod.apiKey ? prod : sandbox).fetch(input, init);
+    }) as typeof fetch;
+    return { sandbox, prod, route };
+  }
+
+  test("sandbox -> produção: recria o cliente na conta nova e cria cobrança nova para o pedido pendente", async () => {
+    const { sandbox, prod, route } = twoAccounts();
+    const { storeId, offerId } = await seedAsaasStore(sandbox);
+    setAsaasFetchForTests(route);
+    const order = await newAsaasOrder(storeId, offerId);
+    await startAsaasPix({ storeId }, order.id);
+    const [old] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    const [before] = await t.ownerDb.select().from(customer).where(eq(customer.id, order.customerId));
+    expect(before!.asaasAccountKey).toBe(`sandbox:wallet:${sandbox.walletId}`);
+
+    await runAction(saveAsaas, panel(storeId), { env: "production", apiKey: prod.apiKey });
+    const [superseded] = await t.ownerDb.select().from(payment).where(eq(payment.id, old!.id));
+    expect(superseded!.status).toBe("superseded");
+
+    const qr = await startAsaasPix({ storeId }, order.id);
+    expect(qr.copyPaste).toContain("pay_");
+    expect(prod.customers.size).toBe(1);
+    expect(prod.payments.size).toBe(1);
+    const created = [...prod.payments.values()][0]!;
+    expect(created.customer).toBe([...prod.customers.keys()][0]!);
+    expect(created.externalReference).toBe(order.id);
+    const [after] = await t.ownerDb.select().from(customer).where(eq(customer.id, order.customerId));
+    expect(after!.asaasCustomerId).toBe(created.customer);
+    expect(after!.asaasAccountKey).toBe("production:wallet:wal_producao");
+    const rows = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    expect(rows.map((r) => [r.providerId, r.status]).sort()).toEqual(
+      [
+        [old!.providerId, "superseded"],
+        [created.id, "PENDING"],
+      ].sort(),
+    );
+  });
+
+  test("salvar de novo a mesma conta não descarta cobranças nem recria o cliente", async () => {
+    const fake = createFakeAsaas();
+    const { storeId, offerId } = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(storeId, offerId);
+    await startAsaasPix({ storeId }, order.id);
+    await runAction(saveAsaas, panel(storeId), { env: "sandbox", apiKey: fake.apiKey, rotateWebhookToken: true });
+    const rows = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    expect(rows.map((r) => r.status)).toEqual(["PENDING"]);
+    await startAsaasPix({ storeId }, order.id);
+    expect(fake.customers.size).toBe(1);
+    expect(fake.payments.size).toBe(1);
+  });
+
+  test("troca de conta só descarta cobranças PENDING da própria loja", async () => {
+    const { sandbox, prod, route } = twoAccounts();
+    const a = await seedAsaasStore(sandbox);
+    const b = await seedAsaasStore(sandbox);
+    setAsaasFetchForTests(route);
+    const oa = await newAsaasOrder(a.storeId, a.offerId);
+    const ob = await newAsaasOrder(b.storeId, b.offerId);
+    await startAsaasPix({ storeId: a.storeId }, oa.id);
+    await startAsaasPix({ storeId: b.storeId }, ob.id);
+    await runAction(saveAsaas, panel(a.storeId), { env: "production", apiKey: prod.apiKey });
+    const [pa] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, oa.id));
+    const [pb] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, ob.id));
+    expect([pa!.status, pb!.status]).toEqual(["superseded", "PENDING"]);
   });
 });

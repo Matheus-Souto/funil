@@ -2,7 +2,7 @@
 // Cria um cliente, uma cobrança Pix de R$ 5,00 e lê o QR Code; depois cartão de teste aprovado (4444...) e recusado
 // (5184019740373151), à vista e parcelado em 2x (installmentCount + totalValue).
 import { ActionError } from "@/lib/actions/core";
-import { asaasDueDate, createAsaasClient } from "@/lib/payments/asaas/client";
+import { asaasAccountKey, asaasDueDate, createAsaasClient } from "@/lib/payments/asaas/client";
 
 const apiKey = process.env.ASAAS_SANDBOX_KEY;
 if (!apiKey) {
@@ -23,6 +23,8 @@ function cpf(): string {
 const client = createAsaasClient({ apiKey, env: "sandbox" });
 const { balance } = await client.getBalance();
 console.log("saldo:", balance);
+// Identificação da conta usada por connections.saveAsaas (GET /wallets/).
+console.log("conta:", await asaasAccountKey(client, "sandbox", apiKey));
 const customer = await client.createCustomer({
   name: "Cliente Teste",
   email: `teste+${Date.now()}@example.com`,

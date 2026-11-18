@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ActionError } from "@/lib/actions/core";
 import { env as appEnv } from "@/lib/env";
 import { getIntegration } from "@/lib/integrations";
@@ -143,6 +144,12 @@ export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?:
       call<{ id: string; value: number; installmentCount: number }>("GET", `/installments/${encodeURIComponent(id)}`),
     refundInstallment: (id: string) => call<{ id: string }>("POST", `/installments/${encodeURIComponent(id)}/refund`, {}),
     getBalance: () => call<{ balance: number }>("GET", "/finance/balance"),
+    /** GET /wallets/: carteira(s) da conta autenticada (`walletId` identifica a conta). */
+    getWallets: async (): Promise<{ id?: string; walletId?: string }[]> => {
+      const r = await call<{ data?: unknown }>("GET", "/wallets/");
+      if (!Array.isArray(r.data)) throw providerError("Resposta inválida do Asaas", { status: 200, errorCodes: [] } satisfies AsaasErrorDetails);
+      return r.data as { id?: string; walletId?: string }[];
+    },
   };
 }
 export type AsaasClient = ReturnType<typeof createAsaasClient>;
@@ -153,10 +160,30 @@ export function setAsaasFetchForTests(f?: typeof fetch): void {
   asaasFetchOverride = f;
 }
 
-/** Cliente da conexão `asaas` da loja. `conflict` se a loja não conectou o Asaas. */
-export async function asaasClientFor(tx: Tx, storeId: string): Promise<AsaasClient> {
+/**
+ * Identifica a conta Asaas da chave (fora de transação): `<env>:wallet:<walletId>` (GET /wallets/). Se a conta não
+ * devolver carteira, `<env>:key:<sha256 da chave, 32 hex>`. Ids do Asaas (clientes, cobranças) só valem nessa conta.
+ */
+export async function asaasAccountKey(client: AsaasClient, env: AsaasEnv, apiKey: string): Promise<string> {
+  const [w] = await client.getWallets();
+  const id = String(w?.walletId ?? w?.id ?? "").replace(/[^\w.-]/g, "").slice(0, 100);
+  if (id) return `${env}:wallet:${id}`;
+  return `${env}:key:${createHash("sha256").update(apiKey).digest("hex").slice(0, 32)}`;
+}
+
+/**
+ * Cliente da conexão `asaas` da loja e a conta (`accountKey`) em que ela foi salva (`null` em conexões antigas).
+ * `conflict` se a loja não conectou o Asaas.
+ */
+export async function asaasConnectionFor(tx: Tx, storeId: string): Promise<{ client: AsaasClient; accountKey: string | null }> {
   const conn = await getIntegration(tx, storeId, "asaas");
   if (!conn?.secret) throw new ActionError("conflict", "Asaas não está conectado nesta loja");
-  const e = (conn.config as { env?: AsaasEnv }).env === "production" ? "production" : "sandbox";
-  return createAsaasClient({ apiKey: conn.secret, env: e });
+  const cfg = conn.config as { env?: AsaasEnv; accountKey?: string };
+  const e = cfg.env === "production" ? "production" : "sandbox";
+  return { client: createAsaasClient({ apiKey: conn.secret, env: e }), accountKey: cfg.accountKey ?? null };
+}
+
+/** Cliente da conexão `asaas` da loja. `conflict` se a loja não conectou o Asaas. */
+export async function asaasClientFor(tx: Tx, storeId: string): Promise<AsaasClient> {
+  return (await asaasConnectionFor(tx, storeId)).client;
 }

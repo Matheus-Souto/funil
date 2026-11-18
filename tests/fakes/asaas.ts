@@ -1,5 +1,7 @@
 // Asaas falso em memória, sem rede: `fetch` injetável (testes unitários) e reaproveitado pelo servidor do smoke
 // (e2e/fakes/asaas-server.ts). Sem espera real. Não importa nada de src/.
+import { createHash } from "node:crypto";
+
 export interface FakePayment {
   id: string;
   status: string;
@@ -37,8 +39,11 @@ export interface FakeInstallment {
   payments: string[];
 }
 
-export function createFakeAsaas(opts: { apiKey?: string } = {}) {
+export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | null } = {}) {
   const apiKey = opts.apiKey ?? "test-key-123456";
+  // Conta do Asaas (GET /wallets/). `null`: a conta não devolve carteira (lista vazia).
+  // Padrão: derivado da chave (mesma chave = mesma conta), sem conter a chave.
+  const walletId = opts.walletId === undefined ? `wal_${createHash("sha256").update(apiKey).digest("hex").slice(0, 12)}` : opts.walletId;
   const payments = new Map<string, FakePayment>();
   const customers = new Map<string, Record<string, unknown>>();
   const installments = new Map<string, FakeInstallment>();
@@ -79,6 +84,11 @@ export function createFakeAsaas(opts: { apiKey?: string } = {}) {
 
 
     if (key === "GET /finance/balance") return json(200, { balance: 123.45 });
+
+    if (key === "GET /wallets/" || key === "GET /wallets") {
+      const data = walletId ? [{ object: "wallet", id: walletId, walletId, status: "ACTIVE" }] : [];
+      return json(200, { object: "list", hasMore: false, totalCount: data.length, limit: 10, offset: 0, data });
+    }
 
     if (key === "POST /customers") {
       for (const f of ["name", "email", "cpfCnpj"]) if (!body?.[f]) return err(400, `O campo ${f} é obrigatório`);
@@ -167,6 +177,7 @@ export function createFakeAsaas(opts: { apiKey?: string } = {}) {
   return {
     fetch: fakeFetch as typeof fetch,
     apiKey,
+    walletId,
     payments,
     customers,
     installments,

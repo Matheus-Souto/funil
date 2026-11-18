@@ -7,25 +7,28 @@ import { customer, orders, payment } from "@/lib/db/schema";
 import { env as appEnv } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { asaasClientFor, asaasDueDate, centsToReais, createAsaasClient } from "./client";
+import { asaasAccountKey, asaasClientFor, asaasConnectionFor, asaasDueDate, centsToReais, createAsaasClient } from "./client";
 
 /** Estado "aberto" da cobrança Pix (índice único parcial: uma por pedido). */
 const OPEN = "PENDING";
 const PIX_TIMEOUT_MS = 15_000;
 
 /**
- * Cria (uma vez) o cliente no Asaas e guarda `asaas_customer_id`.
+ * Cria (uma vez por conta Asaas) o cliente no Asaas e guarda `asaas_customer_id` + `asaas_account_key`.
+ * Se o id guardado veio de outra conta/ambiente (a loja trocou a conexão), cria de novo na conta atual.
  * Não segura transação durante o HTTP: lê, chama o Asaas e grava com UPDATE condicional
  * (se outra chamada gravou antes, devolve o id gravado; o cadastro sobrando no Asaas é inofensivo).
  * Não chamar dentro de uma transação do chamador.
  */
 export async function ensureAsaasCustomer(call: { storeId: string }, customerId: string): Promise<string> {
   const { storeId } = call;
-  const c = await withStore(storeId, async (tx) => (await tx.select().from(customer).where(eq(customer.id, customerId)))[0]);
-  if (!c) throw new ActionError("not_found", "Cliente não encontrado");
-  if (c.asaasCustomerId) return c.asaasCustomerId;
+  const { c, client, accountKey } = await withStore(storeId, async (tx) => {
+    const [row] = await tx.select().from(customer).where(eq(customer.id, customerId));
+    if (!row) throw new ActionError("not_found", "Cliente não encontrado");
+    return { c: row, ...(await asaasConnectionFor(tx, storeId)) };
+  });
+  if (c.asaasCustomerId && c.asaasAccountKey === accountKey) return c.asaasCustomerId;
   if (!c.cpf) throw new ActionError("invalid_input", "CPF ou CNPJ do cliente é obrigatório para pagar pelo Asaas");
-  const client = await withStore(storeId, (tx) => asaasClientFor(tx, storeId));
   const created = await client.createCustomer({
     name: c.name,
     email: c.email,
@@ -34,14 +37,16 @@ export async function ensureAsaasCustomer(call: { storeId: string }, customerId:
     externalReference: c.id,
   });
   return withStore(storeId, async (tx) => {
+    // Só grava se ninguém mudou o id desde a leitura (o id velho de outra conta conta como "não mudou").
     const won = await tx
       .update(customer)
-      .set({ asaasCustomerId: created.id })
-      .where(and(eq(customer.id, c.id), isNull(customer.asaasCustomerId)))
+      .set({ asaasCustomerId: created.id, asaasAccountKey: accountKey })
+      .where(and(eq(customer.id, c.id), c.asaasCustomerId === null ? isNull(customer.asaasCustomerId) : eq(customer.asaasCustomerId, c.asaasCustomerId)))
       .returning({ id: customer.asaasCustomerId });
     if (won.length > 0) return created.id;
-    const [now] = await tx.select({ id: customer.asaasCustomerId }).from(customer).where(eq(customer.id, c.id));
-    return now!.id ?? created.id;
+    const [now] = await tx.select({ id: customer.asaasCustomerId, key: customer.asaasAccountKey }).from(customer).where(eq(customer.id, c.id));
+    if (!now) throw new ActionError("not_found", "Cliente não encontrado");
+    return now.id && now.key === accountKey ? now.id : created.id;
   });
 }
 
@@ -128,9 +133,14 @@ async function discard(client: ReturnType<typeof createAsaasClient>, paymentId: 
 
 const webhookUrl = (storeId: string) => `${appEnv.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
 
+/** Estado das cobranças Asaas abertas de uma conta anterior da loja (fora do índice de cobrança aberta). */
+export const SUPERSEDED = "superseded";
+
 /**
- * Conecta o Asaas: `prepare` testa a chave (GET /finance/balance) fora de transação e só então `run` grava.
- * Chave inválida => provider_error e nada é salvo (a rejeição é auditada).
+ * Conecta o Asaas: `prepare` testa a chave (GET /finance/balance) e identifica a conta (GET /wallets/) fora de
+ * transação; só então `run` grava. Chave inválida => provider_error e nada é salvo (a rejeição é auditada).
+ * Conta diferente da anterior (outra conta ou outro ambiente): as cobranças PENDING da loja viram `superseded`, para o
+ * próximo `startAsaasPix` criar a cobrança na conta atual; os clientes são recriados sob demanda (`ensureAsaasCustomer`).
  */
 export const saveAsaas = defineAction({
   name: "connections.saveAsaas",
@@ -145,13 +155,25 @@ export const saveAsaas = defineAction({
   // Nunca grava a chave de API na auditoria.
   auditInput: (i) => ({ env: i.env, rotateWebhookToken: i.rotateWebhookToken ?? false }),
   async prepare(_call, input) {
-    await createAsaasClient({ apiKey: input.apiKey, env: input.env }).getBalance();
+    const client = createAsaasClient({ apiKey: input.apiKey, env: input.env });
+    await client.getBalance();
+    return { accountKey: await asaasAccountKey(client, input.env, input.apiKey) };
   },
-  async run(ctx, input) {
+  async run(ctx, input, { accountKey }) {
     const current = await getIntegration(ctx.tx, ctx.storeId, "asaas");
-    const kept = (current?.config as { webhookToken?: string } | undefined)?.webhookToken;
+    const cfg = current?.config as { webhookToken?: string; accountKey?: string } | undefined;
+    const kept = cfg?.webhookToken;
     const webhookToken = kept && !input.rotateWebhookToken ? kept : randomToken();
-    await saveIntegration(ctx.tx, ctx.storeId, "asaas", { env: input.env, webhookToken }, input.apiKey);
-    return { env: input.env, webhookToken, webhookUrl: webhookUrl(ctx.storeId) };
+    const accountChanged = current !== null && cfg?.accountKey !== accountKey;
+    if (accountChanged) {
+      const superseded = await ctx.tx
+        .update(payment)
+        .set({ status: SUPERSEDED })
+        .where(and(eq(payment.provider, "asaas"), eq(payment.status, "PENDING")))
+        .returning({ id: payment.id });
+      log.info("conta Asaas trocada; cobranças abertas da conta anterior descartadas", { storeId: ctx.storeId, count: superseded.length });
+    }
+    await saveIntegration(ctx.tx, ctx.storeId, "asaas", { env: input.env, webhookToken, accountKey }, input.apiKey);
+    return { env: input.env, webhookToken, webhookUrl: webhookUrl(ctx.storeId), accountChanged };
   },
 });

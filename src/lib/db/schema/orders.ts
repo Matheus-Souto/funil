@@ -16,6 +16,8 @@ export const customer = pgTable(
     phone: text("phone").notNull(),
     cpf: text("cpf"),
     asaasCustomerId: text("asaas_customer_id"),
+    /** Conta Asaas (accountKey da conexão: ambiente + conta) em que `asaas_customer_id` foi criado. */
+    asaasAccountKey: text("asaas_account_key"),
   },
   (t) => [unique("customer_store_email_unique").on(t.storeId, t.email)],
 );
@@ -108,6 +110,7 @@ export const payment = pgTable(
     uniqueIndex("payment_provider_id_unique").on(t.provider, t.providerId).where(sql`${t.providerId} is not null`),
     index("payment_order_idx").on(t.orderId),
     // No máximo uma cobrança Asaas ainda aberta (PENDING) por pedido: chamadas simultâneas não criam duas.
+    // Cobranças de uma conta Asaas anterior viram `superseded` (fora do índice) quando a loja troca de conta.
     uniqueIndex("payment_order_open_asaas_unique")
       .on(t.orderId)
       .where(sql`${t.provider} = 'asaas' and ${t.status} = 'PENDING'`),
