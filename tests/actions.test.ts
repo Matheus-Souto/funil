@@ -198,14 +198,19 @@ test("rejeições pré-execução de ator público (forbidden, invalid_input, ap
   expect(await auditRows(storeId)).toHaveLength(0);
 });
 
-test("ator público que falha DENTRO da execução continua auditado; user e system rejeitados também", async () => {
+test("ator público: nenhuma falha (pré-execução ou dentro da execução) grava audit_log; user e system rejeitados sim", async () => {
   const { storeId } = await seedStore();
   const boom = defineAction({ name: "t.boom2", description: "x", input: z.object({}), permission: "public", run: async () => { throw new ActionError("conflict", "x"); } }, def);
   await runAction(boom, { storeId, actor: { kind: "public" }, origin: "public" }, {}).catch(() => undefined);
+  const limited = defineAction({ name: "t.lim", description: "x", input: z.object({}), permission: "public", prepare: async () => { throw new ActionError("rate_limited", "x"); }, run: async () => 1 }, def);
+  await runAction(limited, { storeId, actor: { kind: "public" }, origin: "public" }, {}).catch(() => undefined);
+  const crash = defineAction({ name: "t.crash", description: "x", input: z.object({}), permission: "public", run: async () => { throw new Error("db"); } }, def);
+  await runAction(crash, { storeId, actor: { kind: "public" }, origin: "public" }, {}).catch(() => undefined);
+  expect(await auditRows(storeId)).toHaveLength(0);
   const strict = defineAction({ name: "t.strict2", description: "x", input: z.object({ n: z.number() }), permission: "public", run: async () => 1 }, def);
   await runAction(strict, { storeId, actor: { kind: "system" }, origin: "system" }, {}).catch(() => undefined);
   await runAction(strict, { storeId, actor: owner, origin: "panel" }, {}).catch(() => undefined);
-  expect((await auditRows(storeId)).map((r) => r.ok)).toEqual([false, false, false]);
+  expect((await auditRows(storeId)).map((r) => r.ok)).toEqual([false, false]);
 });
 
 test("corpo vazio ou não-objeto ainda grava linha ok=false", async () => {

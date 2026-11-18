@@ -85,3 +85,20 @@ test("TURNSTILE_SITE_KEY e TURNSTILE_SECRET juntos ou nenhum", () => {
   expect(parseEnv({ ...base, TURNSTILE_SITE_KEY: "k", TURNSTILE_SECRET: "s" }).TURNSTILE_SECRET).toBe("s");
   expect(parseEnv(base).TURNSTILE_SITE_KEY).toBeUndefined();
 });
+
+test("E2E_SEED_ROUTES=1 só com BASE_URL em loopback (rota só do smoke)", () => {
+  for (const url of ["http://127.0.0.1:3000", "http://localhost:3000", "http://[::1]:3000"]) {
+    expect(parseEnv({ ...base, NODE_ENV: "production", BASE_URL: url, E2E_SEED_ROUTES: "1" }).E2E_SEED_ROUTES).toBe("1");
+  }
+  for (const url of ["https://loja.example.com", "http://127.0.0.1.evil.com"]) {
+    expect(() => parseEnv({ ...base, BASE_URL: url, TRUST_PROXY: "1", E2E_SEED_ROUTES: "1" })).toThrow(/E2E_SEED_ROUTES.*loopback/);
+  }
+  expect(parseEnv(base).E2E_SEED_ROUTES).toBeUndefined();
+  expect(() => parseEnv({ ...base, E2E_SEED_ROUTES: "sim" })).toThrow(/E2E_SEED_ROUTES/);
+});
+
+test("isLoopbackUrl: 127.0.0.1, localhost e ::1 (com ou sem colchetes)", async () => {
+  const { isLoopbackUrl } = await import("@/lib/env");
+  for (const u of ["http://127.0.0.1:1", "http://localhost", "http://[::1]:3000", "::1", "127.0.0.1", "localhost:4010"]) expect(isLoopbackUrl(u)).toBe(true);
+  for (const u of ["http://x", "https://api.asaas.com", "http://127.0.0.1.evil.com", "lixo", ""]) expect(isLoopbackUrl(u)).toBe(false);
+});

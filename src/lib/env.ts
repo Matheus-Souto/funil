@@ -27,17 +27,32 @@ const schema = z.object({
   // Quantos proxies reversos confiáveis ficam na frente do app (0 = nenhum). Define de onde sai o IP do cliente.
   // Obrigatória em produção, salvo BASE_URL em loopback (ver parseEnv).
   TRUST_PROXY: z.enum(["0", "1", "2", "3", "4", "5"]).default("0").transform(Number),
+  // Liga a rota só do smoke E2E (/api/test-only). Recusada fora de BASE_URL em loopback (ver parseEnv).
+  E2E_SEED_ROUTES: z.enum(["0", "1"]).optional(),
 });
 
 export type Env = z.infer<typeof schema>;
 
-function isLoopbackUrl(value: string): boolean {
-  try {
-    const host = new URL(value).hostname;
-    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
-  } catch {
-    return false;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
+/**
+ * URL ou host em loopback: 127.0.0.1, localhost ou ::1 (com ou sem colchetes, com ou sem esquema/porta).
+ * Única implementação: usada pelo env e pela rota só do smoke.
+ */
+export function isLoopbackUrl(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (LOOPBACK_HOSTS.has(v)) return true;
+  for (const candidate of [v, `http://${v}`]) {
+    try {
+      const u = new URL(candidate);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      return LOOPBACK_HOSTS.has(u.hostname);
+    } catch {
+      /* tenta como host sem esquema */
+    }
   }
+  return false;
 }
 
 /** Valida um objeto de variáveis. Não lê `process.env`: facilita testar. */
@@ -63,6 +78,9 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     throw new Error(
       "Variáveis de ambiente inválidas: ASAAS_BASE_URL em produção só pode apontar para loopback (127.0.0.1, localhost, ::1; uso de teste e smoke)",
     );
+  }
+  if (parsed.data.E2E_SEED_ROUTES === "1" && !isLoopbackUrl(parsed.data.BASE_URL)) {
+    throw new Error("Variáveis de ambiente inválidas: E2E_SEED_ROUTES=1 só é aceita com BASE_URL em loopback (smoke E2E local)");
   }
   if (source.NODE_ENV === "production" && cleaned.TRUST_PROXY === undefined && !isLoopbackUrl(parsed.data.BASE_URL)) {
     throw new Error(

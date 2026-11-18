@@ -23,6 +23,24 @@ export async function checkRateLimit(key: string, limit: number, windowSec: numb
   return count <= limit;
 }
 
+/**
+ * Só LÊ o contador de `key` na janela fixa atual: `true` se ainda cabe mais um (contagem < limite).
+ * Par de `hitRateLimit`, para limites que contam só o que deu certo (ex.: pedidos criados, não tentativas).
+ */
+export async function peekRateLimit(key: string, limit: number, windowSec: number, now: Date = new Date()): Promise<boolean> {
+  const [row] = await db
+    .select({ count: rateLimit.count })
+    .from(rateLimit)
+    .where(and(eq(rateLimit.key, key), eq(rateLimit.windowStart, windowStart(now, windowSec))));
+  return (row?.count ?? 0) < limit;
+}
+
+/** Soma 1 ao contador de `key` na janela fixa atual (depois que a operação limitada deu certo). */
+export async function hitRateLimit(key: string, windowSec: number, now: Date = new Date()): Promise<void> {
+  await bump(key, windowStart(now, windowSec));
+  maybeCleanup(now);
+}
+
 async function bump(key: string, start: Date): Promise<number> {
   const [row] = await db
     .insert(rateLimit)

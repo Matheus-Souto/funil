@@ -6,7 +6,9 @@
 //   - Cartão: `startCheckoutAction` (cria o pedido) + POST /api/checkout/card (mesma origem, JSON) com uma chave de
 //     idempotência por tentativa (reaproveitada se a rede cair no meio da mesma tentativa).
 // Dados do cartão só ficam no estado deste componente e no corpo do POST; nunca vão para a server action.
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+// Envio nativo (sem JS, ou antes de hidratar) não vaza nada: nenhum campo tem `name` (só o rádio do método), o form é
+// `method="post"` para a própria página sem query, e o botão fica desabilitado até o componente hidratar.
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { brl } from "@/lib/format";
 import { cardExpiryValid, normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
@@ -114,7 +116,6 @@ function Field(props: {
       <div className={s.box}>
         <input
           id={id}
-          name={id}
           className={s.input}
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -183,6 +184,10 @@ function Turnstile({ siteKey, onToken }: { siteKey: string; onToken: (t: string)
 }
 
 // ---- formulário ----
+const noop = () => () => {};
+/** `false` no HTML do servidor e antes de hidratar; `true` depois (sem setState em efeito). */
+const useHydrated = () => useSyncExternalStore(noop, () => true, () => false);
+
 export function CheckoutForm(props: {
   storeName: string;
   offer: CheckoutOffer;
@@ -194,6 +199,7 @@ export function CheckoutForm(props: {
 }) {
   const { offer, storeName, touch, refCode, eventId, turnstileSiteKey } = props;
   const router = useRouter();
+  const hydrated = useHydrated();
   const [method, setMethod] = useState<Method>(props.initialMethod);
   const [withBump, setWithBump] = useState(false);
   const [v, setV] = useState({
@@ -431,7 +437,7 @@ export function CheckoutForm(props: {
 
   return (
     <main>
-      <form className={`${s.main} ${s.checkoutMain}`} onSubmit={onSubmit} noValidate>
+      <form className={`${s.main} ${s.checkoutMain}`} method="post" action={`/c/${encodeURIComponent(offer.slug)}`} onSubmit={onSubmit} noValidate>
         <div className={s.intro}>
           <p className={`${s.p0} ${s.muted} ${s.small}`}>Finalize sua compra</p>
           <h1 className={s.introTitle}>{offer.name}</h1>
@@ -595,7 +601,7 @@ export function CheckoutForm(props: {
                   {brl(total)}
                 </span>
               </div>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated}>
                 <Icon name={method === "pix" ? "pix" : "lock"} size={20} />
                 {buttonLabel}
               </button>

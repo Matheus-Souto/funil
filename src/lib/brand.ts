@@ -2,9 +2,10 @@
 // com contraste AA garantido. Calculado no servidor e aplicado como estilo inline no contêiner da página.
 //   --color-brand         a cor escolhida
 //   --color-on-brand      texto sobre a marca: branco, tinta ou preto, o primeiro com contraste ≥ 4,5:1
-//   --color-brand-hover   a cor com luminosidade (HSL) 8 pontos menor
+//   --color-brand-hover   a cor 8 pontos de luminosidade (HSL) mais longe do texto da marca, com ≥ 4,5:1 contra ele
 //   --color-brand-soft    12% da cor sobre branco (fundo de seleção)
-//   --color-brand-strong  a cor escurecida até 4,5:1 sobre branco (texto, ícones e bordas de seleção)
+//   --color-brand-strong  a cor escurecida até 4,5:1 sobre o soft (e, portanto, sobre branco): texto, ícones, bordas
+// Os pares texto/fundo garantidos estão listados em tests/brand.test.ts.
 
 export type BrandVars = {
   "--color-brand": string;
@@ -82,15 +83,26 @@ export function brandVars(hex: string | null | undefined): BrandVars {
   const brand = toHex(rgb);
   const [h, s, l] = toHsl(rgb);
   const onBrand = [WHITE, INK, BLACK].find((c) => contrastRatio(c, brand) >= AA) ?? BLACK;
+  const soft = toHex(rgb.map((v) => 255 + (v - 255) * 0.12) as Rgb);
+  // Hover: 8 pontos de luminosidade no sentido que AUMENTA o contraste com o texto da marca (mais escuro com texto
+  // branco, mais claro com texto escuro) e continua até 4,5:1 (o arredondamento HSL pode perder um pouco).
+  const dir = onBrand === WHITE ? -1 : 1;
+  let hl = Math.min(100, Math.max(0, l + 8 * dir));
+  let hover = toHex(fromHsl(h, s, hl));
+  while (contrastRatio(onBrand, hover) < AA && hl > 0 && hl < 100) {
+    hl = Math.min(100, Math.max(0, hl + dir));
+    hover = toHex(fromHsl(h, s, hl));
+  }
+  // Strong: escurece até 4,5:1 sobre o fundo suave da marca (o pior fundo em que aparece; branco é mais claro).
   let strong = brand;
-  for (let ll = l; contrastRatio(strong, WHITE) < AA && ll > 0; ) {
+  for (let ll = l; contrastRatio(strong, soft) < AA && ll > 0; ) {
     ll = Math.max(0, ll - 1);
     strong = toHex(fromHsl(h, s, ll));
   }
   return {
     "--color-brand": brand,
-    "--color-brand-hover": toHex(fromHsl(h, s, Math.max(0, l - 8))),
-    "--color-brand-soft": toHex(rgb.map((v) => 255 + (v - 255) * 0.12) as Rgb),
+    "--color-brand-hover": hover,
+    "--color-brand-soft": soft,
     "--color-on-brand": onBrand,
     "--color-brand-strong": strong,
   };

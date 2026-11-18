@@ -8,12 +8,17 @@ import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
 import {
+  ASAAS_LIMITS,
   CHECKOUT_LIMIT_MESSAGE,
+  PIX_REGEN_PER_HOUR,
   PIX_UNAVAILABLE_MESSAGE,
+  TOUCH_MAX_BYTES,
+  VIEW_LIMIT_PER_HOUR,
   checkoutStart,
   checkoutView as checkoutViewAction,
   getOrderPublic,
   handleOrderStatus,
+  regenerateOrderPix,
   startCheckout,
 } from "@/lib/checkout";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
@@ -448,9 +453,146 @@ describe("página do pedido", () => {
 
   test("checkout.view grava uma visita da oferta", async () => {
     const s = await seed();
-    await runAction(checkoutViewAction, pub(s.storeId), { slug: s.slug, touch: { first: null, last: { utm_source: "ig" } } });
+    await runAction(checkoutViewAction, pub(s.storeId), { slug: s.slug, touch: { first: null, last: { utm_source: "ig" } }, clientIp: nextIp() });
     const rows = await withStore(s.storeId, (tx) => tx.select().from(checkoutView).where(eq(checkoutView.offerId, s.offerId)));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.touch).toEqual({ first: null, last: { utm_source: "ig" } });
+  });
+});
+
+describe("fix 1: limites contam pedidos criados, não tentativas", () => {
+  test("Pix manual por IP: tentativas recusadas (limite por e-mail) não consomem as 5 do IP", async () => {
+    const s = await seed();
+    const ip = nextIp();
+    const mail = email();
+    for (let i = 0; i < 3; i++) await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, customer: { email: mail } }));
+    for (let i = 0; i < 4; i++) {
+      expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, customer: { email: mail } })))).code).toBe("rate_limited");
+    }
+    for (let i = 0; i < 2; i++) expect((await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip }))).method).toBe("pix_manual");
+    expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip })))).code).toBe("rate_limited");
+  });
+
+  test("ida e volta do needs_cpf e o Pix do Asaas de reserva não consomem o limite do Pix manual", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    await exhaustManual(s.storeId, s.offerId);
+    const ip = nextIp();
+    for (let i = 0; i < 6; i++) {
+      expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip })))).message).toBe("needs_cpf");
+    }
+    for (let i = 0; i < 6; i++) {
+      expect((await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, customer: { cpf: CPF } }))).method).toBe("pix_asaas");
+    }
+    // Valores liberados: o IP ainda tem os 5 Pix manuais.
+    await withStore(s.storeId, (tx) => tx.delete(orders).where(and(eq(orders.method, "pix_manual"), eq(orders.offerId, s.offerId))));
+    for (let i = 0; i < 5; i++) expect((await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip }))).method).toBe("pix_manual");
+    expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip })))).code).toBe("rate_limited");
+  });
+
+  test("Asaas (cartão e Pix do Asaas): 10 pedidos por IP por hora", async () => {
+    const s = await seed({ pixMode: "asaas", asaas: createFakeAsaas() });
+    expect(ASAAS_LIMITS).toEqual({ perIpPerHour: 10, perEmailPerHour: 5 });
+    const ip = nextIp();
+    // Recusado (CPF inválido) não conta.
+    expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, customer: { cpf: "123" } })))).code).toBe("invalid_input");
+    for (let i = 0; i < 10; i++) {
+      const method = i % 2 ? "card" : "pix";
+      await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, method, customer: { cpf: CPF } }));
+    }
+    const e = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { clientIp: ip, method: "card", customer: { cpf: CPF } })));
+    expect(e.code).toBe("rate_limited");
+  });
+
+  test("Asaas: 5 pedidos por e-mail por hora na loja (outra loja não é afetada)", async () => {
+    const fake = createFakeAsaas();
+    const a = await seed({ pixMode: "asaas", asaas: fake });
+    const mail = email();
+    for (let i = 0; i < 5; i++) await runAction(checkoutStart, pub(a.storeId), startInput(a.slug, { method: "card", customer: { email: mail, cpf: CPF } }));
+    const e = await fail(runAction(checkoutStart, pub(a.storeId), startInput(a.slug, { customer: { email: mail, cpf: CPF } })));
+    expect(e.code).toBe("rate_limited");
+    const b = await seed({ pixMode: "asaas", asaas: fake });
+    expect((await runAction(checkoutStart, pub(b.storeId), startInput(b.slug, { customer: { email: mail, cpf: CPF } }))).method).toBe("pix_asaas");
+  });
+
+  test("falhas de ator público em checkout.start não gravam audit_log; sucesso grava", async () => {
+    const s = await seed();
+    const mail = email();
+    for (let i = 0; i < 4; i++) await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { customer: { email: mail } })).catch(() => undefined);
+    await runAction(checkoutStart, pub(s.storeId), startInput("nao-existe")).catch(() => undefined);
+    const rows = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "checkout.start")));
+    expect(rows.map((r) => r.ok)).toEqual([true, true, true]);
+  });
+});
+
+describe("fix 1: página do pedido nunca chama o Asaas; novo código só por POST", () => {
+  test("GET (getOrderPublic) lê o QR guardado no checkout, sem chamar o Asaas", async () => {
+    const fake = createFakeAsaas();
+    const s = await seed({ pixMode: "asaas", asaas: fake });
+    const r = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { customer: { cpf: CPF } }));
+    const before = fake.calls.length;
+    const view = (await getOrderPublic(s.storeId, r.publicId))!;
+    expect(view.pix?.copyPaste).toContain("00020126fake");
+    expect(view.pix?.qrImage).toBeTruthy();
+    await getOrderPublic(s.storeId, r.publicId);
+    expect(fake.calls.length).toBe(before);
+  });
+
+  test("QR faltando: a página mostra o aviso sem chamar o Asaas; 'Gerar novo código Pix' (POST) busca e guarda; 3 por hora", async () => {
+    const fake = createFakeAsaas();
+    const s = await seed({ pixMode: "asaas", asaas: fake });
+    fake.fail("GET /payments/", 503, "fora do ar");
+    const r = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { customer: { cpf: CPF } }));
+    fake.clearFailures();
+    const before = fake.calls.length;
+    const missing = (await getOrderPublic(s.storeId, r.publicId))!;
+    expect(missing.pix).toBeUndefined();
+    expect(missing.pixUnavailable).toBe(true);
+    expect(fake.calls.length).toBe(before);
+
+    expect(PIX_REGEN_PER_HOUR).toBe(3);
+    await runAction(regenerateOrderPix, pub(s.storeId), { publicId: r.publicId });
+    expect(fake.calls.filter((c) => c.method === "POST" && c.path === "/payments")).toHaveLength(1); // reaproveita a cobrança
+    const view = (await getOrderPublic(s.storeId, r.publicId))!;
+    expect(view.pix?.copyPaste).toContain("00020126fake");
+    await runAction(regenerateOrderPix, pub(s.storeId), { publicId: r.publicId });
+    await runAction(regenerateOrderPix, pub(s.storeId), { publicId: r.publicId });
+    expect((await fail(runAction(regenerateOrderPix, pub(s.storeId), { publicId: r.publicId }))).code).toBe("rate_limited");
+  });
+
+  test("novo código só para Pix do Asaas pendente da própria loja", async () => {
+    const s = await seed();
+    const r = await runAction(checkoutStart, pub(s.storeId), startInput(s.slug));
+    expect((await fail(runAction(regenerateOrderPix, pub(s.storeId), { publicId: r.publicId }))).code).toBe("conflict");
+    const other = await seed();
+    expect((await fail(runAction(regenerateOrderPix, pub(other.storeId), { publicId: r.publicId }))).code).toBe("not_found");
+  });
+});
+
+describe("fix 1: checkout.view (gravação anônima)", () => {
+  test("no máximo 30 visitas por IP por hora em cada oferta", async () => {
+    const s = await seed();
+    expect(VIEW_LIMIT_PER_HOUR).toBe(30);
+    const ip = nextIp();
+    const view = (clientIp: string) => runAction(checkoutViewAction, pub(s.storeId), { slug: s.slug, touch: { first: null, last: null }, clientIp });
+    for (let i = 0; i < 30; i++) await view(ip);
+    expect((await fail(view(ip))).code).toBe("rate_limited");
+    await view(nextIp());
+    const rows = await withStore(s.storeId, (tx) => tx.select().from(checkoutView).where(eq(checkoutView.offerId, s.offerId)));
+    expect(rows).toHaveLength(31);
+    // Só as ações do dono no seed (produto, oferta, chave Pix) estão auditadas; nada de checkout.view.
+    const actions = (await withStore(s.storeId, (tx) => tx.select({ action: auditLog.action }).from(auditLog))).map((r) => r.action);
+    expect(actions.filter((a) => a.startsWith("checkout."))).toEqual([]);
+  });
+
+  test("toque acima de 2 KB é descartado (não grava payload grande)", async () => {
+    const s = await seed();
+    expect(TOUCH_MAX_BYTES).toBe(2048);
+    const big: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) big[`k${i}`] = "x".repeat(400);
+    await runAction(checkoutViewAction, pub(s.storeId), { slug: s.slug, touch: { first: big, last: { utm_source: "ig" } }, clientIp: nextIp() });
+    const [row] = await withStore(s.storeId, (tx) => tx.select().from(checkoutView).where(eq(checkoutView.offerId, s.offerId)));
+    expect(row!.touch).toEqual({ first: null, last: null });
+    const r = await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { touch: { first: big, last: null } }));
+    expect((await orderBy(s.storeId, r.publicId)).firstTouch).toBeNull();
   });
 });

@@ -3,24 +3,26 @@
 // - `checkout.start` cria o pedido (preços sempre do banco). CPF só quando o pagamento é pelo Asaas (Pix do Asaas ou
 //   cartão); no Pix manual o CPF não é pedido nem guardado. Pix manual esgotado (ou sem chave) com Asaas conectado:
 //   vira Pix do Asaas (pede CPF com `needs_cpf`).
-// - Pix manual tem limites contra quem esgota os valores únicos: 5 pedidos por IP por hora e 3 pendentes (ou
-//   reservados: expirados há menos de 48 h) por e-mail na loja.
-// - `startCheckout` roda `checkout.start` e, no Pix do Asaas, já cria a cobrança fora da transação.
-// - `getOrderPublic` é o que a página do pedido mostra: nunca e-mail, CPF, celular ou ids internos.
+// - Limites (contam pedidos CRIADOS, não tentativas: lidos no `prepare`, somados no `afterCommit`):
+//   Pix manual 5 por IP/hora e 3 pendentes (ou reservados: expirados há < 48 h) por e-mail na loja;
+//   Asaas (Pix do Asaas e cartão) 10 por IP/hora e 5 por e-mail/hora na loja.
+// - `startCheckout` roda `checkout.start` e, no Pix do Asaas, já cria a cobrança e guarda o QR (fora da transação).
+// - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
+//   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
 import { createHash } from "node:crypto";
 import { and, asc, count, desc, eq, gt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, product } from "@/lib/db/schema";
+import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createOrder, type Order } from "@/lib/orders/create";
 import { UNAVAILABLE_MESSAGE as CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/asaas/card";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { MANUAL_RESERVE_AFTER_EXPIRY_MS, manualPixBrCode } from "@/lib/payments/manual";
-import { checkRateLimit, ipRateKey } from "@/lib/payments/ratelimit";
+import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
 import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 
@@ -29,9 +31,20 @@ export const PIX_UNAVAILABLE_MESSAGE = "Pix indisponível no momento, tente em a
 export { CARD_UNAVAILABLE_MESSAGE };
 /** `ActionError("conflict", NEEDS_CPF)`: Pix manual esgotado; o formulário mostra o CPF e reenvia (vira Pix do Asaas). */
 export const NEEDS_CPF = "needs_cpf";
+export const ASAAS_LIMIT_MESSAGE = "Muitas compras seguidas. Aguarde alguns minutos e tente de novo.";
 export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
-/** IP sem proxy confiável (ver card-http.ts): sem limite por IP. */
+export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
+export const PIX_REGEN_PER_HOUR = 3;
+export const VIEW_LIMIT_PER_HOUR = 30;
+/** Toque (UTM etc.) maior que isto, serializado, é descartado: nunca grava payload grande de anônimo. */
+export const TOUCH_MAX_BYTES = 2048;
+const HOUR = 3600;
+/** IP sem proxy confiável (ver card-http.ts): sem limite por IP nos pedidos. */
 const UNKNOWN_IP = "unknown";
+
+const manualIpKey = (ip: string) => `checkout:pix_manual:ip:${ipRateKey(ip)}`;
+const asaasIpKey = (ip: string) => `checkout:asaas:ip:${ipRateKey(ip)}`;
+const asaasEmailKey = (storeId: string, email: string) => `checkout:asaas:email:${storeId}:${sha256(email)}`;
 
 const publicCall = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -42,8 +55,10 @@ const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const touchRecord = z
   .record(z.string().max(40), z.string().max(500))
   .refine((r) => Object.keys(r).length <= 20, "Toque com campos demais");
-export const touchSchema = z.object({ first: touchRecord.nullable(), last: touchRecord.nullable() });
-export type CheckoutTouch = z.infer<typeof touchSchema>;
+export const touchSchema = z
+  .object({ first: touchRecord.nullable(), last: touchRecord.nullable() })
+  .transform((t) => (Buffer.byteLength(JSON.stringify(t)) > TOUCH_MAX_BYTES ? { first: null, last: null } : t));
+export type CheckoutTouch = z.input<typeof touchSchema>;
 
 const slug = z.string().min(1).max(100);
 
@@ -91,6 +106,8 @@ function requireCpf(cpf: string | undefined): string {
 // ---------------------------------------------------------------------------------------------------------------
 // checkout.start
 
+type StartOutput = { publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; orderId: string };
+
 export const checkoutStart = defineAction({
   name: "checkout.start",
   description: "Cria o pedido de uma oferta pelo checkout público (Pix manual, Pix do Asaas ou cartão).",
@@ -99,20 +116,29 @@ export const checkoutStart = defineAction({
   // LGPD: sem CPF, celular, nome nem e-mail em claro na auditoria.
   auditInput: (i) => ({ slug: i.slug, method: i.method, hasBump: i.withBump, emailHash: sha256(i.customer.email) }),
   /**
-   * Limite por IP do Pix manual (5 por hora) antes da transação: o contador fica no `rate_limit` (outra conexão),
-   * então não pode rodar com a transação aberta. A oferta é só lida.
+   * Só LÊ os contadores (`rate_limit`, outra conexão: fora da transação). Quem decide qual vale é `run`, pelo método do
+   * pedido que vai ser criado; quem soma é `afterCommit`, só para o pedido criado.
    */
   async prepare(call, input) {
-    if (input.method !== "pix" || input.clientIp === UNKNOWN_IP) return undefined;
-    const [o] = await withStore(call.storeId, (tx) =>
-      tx.select({ pixMode: offer.pixMode }).from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true))),
-    );
-    if (o?.pixMode !== "manual") return undefined;
-    const ok = await checkRateLimit(`pix_manual:ip:${ipRateKey(input.clientIp)}`, PIX_MANUAL_LIMITS.perIpPerHour, 3600);
-    if (!ok) throw new ActionError("rate_limited", CHECKOUT_LIMIT_MESSAGE);
-    return undefined;
+    const knownIp = input.clientIp !== UNKNOWN_IP;
+    const [manualIpOk, asaasIpOk, asaasEmailOk] = await Promise.all([
+      knownIp ? peekRateLimit(manualIpKey(input.clientIp), PIX_MANUAL_LIMITS.perIpPerHour, HOUR) : true,
+      knownIp ? peekRateLimit(asaasIpKey(input.clientIp), ASAAS_LIMITS.perIpPerHour, HOUR) : true,
+      peekRateLimit(asaasEmailKey(call.storeId, input.customer.email), ASAAS_LIMITS.perEmailPerHour, HOUR),
+    ]);
+    return { manualIpOk, asaasOk: asaasIpOk && asaasEmailOk };
   },
-  async run(ctx, input) {
+  /** Conta o pedido criado (melhor esforço; falha só vai para o log). */
+  async afterCommit(call, input, out: StartOutput) {
+    const knownIp = input.clientIp !== UNKNOWN_IP;
+    if (out.method === "pix_manual") {
+      if (knownIp) await hitRateLimit(manualIpKey(input.clientIp), HOUR);
+      return;
+    }
+    if (knownIp) await hitRateLimit(asaasIpKey(input.clientIp), HOUR);
+    await hitRateLimit(asaasEmailKey(call.storeId, input.customer.email), HOUR);
+  },
+  async run(ctx, input, limits): Promise<StartOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     if (!o.methods.includes(input.method)) {
@@ -131,8 +157,12 @@ export const checkoutStart = defineAction({
       clientIp: input.clientIp,
       userAgent: input.userAgent,
     };
-    const create = (method: "pix_manual" | "pix_asaas" | "card_asaas", withCpf?: string, fallback = false) =>
-      createOrder(ctx, { ...base, method, customer: withCpf ? { ...buyer, cpf: withCpf } : buyer, asaasPixFallback: fallback });
+    const create = (method: "pix_manual" | "pix_asaas" | "card_asaas", withCpf?: string, fallback = false) => {
+      if (method === "pix_manual" ? !limits.manualIpOk : !limits.asaasOk) {
+        throw new ActionError("rate_limited", method === "pix_manual" ? CHECKOUT_LIMIT_MESSAGE : ASAAS_LIMIT_MESSAGE);
+      }
+      return createOrder(ctx, { ...base, method, customer: withCpf ? { ...buyer, cpf: withCpf } : buyer, asaasPixFallback: fallback });
+    };
 
     let order: Order;
     if (input.method === "card") {
@@ -160,7 +190,8 @@ export const checkoutStart = defineAction({
       else {
         if (!asaasOn) throw new ActionError("conflict", PIX_UNAVAILABLE_MESSAGE);
         if (!cpf) throw new ActionError("conflict", NEEDS_CPF, [{ path: ["customer", "cpf"] }]);
-        order = await create("pix_asaas", requireCpf(cpf), true);
+        const valid = requireCpf(cpf);
+        order = await create("pix_asaas", valid, true);
       }
     }
     return { publicId: order.publicId, method: order.method as "pix_manual" | "pix_asaas" | "card_asaas", orderId: order.id };
@@ -185,9 +216,9 @@ async function enforceEmailLimit(ctx: Ctx, email: string): Promise<void> {
 }
 
 /**
- * `checkout.start` + cobrança Pix do Asaas criada na hora (HTTP fora da transação). Celular recusado pelo Asaas
- * volta como `invalid_input` para o comprador corrigir (o pedido sem cobrança expira sozinho em 24 h); outras falhas
- * do Asaas ficam para a página do pedido, que tenta de novo ao abrir.
+ * `checkout.start` + cobrança Pix do Asaas criada na hora, com o QR guardado (HTTP fora da transação). Celular
+ * recusado pelo Asaas volta como `invalid_input` para o comprador corrigir (o pedido sem cobrança expira sozinho em
+ * 24 h); outras falhas deixam a página do pedido com o botão "Gerar novo código Pix" (`orders.regeneratePix`).
  */
 export async function startCheckout(
   call: { storeId: string },
@@ -199,7 +230,7 @@ export async function startCheckout(
       await startAsaasPix(call, out.orderId);
     } catch (e) {
       if (e instanceof ActionError && e.code === "invalid_input") throw e;
-      log.warn("checkout: cobrança Pix do Asaas não criada agora; a página do pedido tenta de novo", { publicId: out.publicId, error: e });
+      log.warn("checkout: cobrança/QR do Pix do Asaas não gerados agora; o comprador pode pedir um novo código", { publicId: out.publicId, error: e });
     }
   }
   return { publicId: out.publicId, method: out.method };
@@ -211,9 +242,14 @@ export async function startCheckout(
 export const checkoutView = defineAction({
   name: "checkout.view",
   description: "Registra uma visita ao checkout de uma oferta (métrica de conversão).",
-  input: z.object({ slug, touch: touchSchema }),
+  input: z.object({ slug, touch: touchSchema, clientIp: z.string().min(1).max(64) }),
   permission: "public",
   audit: false,
+  /** Gravação anônima: no máximo 30 por IP por hora em cada oferta (IP desconhecido = uma chave só por oferta). */
+  async prepare(call, input) {
+    const key = `checkout:view:${call.storeId}:${input.slug}:${ipRateKey(input.clientIp)}`;
+    if (!(await checkRateLimit(key, VIEW_LIMIT_PER_HOUR, HOUR))) throw new ActionError("rate_limited", "Muitas visitas");
+  },
   async run(ctx, input) {
     const [o] = await ctx.tx.select({ id: offer.id }).from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
@@ -240,7 +276,31 @@ export const orderPublicStatus = defineAction({
   },
 });
 
-/** Leitura interna da página do pedido (inclui o id, usado só no servidor para a cobrança do Asaas). */
+/**
+ * "Gerar novo código Pix" (POST da página do pedido): para Pix do Asaas pendente sem QR guardado. Cria ou reaproveita
+ * a cobrança e guarda o QR (`startAsaasPix`, HTTP no `prepare`: fora de transação). No máximo 3 por hora por pedido.
+ */
+export const regenerateOrderPix = defineAction({
+  name: "orders.regeneratePix",
+  description: "Gera de novo o código Pix (Asaas) de um pedido pendente, quando o QR não está disponível.",
+  input: publicIdInput,
+  permission: "public",
+  audit: false,
+  async prepare(call, { publicId }) {
+    const [o] = await withStore(call.storeId, (tx) =>
+      tx.select({ id: orders.id, method: orders.method, status: orders.status }).from(orders).where(eq(orders.publicId, publicId)),
+    );
+    if (!o) throw new ActionError("not_found", "Pedido não encontrado");
+    if (o.method !== "pix_asaas" || o.status !== "pending") throw new ActionError("conflict", "Este pedido não aceita um novo código Pix");
+    if (!(await checkRateLimit(`checkout:pix_regen:${call.storeId}:${publicId}`, PIX_REGEN_PER_HOUR, HOUR))) {
+      throw new ActionError("rate_limited", "Você já pediu vários códigos. Aguarde alguns minutos.");
+    }
+    await startAsaasPix({ storeId: call.storeId }, o.id);
+  },
+  run: async () => ({ ok: true as const }),
+});
+
+/** Leitura interna da página do pedido (inclui o id; só no servidor). Não chama o Asaas: lê o QR guardado. */
 const orderPublicView = defineAction({
   name: "orders.publicView",
   description: "Dados de um pedido para a página pública do pedido (sem dados pessoais).",
@@ -263,12 +323,20 @@ const orderPublicView = defineAction({
       const cfg = (await getIntegration(ctx.tx, ctx.storeId, "pix_manual"))?.config as { name?: string } | undefined;
       if (brCode) manual = { copyPaste: brCode, receiver: (cfg?.name ?? "").toUpperCase(), txid: txidOf(o.publicId) };
     }
+    let asaas: { copyPaste: string; qrImage: string | null } | null = null;
+    if (o.method === "pix_asaas" && o.status === "pending") {
+      const [p] = await ctx.tx
+        .select({ copyPaste: payment.pixCopyPaste, qrImage: payment.pixQrImage })
+        .from(payment)
+        .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas"), eq(payment.status, "PENDING")));
+      if (p?.copyPaste) asaas = { copyPaste: p.copyPaste, qrImage: p.qrImage };
+    }
     let buyerName = o.buyerName;
     if (!buyerName) {
       const [c] = await ctx.tx.select({ name: customer.name }).from(customer).where(eq(customer.id, o.customerId));
       buyerName = c?.name ?? "";
     }
-    return { o, offer: of!, items, manual, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
+    return { o, offer: of!, items, manual, asaas, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
 });
 
@@ -299,13 +367,13 @@ export interface OrderPublic {
     receiver?: string;
     txid?: string;
   };
-  /** Pix do Asaas pendente sem QR agora (Asaas fora do ar): a página pede para recarregar. */
+  /** Pix do Asaas pendente sem QR guardado: a página oferece "Gerar novo código Pix". */
   pixUnavailable?: boolean;
 }
 
 /**
  * Dados da página do pedido. `publicId` de outra loja -> `null` (RLS: a consulta roda com o `store_id` desta loja).
- * Pix do Asaas pendente: cria ou reaproveita a cobrança (fora de transação) para mostrar o QR.
+ * Só leitura: nunca chama o Asaas (o QR do Pix do Asaas foi guardado no checkout ou no "Gerar novo código Pix").
  */
 export async function getOrderPublic(storeId: string, publicId: string): Promise<OrderPublic | null> {
   let v: Awaited<ReturnType<typeof orderPublicView.run>>;
@@ -334,13 +402,10 @@ export async function getOrderPublic(storeId: string, publicId: string): Promise
     const qrSvg = await QRCode.toString(v.manual.copyPaste, { type: "svg", margin: 0, errorCorrectionLevel: "M" });
     out.pix = { ...v.manual, qrSvg };
   } else if (o.method === "pix_asaas" && o.status === "pending") {
-    try {
-      const qr = await startAsaasPix({ storeId }, o.id);
-      out.pix = { copyPaste: qr.copyPaste, qrImage: /^[A-Za-z0-9+/=]+$/.test(qr.qrImage) ? qr.qrImage : undefined };
-    } catch (e) {
-      log.warn("página do pedido: QR do Asaas indisponível", { publicId, error: e });
-      out.pixUnavailable = true;
-    }
+    if (v.asaas) {
+      const img = v.asaas.qrImage && /^[A-Za-z0-9+/=]+$/.test(v.asaas.qrImage) ? v.asaas.qrImage : undefined;
+      out.pix = { copyPaste: v.asaas.copyPaste, qrImage: img };
+    } else out.pixUnavailable = true;
   }
   return out;
 }

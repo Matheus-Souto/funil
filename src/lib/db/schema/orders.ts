@@ -111,6 +111,9 @@ export const payment = pgTable(
     status: text("status").notNull(),
     amountCents: integer("amount_cents").notNull(),
     raw: jsonb("raw"),
+    /** Pix do Asaas: copia e cola e QR (PNG base64) guardados ao criar a cobrança; a página do pedido só lê daqui. */
+    pixCopyPaste: text("pix_copy_paste"),
+    pixQrImage: text("pix_qr_image"),
   },
   (t) => [
     check("payment_provider_check", sql`${t.provider} in ('asaas','manual')`),

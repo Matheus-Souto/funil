@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { e2eRoutesEnabled, handleE2e } from "@/lib/e2e-seed";
 
 describe("rota só do smoke E2E", () => {
-  test("ligada só com ASAAS_BASE_URL em loopback (Asaas falso do smoke)", () => {
-    expect(e2eRoutesEnabled(undefined)).toBe(false);
-    expect(e2eRoutesEnabled("https://api.asaas.com/v3")).toBe(false);
-    expect(e2eRoutesEnabled("http://127.0.0.1:4010")).toBe(true);
+  test("ligada só com E2E_SEED_ROUTES=1 (que o env recusa fora de loopback); ASAAS_BASE_URL não liga", () => {
+    expect(e2eRoutesEnabled({ E2E_SEED_ROUTES: undefined, ASAAS_BASE_URL: "http://127.0.0.1:4010" })).toBe(false);
+    expect(e2eRoutesEnabled({ E2E_SEED_ROUTES: "0", ASAAS_BASE_URL: undefined })).toBe(false);
+    expect(e2eRoutesEnabled({ E2E_SEED_ROUTES: "1", ASAAS_BASE_URL: undefined })).toBe(true);
   });
 
   test("desligada -> 404 antes de olhar a sessão; ligada sem dono -> 401", async () => {

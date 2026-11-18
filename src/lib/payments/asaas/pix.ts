@@ -164,6 +164,14 @@ export async function startAsaasPix(
 
   // QR fora de transação, com a linha já confirmada: se falhar, a nova tentativa reaproveita a cobrança.
   const qr = await client.getPixQrCode(providerId);
+  const charge = providerId;
+  // Guarda o QR: a página do pedido só lê o banco (nunca chama o Asaas num GET).
+  await withStore(storeId, (tx) =>
+    tx
+      .update(payment)
+      .set({ pixCopyPaste: qr.payload, pixQrImage: qr.encodedImage })
+      .where(and(eq(payment.provider, "asaas"), eq(payment.providerId, charge))),
+  );
   return { qrImage: qr.encodedImage, copyPaste: qr.payload, expiresAt: qr.expirationDate };
 }
 

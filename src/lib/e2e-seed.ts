@@ -1,6 +1,6 @@
 // SÓ PARA O SMOKE E2E (scripts/verify.sh): o painel ainda não tem telas de oferta, conexões e liberação (Task 14),
-// então o smoke configura a loja por aqui. Desligado (404) a menos que ASAAS_BASE_URL aponte para loopback — o env
-// só aceita essa variável em produção com loopback (Asaas falso do smoke), então uma instalação real nunca a tem.
+// então o smoke configura a loja por aqui. Desligada (404) a menos que E2E_SEED_ROUTES=1, variável que o env só
+// aceita com BASE_URL em loopback: uma instalação acessível de fora nunca a liga.
 // Mesmo ligado, exige a sessão do DONO no painel e passa por `runAction` (mesmas permissões e auditoria do painel):
 // não faz nada que o dono não possa fazer.
 import { eq } from "drizzle-orm";
@@ -19,18 +19,9 @@ const ACTIONS: Record<string, Action<unknown, unknown>> = {
   "connections.saveAsaas": saveAsaas as Action<unknown, unknown>,
 };
 
-function isLoopbackUrl(value: string | undefined): boolean {
-  if (!value) return false;
-  try {
-    const h = new URL(value).hostname;
-    return h === "127.0.0.1" || h === "localhost" || h === "[::1]";
-  } catch {
-    return false;
-  }
-}
-
-export function e2eRoutesEnabled(asaasBaseUrl: string | undefined = env.ASAAS_BASE_URL): boolean {
-  return isLoopbackUrl(asaasBaseUrl);
+/** Ligada só com E2E_SEED_ROUTES=1 (o env recusa essa variável fora de BASE_URL em loopback). */
+export function e2eRoutesEnabled(e: Pick<typeof env, "E2E_SEED_ROUTES" | "ASAAS_BASE_URL"> = env): boolean {
+  return e.E2E_SEED_ROUTES === "1";
 }
 
 const json = (status: number, body: unknown) => Response.json(body, { status, headers: { "cache-control": "no-store" } });

@@ -8,14 +8,22 @@ import s from "../../(design)/buyer.module.css";
 import { Icon } from "../../(design)/icons";
 import { BuyerShell } from "../../(design)/shell";
 import { PurchaseTracking } from "./tracking-slot";
+import { regeneratePixAction } from "./actions";
 import { CopyPixButton, OrderLive } from "./status";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Seu pedido", robots: { index: false } };
 
 /** Página do pedido (frames 05, 06, 07 e 09 do canvas Doop). Nunca mostra e-mail, CPF ou ids internos. */
-export default async function OrderPage({ params }: { params: Promise<{ publicId: string }> }) {
+export default async function OrderPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ publicId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { publicId } = await params;
+  const pixNotice = (await searchParams).pix;
   const store = await resolveStore((await headers()).get("host") ?? "");
   if (!store) notFound();
   const order = await getOrderPublic(store.id, publicId);
@@ -25,16 +33,16 @@ export default async function OrderPage({ params }: { params: Promise<{ publicId
   return (
     <BuyerShell storeName={store.name} brandColor={brandColor}>
       {order.status === "pending" ? <OrderLive publicId={publicId} status={order.status} /> : null}
-      <OrderBody order={order} storeName={store.name} />
+      <OrderBody order={order} storeName={store.name} publicId={publicId} pixNotice={typeof pixNotice === "string" ? pixNotice : undefined} />
     </BuyerShell>
   );
 }
 
-function OrderBody({ order, storeName }: { order: OrderPublic; storeName: string }) {
+function OrderBody({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   switch (order.status) {
     case "pending":
       if (order.method === "pix_manual") return <ManualPix order={order} storeName={storeName} />;
-      if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} />;
+      if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
       return <CardPending order={order} />;
     case "paid":
       return <ThankYou order={order} storeName={storeName} />;
@@ -158,7 +166,7 @@ function ManualPix({ order, storeName }: { order: OrderPublic; storeName: string
   );
 }
 
-function AsaasPix({ order, storeName }: { order: OrderPublic; storeName: string }) {
+function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   const pix = order.pix;
   return (
     <main className={s.main}>
@@ -178,10 +186,23 @@ function AsaasPix({ order, storeName }: { order: OrderPublic; storeName: string 
         {pix ? (
           <CodeBox code={pix.copyPaste} />
         ) : (
-          <p className={s.alert} role="alert">
-            <Icon name="circle-alert" />
-            <span>Não foi possível gerar o código Pix agora. Recarregue a página em alguns instantes.</span>
-          </p>
+          <>
+            <p className={s.alert} role="alert">
+              <Icon name="circle-alert" />
+              <span>
+                {pixNotice === "limite"
+                  ? "Você já pediu vários códigos. Aguarde alguns minutos e tente de novo."
+                  : "O código Pix não ficou pronto. Toque abaixo para gerar um novo."}
+              </span>
+            </p>
+            {/* POST (server action): nunca é disparado por um simples GET da página. */}
+            <form action={regeneratePixAction.bind(null, publicId)}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`}>
+                <Icon name="refresh-cw" size={20} />
+                Gerar novo código Pix
+              </button>
+            </form>
+          </>
         )}
       </section>
       <section className={s.card}>

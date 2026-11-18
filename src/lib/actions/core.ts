@@ -119,9 +119,9 @@ export async function runAction<I, O, P = any>(
     }
     if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
   } catch (e) {
-    if (actor.kind === "public" && e instanceof ActionError && PUBLIC_UNAUDITED.has(e.code)) {
-      // Rejeição de requisição anônima: sem linha em audit_log (sem limite nem retenção = disco e pool). Só contador em log.
-      log.info("ação pública rejeitada", { action: action.name, code: e.code });
+    if (actor.kind === "public") {
+      // Falha de requisição anônima: sem linha em audit_log (sem limite nem retenção = disco e pool). Só o código em log.
+      publicFailure(action.name, e);
     } else {
       await auditFailure(storeId, audited, entry(rejection(e), false, describe(e)), e);
     }
@@ -155,7 +155,8 @@ export async function runAction<I, O, P = any>(
         log.error("falha ao compensar ação", { action: action.name, error: cleanupErr });
       }
     }
-    await auditFailure(storeId, audited, entry(capped(auditView()), false, describe(e)), e);
+    if (actor.kind === "public") publicFailure(action.name, e);
+    else await auditFailure(storeId, audited, entry(capped(auditView()), false, describe(e)), e);
     throw e;
   }
   if (action.afterCommit) {
@@ -168,9 +169,14 @@ export async function runAction<I, O, P = any>(
   return committed;
 }
 
-/** Rejeições pré-execução de ator público que NÃO vão para audit_log. */
-// `rate_limited`: limite de requisições anônimas (ex.: Pix manual por IP); auditar cada recusa encheria o audit_log.
-const PUBLIC_UNAUDITED: ReadonlySet<ActionErrorCode> = new Set(["forbidden", "invalid_input", "approval_required", "rate_limited"]);
+/**
+ * Falhas de ator público (antes ou durante a execução) NÃO vão para audit_log: só o código em log.
+ * Erro inesperado (não ActionError) continua em log.error para investigação.
+ */
+function publicFailure(action: string, e: unknown): void {
+  if (e instanceof ActionError) log.info("ação pública falhou", { action, code: e.code });
+  else log.error("ação pública falhou com erro inesperado", { action, error: e });
+}
 
 const MAX_AUDIT_BYTES = 8 * 1024;
 

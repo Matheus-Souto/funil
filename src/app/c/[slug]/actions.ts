@@ -64,10 +64,13 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
 
 /** Visita ao checkout (conversão). Melhor esforço: nunca atrapalha o comprador. */
 export async function recordCheckoutViewAction(input: unknown): Promise<void> {
-  const store = await resolveStore((await headers()).get("host") ?? "");
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
   if (!store) return;
+  const body = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
   try {
-    await runAction(checkoutView, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, input);
+    // O IP vem do servidor (limite de 30 visitas por IP por hora em cada oferta).
+    await runAction(checkoutView, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, { ...body, clientIp: clientIpFrom(h, env.TRUST_PROXY) });
   } catch {
     /* oferta inativa ou entrada inválida: sem registro */
   }

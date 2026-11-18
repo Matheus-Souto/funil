@@ -85,6 +85,13 @@
       "when": 1795033245899,
       "tag": "0011_buyer_snapshot_brand_color",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795035490756,
+      "tag": "0012_payment_pix_qr",
+      "breakpoints": true
     }
   ]
 }
