@@ -165,3 +165,49 @@ test("matriz de papéis", () => {
   expect(hasPermission("traffic", "metrics.read")).toBe(true);
   expect(hasPermission("traffic", "orders.read")).toBe(false);
 });
+
+test("rejeição pré-run de ator público audita só as chaves, nunca valores", async () => {
+  const { storeId } = await seedStore();
+  const gated = defineAction({ name: "t.gated", description: "x", input: z.object({}), permission: "orders.refund", run: async () => 1 }, def);
+  const body = { cpf: "123.456.789-00", blob: "x".repeat(50_000), ["k".repeat(100)]: 1 };
+  const err = await runAction(gated, { storeId, actor: { kind: "public" }, origin: "public" }, body).catch((e) => e);
+  expect(err.code).toBe("forbidden");
+  const [row] = await auditRows(storeId);
+  expect(row!.ok).toBe(false);
+  expect(row!.error).toContain("forbidden");
+  const input = row!.input as { omitted: string; keys: string[] };
+  expect(input.omitted).toBe("forbidden");
+  expect(input.keys).toEqual(["cpf", "blob", "k".repeat(64)]);
+  expect(JSON.stringify(row!.input)).not.toContain("123.456");
+});
+
+test("corpo vazio ou não-objeto ainda grava linha ok=false", async () => {
+  const { storeId } = await seedStore();
+  for (const raw of [undefined, null, "texto", [1, 2]]) {
+    const err = await runAction(echo, { storeId, actor: owner, origin: "panel" }, raw).catch((e) => e);
+    expect(err.code).toBe("invalid_input");
+  }
+  const rows = await auditRows(storeId);
+  expect(rows).toHaveLength(4);
+  for (const r of rows) {
+    expect(r.ok).toBe(false);
+    expect(r.input).toEqual({ omitted: "invalid_input", keys: [] });
+  }
+});
+
+test("approval_required audita só chaves", async () => {
+  const { storeId } = await seedStore();
+  const sens = defineAction({ name: "t.sens2", description: "x", input: z.object({ a: z.string() }), permission: "orders.refund", sensitive: true, run: async () => 1 }, def);
+  await runAction(sens, { storeId, actor: owner, origin: "ai" }, { a: "segredo" }).catch(() => undefined);
+  const [row] = await auditRows(storeId);
+  expect(row!.input).toEqual({ omitted: "approval_required", keys: ["a"] });
+});
+
+test("entrada válida acima de 8 KB é gravada truncada", async () => {
+  const { storeId } = await seedStore();
+  const big = defineAction({ name: "t.big", description: "x", input: z.object({ blob: z.string() }), permission: "products.read", run: async () => 1 }, def);
+  await runAction(big, { storeId, actor: owner, origin: "panel" }, { blob: "x".repeat(20_000) });
+  const [row] = await auditRows(storeId);
+  expect(row!.ok).toBe(true);
+  expect(row!.input).toEqual({ truncated: true, keys: ["blob"] });
+});

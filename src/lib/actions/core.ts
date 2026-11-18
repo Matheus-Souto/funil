@@ -84,6 +84,9 @@ export async function runAction<I, O>(
     error: error === undefined ? null : (redact(error) as string),
   });
 
+  const omitted = (code: string) => ({ omitted: code, keys: topKeys(raw) });
+  const rejection = (e: unknown) => omitted(e instanceof ActionError ? e.code : "error");
+
   let input: I;
   try {
     authorize(action as Action<unknown, unknown>, actor);
@@ -98,21 +101,36 @@ export async function runAction<I, O>(
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
   } catch (e) {
-    await auditFailure(storeId, audited, entry(raw, false, describe(e)), e);
+    await auditFailure(storeId, audited, entry(rejection(e), false, describe(e)), e);
     throw e;
   }
 
   try {
     return await withStore(storeId, async (tx) => {
       const out = await action.run({ storeId, actor, origin, tx }, input);
-      if (audited) await tx.insert(auditLog).values(entry(input, true));
+      if (audited) await tx.insert(auditLog).values(entry(capped(input), true));
       return out;
     });
   } catch (e) {
     // A transação principal já foi desfeita; a auditoria de falha vai em outra.
-    await auditFailure(storeId, audited, entry(input, false, describe(e)), e);
+    await auditFailure(storeId, audited, entry(capped(input), false, describe(e)), e);
     throw e;
   }
+}
+
+const MAX_AUDIT_BYTES = 8 * 1024;
+
+/** Só nomes das chaves de primeiro nível (máx. 20, 64 chars); nunca valores. */
+function topKeys(v: unknown): string[] {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return [];
+  return Object.keys(v).slice(0, 20).map((k) => k.slice(0, 64));
+}
+
+/** Entrada validada para auditoria: se passar de 8 KB serializada, guarda só as chaves. */
+function capped(input: unknown): unknown {
+  const r = redact(input);
+  const size = JSON.stringify(r ?? null).length;
+  return size > MAX_AUDIT_BYTES ? { truncated: true, keys: topKeys(input) } : (r ?? {});
 }
 
 function describe(e: unknown): string {
