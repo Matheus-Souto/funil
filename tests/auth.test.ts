@@ -171,3 +171,26 @@ describe("login", () => {
     expect(await login({ email: u.email, password: PASSWORD, storeId })).toBeString();
   });
 });
+
+describe("limites de tamanho do login", () => {
+  test("e-mail > 254 e senha > 256 são recusados antes de qualquer trabalho (sem tentativa gravada)", async () => {
+    const { storeId } = await seedStore();
+    const u = await seedUser(storeId);
+    const before = (await t.ownerDb.select().from(loginAttempt)).length;
+    const errs = [
+      await rejects(login({ email: `${"a".repeat(250)}@exemplo.com`, password: PASSWORD, storeId })),
+      await rejects(login({ email: u.email, password: "x".repeat(257), storeId })),
+      await rejects(login({ email: u.email, password: "x".repeat(1_000_000), storeId })),
+    ];
+    expect(new Set(errs.map((e) => `${e.code}|${e.message}`)).size).toBe(1);
+    expect((await t.ownerDb.select().from(loginAttempt)).length).toBe(before);
+  });
+
+  test("no limite (senha de 256) segue o fluxo normal e grava a tentativa", async () => {
+    const { storeId } = await seedStore();
+    const u = await seedUser(storeId);
+    await rejects(login({ email: u.email, password: "x".repeat(256), storeId }));
+    const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(u.email)));
+    expect(rows).toHaveLength(1);
+  });
+});

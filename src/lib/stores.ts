@@ -46,12 +46,12 @@ export async function resolveStore(
 }
 
 const SETUP_LOCK = 7_303_005;
-const email = z.string().trim().toLowerCase().pipe(z.email());
+const email = z.string().max(254).trim().toLowerCase().pipe(z.email());
 const setupInput = z.object({
-  storeName: z.string().trim().min(1).max(120),
+  storeName: z.string().max(100).trim().min(1),
   email,
-  password: z.string().min(10, "A senha precisa ter no mínimo 10 caracteres").max(200),
-  name: z.string().trim().min(1).max(120),
+  password: z.string().min(10, "A senha precisa ter no mínimo 10 caracteres").max(256),
+  name: z.string().max(100).trim().min(1),
 });
 
 const slugify = (s: string) =>

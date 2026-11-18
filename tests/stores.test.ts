@@ -56,6 +56,24 @@ describe("setupFirstRun", () => {
   });
 });
 
+describe("limites de tamanho do setup", () => {
+  test("e-mail > 254, senha > 256, nomes > 100 → invalid_input sem criar nada", async () => {
+    const cases = [
+      { ...setup, email: `${"a".repeat(250)}@x.com` },
+      { ...setup, password: "x".repeat(257) },
+      { ...setup, name: "n".repeat(101) },
+      { ...setup, storeName: "l".repeat(101) },
+    ];
+    for (const c of cases) expect(await code(setupFirstRun(c, "single"))).toBe("invalid_input");
+    expect(await t.ownerDb.select().from(users)).toHaveLength(0);
+  });
+
+  test("nos limites (nomes 100, senha 256) passa", async () => {
+    const r = await setupFirstRun({ ...setup, name: "n".repeat(100), storeName: "l".repeat(100), password: "x".repeat(256) }, "single");
+    expect(r.userId).toBeString();
+  });
+});
+
 describe("resolveStore", () => {
   async function seed() {
     const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "loja-a.com.br" }).returning();

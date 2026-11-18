@@ -1,5 +1,6 @@
 import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { ActionError, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
@@ -11,6 +12,10 @@ export const SESSION_COOKIE = "__Host-funil_session";
 const SESSION_DAYS = 30;
 const MAX_FAILURES = 5;
 const LOCK_MINUTES = 15;
+
+/** Limites de entrada do login/setup, checados ANTES de qualquer hash, consulta ou gravação. */
+export const MAX_EMAIL_LENGTH = 254;
+export const MAX_PASSWORD_LENGTH = 256;
 
 export type PanelActor = { storeId: string; actor: Extract<Actor, { kind: "user" }> };
 
@@ -77,6 +82,14 @@ async function reserveAttempt(emailHash: string): Promise<boolean> {
  * Limite: 5 tentativas malsucedidas por e-mail em 15 min; sucesso apaga as tentativas do e-mail.
  */
 export async function login(input: { email: string; password: string; storeId: string }): Promise<string> {
+  if (
+    typeof input.email !== "string" ||
+    typeof input.password !== "string" ||
+    input.email.length > MAX_EMAIL_LENGTH ||
+    input.password.length > MAX_PASSWORD_LENGTH
+  ) {
+    throw bad();
+  }
   const email = normalizeEmail(input.email);
   const emailHash = sha256(email);
   const locked = await reserveAttempt(emailHash);
@@ -112,6 +125,16 @@ export async function setSessionCookie(token: string): Promise<void> {
 export async function getPanelActor(): Promise<PanelActor | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   return token ? lookupSession(token) : null;
+}
+
+/**
+ * Porta de entrada de TODA página e server action do painel (o layout não protege server actions):
+ * sem sessão válida redireciona para /admin/login; com sessão devolve a loja e o ator para `runAction`.
+ */
+export async function requirePanelActor(): Promise<PanelActor> {
+  const panel = await getPanelActor();
+  if (!panel) redirect("/admin/login");
+  return panel;
 }
 
 export async function destroySession(): Promise<void> {

@@ -3,12 +3,16 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ActionError } from "@/lib/actions/core";
-import { createSession, destroySession, login, setSessionCookie } from "@/lib/auth/session";
+import { createSession, login, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
 import { resolveStore, setupFirstRun } from "@/lib/stores";
 
 const field = (f: FormData, k: string) => (typeof f.get(k) === "string" ? (f.get(k) as string) : "");
 
 export async function loginAction(form: FormData): Promise<void> {
+  // Limites de tamanho antes de qualquer consulta ou hash.
+  if (field(form, "email").length > MAX_EMAIL_LENGTH || field(form, "password").length > MAX_PASSWORD_LENGTH) {
+    redirect("/admin/login?erro=credenciais");
+  }
   const h = await headers();
   const found = await resolveStore(h.get("host") ?? "");
   let token: string | null = null;
@@ -25,6 +29,14 @@ export async function loginAction(form: FormData): Promise<void> {
 }
 
 export async function setupAction(form: FormData): Promise<void> {
+  if (
+    field(form, "email").length > MAX_EMAIL_LENGTH ||
+    field(form, "password").length > MAX_PASSWORD_LENGTH ||
+    field(form, "name").length > 100 ||
+    field(form, "storeName").length > 100
+  ) {
+    redirect("/admin/setup?erro=dados");
+  }
   let target = "/admin";
   try {
     const { storeId, userId } = await setupFirstRun({
@@ -39,9 +51,4 @@ export async function setupAction(form: FormData): Promise<void> {
     target = e.code === "invalid_input" ? "/admin/setup?erro=dados" : "/admin/login";
   }
   redirect(target);
-}
-
-export async function logoutAction(): Promise<void> {
-  await destroySession();
-  redirect("/admin/login");
 }
