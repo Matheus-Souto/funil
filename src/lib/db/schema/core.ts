@@ -8,6 +8,8 @@ export const store = pgTable("store", {
   name: text("name").notNull(),
   domain: text("domain").unique(),
   notifyEmail: text("notify_email"),
+  /** Cor da marca no checkout (#RRGGBB). Nula = cor padrão da plataforma. O contraste é garantido em src/lib/brand.ts. */
+  brandColor: text("brand_color"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

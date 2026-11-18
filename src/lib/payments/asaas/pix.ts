@@ -7,36 +7,80 @@ import { customer, orders, payment } from "@/lib/db/schema";
 import { env as appEnv } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { asaasAccountKey, asaasClientFor, asaasConnectionFor, asaasDueDate, centsToReais, createAsaasClient, type AsaasEnv } from "./client";
+import {
+  asaasAccountKey,
+  asaasClientFor,
+  asaasConnectionFor,
+  asaasDueDate,
+  centsToReais,
+  createAsaasClient,
+  type AsaasEnv,
+  type AsaasErrorDetails,
+} from "./client";
 import { SUPERSEDED } from "./webhook";
 
 /** Estado "aberto" da cobrança Pix (índice único parcial: uma por pedido). */
 const OPEN = "PENDING";
 const PIX_TIMEOUT_MS = 15_000;
 
+/** Retrato do comprador gravado no pedido (`buyer_*`); nulos em pedidos antigos (usa-se o `customer`). */
+export interface BuyerSnapshot {
+  name: string | null;
+  phone: string | null;
+  cpf: string | null;
+}
+
+export const buyerOf = (o: { buyerName: string | null; buyerPhone: string | null; buyerCpf: string | null }): BuyerSnapshot => ({
+  name: o.buyerName,
+  phone: o.buyerPhone,
+  cpf: o.buyerCpf,
+});
+
+export const INVALID_PHONE_MESSAGE = "Confira o número de WhatsApp";
+
+/** Celular recusado pelo Asaas no cadastro do cliente -> erro do comprador (invalid_input), não erro de integração. */
+function customerError(e: unknown): unknown {
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return e;
+  const d = e.details as Partial<AsaasErrorDetails> | undefined;
+  const phone = (d?.errorCodes ?? []).some((c) => /phone/i.test(c)) || /celular|telefone|phone/i.test(e.message);
+  if (d?.status === 400 && phone) return new ActionError("invalid_input", INVALID_PHONE_MESSAGE, [{ path: ["customer", "phone"] }]);
+  return e;
+}
+
 /**
+ * Cliente do Asaas para o comprador do pedido. Dados do retrato do pedido (`buyer`), com o `customer` como reserva.
  * Cria (uma vez por conta Asaas) o cliente no Asaas e guarda `asaas_customer_id` + `asaas_account_key`.
  * Se o id guardado veio de outra conta/ambiente (a loja trocou a conexão), cria de novo na conta atual.
+ * Se o CPF do pedido difere do CPF do `customer` (outra pessoa usou o mesmo e-mail), cria um cliente só para este
+ * pedido e não o guarda: o cadastro de um comprador nunca recebe os dados de outro.
  * Não segura transação durante o HTTP: lê, chama o Asaas e grava com UPDATE condicional
  * (se outra chamada gravou antes, devolve o id gravado; o cadastro sobrando no Asaas é inofensivo).
  * Não chamar dentro de uma transação do chamador.
  */
-export async function ensureAsaasCustomer(call: { storeId: string }, customerId: string): Promise<string> {
+export async function ensureAsaasCustomer(call: { storeId: string }, customerId: string, buyer?: BuyerSnapshot): Promise<string> {
   const { storeId } = call;
   const { c, client, accountKey } = await withStore(storeId, async (tx) => {
     const [row] = await tx.select().from(customer).where(eq(customer.id, customerId));
     if (!row) throw new ActionError("not_found", "Cliente não encontrado");
     return { c: row, ...(await asaasConnectionFor(tx, storeId)) };
   });
-  if (c.asaasCustomerId && c.asaasAccountKey === accountKey) return c.asaasCustomerId;
-  if (!c.cpf) throw new ActionError("invalid_input", "CPF ou CNPJ do cliente é obrigatório para pagar pelo Asaas");
-  const created = await client.createCustomer({
-    name: c.name,
-    email: c.email,
-    cpfCnpj: c.cpf,
-    mobilePhone: c.phone,
-    externalReference: c.id,
-  });
+  const cpf = buyer?.cpf ?? c.cpf;
+  const own = !buyer?.cpf || buyer.cpf === c.cpf;
+  if (own && c.asaasCustomerId && c.asaasAccountKey === accountKey) return c.asaasCustomerId;
+  if (!cpf) throw new ActionError("invalid_input", "CPF ou CNPJ do cliente é obrigatório para pagar pelo Asaas");
+  let created: { id: string };
+  try {
+    created = await client.createCustomer({
+      name: buyer?.name ?? c.name,
+      email: c.email,
+      cpfCnpj: cpf,
+      mobilePhone: buyer?.phone ?? c.phone,
+      externalReference: c.id,
+    });
+  } catch (e) {
+    throw customerError(e);
+  }
+  if (!own) return created.id;
   return withStore(storeId, async (tx) => {
     // Só grava se ninguém mudou o id desde a leitura (o id velho de outra conta conta como "não mudou").
     const won = await tx
@@ -82,7 +126,7 @@ export async function startAsaasPix(
 
   if (!providerId) {
     // (b) HTTP fora de transação
-    const asaasCustomer = await ensureAsaasCustomer(call, a.o.customerId);
+    const asaasCustomer = await ensureAsaasCustomer(call, a.o.customerId, buyerOf(a.o));
     const created = await client.createPayment(
       {
         customer: asaasCustomer,

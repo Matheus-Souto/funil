@@ -37,6 +37,14 @@ export const orders = pgTable(
     customerId: uuid("customer_id")
       .notNull()
       .references(() => customer.id),
+    /**
+     * Retrato do comprador no momento do pedido (o `customer` é por e-mail e não é sobrescrito por outro comprador).
+     * Entrega e Asaas usam estes campos. `buyer_cpf` só existe quando o pagamento exige (Asaas); nunca é o CPF do
+     * titular do cartão. Nulos em pedidos anteriores a esta coluna (usar o `customer`).
+     */
+    buyerName: text("buyer_name"),
+    buyerPhone: text("buyer_phone"),
+    buyerCpf: text("buyer_cpf"),
     status: text("status").notNull().default("pending"),
     method: text("method").notNull(),
     subtotalCents: integer("subtotal_cents").notNull(),

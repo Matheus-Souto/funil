@@ -16,7 +16,7 @@
 // permitir, conferimos no Asaas (GET /payments?externalReference=<pedido>): paga -> liquida pelo caminho do webhook;
 // em análise -> recusa; nenhuma -> segue; consulta falhou -> recusa (fail closed).
 import { createHash } from "node:crypto";
-import { and, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
@@ -26,8 +26,9 @@ import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
 import { verifyTurnstile } from "@/lib/payments/turnstile";
+import { cardExpiryValid } from "@/lib/validation/br";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
-import { ensureAsaasCustomer } from "./pix";
+import { buyerOf, ensureAsaasCustomer } from "./pix";
 import { applyAsaasPayment, asaasPaymentInput, mapAsaasStatus } from "./webhook";
 
 /** IP desconhecido (sem proxy confiável o app não lê X-Forwarded-For): sem limite por IP; valem e-mail e cartão. */
@@ -144,6 +145,10 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   const now = deps.now ?? (() => new Date());
   const ip = input.clientIp;
   const t = now();
+  // Validade antes do mês atual (São Paulo) é erro de digitação: não vira cobrança recusada nem erro de integração.
+  if (!cardExpiryValid(input.card.expiryMonth, input.card.expiryYear, t)) {
+    throw new ActionError("invalid_input", "Cartão vencido ou validade inválida", [{ path: ["card", "expiryMonth"] }]);
+  }
 
   // 1. Leitura curta.
   const pre = await withStore(storeId, async (tx) => {
@@ -217,10 +222,6 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     if (o!.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     const [busy] = await tx.select({ id: cardAttempt.id }).from(cardAttempt).where(busyWhere(order.id, t)).limit(1);
     if (busy) throw new ActionError("conflict", BUSY_MESSAGE);
-    // O Asaas exige CPF/CNPJ no cliente: sem CPF no pedido, usa o do titular (não é dado do cartão).
-    if (!pre.cust.cpf) {
-      await tx.update(customer).set({ cpf: input.holder.cpf }).where(and(eq(customer.id, pre.cust.id), isNull(customer.cpf)));
-    }
     const [created] = await tx
       .insert(cardAttempt)
       .values({ storeId, orderId: order.id, idempotencyKey: input.idempotencyKey, status: "processing", createdAt: t })
@@ -241,7 +242,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   let asaasCustomer: string;
   try {
     client = await withStore(storeId, (tx) => asaasClientFor(tx, storeId));
-    asaasCustomer = await ensureAsaasCustomer({ storeId }, order.customerId);
+    asaasCustomer = await ensureAsaasCustomer({ storeId }, order.customerId, buyerOf(order));
   } catch (e) {
     // Nenhuma cobrança foi enviada: libera o pedido para nova tentativa.
     await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: NO_CHARGE }, now());
@@ -269,8 +270,8 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
       cpfCnpj: input.holder.cpf,
       postalCode: input.holder.postalCode,
       addressNumber: input.holder.addressNumber,
-      phone: pre.cust.phone,
-      mobilePhone: pre.cust.phone,
+      phone: order.buyerPhone ?? pre.cust.phone,
+      mobilePhone: order.buyerPhone ?? pre.cust.phone,
     },
     // Asaas exige remoteIp; sem proxy confiável não sabemos o IP real (configuração de produção exige TRUST_PROXY).
     remoteIp: knownIp ? ip : "0.0.0.0",

@@ -169,7 +169,8 @@ export async function runAction<I, O, P = any>(
 }
 
 /** Rejeições pré-execução de ator público que NÃO vão para audit_log. */
-const PUBLIC_UNAUDITED: ReadonlySet<ActionErrorCode> = new Set(["forbidden", "invalid_input", "approval_required"]);
+// `rate_limited`: limite de requisições anônimas (ex.: Pix manual por IP); auditar cada recusa encheria o audit_log.
+const PUBLIC_UNAUDITED: ReadonlySet<ActionErrorCode> = new Set(["forbidden", "invalid_input", "approval_required", "rate_limited"]);
 
 const MAX_AUDIT_BYTES = 8 * 1024;
 

@@ -78,6 +78,13 @@
       "when": 1795031393587,
       "tag": "0010_card_attempt_resolved_at",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795033245899,
+      "tag": "0011_buyer_snapshot_brand_color",
+      "breakpoints": true
     }
   ]
 }

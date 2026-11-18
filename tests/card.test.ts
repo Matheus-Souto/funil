@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { cardAttempt, job, orders, payment } from "@/lib/db/schema";
+import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import {
   payWithCard,
@@ -237,12 +237,15 @@ describe("payWithCard: aprovação", () => {
     expect(paymentPosts(fake)).toHaveLength(1);
   });
 
-  test("cliente sem CPF: usa o CPF do titular para criar o cliente no Asaas", async () => {
+  test("pedido sem CPF do comprador: invalid_input; o CPF do titular nunca vira o CPF do comprador", async () => {
     const { fake, call, storeId, offerId } = await setup();
     const o = await newCardOrder(storeId, offerId, email(), null);
-    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
-    const created = fake.calls.find((c) => c.path === "/customers")!.body as Record<string, unknown>;
-    expect(created.cpfCnpj).toBe("52998224725");
+    const e = await payWithCard(call, input(o.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("invalid_input");
+    expect(fake.calls.filter((c) => c.path === "/customers" || c.path === "/payments")).toHaveLength(0);
+    const [c] = await withStore(storeId, (tx) => tx.select().from(customer).where(eq(customer.id, o.customerId)));
+    expect(c!.cpf).toBeNull();
+    expect((await attempts(storeId, o.id)).map((a) => a.status)).toEqual(["error"]);
   });
 });
 

@@ -159,3 +159,9 @@ export async function createStoreWithOwner(raw: {
     throw e;
   }
 }
+
+/** Cor da marca da loja no checkout (`null` = padrão). A tabela `store` não tem RLS. */
+export async function getStoreBrandColor(storeId: string): Promise<string | null> {
+  const [row] = await db.select({ brandColor: store.brandColor }).from(store).where(eq(store.id, storeId)).limit(1);
+  return row?.brandColor ?? null;
+}

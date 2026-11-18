@@ -29,7 +29,7 @@ const customer = await client.createCustomer({
   name: "Cliente Teste",
   email: `teste+${Date.now()}@example.com`,
   cpfCnpj: cpf(),
-  mobilePhone: "11999999999",
+  mobilePhone: "11987654321",
   externalReference: `sandbox-${Date.now()}`,
 });
 console.log("cliente:", customer.id);
@@ -50,8 +50,8 @@ const holderInfo = {
   cpfCnpj: cpf(),
   postalCode: "01310100",
   addressNumber: "100",
-  phone: "11999999999",
-  mobilePhone: "11999999999",
+  phone: "11987654321",
+  mobilePhone: "11987654321",
 };
 const card = (number: string) => ({ holderName: "Cliente Teste", number, expiryMonth: "12", expiryYear: "2034", ccv: "123" });
 const base = { customer: customer.id, billingType: "CREDIT_CARD" as const, dueDate: asaasDueDate(), creditCardHolderInfo: holderInfo, remoteIp: "203.0.113.10" };

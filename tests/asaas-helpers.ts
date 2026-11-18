@@ -49,7 +49,7 @@ export const newAsaasOrder = (storeId: string, offerId: string, email = "ana@exa
 
 export { createFakeAsaas };
 
-/** Pedido de cartão (Asaas). `cpf: null` cria o cliente sem CPF (o do titular é usado na cobrança). */
+/** Pedido de cartão (Asaas). `cpf: null` cria pedido e cliente sem CPF do comprador (pedido antigo: o cartão é recusado antes do Asaas). */
 export const newCardOrder = (storeId: string, offerId: string, email: string, cpf: string | null = "52998224725") =>
   withStore(storeId, (tx) =>
     createOrder(ctxOf(storeId, tx), {

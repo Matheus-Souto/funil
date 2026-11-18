@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { ActionError, type Ctx } from "@/lib/actions/core";
 import { randomToken } from "@/lib/crypto";
 import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
@@ -19,13 +19,19 @@ export type CreateOrderInput = {
   fbp?: string;
   clientIp: string;
   userAgent: string;
+  /**
+   * Pix manual esgotado (sem valor único livre) com Asaas conectado: permite `pix_asaas` numa oferta `pix_mode = 'manual'`.
+   * Só `checkout.start` usa.
+   */
+  asaasPixFallback?: boolean;
 };
 
 /** Validade de um Pix pendente antes de expirar. Cartão não expira por tempo. */
 export const PIX_TTL_MS = 24 * 60 * 60 * 1000;
 
-function methodAllowed(method: Method, methods: string[], pixMode: string): boolean {
+function methodAllowed(method: Method, methods: string[], pixMode: string, asaasPixFallback = false): boolean {
   if (method === "card_asaas") return methods.includes("card");
+  if (method === "pix_asaas" && asaasPixFallback) return methods.includes("pix");
   return methods.includes("pix") && pixMode === (method === "pix_manual" ? "manual" : "asaas");
 }
 
@@ -33,7 +39,7 @@ function methodAllowed(method: Method, methods: string[], pixMode: string): bool
 export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Order> {
   const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.id, input.offerId), eq(offer.active, true)));
   if (!o) throw new ActionError("not_found", "Oferta não encontrada");
-  if (!methodAllowed(input.method, o.methods, o.pixMode)) throw new ActionError("invalid_input", "Método de pagamento indisponível nesta oferta");
+  if (!methodAllowed(input.method, o.methods, o.pixMode, input.asaasPixFallback)) throw new ActionError("invalid_input", "Método de pagamento indisponível nesta oferta");
 
   const live = async (id: string) => {
     const [p] = await ctx.tx.select({ id: product.id }).from(product).where(and(eq(product.id, id), isNull(product.deletedAt)));
@@ -50,12 +56,15 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
   const total = o.priceCents + (bump?.priceCents ?? 0);
 
   const email = input.customer.email.trim().toLowerCase();
+  const cpf = input.customer.cpf ?? null;
+  // Cliente é por e-mail: outro comprador com o mesmo e-mail NÃO sobrescreve nome, telefone nem CPF já gravados
+  // (só preenche o CPF vazio). Os dados deste pedido ficam no retrato do pedido (buyer_*).
   const [cust] = await ctx.tx
     .insert(customer)
-    .values({ storeId: ctx.storeId, email, name: input.customer.name, phone: input.customer.phone, cpf: input.customer.cpf ?? null })
+    .values({ storeId: ctx.storeId, email, name: input.customer.name, phone: input.customer.phone, cpf })
     .onConflictDoUpdate({
       target: [customer.storeId, customer.email],
-      set: { name: input.customer.name, phone: input.customer.phone, ...(input.customer.cpf ? { cpf: input.customer.cpf } : {}) },
+      set: { cpf: sql`coalesce(${customer.cpf}, excluded.cpf)` },
     })
     .returning({ id: customer.id });
 
@@ -67,6 +76,9 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
         publicId: randomToken(16),
         offerId: o.id,
         customerId: cust!.id,
+        buyerName: input.customer.name,
+        buyerPhone: input.customer.phone,
+        buyerCpf: cpf,
         status: "pending",
         method: input.method,
         subtotalCents: total,

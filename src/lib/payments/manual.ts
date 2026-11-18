@@ -4,6 +4,7 @@ import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { orders, payment } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { transitionOrder } from "@/lib/orders/state";
+import { validCpf } from "@/lib/validation/br";
 import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
 
 export const MANUAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -101,17 +102,6 @@ export async function manualPixBrCode(
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function validCpf(d: string): boolean {
-  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
-  for (const n of [9, 10]) {
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += Number(d[i]) * (n + 1 - i);
-    const dv = ((sum * 10) % 11) % 10;
-    if (dv !== Number(d[n])) return false;
-  }
-  return true;
-}
 
 function validCnpj(d: string): boolean {
   if (!/^\d{14}$/.test(d) || /^(\d)\1{13}$/.test(d)) return false;
