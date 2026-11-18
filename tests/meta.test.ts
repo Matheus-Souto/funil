@@ -3,7 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
-import { createOffer, getPublicOffer, updateOffer } from "@/lib/catalog/offers";
+import { createOffer, getPublicOffer, setOfferPixel } from "@/lib/catalog/offers";
 import { createProduct } from "@/lib/catalog/products";
 import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
@@ -36,6 +36,8 @@ afterEach(freshMeta);
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
+const traffic: Actor = { kind: "user", userId: "u3", role: "traffic" };
+const support: Actor = { kind: "user", userId: "u4", role: "support" };
 const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
 const pub = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
 const systemCtx = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "system" }, origin: "system", tx });
@@ -166,12 +168,25 @@ describe("connections.saveMeta", () => {
     expect((await fail(runAction(saveMeta, panel(shop.storeId), { pixelId: "12ab/../x", accessToken: meta.token }))).code).toBe("invalid_input");
   });
 
-  test("sensível: MCP/IA pedem aprovação; tráfego e suporte não podem", async () => {
+  test("sensível: MCP/IA pedem aprovação; suporte não pode; tráfego pode (tracking.write)", async () => {
     const shop = await seedShop({ meta: false });
     const input = { pixelId: PIXEL, accessToken: meta.token };
     expect((await fail(runAction(saveMeta, { ...panel(shop.storeId), origin: "mcp" }, input))).code).toBe("approval_required");
-    expect((await fail(runAction(saveMeta, panel(shop.storeId, { kind: "user", userId: "u3", role: "traffic" }), input))).code).toBe("forbidden");
+    expect((await fail(runAction(saveMeta, panel(shop.storeId, support), input))).code).toBe("forbidden");
+    expect((await fail(runAction(testMeta, panel(shop.storeId, support), {}))).code).toBe("forbidden");
     expect(meta.requests).toHaveLength(0);
+    expect((await runAction(saveMeta, panel(shop.storeId, traffic), input)).hasAccessToken).toBe(true);
+    expect(await runAction(testMeta, panel(shop.storeId, traffic), {})).toEqual({ ok: true });
+  });
+
+  test("token só no header Authorization: Bearer, nunca na URL nem no corpo (validação e eventos)", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    await runMetaJobs(o.id);
+    expect(meta.events).toHaveLength(1);
+    expect(meta.rawUrls.length).toBeGreaterThanOrEqual(2); // GET de validação + POST do evento
+    for (const u of meta.rawUrls) expect(u).not.toContain(meta.token);
+    for (const b of meta.rawBodies) expect(b).not.toContain(meta.token);
   });
 
   test("sem token novo: mantém o guardado (e o valida de novo para o pixel informado)", async () => {
@@ -227,7 +242,7 @@ describe("meta_event Purchase (API de Conversões)", () => {
     await runMetaJobs(o.id);
     expect(meta.events).toHaveLength(1);
     const marks = await withStore(shop.storeId, (tx) => tx.select().from(conversion).where(eq(conversion.orderId, o.id)));
-    expect(marks.map((m) => [m.event, m.eventId])).toEqual([["Purchase", `purchase:${o.publicId}`]]);
+    expect(marks.map((m) => [m.event, m.eventId, m.status, m.errorCode])).toEqual([["Purchase", `purchase:${o.publicId}`, "sent", null]]);
   });
 
   test("sem conexão Meta o job termina sem erro e sem chamar o Meta", async () => {
@@ -240,26 +255,64 @@ describe("meta_event Purchase (API de Conversões)", () => {
 
   test("pixel da oferta sobrescreve o da loja; test_event_code vai junto quando configurado", async () => {
     const shop = await seedShop({ testEventCode: "TEST999" });
-    await runAction(updateOffer, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" });
+    await runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" });
     const o = await paidOrder(shop);
     await runMetaJobs(o.id);
     expect(meta.events.map((e) => [e.pixelId, e.testEventCode])).toEqual([["5550001112", "TEST999"]]);
   });
 
-  test("erro do Meta: job falha só com o código (sem token), sem marca; a nova tentativa envia", async () => {
-    const shop = await seedShop();
-    const o = await paidOrder(shop);
-    meta.failNext(1, 400, 190);
-    const err = await runMetaJobs(o.id).then(
+  const marksOf = (storeId: string, orderId: string) => withStore(storeId, (tx) => tx.select().from(conversion).where(eq(conversion.orderId, orderId)));
+  const outcome = (p: Promise<unknown>) =>
+    p.then(
       () => null,
       (e: unknown) => e as Error,
     );
-    expect(err).toBeInstanceOf(Error);
-    expect(err!.message).toContain("190");
-    expect(err!.message).not.toContain(meta.token);
-    expect(await withStore(shop.storeId, (tx) => tx.select().from(conversion).where(eq(conversion.orderId, o.id)))).toHaveLength(0);
+
+  for (const [label, status, code] of [
+    ["5xx", 500, 2],
+    ["429", 429, 4],
+    ["limite (17)", 400, 17],
+    ["limite (613)", 400, 613],
+    ["temporário (1)", 400, 1],
+    ["rede", 0, 0],
+  ] as const) {
+    test(`erro transitório (${label}): job falha só com status/código (sem token), sem marca; a nova tentativa envia`, async () => {
+      const shop = await seedShop();
+      const o = await paidOrder(shop);
+      meta.failNext(1, status, code);
+      const err = await outcome(runMetaJobs(o.id));
+      expect(err).toBeInstanceOf(Error);
+      if (status !== 0) expect(err!.message).toContain(String(code));
+      expect(err!.message).not.toContain(meta.token);
+      expect(await marksOf(shop.storeId, o.id)).toHaveLength(0);
+      await runMetaJobs(o.id);
+      expect(meta.events).toHaveLength(1);
+    });
+  }
+
+  for (const code of [190, 100, 200]) {
+    test(`erro permanente (código ${code}): job termina sem re-tentar, marca 'failed' com o código e não reenvia`, async () => {
+      const shop = await seedShop();
+      const o = await paidOrder(shop);
+      meta.failNext(1, 400, code);
+      expect(await outcome(runMetaJobs(o.id))).toBeNull();
+      expect(meta.events).toHaveLength(0);
+      const marks = await marksOf(shop.storeId, o.id);
+      expect(marks.map((m) => [m.event, m.status, m.errorCode])).toEqual([["Purchase", "failed", code]]);
+      await runMetaJobs(o.id);
+      expect(meta.events).toHaveLength(0);
+    });
+  }
+
+  test("pedido reembolsado (ou contestado) antes do envio: Purchase não sai", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    await runAction(refundOrder, panel(shop.storeId), { orderId: o.id });
+    const [now] = await withStore(shop.storeId, (tx) => tx.select({ status: orders.status }).from(orders).where(eq(orders.id, o.id)));
+    expect(now!.status).toBe("refunded");
     await runMetaJobs(o.id);
-    expect(meta.events).toHaveLength(1);
+    expect(meta.events).toHaveLength(0);
+    expect(await marksOf(shop.storeId, o.id)).toHaveLength(0);
   });
 
   test("sinal abortado (tempo-limite do worker): não envia nem marca", async () => {
@@ -323,13 +376,48 @@ describe("meta_event InitiateCheckout (checkout.start)", () => {
   });
 });
 
+describe("offers.setPixel (pixel próprio da oferta)", () => {
+  test("tracking.write: tráfego define e limpa; suporte não; MCP/IA pedem aprovação", async () => {
+    const shop = await seedShop();
+    const set = (actor: Actor, pixelId: string | null, origin: "panel" | "mcp" | "ai" = "panel") =>
+      runAction(setOfferPixel, { storeId: shop.storeId, actor, origin }, { id: shop.offerId, pixelId });
+    expect((await fail(set(support, "5550001112"))).code).toBe("forbidden");
+    expect((await fail(set(owner, "5550001112", "mcp"))).code).toBe("approval_required");
+    expect((await fail(set(owner, "5550001112", "ai"))).code).toBe("approval_required");
+    expect(await set(traffic, "5550001112")).toEqual({ id: shop.offerId, pixelId: "5550001112" });
+    expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe("5550001112");
+    meta.requests.length = 0;
+    expect(await set(traffic, null)).toEqual({ id: shop.offerId, pixelId: null });
+    expect(meta.requests).toHaveLength(0); // limpar não consulta o Meta
+    expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
+  });
+
+  test("validado no prepare com o token guardado (mesmo teste do saveMeta); recusado: nada muda", async () => {
+    const shop = await seedShop();
+    meta.requests.length = 0;
+    meta.failNext(1, 400, 100);
+    const e = await fail(runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" }));
+    expect(e.code).toBe("provider_error");
+    expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/5550001112` }]);
+    expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
+    expect((await fail(runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "abc" }))).code).toBe("invalid_input");
+  });
+
+  test("offers.create/update não aceitam mais pixelId (só offers.setPixel)", async () => {
+    const shop = await seedShop();
+    const { updateOffer } = await import("@/lib/catalog/offers");
+    await runAction(updateOffer, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" } as never).catch(() => undefined);
+    expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
+  });
+});
+
 describe("pixel nas páginas do comprador", () => {
   test("oferta pública e página do pedido expõem o Pixel ID (oferta sobrescreve a loja); sem Meta: null", async () => {
     const shop = await seedShop();
     expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
     const o = await paidOrder(shop);
     expect((await getOrderPublic(shop.storeId, o.publicId))!.pixelId).toBe(PIXEL);
-    await runAction(updateOffer, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" });
+    await runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" });
     expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe("5550001112");
     const none = await seedShop({ meta: false });
     expect((await runAction(getPublicOffer, pub(none.storeId), { slug: none.slug })).pixelId).toBeNull();

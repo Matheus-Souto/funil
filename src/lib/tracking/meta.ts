@@ -58,10 +58,20 @@ export class MetaApiError extends Error {
 const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const abortError = (signal: AbortSignal) => (signal.reason instanceof Error ? signal.reason : new Error("cancelado"));
 
+/**
+ * Erro que não adianta re-tentar: token inválido/expirado (190), parâmetro inválido (100) ou permissão (200-299).
+ * Os demais (5xx, 429, rede, 1/2/4/17/613 e desconhecidos) são transitórios e a fila re-tenta.
+ */
+export function isPermanentMetaError(e: MetaApiError): boolean {
+  if (e.status === 0 || e.status === 429 || e.status >= 500) return false;
+  return e.code === 190 || e.code === 100 || (e.code !== null && e.code >= 200 && e.code <= 299);
+}
+
+/** Chamada à Graph API. O token vai SÓ no header `Authorization: Bearer` (nunca em URL, corpo ou log). */
 async function graph(
   method: "GET" | "POST",
   path: string,
-  opts: { query?: Record<string, string>; body?: unknown; signal?: AbortSignal },
+  opts: { token: string; query?: Record<string, string>; body?: unknown; signal?: AbortSignal },
 ): Promise<unknown> {
   const url = new URL(`${graphBase()}/${META_GRAPH_VERSION}/${path}`);
   for (const [k, v] of Object.entries(opts.query ?? {})) url.searchParams.set(k, v);
@@ -72,12 +82,16 @@ async function graph(
   try {
     res = await (fetchOverride ?? fetch)(url, {
       method,
-      headers: { Accept: "application/json", ...(opts.body === undefined ? {} : { "Content-Type": "application/json" }) },
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${opts.token}`,
+        ...(opts.body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
       ...(opts.body === undefined ? {} : { body: JSON.stringify(opts.body) }),
       signal,
     });
   } catch {
-    // Nunca repassa o erro da rede (pode trazer a URL, com o token na query).
+    // Nunca repassa o erro da rede (texto do runtime; pode trazer detalhes da requisição).
     if (opts.signal?.aborted) throw abortError(opts.signal);
     throw new MetaApiError(0, null, null);
   }
@@ -172,7 +186,7 @@ export async function pixelIdFor(tx: Tx, storeId: string, offerPixelId: string |
 /** Pergunta ao Meta se o token enxerga o pixel (GET no pixel: não cria evento nenhum). */
 async function checkToken(pixelId: string, token: string, storeId: string): Promise<void> {
   try {
-    const r = (await graph("GET", pixelId, { query: { fields: "id", access_token: token } })) as { id?: unknown } | null;
+    const r = (await graph("GET", pixelId, { token, query: { fields: "id" } })) as { id?: unknown } | null;
     if (String(r?.id ?? "") !== pixelId) throw new MetaApiError(200, null, null);
   } catch (e) {
     if (!(e instanceof MetaApiError)) throw e;
@@ -183,6 +197,15 @@ async function checkToken(pixelId: string, token: string, storeId: string): Prom
       `O Meta não aceitou o token para este Pixel${e.code !== null ? ` (código ${e.code})` : ""}. Confira o Pixel ID e o token da API de Conversões.`,
     );
   }
+}
+
+/**
+ * Pixel novo de uma oferta (offers.setPixel): validado com o token guardado da loja, se houver (sem token, a loja só
+ * tem o Pixel no navegador e não há o que testar). Fora de transação.
+ */
+export async function validatePixelWithStoredToken(storeId: string, pixelId: string): Promise<void> {
+  const token = (await withStore(storeId, (tx) => getIntegration(tx, storeId, "meta")))?.secret ?? null;
+  if (token) await checkToken(pixelId, token, storeId);
 }
 
 const pixelIdInput = z.string().trim().regex(PIXEL_ID_RE, "Pixel ID: só números (5 a 20)");
@@ -205,7 +228,7 @@ export const saveMeta = defineAction({
       .regex(/^[A-Za-z0-9_-]{1,64}$/, "Código de teste inválido")
       .optional(),
   }),
-  permission: "connections.write",
+  permission: "tracking.write",
   // Quem controla o token controla o que a loja manda ao Meta: MCP/IA precisam de aprovação.
   sensitive: true,
   auditInput: (i) => ({ pixelId: i.pixelId, testEventCode: i.testEventCode ?? null, accessToken: i.accessToken ? "[novo]" : "[mantido]" }),
@@ -226,7 +249,7 @@ export const testMeta = defineAction({
   name: "connections.testMeta",
   description: "Testa a conexão do Meta da loja (o token da API de Conversões enxerga o Pixel).",
   input: z.object({}),
-  permission: "connections.write",
+  permission: "tracking.write",
   async prepare(call) {
     const meta = await withStore(call.storeId, (tx) => getIntegration(tx, call.storeId, "meta"));
     const pixelId = validPixel((meta?.config as MetaConfig | undefined)?.pixelId);
@@ -274,7 +297,8 @@ type Prepared =
 /**
  * `meta_event` {event, orderId, eventId?}: lê tudo numa transação curta, envia FORA dela (respeitando o AbortSignal do
  * worker) e grava a marca `conversion` (pedido, evento): job repetido ou duplicado não reenvia. Sem conexão (token) ou
- * sem pixel: termina sem erro. Erro do Meta: só status/código vão ao log; o job falha e a fila re-tenta.
+ * sem pixel: termina sem erro. Purchase só com o pedido ainda `paid`. Erro do Meta: só status/código vão ao log;
+ * transitório -> o job falha e a fila re-tenta; permanente (190, 100, 200-299) -> marca `failed` com o código e encerra.
  */
 export const metaEventJob: JobHandler = async (j, signal) => {
   const parsed = payloadSchema.safeParse(j.payload);
@@ -289,6 +313,8 @@ export const metaEventJob: JobHandler = async (j, signal) => {
   const prep: Prepared = await withStore(storeId, async (tx) => {
     const [o] = await tx.select().from(orders).where(eq(orders.id, p.orderId));
     if (!o) return { skip: "pedido_inexistente" };
+    // Purchase só com o pedido AINDA pago: reembolsado/contestado antes do envio não vira venda no Meta.
+    if (p.event === "Purchase" && o.status !== "paid") return { skip: `pedido_${o.status}` };
     const eventId = p.event === "Purchase" ? purchaseEventId(o.publicId) : p.eventId!;
     const [sent] = await tx
       .select({ id: conversion.id })
@@ -351,17 +377,29 @@ export const metaEventJob: JobHandler = async (j, signal) => {
   if (signal.aborted) throw abortError(signal);
   try {
     await graph("POST", `${prep.pixelId}/events`, {
-      body: { data: [prep.body], access_token: prep.token, ...(prep.testEventCode ? { test_event_code: prep.testEventCode } : {}) },
+      token: prep.token,
+      body: { data: [prep.body], ...(prep.testEventCode ? { test_event_code: prep.testEventCode } : {}) },
       signal,
     });
   } catch (e) {
-    if (e instanceof MetaApiError) {
-      log.warn("API de Conversões do Meta recusou o evento", { orderId: p.orderId, event: p.event, status: e.status, code: e.code, subcode: e.subcode });
+    if (!(e instanceof MetaApiError)) throw e;
+    const info = { orderId: p.orderId, event: p.event, status: e.status, code: e.code, subcode: e.subcode };
+    if (!isPermanentMetaError(e)) {
+      log.warn("API de Conversões do Meta falhou; a fila re-tenta", info);
+      throw e;
     }
-    throw e;
+    // Permanente (token, parâmetro, permissão): re-tentar não resolve. Marca `failed` com o código e encerra o job.
+    log.error("API de Conversões do Meta recusou o evento (permanente); não será re-tentado", info);
+    await withStore(storeId, (tx) =>
+      tx
+        .insert(conversion)
+        .values({ storeId, orderId: p.orderId, event: p.event, eventId: prep.eventId, status: "failed", errorCode: e.code })
+        .onConflictDoNothing(),
+    );
+    return;
   }
   await withStore(storeId, (tx) =>
-    tx.insert(conversion).values({ storeId, orderId: p.orderId, event: p.event, eventId: prep.eventId }).onConflictDoNothing(),
+    tx.insert(conversion).values({ storeId, orderId: p.orderId, event: p.event, eventId: prep.eventId, status: "sent" }).onConflictDoNothing(),
   );
   log.info("meta_event enviado", { orderId: p.orderId, event: p.event });
 };

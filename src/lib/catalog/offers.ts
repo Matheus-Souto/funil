@@ -3,10 +3,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { offer, product } from "@/lib/db/schema";
-import { PIXEL_ID_RE, pixelIdFor } from "@/lib/tracking/meta";
-
-/** Pixel próprio da oferta (sobrescreve o da conexão Meta da loja). */
-const pixelIdField = z.string().trim().regex(PIXEL_ID_RE, "Pixel ID: só números (5 a 20)");
+import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
 const id = z.uuid();
 const slug = z.string().regex(/^[a-z0-9-]{3,60}$/, "Use 3 a 60 caracteres: letras minúsculas, números e hífen");
@@ -48,7 +45,6 @@ const createInput = z
     bumpPriceCents: priceCents.nullish(),
     bumpLabel: text.nullish(),
     thankYouText: text.nullish(),
-    pixelId: pixelIdField.nullish(),
     active: z.boolean().default(true),
   })
   .superRefine((v, ctx) => {
@@ -86,7 +82,6 @@ export const createOffer = defineAction({
           bumpPriceCents: input.bumpPriceCents ?? null,
           bumpLabel: input.bumpLabel ?? null,
           thankYouText: input.thankYouText ?? null,
-          pixelId: input.pixelId ?? null,
           active: input.active,
         })
         .returning(offerCols);
@@ -95,6 +90,31 @@ export const createOffer = defineAction({
       if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
       throw e;
     }
+  },
+});
+
+/**
+ * Pixel próprio da oferta (sobrescreve o da conexão Meta da loja); `null` volta ao pixel da loja. Fica fora de
+ * offers.create/update: exige `tracking.write` (dono, admin, tráfego) e é sensível (MCP/IA pedem aprovação). Um pixel
+ * novo é validado no `prepare` com o token guardado da loja (mesmo teste do saveMeta; fora de transação).
+ */
+export const setOfferPixel = defineAction({
+  name: "offers.setPixel",
+  description: "Define (ou limpa, com null) o Meta Pixel próprio de uma oferta.",
+  input: z.object({ id, pixelId: z.string().trim().regex(PIXEL_ID_RE, "Pixel ID: só números (5 a 20)").nullable() }),
+  permission: "tracking.write",
+  sensitive: true,
+  async prepare(call, input) {
+    if (input.pixelId !== null) await validatePixelWithStoredToken(call.storeId, input.pixelId);
+  },
+  async run(ctx, input) {
+    const [row] = await ctx.tx
+      .update(offer)
+      .set({ pixelId: input.pixelId })
+      .where(eq(offer.id, input.id))
+      .returning({ id: offer.id, pixelId: offer.pixelId });
+    if (!row) throw new ActionError("not_found", "Oferta não encontrada");
+    return row;
   },
 });
 
@@ -112,7 +132,6 @@ export const updateOffer = defineAction({
     maxInstallments: maxInstallments.optional(),
     bumpLabel: text.nullable().optional(),
     thankYouText: text.nullable().optional(),
-    pixelId: pixelIdField.nullable().optional(),
     active: z.boolean().optional(),
   }),
   permission: "offers.write",

@@ -165,6 +165,12 @@ test("matriz de papéis", () => {
   expect(hasPermission("support", "orders.refund")).toBe(false);
   expect(hasPermission("traffic", "metrics.read")).toBe(true);
   expect(hasPermission("traffic", "orders.read")).toBe(false);
+  // Pixel/Meta (Task 13): dono, admin e tráfego configuram; suporte não.
+  expect(hasPermission("owner", "tracking.write")).toBe(true);
+  expect(hasPermission("admin", "tracking.write")).toBe(true);
+  expect(hasPermission("traffic", "tracking.write")).toBe(true);
+  expect(hasPermission("support", "tracking.write")).toBe(false);
+  expect(hasPermission("traffic", "connections.write")).toBe(false);
 });
 
 test("rejeição pré-run de usuário audita só as chaves, nunca valores", async () => {
