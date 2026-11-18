@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 
 // Tabelas globais (sem RLS): lojas, usuários, vínculos e sessões.
 export const store = pgTable("store", {
@@ -62,3 +62,13 @@ export const auditLog = pgTable("audit_log", {
   error: text("error"),
   at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Global como users/session: sem store_id nem RLS, pois a tentativa ocorre antes de haver loja/ator. Só guarda sha256 do e-mail.
+export const loginAttempt = pgTable(
+  "login_attempt",
+  {
+    emailHash: text("email_hash").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("login_attempt_email_at_idx").on(t.emailHash, t.at)],
+);

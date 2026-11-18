@@ -13,6 +13,7 @@
     "check": "bun run lint && bun run typecheck && bun run hygiene && bun run test",
     "migration": "drizzle-kit generate",
     "migrate": "bun src/lib/db/migrate.ts",
+    "store:create": "bun scripts/store-create.ts",
     "hygiene": "bun scripts/check-test-hygiene.ts",
     "verify": "bash scripts/verify.sh",
     "verify:reset": "rm -f .verify/state.json"

@@ -24,10 +24,13 @@ test("SECRET precisa de 32 caracteres", () => {
   expect(() => parseEnv({ ...base, SECRET: "curta" })).toThrow(/SECRET/);
 });
 
-test("ASAAS_BASE_URL é recusada em produção", () => {
-  expect(() => parseEnv({ ...base, NODE_ENV: "production", ASAAS_BASE_URL: "http://x" })).toThrow(
-    /ASAAS_BASE_URL.*produção/,
-  );
+test("ASAAS_BASE_URL em produção só aceita loopback", () => {
+  for (const url of ["http://127.0.0.1:4010", "http://localhost:4010/x", "http://[::1]:4010"]) {
+    expect(parseEnv({ ...base, NODE_ENV: "production", ASAAS_BASE_URL: url }).ASAAS_BASE_URL).toBe(url);
+  }
+  for (const url of ["http://x", "https://api.asaas.com", "http://127.0.0.1.evil.com", "lixo"]) {
+    expect(() => parseEnv({ ...base, NODE_ENV: "production", ASAAS_BASE_URL: url })).toThrow(/ASAAS_BASE_URL.*loopback/);
+  }
   expect(parseEnv({ ...base, NODE_ENV: "production" }).ASAAS_BASE_URL).toBeUndefined();
 });
 

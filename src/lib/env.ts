@@ -16,6 +16,15 @@ const schema = z.object({
 
 export type Env = z.infer<typeof schema>;
 
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const host = new URL(value).hostname;
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 /** Valida um objeto de variáveis. Não lê `process.env`: facilita testar. */
 export function parseEnv(source: Record<string, string | undefined>): Env {
   // Variável vazia (`FOO=`) conta como ausente.
@@ -29,9 +38,9 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     });
     throw new Error(`Variáveis de ambiente inválidas: ${problems.join("; ")}`);
   }
-  if (source.NODE_ENV === "production" && parsed.data.ASAAS_BASE_URL !== undefined) {
+  if (source.NODE_ENV === "production" && parsed.data.ASAAS_BASE_URL !== undefined && !isLoopbackUrl(parsed.data.ASAAS_BASE_URL)) {
     throw new Error(
-      "Variáveis de ambiente inválidas: ASAAS_BASE_URL não pode ser definida em produção (só para testes e smoke)",
+      "Variáveis de ambiente inválidas: ASAAS_BASE_URL em produção só pode apontar para loopback (127.0.0.1, localhost, ::1; uso de teste e smoke)",
     );
   }
   return parsed.data;
