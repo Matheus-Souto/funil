@@ -6,3 +6,5 @@ data/
 !.verify/.gitkeep
 !.verify/gate-mode
 .superpowers/
+next-env.d.ts
+*.tsbuildinfo
