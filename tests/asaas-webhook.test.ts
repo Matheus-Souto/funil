@@ -331,5 +331,7 @@ describe("propriedade: webhook repetido, fora de ordem e contraditório", () => 
       ),
       { numRuns: 25 },
     );
-  });
+    // 25 execuções, cada uma com loja/produto/oferta/cobrança Pix novos: ~3-5 s sozinho, acima disso sob a suíte
+    // inteira. O limite padrão de 5 s do bun não cabe; orçamento explícito (não é espera nem nova tentativa).
+  }, 30_000);
 });
