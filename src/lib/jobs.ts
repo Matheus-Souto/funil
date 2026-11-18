@@ -3,13 +3,15 @@
 // O job é reivindicado numa transação curta (status running), o handler roda FORA de transação e
 // um segundo UPDATE grava o resultado.
 import { and, asc, eq, inArray, lt, lte, sql } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { db, type Tx } from "@/lib/db/client";
 import { job } from "@/lib/db/schema";
 import { log, redact } from "@/lib/log";
 
 export type JobType = "deliver_order" | "meta_event" | "notify_seller" | "revoke_downloads" | "restore_downloads" | "expire_orders";
 export type Job = typeof job.$inferSelect;
-export type JobHandler = (job: Job) => Promise<void>;
+/** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
+export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;
 export type JobHandlers = Partial<Record<JobType, JobHandler>>;
 
 /** Espera (s) antes de cada nova tentativa; esgotada a lista, o job vira `failed`. */
@@ -17,6 +19,10 @@ export const BACKOFF_SECONDS = [60, 300, 1800, 7200, 43200] as const;
 const MAX_ERROR = 500;
 /** `running` há mais que isto volta para `queued` (processo caiu no meio do handler). */
 export const STUCK_AFTER_MS = 10 * 60 * 1000;
+/** Tempo-limite padrão de cada handler (bem menor que STUCK_AFTER_MS). Estourou = tentativa falha (backoff normal). */
+export const HANDLER_TIMEOUT_MS = 120_000;
+/** Job cujo tipo não tem handler neste processo (ex.: deploy gradual) volta à fila depois disto, sem contar tentativa. */
+export const NO_HANDLER_DELAY_MS = 10 * 60 * 1000;
 
 export async function enqueue(tx: Tx, j: { storeId: string | null; type: JobType; payload: unknown; runAt?: Date }): Promise<void> {
   await tx.insert(job).values({ storeId: j.storeId, type: j.type, payload: j.payload ?? {}, ...(j.runAt ? { runAt: j.runAt } : {}) });
@@ -68,6 +74,37 @@ async function claim(now: Date): Promise<Job | undefined> {
 }
 
 export type Clock = () => Date;
+/** Agenda `onTimeout` em `ms`; devolve a função que cancela. Injetável nos testes (sem espera real). */
+export type Timer = (ms: number, onTimeout: () => void) => () => void;
+
+const realTimer: Timer = (ms, onTimeout) => {
+  const h = setTimeout(onTimeout, ms);
+  h.unref?.();
+  return () => clearTimeout(h);
+};
+
+export interface RunOptions {
+  timeoutMs?: number;
+  timer?: Timer;
+}
+
+/** Roda o handler com tempo-limite: estourou -> aborta o `signal` e rejeita (o handler pode seguir em segundo plano). */
+async function runWithTimeout(handler: JobHandler, j: Job, timeoutMs: number, timer: Timer): Promise<void> {
+  const ctrl = new AbortController();
+  let cancel: () => void = () => undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    cancel = timer(timeoutMs, () => {
+      const e = new Error(`tempo-limite de ${timeoutMs} ms estourado`);
+      ctrl.abort(e);
+      reject(e);
+    });
+  });
+  try {
+    await Promise.race([handler(j, ctrl.signal), timedOut]);
+  } finally {
+    cancel();
+  }
+}
 
 /**
  * Executa até `limit` jobs vencidos (`run_at <= now`). `now` é uma data fixa ou um relógio (lido a cada
@@ -75,8 +112,16 @@ export type Clock = () => Date;
  * (`locked_at` igual): um worker lento cujo job foi recuperado e reivindicado por outro não sobrescreve nada. Handlers que tocam dados de loja devem usar
  * `withStore(job.storeId)`; `job` não tem RLS.
  */
-export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date | Clock = () => new Date()): Promise<number> {
+export async function runDueJobs(
+  handlers: JobHandlers,
+  limit = 10,
+  now: Date | Clock = () => new Date(),
+  opts: RunOptions = {},
+): Promise<number> {
   const clock: Clock = typeof now === "function" ? now : () => now;
+  const timeoutMs = opts.timeoutMs ?? HANDLER_TIMEOUT_MS;
+  const timer = opts.timer ?? realTimer;
+  const missing = new Map<string, number>();
   await recoverStuck(clock());
   let ran = 0;
   while (ran < limit) {
@@ -84,7 +129,7 @@ export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date | 
     if (!j) break;
     ran++;
     const handler = handlers[j.type as JobType];
-    const finish = async (set: (at: Date) => Partial<typeof job.$inferInsert>) => {
+    const finish = async (set: (at: Date) => PgUpdateSetSource<typeof job>) => {
       const res = await db
         .update(job)
         .set({ lockedAt: null, ...set(clock()) })
@@ -93,11 +138,18 @@ export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date | 
       if (res.length === 0) log.warn("finalização obsoleta ignorada (job reivindicado por outro worker)", { id: j.id, type: j.type });
     };
     if (!handler) {
-      await finish(() => ({ status: "failed", lastError: "sem handler" }));
+      // Não é falha do job: devolve à fila sem queimar a tentativa (o claim já tinha contado).
+      missing.set(j.type, (missing.get(j.type) ?? 0) + 1);
+      await finish((at) => ({
+        status: "queued",
+        attempts: sql`${job.attempts} - 1`,
+        lastError: "sem handler",
+        runAt: new Date(at.getTime() + NO_HANDLER_DELAY_MS),
+      }));
       continue;
     }
     try {
-      await handler(j);
+      await runWithTimeout(handler, j, timeoutMs, timer);
       await finish(() => ({ status: "done", lastError: null }));
     } catch (e) {
       const wait = BACKOFF_SECONDS[j.attempts - 1];
@@ -109,5 +161,6 @@ export async function runDueJobs(handlers: JobHandlers, limit = 10, now: Date | 
       );
     }
   }
+  if (missing.size > 0) log.warn("jobs sem handler adiados", { types: Object.fromEntries(missing), delayMs: NO_HANDLER_DELAY_MS });
   return ran;
 }

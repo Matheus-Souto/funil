@@ -1,5 +1,5 @@
 import { VALID_PDF } from "./pdf-fixtures";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { eq, inArray, sql } from "drizzle-orm";
 import { runAction } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
@@ -8,6 +8,7 @@ import { withStore } from "@/lib/db/client";
 import { job, orders } from "@/lib/db/schema";
 import { enqueue, runDueJobs, scheduleOnce, type JobType } from "@/lib/jobs";
 import { createExpireOrdersHandler, expireOrdersHandler } from "@/lib/jobs/handlers";
+import { log } from "@/lib/log";
 import { createOrder } from "@/lib/orders/create";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -72,15 +73,72 @@ describe("runDueJobs", () => {
     expect(r.lastError).not.toContain("4111");
   });
 
-  test("tipo sem handler vira failed com 'sem handler', sem repetir", async () => {
-    await enq("expire_orders");
-    const id = (await newest("expire_orders")).id;
-    expect(await runDueJobs({}, 10, at(1))).toBe(1);
-    const r = await row(id);
-    expect(r.status).toBe("failed");
-    expect(r.lastError).toBe("sem handler");
-    await runDueJobs({}, 10, at(100_000));
-    expect((await row(id)).attempts).toBe(1);
+  test("tipo sem handler volta para queued em 10 min, sem contar tentativa, com um único aviso por execução", async () => {
+    await t.ownerDb.delete(job).where(eq(job.type, "expire_orders"));
+    await enq("expire_orders", { n: 1 });
+    await enq("expire_orders", { n: 2 });
+    const ids = (await t.ownerDb.select().from(job).where(eq(job.type, "expire_orders"))).map((r) => r.id);
+    const warn = spyOn(log, "warn");
+    try {
+      await runDueJobs({}, 10, at(1));
+      const msgs = warn.mock.calls.map((c) => String(c[0]));
+      expect(msgs.filter((m) => m.includes("sem handler"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+    for (const id of ids) {
+      const r = await row(id);
+      expect([r.status, r.attempts, r.lockedAt]).toEqual(["queued", 0, null]);
+      expect(r.runAt.getTime()).toBe(at(1).getTime() + 10 * 60_000);
+    }
+    // Nunca vira failed: adiado de novo a cada execução enquanto o tipo não tiver handler.
+    await runDueJobs({}, 10, at(1 + 600));
+    expect((await row(ids[0]!)).status).toBe("queued");
+    expect((await row(ids[0]!)).attempts).toBe(0);
+    // Com o handler registrado, roda normalmente.
+    await runDueJobs({ expire_orders: async () => undefined }, 10, at(1 + 1200));
+    for (const id of ids) expect((await row(id)).status).toBe("done");
+  });
+
+  test("handler que não termina estoura o tempo-limite (padrão 120 s): conta como falha e o worker segue", async () => {
+    await enq("notify_seller", { hang: true }, null, at(-20));
+    const hungId = (await newest("notify_seller")).id;
+    await enq("notify_seller", { hang: false }, null, at(-10));
+    const okId = (await newest("notify_seller")).id;
+    const timeouts: number[] = [];
+    let fire: (() => void) | undefined;
+    // Relógio do tempo-limite injetado: o handler "pendurado" faz o tempo passar disparando o timer.
+    const timer = (ms: number, onTimeout: () => void) => {
+      timeouts.push(ms);
+      fire = onTimeout;
+      return () => void (fire = undefined);
+    };
+    let hungSignal: AbortSignal | undefined;
+    const handlers = {
+      notify_seller: async (j: { payload: unknown }, signal: AbortSignal) => {
+        if ((j.payload as { hang: boolean }).hang) {
+          hungSignal = signal;
+          fire!();
+          return new Promise<void>(() => undefined);
+        }
+      },
+    };
+    expect(await runDueJobs(handlers, 2, T0, { timer })).toBe(2);
+    expect(timeouts).toEqual([120_000, 120_000]);
+    expect(hungSignal?.aborted).toBe(true);
+    const hung = await row(hungId);
+    expect([hung.status, hung.attempts, hung.lockedAt]).toEqual(["queued", 1, null]);
+    expect(hung.runAt.getTime()).toBe(T0.getTime() + 60_000);
+    expect(hung.lastError).toContain("tempo-limite");
+    expect((await row(okId)).status).toBe("done");
+    await t.ownerDb.update(job).set({ status: "done" }).where(eq(job.id, hungId));
+  });
+
+  test("tempo-limite configurável", async () => {
+    await enq("notify_seller", { quick: true }, null, at(-5));
+    const timeouts: number[] = [];
+    await runDueJobs({ notify_seller: async () => undefined }, 1, T0, { timeoutMs: 5000, timer: (ms) => (timeouts.push(ms), () => undefined) });
+    expect(timeouts).toEqual([5000]);
   });
 
   test("respeita o limite e execuções concorrentes não repetem job", async () => {
@@ -227,7 +285,7 @@ describe("expire_orders", () => {
       b2: await mk(b.storeId, ob.id, past, "paid"),
       b3: await mk(b.storeId, ob.id, null, "pending"),
     };
-    await expireOrdersHandler({} as never);
+    await expireOrdersHandler({} as never, new AbortController().signal);
     const st = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
     expect(await st(ids.a1)).toBe("expired");
     expect(await st(ids.a2)).toBe("pending");
@@ -247,7 +305,7 @@ describe("expire_orders", () => {
     const h = createExpireOrdersHandler(async (tx, id) => {
       if (id === raced) await tx.update(orders).set({ status: "paid" }).where(eq(orders.id, id));
     });
-    await h({} as never);
+    await h({} as never, new AbortController().signal);
     const st = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
     expect(await st(raced)).toBe("paid");
     expect(await st(other)).toBe("expired");
@@ -259,7 +317,7 @@ describe("expire_orders", () => {
     const locked = await mk(a.storeId, oa.id, new Date(Date.now() - 60_000), "pending");
     await withStore(a.storeId, async (tx) => {
       await tx.select().from(orders).where(eq(orders.id, locked)).for("update");
-      await expireOrdersHandler({} as never);
+      await expireOrdersHandler({} as never, new AbortController().signal);
     });
     expect((await t.ownerDb.select().from(orders).where(eq(orders.id, locked)))[0]!.status).toBe("pending");
   });
@@ -275,7 +333,7 @@ describe("expire_orders", () => {
     const h = createExpireOrdersHandler(async (_tx, id) => {
       if (id === bad) throw new Error("boom");
     });
-    const err = await h({} as never).catch((e: unknown) => e);
+    const err = await h({} as never, new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
     const st = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!.status;
     expect(await st(bad)).toBe("pending");
