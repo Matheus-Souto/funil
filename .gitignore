@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.env
+data/
+.verify/*
+!.verify/.gitkeep
+!.verify/gate-mode
