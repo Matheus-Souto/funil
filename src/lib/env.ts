@@ -93,8 +93,10 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   const isCard = cleaned.SERVICE === "card";
   const extra: string[] = [];
   if (isCard) {
-    if (cleaned.SECRET !== undefined) extra.push("SECRET não pode ser passado ao serviço de cartão (SERVICE=card)");
-    delete cleaned.SECRET;
+    for (const k of ["SECRET", "OWNER_DATABASE_URL", "APP_DB_PASSWORD"]) {
+      if (cleaned[k] !== undefined) extra.push(`${k} não pode ser passado ao serviço de cartão (SERVICE=card)`);
+      delete cleaned[k];
+    }
   } else if (cleaned.SECRET === undefined) {
     extra.push("SECRET (faltando)");
   }
@@ -102,6 +104,18 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY"]) {
       if (cleaned[k] === undefined) extra.push(`${k} (faltando; obrigatória com ${isCard ? "SERVICE=card" : "CARD_ISOLATED=1"})`);
     }
+  }
+  // Segredos distintos: um vazamento de um não pode abrir os outros. Nunca incluir os valores na mensagem.
+  const secrets = [source.CARD_TICKET_KEY, source.ASAAS_SEAL_KEY, source.SECRET].filter((v): v is string => v !== undefined && v !== "");
+  if (new Set(secrets).size !== secrets.length) extra.push("CARD_TICKET_KEY, ASAAS_SEAL_KEY e SECRET precisam ser diferentes");
+  if (cleaned.CARD_ORIGIN !== undefined && cleaned.BASE_URL !== undefined && isCardOrigin(cleaned.CARD_ORIGIN)) {
+    let baseOrigin: string | undefined;
+    try {
+      baseOrigin = new URL(cleaned.BASE_URL).origin;
+    } catch {
+      /* BASE_URL inválida: o schema já reclama */
+    }
+    if (baseOrigin === cleaned.CARD_ORIGIN) extra.push("CARD_ORIGIN precisa ser um domínio diferente do checkout (ex.: https://pagar.<DOMAIN>)");
   }
   const parsed = schema.safeParse(cleaned);
   if (!parsed.success || extra.length > 0) {

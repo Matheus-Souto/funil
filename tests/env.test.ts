@@ -125,8 +125,9 @@ const cardKeys = {
   CARD_TICKET_KEY: "t".repeat(32),
   ASAAS_SEAL_KEY: "a".repeat(32),
 };
-const { SECRET: _secret, ...baseSemSecret } = base;
-const cardBase = { ...baseSemSecret, SERVICE: "card", ...cardKeys };
+const baseSemSecret: Record<string, string | undefined> = { ...base, SECRET: undefined };
+const baseCard: Record<string, string | undefined> = { ...baseSemSecret, OWNER_DATABASE_URL: undefined };
+const cardBase = { ...baseCard, SERVICE: "card", ...cardKeys };
 
 test("SERVICE=app (padrão) sem SECRET falha", () => {
   expect(() => parseEnv(baseSemSecret)).toThrow(/SECRET/);
@@ -203,4 +204,44 @@ test("requireSecret devolve o SECRET e lança erro claro sem ele", () => {
   expect(requireSecret({ SECRET: base.SECRET })).toBe(base.SECRET);
   expect(() => requireSecret({})).toThrow("SECRET não definido: o app precisa do SECRET (o serviço de cartão nunca o recebe)");
   expect(typeof requireSecret()).toBe("string"); // env do processo de teste (preload) define SECRET
+});
+
+test("SERVICE=card recusa OWNER_DATABASE_URL e APP_DB_PASSWORD", () => {
+  expect(() => parseEnv({ ...cardBase, OWNER_DATABASE_URL: base.OWNER_DATABASE_URL })).toThrow(
+    "OWNER_DATABASE_URL não pode ser passado ao serviço de cartão",
+  );
+  expect(() => parseEnv({ ...cardBase, APP_DB_PASSWORD: "app" })).toThrow("APP_DB_PASSWORD não pode ser passado ao serviço de cartão");
+  expect(parseEnv({ ...base, ...cardKeys, CARD_ISOLATED: "1" }).OWNER_DATABASE_URL).toBe(base.OWNER_DATABASE_URL);
+});
+
+test("CARD_TICKET_KEY, ASAAS_SEAL_KEY e SECRET precisam ser diferentes, sem vazar valores", () => {
+  const same = "z".repeat(32);
+  const msg = "CARD_TICKET_KEY, ASAAS_SEAL_KEY e SECRET precisam ser diferentes";
+  const cases = [
+    { ...base, ...cardKeys, CARD_TICKET_KEY: same, ASAAS_SEAL_KEY: same },
+    { ...base, ...cardKeys, CARD_TICKET_KEY: same, SECRET: same },
+    { ...base, ...cardKeys, ASAAS_SEAL_KEY: same, SECRET: same },
+    { ...base, CARD_TICKET_KEY: same, SECRET: same },
+    { ...cardBase, CARD_TICKET_KEY: same, ASAAS_SEAL_KEY: same },
+  ];
+  for (const c of cases) {
+    let message = "";
+    try {
+      parseEnv(c);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toContain(msg);
+    expect(message).not.toContain(same);
+  }
+  expect(parseEnv({ ...base, ...cardKeys, CARD_ISOLATED: "1" }).CARD_TICKET_KEY).toBe(cardKeys.CARD_TICKET_KEY);
+});
+
+test("CARD_ORIGIN precisa ser diferente da origem de BASE_URL", () => {
+  const msg = "CARD_ORIGIN precisa ser um domínio diferente do checkout (ex.: https://pagar.<DOMAIN>)";
+  expect(() => parseEnv({ ...cardBase, BASE_URL: "https://loja.example.com", CARD_ORIGIN: "https://loja.example.com" })).toThrow(msg);
+  expect(() => parseEnv({ ...base, BASE_URL: "https://loja.example.com/base", TRUST_PROXY: "1", CARD_ORIGIN: "https://loja.example.com" })).toThrow(msg);
+  expect(parseEnv({ ...cardBase, BASE_URL: "https://loja.example.com", CARD_ORIGIN: "https://pagar.example.com" }).CARD_ORIGIN).toBe(
+    "https://pagar.example.com",
+  );
 });
