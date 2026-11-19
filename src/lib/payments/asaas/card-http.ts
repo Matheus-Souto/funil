@@ -58,7 +58,8 @@ export function clientIpFrom(headers: Headers, trustProxy: number): string {
   return normalizeIp(hops[Math.max(0, hops.length - trustProxy)]) ?? UNKNOWN_IP;
 }
 
-function isHttps(headers: Headers, trustProxy: number): boolean {
+/** HTTPS só pelo `X-Forwarded-Proto` (último valor) de um proxy confiável; sem proxy confiável, nunca. */
+export function isHttps(headers: Headers, trustProxy: number): boolean {
   // `next start` só fala HTTP: sem proxy confiável, nenhuma requisição é HTTPS (X-Forwarded-Proto pode ser forjado).
   if (trustProxy <= 0) return false;
   const proto = (headers.get("x-forwarded-proto") ?? "").split(",").map((s) => s.trim().toLowerCase());
@@ -129,18 +130,28 @@ export async function handleCardCheckout(req: Request, opts: CardHttpOptions = {
     const result = await (opts.payWithCard ?? defaultPayWithCard)({ storeId: store.id }, input);
     return json(200, result);
   } catch (e) {
-    if (e instanceof ActionError) {
-      // Mensagens de ActionError deste fluxo são nossas (as do Asaas no cartão são opacas); detalhes só se seguros.
-      const extra =
-        e.code === "invalid_input" && Array.isArray(e.details)
-          ? { fields: (e.details as { path?: unknown }[]).map((d) => d.path) }
-          : e.code === "rate_limited" && (e.details as { captcha?: boolean } | undefined)?.captcha
-            ? { captcha: true }
-            : {};
-      return json(STATUS[e.code] ?? 400, { error: e.code, message: e.message, ...extra });
-    }
-    // `log` aplica redact (remove PAN e chaves de cartão); nunca registramos o corpo da requisição.
-    log.error("checkout cartão: erro inesperado", { error: e });
-    return json(500, { error: "internal", message: INTERNAL_MESSAGE });
+    const { status, body: out } = cardErrorResponse(e);
+    return json(status, out);
   }
+}
+
+/**
+ * Resposta HTTP de um erro da cobrança com cartão (rota do app e serviço isolado). Nunca ecoa o corpo nem campos do
+ * cartão: `ActionError` vira código + mensagem nossa (+ caminhos dos campos ou `captcha`); o resto, 500 genérico com o
+ * erro no `log` (que aplica a máscara de cartão).
+ */
+export function cardErrorResponse(e: unknown): { status: number; body: object } {
+  if (e instanceof ActionError) {
+    // Mensagens de ActionError deste fluxo são nossas (as do Asaas no cartão são opacas); detalhes só se seguros.
+    const extra =
+      e.code === "invalid_input" && Array.isArray(e.details)
+        ? { fields: (e.details as { path?: unknown }[]).map((d) => d.path) }
+        : e.code === "rate_limited" && (e.details as { captcha?: boolean } | undefined)?.captcha
+          ? { captcha: true }
+          : {};
+    return { status: STATUS[e.code] ?? 400, body: { error: e.code, message: e.message, ...extra } };
+  }
+  // `log` aplica redact (remove PAN e chaves de cartão); nunca registramos o corpo da requisição.
+  log.error("checkout cartão: erro inesperado", { error: e });
+  return { status: 500, body: { error: "internal", message: INTERNAL_MESSAGE } };
 }

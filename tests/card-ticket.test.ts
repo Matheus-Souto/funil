@@ -1,7 +1,7 @@
 // Bilhete assinado do pedido (app emite, serviço de cartão confere). Sem banco: a chave vem por parâmetro.
 import { describe, expect, test } from "bun:test";
 import { createHmac, randomUUID } from "node:crypto";
-import { CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket } from "@/lib/payments/card-ticket";
+import { CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket, verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
 
 const KEY = "k".repeat(48);
 const NOW = new Date("2026-11-19T12:00:00Z");
@@ -100,5 +100,43 @@ describe("bilhete do pedido", () => {
   test("now inválido (NaN) → null", () => {
     const tk = issueCardTicket(t(), KEY, NOW);
     expect(verifyCardTicket(tk, KEY, new Date(Number.NaN))).toBeNull();
+  });
+});
+
+describe("bilhete do pedido: motivo da recusa (verifyCardTicketDetailed)", () => {
+  test("válido -> ok com o conteúdo; igual ao verifyCardTicket", () => {
+    const x = t();
+    expect(verifyCardTicketDetailed(issueCardTicket(x, KEY, NOW), KEY, NOW)).toEqual({ ok: true, ...x });
+  });
+
+  test("assinatura válida e vencido -> expired: true", () => {
+    const tk = issueCardTicket(t(), KEY, NOW);
+    expect(verifyCardTicketDetailed(tk, KEY, new Date(NOW.getTime() + CARD_TICKET_TTL_MS + 1000))).toEqual({ ok: false, expired: true });
+    expect(verifyCardTicketDetailed(forge({ s: randomUUID(), o: randomUUID(), p: "abc", e: exp(NOW) }), KEY, NOW)).toEqual({
+      ok: false,
+      expired: true,
+    });
+  });
+
+  test("forjado, malformado, outra chave, vencimento longe demais ou corpo inválido -> expired: false", () => {
+    const old = issueCardTicket(t(), KEY, new Date(NOW.getTime() - 2 * CARD_TICKET_TTL_MS));
+    const [p, s] = old.split(".") as [string, string];
+    const flip = (v: string, i: number) => v.slice(0, i) + (v[i] === "A" ? "B" : "A") + v.slice(i + 1);
+    const base = { s: randomUUID(), o: randomUUID(), p: "abc" };
+    for (const bad of [
+      "",
+      "semponto",
+      `${p}.${flip(s, 5)}`, // vencido, mas assinatura errada: não revela o vencimento
+      forge({ ...base, e: exp(NOW) - 60 }, "outra-chave-".repeat(4)),
+      forge({ ...base, e: exp(NOW) + CARD_TICKET_TTL_MS / 1000 + 61 }),
+      forge({ ...base, s: "nao-uuid", e: exp(NOW) - 60 }), // vencido com corpo inválido
+      forge({ ...base, e: "1" }),
+      "a".repeat(2049),
+    ]) {
+      expect(verifyCardTicketDetailed(bad, KEY, NOW)).toEqual({ ok: false, expired: false });
+    }
+    expect(verifyCardTicketDetailed(old, "outra-chave-".repeat(4), NOW)).toEqual({ ok: false, expired: false });
+    expect(verifyCardTicketDetailed(old, KEY, new Date(Number.NaN))).toEqual({ ok: false, expired: false });
+    expect(verifyCardTicketDetailed(42 as unknown as string, KEY, NOW)).toEqual({ ok: false, expired: false });
   });
 });

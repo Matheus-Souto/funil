@@ -1,0 +1,191 @@
+// Servidor HTTP do serviço de cartão isolado (node:http, sem framework). Rotas, e nada mais:
+//   GET  /form/<storeId>  página do iframe (CSP estrita, frame-ancestors = origens do checkout da loja)
+//   GET  /form.js, /form.css  artefatos do formulário (dois nomes fixos dentro de `assetsDir`; nunca caminho da URL)
+//   POST /api/card        cobrança: Content-Type, Origin e HTTPS antes de tudo; corpo com teto; bilhete do pedido
+//   GET  /healthz         200 "ok" quando o banco responde
+// Qualquer outra rota ou método: 404 sem corpo.
+//
+// DADOS DO CARTÃO: só existem no corpo do POST, repassado a `payWithCard`. Nunca vão para log nem para a resposta
+// (erros passam por `cardErrorResponse`, que só devolve códigos e mensagens nossas).
+import { readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { join } from "node:path";
+import { dbHealthy } from "@/lib/db/client";
+import { isLoopbackUrl } from "@/lib/env";
+import { log } from "@/lib/log";
+import { payWithCard as defaultPayWithCard, type CardPaymentInput } from "@/lib/payments/asaas/card";
+import { cardErrorResponse, clientIpFrom, isHttps } from "@/lib/payments/asaas/card-http";
+import { verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
+import { storeCheckoutOrigins } from "@/lib/stores";
+import { cardFormCsp, cardFormHtml } from "./page";
+
+export interface CardServerOptions {
+  /** Origem do próprio serviço (CARD_ORIGIN): o único `Origin` aceito no POST. */
+  cardOrigin: string;
+  /** CARD_TICKET_KEY: confere o bilhete do pedido emitido pelo app. */
+  ticketKey: string;
+  /** TRUST_PROXY: quantos proxies confiáveis (IP do comprador e X-Forwarded-Proto). */
+  trustProxy: number;
+  turnstileSiteKey?: string;
+  /** Diretório com `form.js` e `form.css` (build da Task 7). Sem ele, as duas rotas dão 404. */
+  assetsDir?: string;
+  payWithCard?: typeof defaultPayWithCard;
+  origins?: (storeId: string) => Promise<string[]>;
+}
+
+const MAX_BODY = 16 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FORM_PATH = /^\/form\/([^/]+)$/;
+/** Os únicos arquivos servidos: caminho da URL -> nome fixo no `assetsDir` e tipo. */
+const ASSETS = new Map<string, { file: string; type: string }>([
+  ["/form.js", { file: "form.js", type: "text/javascript; charset=utf-8" }],
+  ["/form.css", { file: "form.css", type: "text/css; charset=utf-8" }],
+]);
+
+function send(res: ServerResponse, status: number, body = "", headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "x-content-type-options": "nosniff", ...headers, "content-length": String(Buffer.byteLength(body)) });
+  res.end(body);
+}
+
+const json = (res: ServerResponse, status: number, body: object, headers: Record<string, string> = {}) =>
+  send(res, status, JSON.stringify(body), { "content-type": "application/json", "cache-control": "no-store", ...headers });
+
+/** Cabeçalhos da requisição como `Headers` (o que `clientIpFrom` e `isHttps` leem). */
+function headersOf(req: IncomingMessage): Headers {
+  const h = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (v !== undefined) h.set(k, Array.isArray(v) ? v.join(", ") : v);
+  }
+  return h;
+}
+
+/** Corpo com teto de bytes; `null` se passar do limite (declarado ou real). */
+function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
+  if (Number(req.headers["content-length"] ?? 0) > max) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const cleanup = () => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("close", onClose);
+    };
+    const onData = (c: Buffer) => {
+      total += c.length;
+      if (total > max) {
+        cleanup();
+        resolve(null);
+      } else chunks.push(c);
+    };
+    const onEnd = () => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+    const onError = (e: Error) => {
+      cleanup();
+      reject(e);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("requisição interrompida antes do fim do corpo"));
+    };
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("close", onClose);
+  });
+}
+
+export function createCardServer(opts: CardServerOptions): Server {
+  const pay = opts.payWithCard ?? defaultPayWithCard;
+  const originsOf = opts.origins ?? ((storeId: string) => storeCheckoutOrigins(storeId));
+  const cardUrl = new URL(opts.cardOrigin);
+  if (cardUrl.origin !== opts.cardOrigin) throw new Error("cardOrigin deve ser só a origem (esquema, host e porta)");
+  // HTTP só em loopback (desenvolvimento e testes); fora dele, a conexão do comprador precisa ser HTTPS no proxy.
+  const plainLoopback = cardUrl.protocol === "http:" && isLoopbackUrl(opts.cardOrigin);
+  if (cardUrl.protocol !== "https:" && !plainLoopback) throw new Error("cardOrigin deve ser https (http só em loopback)");
+
+  async function apiCard(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const headers = headersOf(req);
+    // Antes de qualquer trabalho: POST de outro site (ou do app) nunca chega ao bilhete nem ao pagamento.
+    const type = (headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    if (type !== "application/json" || headers.get("origin") !== opts.cardOrigin) {
+      return json(res, 403, { error: "forbidden_origin", message: "Requisição recusada." });
+    }
+    if (!plainLoopback && !isHttps(headers, opts.trustProxy)) {
+      return json(res, 403, { error: "https_required", message: "Use uma conexão segura (HTTPS) para pagar com cartão." });
+    }
+    const raw = await readBody(req, MAX_BODY);
+    if (raw === null) return json(res, 413, { error: "too_large", message: "Requisição grande demais" }, { connection: "close" });
+    let body: unknown;
+    try {
+      body = JSON.parse(raw.toString("utf8"));
+    } catch {
+      return json(res, 400, { error: "invalid_input", message: "JSON inválido" });
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return json(res, 400, { error: "invalid_input", message: "JSON inválido" });
+    }
+    const { ticket, ...fields } = body as Record<string, unknown>;
+    const check = verifyCardTicketDetailed(typeof ticket === "string" ? ticket : "", opts.ticketKey);
+    if (!check.ok) return json(res, 403, { error: "ticket", ticketExpired: check.expired });
+    if (fields.orderPublicId !== check.publicId) return json(res, 403, { error: "ticket", ticketExpired: false });
+    try {
+      // O IP vem do servidor e sobrescreve qualquer `clientIp` enviado no corpo; a loja vem do bilhete.
+      const input = { ...fields, clientIp: clientIpFrom(headers, opts.trustProxy) } as unknown as CardPaymentInput;
+      return json(res, 200, await pay({ storeId: check.storeId }, input));
+    } catch (e) {
+      const { status, body: out } = cardErrorResponse(e);
+      return json(res, status, out);
+    }
+  }
+
+  async function form(storeId: string, res: ServerResponse): Promise<void> {
+    if (!UUID.test(storeId)) return send(res, 404);
+    const origins = await originsOf(storeId);
+    if (origins.length === 0) return send(res, 404);
+    send(res, 200, cardFormHtml({ allowedOrigins: origins, turnstileSiteKey: opts.turnstileSiteKey }), {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": cardFormCsp(origins, { turnstile: Boolean(opts.turnstileSiteKey) }),
+      "referrer-policy": "no-referrer",
+      "cache-control": "no-store",
+    });
+  }
+
+  async function asset(a: { file: string; type: string }, res: ServerResponse): Promise<void> {
+    if (!opts.assetsDir) return send(res, 404);
+    let content: string;
+    try {
+      content = await readFile(join(opts.assetsDir, a.file), "utf8");
+    } catch {
+      return send(res, 404);
+    }
+    send(res, 200, content, { "content-type": a.type, "cache-control": "public, max-age=300" });
+  }
+
+  async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Caminho cru, sem normalizar: só casa com os nomes exatos (`/form.js/../x`, `%2e%2e` e afins dão 404).
+    const path = (req.url ?? "/").split("?")[0]!;
+    if (req.method === "POST" && path === "/api/card") return apiCard(req, res);
+    if (req.method !== "GET") return send(res, 404);
+    if (path === "/healthz") return (await dbHealthy()) ? send(res, 200, "ok", { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }) : send(res, 503);
+    const a = ASSETS.get(path);
+    if (a) return asset(a, res);
+    const m = FORM_PATH.exec(path);
+    if (m) return form(m[1]!, res);
+    return send(res, 404);
+  }
+
+  const server = createServer((req, res) => {
+    handle(req, res).catch((e: unknown) => {
+      // Nunca o corpo da requisição; `log` ainda aplica a máscara de cartão.
+      log.error("serviço de cartão: erro inesperado", { error: e });
+      if (!res.headersSent) send(res, 500);
+      else res.destroy();
+    });
+  });
+  server.requestTimeout = 15_000;
+  server.headersTimeout = 10_000;
+  return server;
+}

@@ -30,28 +30,42 @@ export function issueCardTicket(t: CardTicket, key: string, now: Date = new Date
 
 /** Devolve o conteúdo se o bilhete é íntegro, válido e não vencido; `null` para qualquer defeito. */
 export function verifyCardTicket(token: string, key: string, now: Date = new Date()): CardTicket | null {
-  if (!key || typeof token !== "string" || token.length > MAX_TOKEN_LEN) return null;
+  const r = verifyCardTicketDetailed(token, key, now);
+  return r.ok ? { storeId: r.storeId, orderId: r.orderId, publicId: r.publicId } : null;
+}
+
+export type CardTicketCheck = ({ ok: true } & CardTicket) | { ok: false; expired: boolean };
+
+/**
+ * Como `verifyCardTicket`, mas diz se a recusa foi só o vencimento: `expired: true` apenas com assinatura e conteúdo
+ * válidos e `e` já passado (o checkout pede um bilhete novo). Forjado, malformado ou vencimento longe demais no
+ * futuro dão `expired: false`: nada além disso é revelado.
+ */
+export function verifyCardTicketDetailed(token: string, key: string, now: Date = new Date()): CardTicketCheck {
+  const no = { ok: false, expired: false } as const;
+  if (!key || typeof token !== "string" || token.length > MAX_TOKEN_LEN) return no;
   const parts = token.split(".");
-  if (parts.length !== 2) return null;
+  if (parts.length !== 2) return no;
   const [payload, sig] = parts as [string, string];
-  if (!payload || !SIGNATURE.test(sig)) return null;
+  if (!payload || !SIGNATURE.test(sig)) return no;
   const given = Buffer.from(sig, "base64url");
   const expected = sign(payload, key);
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
-  if (given.toString("base64url") !== sig) return null; // bits baixos do último caractere
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return no;
+  if (given.toString("base64url") !== sig) return no; // bits baixos do último caractere
   let body: unknown;
   try {
     body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   } catch {
-    return null;
+    return no;
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return no;
   const { s, o, p, e } = body as Record<string, unknown>;
-  if (typeof s !== "string" || !UUID.test(s) || typeof o !== "string" || !UUID.test(o)) return null;
-  if (typeof p !== "string" || !PUBLIC_ID.test(p)) return null;
-  if (typeof e !== "number" || !Number.isInteger(e)) return null;
+  if (typeof s !== "string" || !UUID.test(s) || typeof o !== "string" || !UUID.test(o)) return no;
+  if (typeof p !== "string" || !PUBLIC_ID.test(p)) return no;
+  if (typeof e !== "number" || !Number.isInteger(e)) return no;
   const nowS = Math.floor(now.getTime() / 1000);
-  if (!Number.isFinite(nowS)) return null;
-  if (e <= nowS || e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return null;
-  return { storeId: s, orderId: o, publicId: p };
+  if (!Number.isFinite(nowS)) return no;
+  if (e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return no;
+  if (e <= nowS) return { ok: false, expired: true };
+  return { ok: true, storeId: s, orderId: o, publicId: p };
 }
