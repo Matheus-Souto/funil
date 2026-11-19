@@ -253,6 +253,16 @@ test("Dockerfile: estágio card só com dist/card (sem node_modules nem .next), 
   expect([...runtime.matchAll(/^COPY --from=card-build (.*)$/gm)]).toHaveLength(1);
 });
 
+test("CLI asaas:unseal (rollback do cartão isolado): empacotada para Node na imagem do app, como a store-create", () => {
+  const dockerfile = read("deploy/Dockerfile");
+  expect(dockerfile).toMatch(/bun build [^\n]*scripts\/asaas-unseal\.ts/);
+  expect(dockerfile).toMatch(/^COPY deploy\/asaas-unseal\.sh \/usr\/local\/bin\/asaas-unseal$/m);
+  expect(dockerfile).toMatch(/chmod 0755 [^\n]*\/usr\/local\/bin\/asaas-unseal/);
+  expect(read("deploy/Dockerfile.dockerignore")).toMatch(/^!scripts\/asaas-unseal\.ts$/m);
+  expect(read("deploy/asaas-unseal.sh")).toMatch(/^exec node \/app\/cli\/scripts\/asaas-unseal\.mjs "\$@"$/m);
+  expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["asaas:unseal"]).toBe("bun scripts/asaas-unseal.ts");
+});
+
 describe("Caddyfiles: HSTS em todo site servido", () => {
   for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi", "deploy/Caddyfile.card"]) {
     test(file, () => {

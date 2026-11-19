@@ -10,6 +10,7 @@ import {
   type IntegrationSecrets,
   openIntegrationSecret,
   resealAsaasSecrets,
+  unsealAsaasSecrets,
   saveIntegration,
 } from "@/lib/integrations";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -217,5 +218,78 @@ describe("resealAsaasSecrets", () => {
     expect(await resealAsaasSecrets()).toBe(0);
     expect(await rawSecret(s.storeId, "asaas")).toBe(antes);
     expect(await withStore(s.storeId, (tx) => getIntegration(tx, s.storeId, "asaas"))).toEqual({ config: {}, secret: "chave" });
+  });
+});
+
+describe("unsealAsaasSecrets (CLI asaas:unseal, rollback do isolamento)", () => {
+  let t: TestDb;
+  beforeAll(async () => {
+    t = await createTestDb();
+  });
+  afterAll(async () => {
+    await t.drop();
+  });
+
+  const rawSecret = (storeId: string) =>
+    withStore(storeId, async (tx) => {
+      const [row] = await tx.select({ secret: integration.secret }).from(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, "asaas")));
+      return row?.secret ?? null;
+    });
+  const sealedA1 = createIntegrationSecrets({ secret: requireSecret(), asaasKey: ASAAS_KEY });
+
+  test("regrava a1 -> v1 por loja (abre só com o SECRET, como na imagem anterior), não toca no resto e é idempotente", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    const antiga = await seedStore();
+    const vazia = await seedStore();
+    for (const s of [a, b]) {
+      await t.ownerDb.insert(integration).values({ storeId: s.storeId, kind: "asaas", config: {}, secret: sealedA1.seal("asaas", `chave-${s.storeId}`) });
+      await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "smtp", { host: "h" }, "senha-smtp"));
+    }
+    await withStore(antiga.storeId, (tx) => saveIntegration(tx, antiga.storeId, "asaas", {}, "chave-v1"));
+    await withStore(vazia.storeId, (tx) => saveIntegration(tx, vazia.storeId, "asaas", {}, null));
+    const v1Antes = await rawSecret(antiga.storeId);
+
+    expect(await unsealAsaasSecrets({ secret: requireSecret(), asaasKey: ASAAS_KEY })).toEqual({ unsealed: 2, remaining: 0 });
+    const semChave = createIntegrationSecrets({ secret: requireSecret() }); // imagem anterior: só SECRET, sem a1
+    for (const s of [a, b]) {
+      const sealed = (await rawSecret(s.storeId))!;
+      expect(sealed.startsWith("v1.")).toBe(true);
+      expect(semChave.open("asaas", sealed)).toBe(`chave-${s.storeId}`);
+    }
+    expect(await rawSecret(antiga.storeId)).toBe(v1Antes);
+    expect(await rawSecret(vazia.storeId)).toBeNull();
+    expect(await unsealAsaasSecrets({ secret: requireSecret(), asaasKey: ASAAS_KEY })).toEqual({ unsealed: 0, remaining: 0 });
+  });
+
+  test("precisa do SECRET e da ASAAS_SEAL_KEY", async () => {
+    await expect(unsealAsaasSecrets({ secret: requireSecret() })).rejects.toThrow(/ASAAS_SEAL_KEY/);
+    await expect(unsealAsaasSecrets({ asaasKey: ASAAS_KEY })).rejects.toThrow(/SECRET/);
+  });
+
+  test("a1 que não abre com a chave: conta como restante, segue as demais e o log não leva valores", async () => {
+    const ok = await seedStore();
+    const ruim = await seedStore();
+    await t.ownerDb.insert(integration).values({ storeId: ok.storeId, kind: "asaas", config: {}, secret: sealedA1.seal("asaas", "chave-boa-123") });
+    const alheio = createIntegrationSecrets({ secret: requireSecret(), asaasKey: "x".repeat(40) }).seal("asaas", "chave-alheia-456");
+    await t.ownerDb.insert(integration).values({ storeId: ruim.storeId, kind: "asaas", config: {}, secret: alheio });
+
+    const lines: string[] = [];
+    const out = spyOn(process.stdout, "write").mockImplementation(((chunk: string) => {
+      lines.push(String(chunk));
+      return true;
+    }) as never);
+    let r: unknown;
+    try {
+      r = await unsealAsaasSecrets({ secret: requireSecret(), asaasKey: ASAAS_KEY });
+    } finally {
+      out.mockRestore();
+    }
+    expect(r).toEqual({ unsealed: 1, remaining: 1 });
+    expect((await rawSecret(ok.storeId))!.startsWith("v1.")).toBe(true);
+    expect(await rawSecret(ruim.storeId)).toBe(alheio);
+    const logged = lines.join("");
+    expect(logged).toContain(ruim.storeId);
+    for (const v of [alheio, "chave-alheia-456", "chave-boa-123", ASAAS_KEY]) expect(logged).not.toContain(v);
   });
 });

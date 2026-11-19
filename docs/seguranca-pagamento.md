@@ -87,10 +87,10 @@ pedido (`CARD_TICKET_KEY`) e recebe do iframe o resultado (aprovado, recusado).
   o `SECRET` (`v1`), mesmo com a `ASAAS_SEAL_KEY` presente; só com `CARD_ISOLATED=1` ela passa a ser cifrada com a
   chave própria (`a1`) e a re-selagem roda.
 - **Rollback:** voltar para `CARD_ISOLATED=0` na mesma versão é seguro (o app ainda abre `a1` com a chave). Voltar
-  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback
-  preventivo: desligue o isolamento na versão atual, cole de novo a chave de API do Asaas de cada loja em Conexões
-  (com o isolamento desligado ela é gravada em `v1`) e só então volte a imagem. Se já voltou, cole a chave do mesmo
-  jeito. Desligando de vez: `alter role card nologin` (`docs/instalacao.md`, seção 12).
+  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback:
+  desligue o isolamento na versão atual, rode a CLI `asaas-unseal` (`docker compose exec app asaas-unseal`; regrava
+  `a1` em `v1` com o `SECRET`, loja a loja, idempotente, só contagens no log) e só então volte a imagem.
+  Desligando de vez: `alter role card nologin` (`docs/instalacao.md`, seção 12).
 - **Cloudflare:** o checkout e o `pagar.` com o mesmo estado de proxy (o `TRUST_PROXY` é um só para o app e o `card`)
   e sem recursos que injetam scripts (Rocket Loader, Email Obfuscation, JS Detections, Zaraz, Web Analytics
   automático): ver `docs/instalacao.md`, seção 12.

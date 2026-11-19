@@ -18,6 +18,7 @@ tests
 playwright-report
 test-results
 # Scripts de desenvolvimento usam APIs do Bun (o typecheck do `next build` não tem os tipos do Bun sem tests/);
-# a imagem só precisa da CLI de criação de loja.
+# a imagem só precisa das CLIs de operação (criação de loja, rollback do cartão isolado).
 scripts/*
 !scripts/store-create.ts
+!scripts/asaas-unseal.ts

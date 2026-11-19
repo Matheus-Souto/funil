@@ -128,13 +128,12 @@ export async function saveIntegration(
 }
 
 /**
- * Re-sela em `a1.` os segredos `asaas` ainda em `v1.` (gravados antes da ASAAS_SEAL_KEY). Roda no boot do app.
- * Sem a chave, não faz nada. Idempotente; devolve quantas conexões mudaram. Percorre as lojas com o papel `app`
- * (RLS: a conexão é da loja); erro numa loja não impede as demais, e o total de falhas vai no erro final.
- * `secrets` existe para os testes.
+ * Regrava, loja a loja, os segredos `asaas` que começam com `from` usando `convert` (abrir e selar de novo). Percorre as
+ * lojas com o papel `app` (RLS: a conexão é da loja); só troca se ninguém regravou a conexão no meio (comparação com o
+ * valor lido). Erro numa loja não impede as demais: vai para o log com a loja e o objeto do erro, nunca a mensagem crua
+ * (o log.ts troca erro de consulta, com SQL e os selos nos `params`, por um texto genérico com o código do Postgres).
  */
-export async function resealAsaasSecrets(secrets: IntegrationSecrets = defaultSecrets()): Promise<number> {
-  if (!secrets.asaasOwnKey) return 0;
+async function rewriteAsaasSecrets(from: "v1." | "a1.", convert: (sealed: string) => string, failure: string): Promise<{ changed: number; failed: number }> {
   const stores = await db.select({ id: store.id }).from(store);
   let changed = 0;
   let failed = 0;
@@ -143,25 +142,52 @@ export async function resealAsaasSecrets(secrets: IntegrationSecrets = defaultSe
       changed += await withStore(s.id, async (tx) => {
         const where = and(eq(integration.storeId, s.id), eq(integration.kind, "asaas"));
         const [row] = await tx.select({ secret: integration.secret }).from(integration).where(where);
-        if (!row?.secret?.startsWith("v1.")) return 0;
-        const resealed = secrets.seal("asaas", secrets.open("asaas", row.secret));
-        // Só troca se ninguém regravou a conexão no meio (comparação com o valor lido).
+        if (!row?.secret?.startsWith(from)) return 0;
         const done = await tx
           .update(integration)
-          .set({ secret: resealed })
+          .set({ secret: convert(row.secret) })
           .where(and(where, eq(integration.secret, row.secret)))
           .returning({ storeId: integration.storeId });
         return done.length;
       });
     } catch (e) {
       failed++;
-      // O objeto do erro, nunca a mensagem crua: o log.ts troca erro de consulta (SQL + params com os selos) por um
-      // texto genérico com o código do Postgres.
-      log.error("re-selagem da conexão Asaas falhou na loja", { storeId: s.id, error: e });
+      log.error(failure, { storeId: s.id, error: e });
     }
   }
+  return { changed, failed };
+}
+
+/**
+ * Re-sela em `a1.` os segredos `asaas` ainda em `v1.` (gravados antes da ASAAS_SEAL_KEY). Roda no boot do app.
+ * Sem a chave, não faz nada. Idempotente; devolve quantas conexões mudaram; o total de falhas vai no erro final.
+ * `secrets` existe para os testes.
+ */
+export async function resealAsaasSecrets(secrets: IntegrationSecrets = defaultSecrets()): Promise<number> {
+  if (!secrets.asaasOwnKey) return 0;
+  const { changed, failed } = await rewriteAsaasSecrets("v1.", (v) => secrets.seal("asaas", secrets.open("asaas", v)), "re-selagem da conexão Asaas falhou na loja");
   if (failed > 0) throw new Error(`re-selagem da conexão Asaas falhou em ${failed} loja(s); ${changed} re-selada(s)`);
   return changed;
+}
+
+/**
+ * O inverso de `resealAsaasSecrets` (CLI `asaas:unseal`, rollback do isolamento): regrava em `v1.` (SECRET) os
+ * segredos `asaas` em `a1.` (ASAAS_SEAL_KEY), para uma imagem anterior ao isolamento abrir a conexão sem o vendedor
+ * colar a chave de novo. Precisa das duas chaves. Idempotente (`v1.` e vazio ficam como estão). Uma conexão que não
+ * abre (ou falha ao gravar) não impede as demais: conta em `remaining` e vai para o log só com a loja.
+ */
+export async function unsealAsaasSecrets(keys: { secret?: string; asaasKey?: string }): Promise<{ unsealed: number; remaining: number }> {
+  if (!keys.asaasKey) throw new Error("ASAAS_SEAL_KEY é obrigatória para regravar as conexões Asaas em v1");
+  if (!keys.secret) throw new Error("SECRET é obrigatório para regravar as conexões Asaas em v1");
+  // sealAsaas false: abre `a1.` com a chave e grava `asaas` em `v1.` com o SECRET.
+  const secrets = createIntegrationSecrets({ secret: keys.secret, asaasKey: keys.asaasKey, sealAsaas: false });
+  const toV1 = (a1: string) => {
+    const v1 = secrets.seal("asaas", secrets.open("asaas", a1));
+    if (!v1.startsWith("v1.")) throw new Error("selagem inesperada: esperado v1");
+    return v1;
+  };
+  const { changed, failed } = await rewriteAsaasSecrets("a1.", toV1, "regravação da conexão Asaas em v1 falhou na loja");
+  return { unsealed: changed, remaining: failed };
 }
 
 /**

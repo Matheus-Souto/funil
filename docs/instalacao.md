@@ -426,11 +426,23 @@ capabilities, 192 MB de memória e sem core dump.
   O checkout volta ao formulário antigo e a chave do Asaas continua abrindo (mantenha a `ASAAS_SEAL_KEY` no `.env`).
   Desligando de vez, tire também o login do papel `card` (a migração não tira sozinha):
   `docker compose exec -T postgres psql -U owner -d funil -c 'alter role card nologin'`.
-- **Voltar para uma versão do sistema anterior ao isolamento trava o Asaas das lojas** (ela não abre a chave cifrada
-  com a `ASAAS_SEAL_KEY`: Pix e cartão do Asaas param). Para voltar sem travar: primeiro desligue o isolamento (item
-  acima, ainda na versão atual), cole de novo a chave de API do Asaas de cada loja em Conexões → Asaas (com o
-  isolamento desligado ela é gravada no formato antigo) e só então volte a versão. Se já voltou, cole a chave de novo
-  em cada loja do mesmo jeito.
+- **Voltar para uma versão do sistema anterior ao isolamento trava o Asaas das lojas** se as conexões continuarem
+  cifradas com a `ASAAS_SEAL_KEY` (a versão antiga não as abre: Pix e cartão do Asaas param). Para voltar sem travar,
+  ainda na versão atual:
+  1. desligue o isolamento (item acima), mantendo a `ASAAS_SEAL_KEY` no `.env`;
+  2. regrave as conexões Asaas no formato antigo (só mostra contagens, nunca chaves):
+
+     ```sh
+     docker compose exec app asaas-unseal
+     ```
+
+     Ela recusa rodar com `CARD_ISOLATED=1` (o app cifraria tudo de novo no próximo boot). Se disser que alguma
+     conexão não pôde ser regravada, veja `docker compose logs app` (a loja aparece no log) e cole a chave de API do
+     Asaas dessa loja em Conexões → Asaas antes de seguir;
+  3. só então volte a versão.
+
+  Se já voltou sem rodar a CLI: volte para a versão atual com `CARD_ISOLATED=0`, rode a CLI e volte de novo (ou cole
+  a chave de API do Asaas de cada loja em Conexões → Asaas).
 - **Restaurar um backup** (seção 10) exige o mesmo `SECRET` **e** a mesma `ASAAS_SEAL_KEY`. Além dos erros de
   `CREATE POLICY ... TO card` já descritos (esperados), nada muda: o app recria o papel `card` com a
   `CARD_DB_PASSWORD` ao iniciar.

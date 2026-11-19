@@ -2,7 +2,8 @@
 # Imagem de produção do app (compose.yaml). Estágios:
 #   bun        -> só fornece o binário do Bun para o build;
 #   deps       -> Node 22 + Bun com as dependências instaladas (`bun install`);
-#   build      -> `next build` (saída standalone) e as CLIs (migrate, store:create) empacotadas para Node com `bun build`;
+#   build      -> `next build` (saída standalone) e as CLIs (migrate, store:create, asaas:unseal) empacotadas para Node
+#                 com `bun build`;
 #   card-build -> `bun run card:build`: o serviço de cartão isolado num arquivo só (dist/card/server.js, sem
 #                 node_modules), o formulário do iframe (form.js, form.css) e o sha256 do form.js (vai também para a
 #                 imagem do app: o monitor 11.6.1 confere o /form.js servido contra ele);
@@ -28,9 +29,10 @@ FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY . .
 RUN bun run build
-# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs),
-# então os caminhos relativos de migrate.ts continuam valendo: cli/src/lib/db/rls.sql e cli/drizzle/.
-RUN bun build src/lib/db/migrate.ts scripts/store-create.ts --target=node --format=esm --root=. \
+# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs,
+# cli/scripts/asaas-unseal.mjs), então os caminhos relativos de migrate.ts continuam valendo: cli/src/lib/db/rls.sql e
+# cli/drizzle/.
+RUN bun build src/lib/db/migrate.ts scripts/store-create.ts scripts/asaas-unseal.ts --target=node --format=esm --root=. \
       --outdir=/cli --entry-naming='[dir]/[name].mjs' \
  && cp src/lib/db/rls.sql /cli/src/lib/db/rls.sql \
  && cp -r drizzle /cli/drizzle
@@ -79,7 +81,8 @@ COPY --from=build /cli ./cli
 COPY --from=card-build /src/dist/card/form.js.sha256 ./card-form.sha256
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint
 COPY deploy/store-create.sh /usr/local/bin/store-create
-RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/store-create \
+COPY deploy/asaas-unseal.sh /usr/local/bin/asaas-unseal
+RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/store-create /usr/local/bin/asaas-unseal \
  && mkdir -p /data /app/.next/cache \
  && chown node:node /data /app/.next/cache
 USER node
