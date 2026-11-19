@@ -209,6 +209,19 @@ describe("Caddy: domínio do cartão só para o card, e nada do card fora dele",
     });
   }
 
+  for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi"]) {
+    test(`${file}: com CARD_ISOLATED=1, a rota antiga do cartão (/api/checkout/card) morre no Caddy, em todo site do app`, () => {
+      for (const site of caddySites(read(file))) {
+        expect(site.body, site.head).toMatch(/@legacyCard \{\n\s*path \/api\/checkout\/card\n\s*expression `"\{\$CARD_ISOLATED\}" == "1"`\n\s*\}/);
+        expect(site.body, site.head).toMatch(/respond @legacyCard 404/);
+      }
+    });
+  }
+
+  test("compose: o Caddy recebe CARD_ISOLATED (padrão 0: sem a flag, a rota antiga segue)", () => {
+    expect(compose.services.caddy!.environment!.CARD_ISOLATED).toBe("${CARD_ISOLATED:-0}");
+  });
+
   /** Interpolação do compose para as formas usadas aqui: `${X:+valor}` (só se X não vazia) e `${X:-padrão}`. */
   const interpolate = (text: string, vars: Record<string, string>) =>
     text.replace(/\$\{(\w+):([+-])([^}]*)\}/g, (_m, name: string, op: string, word: string) => {

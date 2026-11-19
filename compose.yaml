@@ -141,6 +141,8 @@ services:
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       # Endereço do site do cartão (deploy/Caddyfile.card).
       CARD_ORIGIN: ${CARD_ORIGIN:-}
+      # Com 1, o Caddy responde 404 à rota antiga do cartão (/api/checkout/card) sem repassar ao app.
+      CARD_ISOLATED: ${CARD_ISOLATED:-0}
     volumes:
       # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
       # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
