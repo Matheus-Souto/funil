@@ -1,8 +1,10 @@
 import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { ActionError } from "@/lib/actions/core";
 import { verifyPassword } from "@/lib/auth/password";
 import { membership, store, users } from "@/lib/db/schema";
-import { createStoreWithOwner, resolveStore, setupFirstRun } from "@/lib/stores";
+import { RESERVED_SLUGS, createStoreWithOwner, resolveStore, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
+import { setDbForTests } from "@/lib/db/client";
 import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 
 let t: TestDb;
@@ -147,4 +149,54 @@ describe("createStoreWithOwner (CLI)", () => {
     expect(await code(createStoreWithOwner({ name: "B", slug: "dup", ownerEmail: "b@exemplo.com" }))).toBe("conflict");
     expect(await t.ownerDb.select().from(users)).toHaveLength(1);
   }, HEAVY_TEST_MS);
+});
+
+describe("storeCheckoutOrigins", () => {
+  const multi = { mode: "multi", platformDomain: "plataforma.com", baseUrl: "https://app.plataforma.com" } as const;
+
+  test("single: só a origem do BASE_URL; loja inexistente → []", async () => {
+    const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "ignorado.com" }).returning();
+    expect(await storeCheckoutOrigins(a!.id, { mode: "single", baseUrl: "https://loja.example.com" })).toEqual(["https://loja.example.com"]);
+    expect(await storeCheckoutOrigins(randomUUID(), { mode: "single", baseUrl: "https://loja.example.com" })).toEqual([]);
+  });
+
+  test("multi: domínio próprio (se houver) e subdomínio da plataforma", async () => {
+    const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "Loja-A.com.br" }).returning();
+    const [b] = await t.ownerDb.insert(store).values({ name: "B", slug: "beta" }).returning();
+    expect(await storeCheckoutOrigins(a!.id, multi)).toEqual(["https://loja-a.com.br", "https://alfa.plataforma.com"]);
+    expect(await storeCheckoutOrigins(b!.id, multi)).toEqual(["https://beta.plataforma.com"]);
+    expect(await storeCheckoutOrigins(randomUUID(), multi)).toEqual([]);
+  });
+
+  test("multi em dev (BASE_URL http em loopback): mesmo esquema e porta do BASE_URL (https segue https sem porta)", async () => {
+    const [b] = await t.ownerDb.insert(store).values({ name: "B", slug: "beta" }).returning();
+    expect(await storeCheckoutOrigins(b!.id, { mode: "multi", platformDomain: "lvh.me", baseUrl: "http://localhost:3000" })).toEqual(["http://beta.lvh.me:3000"]);
+    expect(await storeCheckoutOrigins(b!.id, { mode: "multi", platformDomain: "lvh.me", baseUrl: "https://app.lvh.me" })).toEqual(["https://beta.lvh.me"]);
+  });
+
+  test("com o banco no papel card (só lê id, slug e domain de store)", async () => {
+    const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "loja-a.com.br" }).returning();
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+    try {
+      expect(await storeCheckoutOrigins(a!.id, multi)).toEqual(["https://loja-a.com.br", "https://alfa.plataforma.com"]);
+      expect(await storeCheckoutOrigins(a!.id, { mode: "single", baseUrl: "https://loja.example.com" })).toEqual(["https://loja.example.com"]);
+    } finally {
+      await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+    }
+  });
+});
+
+describe("slug reservado", () => {
+  test("pagar está em RESERVED_SLUGS e a criação de loja recusa (qualquer caixa)", async () => {
+    expect(RESERVED_SLUGS).toContain("pagar");
+    expect(await code(createStoreWithOwner({ name: "X", slug: "pagar", ownerEmail: "x@exemplo.com" }))).toBe("invalid_input");
+    expect(await t.ownerDb.select().from(store)).toHaveLength(0);
+    expect((await createStoreWithOwner({ name: "X", slug: "pagar-bem", ownerEmail: "x@exemplo.com" })).storeId).toBeString();
+  });
+
+  test("setup do modo single com nome 'Pagar' não gera o slug reservado", async () => {
+    const r = await setupFirstRun({ ...setup, storeName: "Pagar" }, "single");
+    const [s] = await t.ownerDb.select().from(store).where(eq(store.id, r.storeId));
+    expect(s!.slug).not.toBe("pagar");
+  });
 });
