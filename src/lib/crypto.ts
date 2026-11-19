@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
-import { env } from "@/lib/env";
+import { requireSecret } from "@/lib/env";
 
 const VERSION = "v1";
 const INFO = "funil:seal:v1";
@@ -32,7 +32,7 @@ export function createSealer(secret: string) {
 }
 
 let sealer: ReturnType<typeof createSealer> | undefined;
-const defaultSealer = () => (sealer ??= createSealer(env.SECRET));
+const defaultSealer = () => (sealer ??= createSealer(requireSecret()));
 
 export const seal = (plain: string): string => defaultSealer().seal(plain);
 export const open = (sealed: string): string => defaultSealer().open(sealed);

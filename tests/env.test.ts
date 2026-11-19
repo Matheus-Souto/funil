@@ -1,5 +1,5 @@
 import { requireOwnerUrl } from "@/lib/db/client";
-import { parseEnv } from "@/lib/env";
+import { parseEnv, requireSecret } from "@/lib/env";
 
 const base = {
   BASE_URL: "http://localhost:3000",
@@ -118,4 +118,89 @@ test("SETUP_TOKEN: opcional para o app; se definido, 16+ caracteres", () => {
   expect(parseEnv(base).SETUP_TOKEN).toBeUndefined();
   expect(parseEnv({ ...base, SETUP_TOKEN: "a".repeat(16) }).SETUP_TOKEN).toBe("a".repeat(16));
   expect(() => parseEnv({ ...base, SETUP_TOKEN: "curto" })).toThrow(/SETUP_TOKEN/);
+});
+
+const cardKeys = {
+  CARD_ORIGIN: "https://cartao.example.com",
+  CARD_TICKET_KEY: "t".repeat(32),
+  ASAAS_SEAL_KEY: "a".repeat(32),
+};
+const { SECRET: _secret, ...baseSemSecret } = base;
+const cardBase = { ...baseSemSecret, SERVICE: "card", ...cardKeys };
+
+test("SERVICE=app (padrão) sem SECRET falha", () => {
+  expect(() => parseEnv(baseSemSecret)).toThrow(/SECRET/);
+  expect(() => parseEnv({ ...baseSemSecret, SERVICE: "app" })).toThrow(/SECRET/);
+  expect(parseEnv(base).SERVICE).toBe("app");
+  expect(parseEnv(base).CARD_ISOLATED).toBe(false);
+});
+
+test("SERVICE inválido falha", () => {
+  expect(() => parseEnv({ ...base, SERVICE: "x" })).toThrow(/SERVICE/);
+});
+
+test("SERVICE=card: aceita as variáveis do serviço, sem SECRET", () => {
+  const e = parseEnv({ ...cardBase, CARD_DB_PASSWORD: "card" });
+  expect(e.SERVICE).toBe("card");
+  expect(e.SECRET).toBeUndefined();
+  expect(e.CARD_ORIGIN).toBe(cardKeys.CARD_ORIGIN);
+  expect(e.CARD_TICKET_KEY).toBe(cardKeys.CARD_TICKET_KEY);
+  expect(e.ASAAS_SEAL_KEY).toBe(cardKeys.ASAAS_SEAL_KEY);
+  expect(e.CARD_DB_PASSWORD).toBe("card");
+});
+
+test("SERVICE=card com SECRET definido falha", () => {
+  expect(() => parseEnv({ ...cardBase, SECRET: base.SECRET })).toThrow("SECRET não pode ser passado ao serviço de cartão");
+});
+
+test("SERVICE=card continua exigindo BASE_URL e DATABASE_URL", () => {
+  expect(() => parseEnv({ ...cardBase, BASE_URL: undefined })).toThrow(/BASE_URL/);
+  expect(() => parseEnv({ ...cardBase, DATABASE_URL: undefined })).toThrow(/DATABASE_URL/);
+});
+
+test("SERVICE=card exige CARD_TICKET_KEY, ASAAS_SEAL_KEY e CARD_ORIGIN", () => {
+  for (const k of Object.keys(cardKeys)) {
+    expect(() => parseEnv({ ...cardBase, [k]: undefined })).toThrow(new RegExp(k));
+  }
+});
+
+test("CARD_ISOLATED=1 no app exige CARD_ORIGIN, CARD_TICKET_KEY e ASAAS_SEAL_KEY", () => {
+  expect(parseEnv({ ...base, CARD_ISOLATED: "1", ...cardKeys }).CARD_ISOLATED).toBe(true);
+  expect(parseEnv({ ...base, CARD_ISOLATED: "0" }).CARD_ISOLATED).toBe(false);
+  for (const k of Object.keys(cardKeys)) {
+    expect(() => parseEnv({ ...base, CARD_ISOLATED: "1", ...cardKeys, [k]: undefined })).toThrow(new RegExp(k));
+  }
+  expect(() => parseEnv({ ...base, CARD_ISOLATED: "sim" })).toThrow(/CARD_ISOLATED/);
+});
+
+test("CARD_ISOLATED=0 não exige as variáveis do cartão", () => {
+  expect(parseEnv({ ...base, CARD_ISOLATED: "0" }).CARD_ORIGIN).toBeUndefined();
+});
+
+test("CARD_ORIGIN: origem https sem caminho, query nem barra final; http só em loopback", () => {
+  for (const o of ["https://cartao.example.com", "https://cartao.example.com:8443", "http://localhost:3100", "http://127.0.0.1:3100"]) {
+    expect(parseEnv({ ...cardBase, CARD_ORIGIN: o }).CARD_ORIGIN).toBe(o);
+  }
+  for (const o of [
+    "https://cartao.example.com/",
+    "https://cartao.example.com/pay",
+    "https://cartao.example.com?x=1",
+    "http://cartao.example.com",
+    "http://127.0.0.1.evil.com",
+    "cartao.example.com",
+    "ftp://cartao.example.com",
+  ]) {
+    expect(() => parseEnv({ ...cardBase, CARD_ORIGIN: o })).toThrow(/CARD_ORIGIN/);
+  }
+});
+
+test("CARD_TICKET_KEY e ASAAS_SEAL_KEY exigem 32 caracteres", () => {
+  expect(() => parseEnv({ ...cardBase, CARD_TICKET_KEY: "curta" })).toThrow(/CARD_TICKET_KEY/);
+  expect(() => parseEnv({ ...cardBase, ASAAS_SEAL_KEY: "curta" })).toThrow(/ASAAS_SEAL_KEY/);
+});
+
+test("requireSecret devolve o SECRET e lança erro claro sem ele", () => {
+  expect(requireSecret({ SECRET: base.SECRET })).toBe(base.SECRET);
+  expect(() => requireSecret({})).toThrow("SECRET não definido: o app precisa do SECRET (o serviço de cartão nunca o recebe)");
+  expect(typeof requireSecret()).toBe("string"); // env do processo de teste (preload) define SECRET
 });

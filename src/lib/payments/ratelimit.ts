@@ -5,7 +5,7 @@ import { isIP } from "node:net";
 import { and, eq, gt, lt, sql } from "drizzle-orm";
 import { db, type Db, type Tx } from "@/lib/db/client";
 import { rateLimit } from "@/lib/db/schema";
-import { env } from "@/lib/env";
+import { requireSecret } from "@/lib/env";
 
 /** Janela fixa alinhada ao relógio. */
 function windowStart(now: Date, windowSec: number): Date {
@@ -95,7 +95,7 @@ const fingerprints = new Map<string, { count: number; resetAt: number }>();
 
 /** HMAC-SHA256(SECRET, número só com dígitos): não reversível sem o SECRET. */
 function fingerprint(number: string): string {
-  return createHmac("sha256", env.SECRET).update(number.replace(/\D/g, "")).digest("base64url");
+  return createHmac("sha256", requireSecret()).update(number.replace(/\D/g, "")).digest("base64url");
 }
 
 /** Conta uma tentativa do cartão e devolve se ainda está dentro do limite (janela de `windowSec` a partir da 1ª). */
