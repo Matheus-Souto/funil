@@ -174,7 +174,7 @@ function ProductCover({ small }: { small?: boolean }) {
   );
 }
 
-// ---- Turnstile (só quando a API pede) ----
+// ---- Turnstile (só quando a API pede; com o cartão isolado, também aqui no checkout, nunca dentro do iframe) ----
 declare global {
   interface Window {
     turnstile?: { render: (el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void }) => void };
@@ -240,6 +240,8 @@ export function CheckoutForm(props: {
   const [declined, setDeclined] = useState<{ last4: string } | null>(null);
   const [captcha, setCaptcha] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState<string | undefined>();
+  // Remonta o widget depois de usar o token (ele vale uma vez): o próximo captcha pede um desafio novo.
+  const [turnstileKey, setTurnstileKey] = useState(0);
   // Pedido de cartão já criado para estes dados (nova tentativa de cartão reaproveita o pedido).
   const order = useRef<{ publicId: string; sig: string } | null>(null);
   // Chave de idempotência da tentativa de cartão em andamento (mantida se a rede cair antes da resposta).
@@ -465,15 +467,23 @@ export function CheckoutForm(props: {
     checkoutTracking.onAddPaymentInfo("card", total);
     const sig = orderSig();
     const buyerCpf = onlyDigits(v.cpf);
+    // Token do Turnstile resolvido aqui no checkout (depois de um `captcha`): vai no `pay`, e o iframe o repassa.
+    const sentToken = turnstileToken;
     const { outcome, order: next } = await payWithFrame({
       order: cardOrder.current,
       sig,
+      ...(sentToken ? { turnstileToken: sentToken } : {}),
       now: () => Date.now(),
       start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId }),
       renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });
     cardOrder.current = next;
+    if (sentToken && outcome.kind !== "start_error") {
+      setTurnstileToken(undefined);
+      setTurnstileKey((k) => k + 1);
+    }
+    setCaptcha(outcome.kind === "failed" && outcome.captcha === true);
     if (outcome.kind === "go") {
       router.push(`/o/${outcome.publicId}`);
       return;
@@ -660,6 +670,9 @@ export function CheckoutForm(props: {
               <div ref={frameBox} className={s.cardFrameBox} aria-busy={frameStatus === "loading"} hidden={method !== "card" || frameStatus === "unavailable"} />
             ) : null}
             {/* Com o iframe, a nota "Os dados do cartão não ficam salvos." vem dentro dele. */}
+            {method === "card" && isolated && frameStatus !== "unavailable" && captcha && turnstileSiteKey ? (
+              <Turnstile key={turnstileKey} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+            ) : null}
             {method === "card" && isolated && frameStatus === "unavailable" ? (
               <p className={s.alert} role="alert">
                 <Icon name="circle-alert" />

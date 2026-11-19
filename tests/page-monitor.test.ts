@@ -60,12 +60,12 @@ describe("inspectBuyerPage", () => {
 const CARD = "https://pagar.example.com";
 const STORE = "00000000-0000-4000-8000-000000000001";
 const ORIGINS = ["https://loja.example.com"];
-const formPage = (origins = ORIGINS, extra = "", turnstile = false) => ({
-  html: cardFormHtml({ storeId: STORE, allowedOrigins: origins, ...(turnstile ? { turnstileSiteKey: "0x4AAA" } : {}) }).replace("</body>", `${extra}</body>`),
-  csp: cardFormCsp(origins, { turnstile }),
+const formPage = (origins = ORIGINS, extra = "") => ({
+  html: cardFormHtml({ storeId: STORE, allowedOrigins: origins }).replace("</body>", `${extra}</body>`),
+  csp: cardFormCsp(origins),
 });
-const inspectForm = (p: { html: string; csp: string | null }, origins = ORIGINS, turnstile = false) =>
-  inspectCardFormPage(p.html, p.csp, { origins, turnstile, pageUrl: `${CARD}/form/${STORE}` });
+const inspectForm = (p: { html: string; csp: string | null }, origins = ORIGINS) =>
+  inspectCardFormPage(p.html, p.csp, { origins, pageUrl: `${CARD}/form/${STORE}` });
 
 describe("inspectCardFormPage (página do iframe do cartão)", () => {
   test("página como o serviço de cartão gera: sem problemas; só /form.js no inventário (o JSON de configuração não executa)", () => {
@@ -73,7 +73,7 @@ describe("inspectCardFormPage (página do iframe do cartão)", () => {
     expect(r.problems).toEqual([]);
     expect(r.inventory).toEqual(["self:/form.js"]);
     // Com o sha256 do conteúdo baixado do /form.js: entra no inventário (e no hash guardado).
-    const withSha = inspectCardFormPage(formPage().html, formPage().csp, { origins: ORIGINS, turnstile: false, pageUrl: `${CARD}/form/${STORE}`, formJsSha256: "ab".repeat(32) });
+    const withSha = inspectCardFormPage(formPage().html, formPage().csp, { origins: ORIGINS, pageUrl: `${CARD}/form/${STORE}`, formJsSha256: "ab".repeat(32) });
     expect(withSha.inventory).toEqual([`self:/form.js sha256:${"ab".repeat(32)}`]);
     expect(withSha.hash).not.toBe(r.hash);
     // As origens da loja mudam o frame-ancestors, não o resultado guardado: trocar o domínio da loja não é alerta.
@@ -88,17 +88,18 @@ describe("inspectCardFormPage (página do iframe do cartão)", () => {
     expect(evil.inventory).toContain("https://evil.example/skimmer.js");
     expect(inspectForm(formPage(ORIGINS, `<script src="/outro.js"></script>`)).problems).toContain("script_nao_autorizado");
     expect(inspectForm(formPage(ORIGINS, "<script>alert(1)</script>")).problems).toContain("script_inline");
-    // Turnstile só quando a loja usa.
+    // O Turnstile fica no checkout (pai), nunca na página do cartão: lá ele é script não autorizado.
     const ts = `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>`;
     expect(inspectForm(formPage(ORIGINS, ts)).problems).toContain("script_nao_autorizado");
-    expect(inspectForm(formPage(ORIGINS, ts, true), ORIGINS, true).problems).toEqual([]);
   });
 
   test("CSP ausente ou diferente da cardFormCsp (inclusive frame-ancestors de outra loja): problema", () => {
     expect(inspectForm({ ...formPage(), csp: null }).problems).toContain("csp_ausente");
-    expect(inspectForm({ ...formPage(), csp: cardFormCsp(["https://intrusa.example"], { turnstile: false }) }).problems).toContain("csp_diferente");
+    expect(inspectForm({ ...formPage(), csp: cardFormCsp(["https://intrusa.example"]) }).problems).toContain("csp_diferente");
     expect(inspectForm({ ...formPage(), csp: formPage().csp.replace("script-src 'self'", "script-src *") }).problems).toContain("csp_diferente");
-    expect(inspectForm(formPage(), ORIGINS, true).problems).toContain("csp_diferente");
+    // A política antiga, que liberava a Cloudflare no iframe, também é diferente.
+    const old = formPage().csp.replace("script-src 'self'", "script-src 'self' https://challenges.cloudflare.com");
+    expect(inspectForm({ ...formPage(), csp: old }).problems).toContain("csp_diferente");
   });
 
   test("aviso do painel e do e-mail dizem que é o formulário do cartão", () => {
@@ -182,7 +183,7 @@ describe("job pci_page_monitor", () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
     const good = cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins });
-    const csp = cardFormCsp(origins, { turnstile: false });
+    const csp = cardFormCsp(origins);
     const run = (f: typeof fetch) =>
       createPciPageMonitorHandler({ fetch: f, storeIds: [shop.storeId], card: { origin: CARD } })({} as never, new AbortController().signal);
 
@@ -213,7 +214,7 @@ describe("job pci_page_monitor", () => {
   test("CARD_ISOLATED: conteúdo do /form.js trocado no mesmo caminho avisa (inventario_mudou) uma vez; form.js fora do ar não muda nada", async () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
-    const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins, { turnstile: false }) };
+    const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };
     const checkout = { html: goodHtml(), csp: buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD }) };
     const run = (formJs: { html: string; csp: null; status?: number }) =>
       createPciPageMonitorHandler({ fetch: fakeSite({ "/c/": checkout, "/form/": page, "/form.js": formJs }).fetchFn, storeIds: [shop.storeId], card: { origin: CARD } })(

@@ -7,6 +7,8 @@
 //   `result` em que o servidor pode ter cobrado (`mayHaveCharged`), `pay` para OUTRO pedido só passa se o comprador
 //   mexeu no iframe desde então: um pai comprometido não reusa sozinho o cartão que ficou nos campos. POST relativo /api/card (mesma origem), com prazo; leva o `storeId`
 //   da página, que o servidor confere com a loja do bilhete.
+// - Nenhum script de terceiro: quando o servidor pede captcha, o `result` sai com `captcha: true` e o checkout (pai)
+//   mostra o Turnstile; o token volta no `pay` seguinte e só vai no corpo daquele POST.
 //
 // DADOS DO CARTÃO: número, validade e CVV só existem nos inputs e, durante o POST, em variáveis locais que são soltas
 // logo após a resposta. Nunca vão para postMessage, console, storage, URL ou atributo `name`; os inputs não têm
@@ -38,13 +40,7 @@ import {
   type ResultBody,
 } from "./logic";
 
-const TURNSTILE_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
 const SVG_NS = "http://www.w3.org/2000/svg";
-
-interface TurnstileApi {
-  render(el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void; "expired-callback"?: () => void; "error-callback"?: () => void }): string | undefined | null;
-  reset(widgetId?: string): void;
-}
 
 export interface FormDeps {
   /** A janela do iframe. */
@@ -57,7 +53,7 @@ export interface FormDeps {
   now?: () => Date;
   /**
    * Prazo do POST /api/card (padrão 75 s). Estourar conta como queda de rede. Não cobre todo pior caso do servidor
-   * (Turnstile + conferência no Asaas + cobrança de até 60 s): se o servidor ainda estiver processando, a nova
+   * (verificação do Turnstile + conferência no Asaas + cobrança de até 60 s): se o servidor ainda estiver processando, a nova
    * tentativa reusa a mesma chave de idempotência e o servidor não cobra de novo (espera ou devolve o resultado).
    */
   payTimeoutMs?: number;
@@ -68,22 +64,20 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 interface Cfg {
   allowedOrigins: string[];
-  turnstileSiteKey: string | null;
   /** Loja da página (`/form/<storeId>`), em minúsculas; sem ela, o iframe não envia o cartão. */
   storeId: string | null;
 }
 
 function readCfg(doc: Document): Cfg {
   try {
-    const raw = JSON.parse(doc.getElementById("cfg")?.textContent ?? "") as { allowedOrigins?: unknown; turnstileSiteKey?: unknown; storeId?: unknown };
+    const raw = JSON.parse(doc.getElementById("cfg")?.textContent ?? "") as { allowedOrigins?: unknown; storeId?: unknown };
     const origins = Array.isArray(raw.allowedOrigins)
       ? raw.allowedOrigins.filter((o): o is string => typeof o === "string" && /^https?:\/\/[^/*\s]+$/.test(o))
       : [];
-    const site = typeof raw.turnstileSiteKey === "string" && raw.turnstileSiteKey.length > 0 ? raw.turnstileSiteKey : null;
     const storeId = typeof raw.storeId === "string" && UUID.test(raw.storeId) ? raw.storeId : null;
-    return { allowedOrigins: origins, turnstileSiteKey: site, storeId };
+    return { allowedOrigins: origins, storeId };
   } catch {
-    return { allowedOrigins: [], turnstileSiteKey: null, storeId: null };
+    return { allowedOrigins: [], storeId: null };
   }
 }
 
@@ -224,11 +218,6 @@ export function mountCardForm(deps: FormDeps): void {
   f.installments.wrap.hidden = true;
   const select = f.installments.control as HTMLSelectElement;
 
-  const turnstileBox = el(doc, "div", { class: "turnstile" });
-  turnstileBox.hidden = true;
-  const alertBox = el(doc, "p", { class: "alert", role: "alert" });
-  alertBox.hidden = true;
-
   const form = el(
     doc,
     "form",
@@ -242,7 +231,7 @@ export function mountCardForm(deps: FormDeps): void {
     f.installments.wrap,
   );
   form.addEventListener("submit", (e) => e.preventDefault());
-  root.replaceChildren(form, el(doc, "p", { class: "lockNote" }, icon(doc, "lock", "lockIcon", 15), "Os dados do cartão não ficam salvos."), turnstileBox, alertBox);
+  root.replaceChildren(form, el(doc, "p", { class: "lockNote" }, icon(doc, "lock", "lockIcon", 15), "Os dados do cartão não ficam salvos."));
 
   // ---- estado ----
   let installments = 1;
@@ -250,10 +239,6 @@ export function mountCardForm(deps: FormDeps): void {
   const seenPays = new Set<string>();
   /** Chave da tentativa: sobrevive só a uma queda de rede (mesmos dados), nunca a uma resposta. */
   let attempt: { key: string; sig: string } | null = null;
-  let turnstileToken: string | undefined;
-  let turnstileWidget: string | undefined;
-  let turnstileLoading = false;
-  let turnstileFailed = false;
   /** Pedido do último `result` que pode ter cobrado, e se o comprador editou algum campo desde então. */
   let lastOrder: string | null = null;
   let editedSinceResult = false;
@@ -289,47 +274,9 @@ export function mountCardForm(deps: FormDeps): void {
     }
   }
 
-  // ---- Turnstile (só quando a resposta pede captcha e a loja tem a chave do site) ----
-  const turnstile = (): TurnstileApi | undefined => (win as unknown as { turnstile?: TurnstileApi }).turnstile;
-  function showTurnstile(): void {
-    const siteKey = cfg.turnstileSiteKey;
-    if (!siteKey) return;
-    turnstileBox.hidden = false;
-    alertBox.hidden = true;
-    const api = turnstile();
-    if (api) {
-      if (turnstileWidget === undefined) {
-        turnstileWidget =
-          api.render(turnstileBox, {
-            sitekey: siteKey,
-            callback: (t) => (turnstileToken = t),
-            "expired-callback": () => (turnstileToken = undefined),
-            "error-callback": () => {
-              // Desafio não carregou ou falhou: some a caixa e fica a mensagem genérica (o próximo captcha tenta de novo).
-              turnstileToken = undefined;
-              turnstileFailed = true;
-              turnstileBox.hidden = true;
-              alertBox.textContent = GENERIC_MESSAGE;
-              alertBox.hidden = false;
-            },
-          }) ?? undefined;
-      } else if (turnstileFailed) {
-        turnstileFailed = false;
-        api.reset(turnstileWidget);
-      }
-      return;
-    }
-    if (turnstileLoading) return;
-    turnstileLoading = true;
-    const s = el(doc, "script", { src: TURNSTILE_SRC, async: "" });
-    s.addEventListener("load", () => showTurnstile());
-    s.addEventListener("error", () => (turnstileLoading = false));
-    doc.head.appendChild(s);
-  }
-
   // ---- pagamento ----
   /** Resultado do `pay` e se o servidor pode ter cobrado (só então o cartão fica travado para outro pedido). */
-  async function pay(msg: { orderPublicId: string; ticket: string; buyerCpf: string }): Promise<{ out: ResultBody; charged: boolean }> {
+  async function pay(msg: { orderPublicId: string; ticket: string; buyerCpf: string; turnstileToken?: string }): Promise<{ out: ResultBody; charged: boolean }> {
     if (cfg.storeId === null) return { out: { status: "error", message: GENERIC_MESSAGE }, charged: false };
     const v = readFields();
     const other = holderOther.checked;
@@ -339,8 +286,7 @@ export function mountCardForm(deps: FormDeps): void {
       return { out: { status: "error", message: fieldsMessage(local.length), fields: local.map((n) => [n]) }, charged: false };
     }
     attempt = attemptKey(attempt, attemptSig(msg.orderPublicId, v, other, installments), deps.newKey);
-    const sentToken = turnstileToken;
-    let body: CardBody | null = buildCardBody(v, other, msg.buyerCpf, installments, msg.ticket, msg.orderPublicId, attempt.key, sentToken);
+    let body: CardBody | null = buildCardBody(v, other, msg.buyerCpf, installments, msg.ticket, msg.orderPublicId, attempt.key, msg.turnstileToken);
     const last4 = body.card.number.slice(-4);
     let payload: string | null = JSON.stringify({ storeId: cfg.storeId, ...body });
     body = null;
@@ -383,15 +329,9 @@ export function mountCardForm(deps: FormDeps): void {
       clearTimeout(timer);
     }
     const out = mapApiResponse(res.status, json, last4, other);
-    // Bilhete recusado (vencido ou não): o servidor parou antes de qualquer cobrança e do Turnstile, então a chave e o
-    // token continuam valendo para a tentativa com o bilhete novo.
-    if (out.ticketExpired === undefined) {
-      attempt = null;
-      if (sentToken !== undefined) {
-        turnstileToken = undefined; // o token vale uma vez
-        if (turnstileWidget !== undefined) turnstile()?.reset(turnstileWidget);
-      }
-    }
+    // Bilhete recusado (vencido ou não): o servidor parou antes de qualquer cobrança, então a chave continua valendo
+    // para a tentativa com o bilhete novo.
+    if (out.ticketExpired === undefined) attempt = null;
     if (out.fields) {
       const errors: Partial<Record<FieldName, string>> = {};
       // Campos do comprador (`cpf`, `phone`...) são do app, que marca os dele; aqui só os campos do iframe.
@@ -399,12 +339,10 @@ export function mountCardForm(deps: FormDeps): void {
       const names = showErrors(errors);
       if (names[0]) (f[names[0]].control as HTMLElement).focus();
     }
-    if (out.captcha) showTurnstile();
     return { out, charged: mayHaveCharged(res.status, out) };
   }
 
   function sendResult(id: string, origin: string, out: ResultBody): void {
-    if (!out.captcha) alertBox.hidden = true; // aviso de Turnstile com erro só vale até o próximo resultado
     const msg = parseFrameMsg({ t: "funil-card:result", id, ...out }) ?? { t: "funil-card:result", id, status: "error", message: GENERIC_MESSAGE };
     parent.postMessage(msg, origin);
   }

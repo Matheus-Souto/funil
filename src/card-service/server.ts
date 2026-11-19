@@ -27,7 +27,6 @@ export interface CardServerOptions {
   ticketKey: string;
   /** TRUST_PROXY: quantos proxies confiáveis (IP do comprador e X-Forwarded-Proto). */
   trustProxy: number;
-  turnstileSiteKey?: string;
   /** Diretório com `form.js` e `form.css` (build da Task 7). Sem ele, as duas rotas dão 404. */
   assetsDir?: string;
   payWithCard?: typeof defaultPayWithCard;
@@ -167,9 +166,9 @@ export function createCardServer(opts: CardServerOptions): Server {
     const storeId = rawId.toLowerCase();
     const origins = await originsOf(storeId);
     if (origins.length === 0) return send(res, 404);
-    send(res, 200, cardFormHtml({ storeId, allowedOrigins: origins, turnstileSiteKey: opts.turnstileSiteKey }), {
+    send(res, 200, cardFormHtml({ storeId, allowedOrigins: origins }), {
       "content-type": "text/html; charset=utf-8",
-      "content-security-policy": cardFormCsp(origins, { turnstile: Boolean(opts.turnstileSiteKey) }),
+      "content-security-policy": cardFormCsp(origins),
       "referrer-policy": "no-referrer",
       "cache-control": "no-store",
     });

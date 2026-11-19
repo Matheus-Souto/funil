@@ -40,7 +40,8 @@ export type ResultStatus = "approved" | "declined" | "unknown" | "unavailable" |
 export type ParentMsg =
   | { t: "funil-card:config"; totalCents: number; maxInstallments: number }
   | { t: "funil-card:validate"; id: string }
-  | { t: "funil-card:pay"; id: string; orderPublicId: string; ticket: string; buyerCpf: string };
+  /** `turnstileToken`: desafio resolvido no checkout (o Turnstile nunca roda no documento do cartão). */
+  | { t: "funil-card:pay"; id: string; orderPublicId: string; ticket: string; buyerCpf: string; turnstileToken?: string };
 
 export type FrameMsg =
   | { t: "funil-card:ready" }
@@ -105,7 +106,14 @@ export function parseParentMsg(data: unknown): ParentMsg | null {
       const cpf = get(d, "buyerCpf");
       const buyerCpf = typeof cpf === "string" && /^[0-9]{11}$/.test(cpf) ? cpf : null;
       if (id === null || orderPublicId === null || ticket === null || buyerCpf === null) return null;
-      return { t: "funil-card:pay", id, orderPublicId, ticket, buyerCpf };
+      const out: Extract<ParentMsg, { t: "funil-card:pay" }> = { t: "funil-card:pay", id, orderPublicId, ticket, buyerCpf };
+      const token = get(d, "turnstileToken");
+      if (token !== undefined) {
+        const t = str(token, 4096);
+        if (t === null) return null;
+        out.turnstileToken = t;
+      }
+      return out;
     }
     default:
       return null;

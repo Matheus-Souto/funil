@@ -114,8 +114,9 @@ Com o cartão isolado (`CARD_ISOLATED=1`), confere também a página do iframe d
 
 - o cabeçalho `Content-Security-Policy` é exatamente o de `cardFormCsp` (`src/card-service/page.ts`), com o
   `frame-ancestors` das origens do checkout da loja;
-- o inventário de scripts: só `/form.js` do domínio do cartão e (com Turnstile) `https://challenges.cloudflare.com`;
-  nenhum script inline executável (a configuração vai num `<script type="application/json">`, que não executa);
+- o inventário de scripts: só `/form.js` do domínio do cartão, nenhum de terceiro (o Turnstile, quando configurado,
+  roda no checkout, não no iframe) e nenhum script inline executável (a configuração vai num
+  `<script type="application/json">`, que não executa);
 - o sha256 do conteúdo do `/form.js` baixado, que entra no inventário: o mesmo caminho com outro conteúdo (skimmer
   servido por um Caddy ou host comprometido) avisa com `inventario_mudou`. Cada atualização que mude o formulário
   também avisa uma vez: confira que a mudança veio da atualização. Se o `/form.js` não responder, a página não é
@@ -153,10 +154,13 @@ Página do iframe do cartão (`CARD_ORIGIN/form/<loja>`, gerada por `cardFormCsp
 inline executável:
 
 ```
-default-src 'none'; script-src 'self' [https://challenges.cloudflare.com]; style-src 'self'; connect-src 'self';
-[frame-src https://challenges.cloudflare.com;] img-src 'self' data:; base-uri 'none'; form-action 'none';
-frame-ancestors <origens do checkout da loja>
+default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:;
+base-uri 'none'; form-action 'none'; frame-ancestors <origens do checkout da loja>
 ```
+
+Nenhum código de terceiro roda no documento dos campos do cartão: o Turnstile, quando a loja usa, aparece no checkout
+(página do app, que já o libera na CSP acima) e o token vai ao iframe na mensagem `pay`; o iframe o repassa no corpo
+do `POST /api/card` e o `card` o confere na Cloudflare.
 
 ## Inventário de scripts da página de pagamento
 
@@ -165,8 +169,8 @@ frame-ancestors <origens do checkout da loja>
 | Runtime do Next.js/React e chunks da página (`/_next/static/...`) | própria (`'self'`) | sempre | renderização e formulário do checkout | build do próprio app; servido pelo próprio domínio |
 | Scripts inline do Next (dados do RSC, `self.__next_f`) | própria, inline | sempre | hidratação das páginas | só executam com o nonce da requisição |
 | Meta Pixel `fbevents.js` (e a configuração do pixel que ele busca) | `https://connect.facebook.net` | só com Pixel configurado (oferta ou loja) | medir anúncios (spec 7.8: InitiateCheckout, AddPaymentInfo, Purchase; deduplicado com a API de Conversões) | `fbq('set','autoConfig',false,<pixel>)` antes do `init` (desliga a configuração automática de eventos: cliques em botões e metadados da página); a correspondência avançada automática (leitura de e-mail/telefone digitados) NÃO é coberta pelo autoConfig e fica desligada no Gerenciador de Eventos (seção abaixo); eventos só com `currency`, `value` e `payment_type` (tipados como valores simples em `src/lib/tracking/fbq.ts`); nenhum dado do formulário; carregado por código próprio (`src/lib/tracking/fbq.ts`), sem HTML inline |
-| Cloudflare Turnstile `api.js` | `https://challenges.cloudflare.com` | só se configurado E a API do cartão pedir o desafio (muitas tentativas) | antifraude de teste de cartões | o desafio roda em iframe da Cloudflare; script e frame só dessa origem |
-| Formulário do cartão `form.js` (página do iframe, cartão isolado) | domínio do cartão (`CARD_ORIGIN`, `'self'` do iframe) | com `CARD_ISOLATED=1`, na página `/form/<loja>` | campos do cartão e envio ao `POST /api/card` do mesmo domínio | build do próprio projeto (`bun run card:build`), servido só pelo container `card`; único `fetch` relativo (`/api/card`) |
+| Cloudflare Turnstile `api.js` | `https://challenges.cloudflare.com` | só se configurado E a API do cartão pedir o desafio (muitas tentativas); sempre no checkout (`/c`), também com o cartão isolado, nunca na página do iframe | antifraude de teste de cartões | o desafio roda em iframe da Cloudflare; script e frame só dessa origem; com o cartão isolado, o token vai ao iframe no `pay` |
+| Formulário do cartão `form.js` (página do iframe, cartão isolado) | domínio do cartão (`CARD_ORIGIN`, `'self'` do iframe) | com `CARD_ISOLATED=1`, na página `/form/<loja>` | campos do cartão e envio ao `POST /api/card` do mesmo domínio | o **único** script da página do iframe; build do próprio projeto (`bun run card:build`), servido só pelo container `card`; único `fetch` relativo (`/api/card`) |
 
 Não há outros scripts de terceiros. `public/t.js` NÃO roda nestas páginas: ele é embutido pelo vendedor na página de
 vendas externa. O painel (`/admin`) e o download (`/d/<token>`) não carregam o Pixel nem terceiros (o download tem CSP

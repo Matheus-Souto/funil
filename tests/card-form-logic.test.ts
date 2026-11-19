@@ -233,11 +233,11 @@ afterEach(async () => {
 });
 
 function setup(
-  opts: { turnstileSiteKey?: string; responses?: (Response | Error | Promise<Response>)[]; storeId?: string | null; payTimeoutMs?: number; topLevel?: boolean } = {},
+  opts: { responses?: (Response | Error | Promise<Response>)[]; storeId?: string | null; payTimeoutMs?: number; topLevel?: boolean } = {},
 ) {
   const w = new Window({ url: "https://pagar.example/form/x", settings: { disableJavaScriptFileLoading: true, disableCSSFileLoading: true } as never });
   open.push(w);
-  w.document.head.innerHTML = `<script type="application/json" id="cfg">${JSON.stringify({ allowedOrigins: [SHOP, OTHER_SHOP], turnstileSiteKey: opts.turnstileSiteKey ?? null, ...(opts.storeId === null ? {} : { storeId: opts.storeId ?? STORE }) })}</script>`;
+  w.document.head.innerHTML = `<script type="application/json" id="cfg">${JSON.stringify({ allowedOrigins: [SHOP, OTHER_SHOP], ...(opts.storeId === null ? {} : { storeId: opts.storeId ?? STORE }) })}</script>`;
   w.document.body.innerHTML = `<main id="card-form"></main>`;
   const posted: Posted[] = [];
   const waiters: ((p: Posted) => void)[] = [];
@@ -670,58 +670,29 @@ describe("formulário no iframe", () => {
     expect(input("cvv").value).toBe("123");
   });
 
-  test("captcha: carrega o Turnstile oficial só com a chave do site configurada", async () => {
-    const withKey = setup({ turnstileSiteKey: "site-key", responses: [Response.json({ captcha: true, message: "Confirme que você não é um robô." }, { status: 429 })] });
-    expect(withKey.doc.querySelector("script[src]")).toBeNull();
-    withKey.fill();
-    withKey.pay("p1");
-    expect((await withKey.next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", captcha: true, message: "Confirme que você não é um robô." });
-    const s = withKey.doc.querySelector("script[src]")!;
-    expect(s.getAttribute("src")!.startsWith("https://challenges.cloudflare.com/turnstile/v0/api.js")).toBe(true);
-
-    const noKey = setup({ responses: [Response.json({ captcha: true, message: "m" }, { status: 429 })] });
-    noKey.fill();
-    noKey.pay("p1");
-    await noKey.next("funil-card:result");
-    expect(noKey.doc.querySelector("script[src]")).toBeNull();
+  test("captcha: o iframe só repassa o pedido de captcha ao checkout; nenhum script de terceiro é carregado", async () => {
+    const t = setup({ responses: [Response.json({ captcha: true, message: "Confirme que você não é um robô." }, { status: 429 })] });
+    t.fill();
+    t.pay("p1");
+    expect((await t.next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", captcha: true, message: "Confirme que você não é um robô." });
+    expect(t.doc.querySelector("script[src]")).toBeNull();
+    expect(t.doc.querySelector(".turnstile")).toBeNull();
+    expect((t.w as unknown as { turnstile?: unknown }).turnstile).toBeUndefined();
   });
 
-  test("Turnstile com erro: esconde a caixa e mostra a mensagem genérica", async () => {
-    const t = setup({ turnstileSiteKey: "site-key", responses: [Response.json({ captcha: true, message: "m" }, { status: 429 })] });
-    let opts: Record<string, unknown> = {};
-    (t.w as unknown as { turnstile: unknown }).turnstile = {
-      render: (_el: unknown, o: Record<string, unknown>) => {
-        opts = o;
-        return "w1";
-      },
-      reset: () => {},
-    };
+  test("token do Turnstile resolvido no checkout: vai no corpo do POST só no pay que o trouxe", async () => {
+    const t = setup({ responses: [Response.json({ captcha: true, message: "m" }, { status: 429 }), Response.json({ status: "approved" })] });
     t.fill();
     t.pay("p1");
     await t.next("funil-card:result");
-    const box = t.doc.querySelector(".turnstile") as unknown as HTMLElement;
-    expect(box.hidden).toBe(false);
-    expect(opts.sitekey).toBe("site-key");
-    (opts["error-callback"] as () => void)();
-    expect(box.hidden).toBe(true);
-    const alert = t.doc.querySelector("[role=alert]") as unknown as HTMLElement;
-    expect(alert.hidden).toBe(false);
-    expect(alert.textContent).toBe(GENERIC);
-  });
-
-  test("alerta do Turnstile some no próximo result que não pede captcha", async () => {
-    const t = setup({ turnstileSiteKey: "site-key", responses: [Response.json({ captcha: true, message: "m" }, { status: 429 }), Response.json({ status: "declined" })] });
-    let opts: Record<string, unknown> = {};
-    (t.w as unknown as { turnstile: unknown }).turnstile = { render: (_el: unknown, o: Record<string, unknown>) => ((opts = o), "w1"), reset: () => {} };
-    t.fill();
-    t.pay("p1");
+    expect(t.calls[0]!.body.turnstileToken).toBeUndefined();
+    t.pay("p2", { turnstileToken: "tok-do-checkout" });
+    expect((await t.next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "approved" });
+    expect(t.calls[1]!.body.turnstileToken).toBe("tok-do-checkout");
+    t.type("cvv", "321"); // outro pedido exige gesto do comprador depois de um approved
+    t.pay("p3", { orderPublicId: "ped-2" });
     await t.next("funil-card:result");
-    (opts["error-callback"] as () => void)();
-    const alert = t.doc.querySelector("[role=alert]") as unknown as HTMLElement;
-    expect(alert.hidden).toBe(false);
-    t.pay("p2");
-    expect((await t.next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "declined" });
-    expect(alert.hidden).toBe(true);
+    expect(t.calls[2]!.body.turnstileToken).toBeUndefined();
   });
 
   describe("navegador sem AbortSignal.timeout (iOS 15)", () => {

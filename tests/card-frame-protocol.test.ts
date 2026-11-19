@@ -50,6 +50,16 @@ describe("parseParentMsg", () => {
     expect(parseParentMsg({ t: `${P}validate`, id: "a".repeat(65) })).toBeNull();
   });
 
+  test("pay com turnstileToken (Turnstile resolvido no checkout): até 4096 caracteres; inválido anula a mensagem", () => {
+    expect(parseParentMsg({ ...pay, turnstileToken: "tok" })).toEqual({ ...pay, turnstileToken: "tok" } as never);
+    expect(parseParentMsg({ ...pay, turnstileToken: "a".repeat(4096) })).not.toBeNull();
+    expect(parseParentMsg({ ...pay, turnstileToken: "a".repeat(4097) })).toBeNull();
+    expect(parseParentMsg({ ...pay, turnstileToken: "" })).toBeNull();
+    expect(parseParentMsg({ ...pay, turnstileToken: 1 })).toBeNull();
+    // Sem o campo, a mensagem não ganha a chave.
+    expect(Object.keys(parseParentMsg(pay) as object)).not.toContain("turnstileToken");
+  });
+
   test("chaves extras (number, cvv, card) somem", () => {
     const out = parseParentMsg({ ...pay, number: "4111111111111111", cvv: "123", card: { n: 1 } });
     expect(out).toEqual(pay as never);

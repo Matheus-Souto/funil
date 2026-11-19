@@ -123,6 +123,18 @@ describe("controlador do iframe", () => {
     expect(h.statuses).toEqual(["ready"]);
   });
 
+  test("pay leva o token do Turnstile do checkout quando há; sem token, a mensagem não tem a chave", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    h.ctrl.start();
+    h.send({ t: "funil-card:ready" });
+    void h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725", turnstileToken: "tok-1" });
+    void h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725" });
+    const pays = h.posted.filter((m) => m.t === "funil-card:pay");
+    expect(pays[0]).toEqual({ t: "funil-card:pay", id: "id-1", orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725", turnstileToken: "tok-1" });
+    expect(Object.keys(pays[1]!)).not.toContain("turnstileToken");
+  });
+
   test("iframe recarregado (novo ready) com pay pendente: o pendente termina já (null), sem esperar o prazo", async () => {
     const h = harness();
     h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
@@ -225,10 +237,10 @@ describe("controlador do iframe", () => {
 // ---- fluxo do "Pagar" (pedido, bilhete, pay, renovação) ----
 
 const T0 = 1_800_000_000_000;
-type PayArgs = { orderPublicId: string; ticket: string };
+type PayArgs = { orderPublicId: string; ticket: string; turnstileToken?: string };
 
 type Renewal = { ok: true; ticket: string } | { ok: false; message: string; definitive: boolean };
-function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameResult | null)[]; renew?: Renewal }) {
+function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameResult | null)[]; renew?: Renewal; turnstileToken?: string }) {
   const calls = { start: 0, renew: [] as string[], renewTickets: [] as string[], pay: [] as PayArgs[] };
   const results = [...opts.results];
   return {
@@ -237,6 +249,7 @@ function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameRes
       payWithFrame({
         order: opts.order ?? null,
         sig: "sig-1",
+        ...(opts.turnstileToken ? { turnstileToken: opts.turnstileToken } : {}),
         now: () => opts.now ?? T0,
         start: async () => {
           calls.start++;
@@ -371,14 +384,28 @@ describe("payWithFrame", () => {
     expect(r.order?.publicId).toBe("pub-new");
   });
 
-  test("erros: mensagem do iframe; CPF do comprador marcado quando vem `cpf`; captcha fica no iframe", async () => {
+  test("erros: mensagem do iframe; CPF do comprador marcado quando vem `cpf`; captcha vai para o checkout", async () => {
     const withCpf = await flow({ results: [result({ status: "error", message: "Confira os 2 campos marcados para continuar.", fields: [["cpf"], ["cep"], ["evil"]] })] }).run();
     expect(withCpf.outcome).toEqual({ kind: "failed", message: "Confira os 2 campos marcados para continuar.", marks: ["cpf"] });
     expect(withCpf.order?.publicId).toBe("pub-new"); // CPF recusado: o corrigido muda a assinatura de qualquer forma
     const unavailable = await flow({ results: [result({ status: "unavailable", message: "Pagamento com cartão indisponível no momento" })] }).run();
     expect(unavailable.outcome).toEqual({ kind: "failed", message: "Pagamento com cartão indisponível no momento", marks: [] });
     const captcha = await flow({ results: [result({ status: "error", captcha: true, message: "Muitas tentativas." })] }).run();
-    expect(captcha.outcome).toEqual({ kind: "failed", message: "Muitas tentativas.", marks: [] });
+    // Captcha: o checkout mostra o Turnstile (no pai) e o pedido fica para o `pay` com o token.
+    expect(captcha.outcome).toEqual({ kind: "failed", message: "Muitas tentativas.", marks: [], captcha: true });
+    expect(captcha.order?.publicId).toBe("pub-new");
+  });
+
+  test("token do Turnstile: mesmo pedido, vai em cada pay (também no de depois do bilhete renovado)", async () => {
+    const order = { publicId: "pub-old", sig: "sig-1", ticket: "ticket-old", ticketAt: T0 - 60_000 };
+    const f = flow({ order, turnstileToken: "tok", results: [result({ status: "error", ticketExpired: true }), result({ status: "approved" })] });
+    const r = await f.run();
+    expect(f.calls.start).toBe(0);
+    expect(f.calls.pay).toEqual([
+      { orderPublicId: "pub-old", ticket: "ticket-old", turnstileToken: "tok" },
+      { orderPublicId: "pub-old", ticket: "ticket-renewed", turnstileToken: "tok" },
+    ]);
+    expect(r.outcome).toEqual({ kind: "go", publicId: "pub-old" });
   });
 
   test("iframe não respondeu: mensagem genérica e o pedido fica", async () => {

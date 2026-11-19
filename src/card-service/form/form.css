@@ -164,20 +164,3 @@ select.input {
   flex: none;
   color: var(--color-success);
 }
-
-.alert {
-  margin: 12px 0 0;
-  padding: 12px;
-  border-radius: var(--radius-md);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.4;
-}
-
-.turnstile {
-  margin-top: 12px;
-  display: flex;
-  justify-content: center;
-}

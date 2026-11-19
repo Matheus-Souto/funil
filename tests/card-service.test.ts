@@ -458,34 +458,35 @@ describe("GET /form/<storeId>", () => {
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
     expect(res.headers.get("cache-control")).toBe("no-store");
     const csp = res.headers.get("content-security-policy")!;
-    expect(csp).toBe(cardFormCsp([APP_ORIGIN], { turnstile: false }));
+    expect(csp).toBe(cardFormCsp([APP_ORIGIN]));
     const fa = directives(csp).find((d) => d.startsWith("frame-ancestors "))!;
     expect(fa.split(/\s+/).slice(1)).toEqual([APP_ORIGIN]);
     const html = await res.text();
     expect(html).toContain('<link rel="stylesheet" href="/form.css">');
     expect(html).toContain('<script src="/form.js" defer></script>');
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(html)!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: [APP_ORIGIN], turnstileSiteKey: null, storeId: shop.storeId });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: [APP_ORIGIN], storeId: shop.storeId });
     const upper = await (await fetch(`${base}/form/${shop.storeId.toUpperCase()}`)).text();
     const cfgUpper = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(upper)!;
     expect((JSON.parse(cfgUpper[1]!) as { storeId: string }).storeId).toBe(shop.storeId);
   });
 
-  test("origens injetadas (multi): frame-ancestors tem exatamente essas; com Turnstile, a CSP o libera", async () => {
+  test("origens injetadas (multi): frame-ancestors tem exatamente essas; nada da Cloudflare (o Turnstile fica no checkout)", async () => {
     const origins = ["https://loja.example.com", "https://loja.plataforma.com.br"];
-    const base = await start({ origins: async (id) => (id === shop.storeId ? origins : []), turnstileSiteKey: "0x4AAAsite" });
+    const base = await start({ origins: async (id) => (id === shop.storeId ? origins : []) });
     const res = await fetch(`${base}/form/${shop.storeId}`);
     expect(res.status).toBe(200);
     const csp = res.headers.get("content-security-policy")!;
     expect(directives(csp).find((d) => d.startsWith("frame-ancestors "))).toBe(`frame-ancestors ${origins.join(" ")}`);
-    expect(csp).toBe(cardFormCsp(origins, { turnstile: true }));
+    expect(csp).toBe(cardFormCsp(origins));
+    expect(csp).not.toContain("challenges.cloudflare.com");
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(await res.text())!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: origins, turnstileSiteKey: "0x4AAAsite", storeId: shop.storeId });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: origins, storeId: shop.storeId });
     expect((await fetch(`${base}/form/${other.storeId}`)).status).toBe(404);
   });
 
   test("o HTML não tem script inline executável, handler on* nem javascript:", async () => {
-    const base = await start({ turnstileSiteKey: "0x4AAAsite" });
+    const base = await start();
     const html = await (await fetch(`${base}/form/${shop.storeId}`)).text();
     const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
     expect(scripts.length).toBe(2);
@@ -518,14 +519,9 @@ describe("GET /form/<storeId>", () => {
 });
 
 describe("page.ts", () => {
-  test("cardFormCsp: política exata, com e sem Turnstile", () => {
+  test("cardFormCsp: política exata, só scripts do próprio domínio (nenhum de terceiro, nem o Turnstile)", () => {
     const o1 = ["https://a.example", "https://b.example"];
-    expect(cardFormCsp(o1, { turnstile: true })).toBe(
-      "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; connect-src 'self'; " +
-        "frame-src https://challenges.cloudflare.com; img-src 'self' data:; base-uri 'none'; form-action 'none'; " +
-        "frame-ancestors https://a.example https://b.example",
-    );
-    const off = cardFormCsp(o1, { turnstile: false });
+    const off = cardFormCsp(o1);
     expect(off).toBe(
       "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; " +
         "base-uri 'none'; form-action 'none'; frame-ancestors https://a.example https://b.example",
@@ -536,11 +532,11 @@ describe("page.ts", () => {
   test("a configuração no JSON não fecha o <script> (chave com </script> e caracteres de linha)", () => {
     const evil = "</script><script>alert(1)</script>\u2028&";
     const sid = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
-    const html = cardFormHtml({ storeId: sid, allowedOrigins: ["https://a.example"], turnstileSiteKey: evil });
+    const html = cardFormHtml({ storeId: sid, allowedOrigins: ["https://a.example", evil] });
     expect(html.match(/<\/script>/gi)!.length).toBe(2);
     expect(html).not.toContain("<script>alert");
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(html)!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: ["https://a.example"], turnstileSiteKey: evil, storeId: sid });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: ["https://a.example", evil], storeId: sid });
   });
 });
 

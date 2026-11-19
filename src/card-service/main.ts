@@ -49,7 +49,6 @@ async function main(): Promise<void> {
     cardOrigin: parsed.CARD_ORIGIN,
     ticketKey: parsed.CARD_TICKET_KEY,
     trustProxy: parsed.TRUST_PROXY,
-    turnstileSiteKey: parsed.TURNSTILE_SITE_KEY,
     assetsDir: dirname(fileURLToPath(import.meta.url)),
   });
   server.listen(parsed.CARD_PORT, HOST, () => log.info("serviço de cartão no ar", { port: (server.address() as AddressInfo).port }));

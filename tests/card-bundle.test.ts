@@ -45,12 +45,12 @@ describe("bun run card:build", () => {
     for (const banned of ["nodemailer", "pdf-lib", "next/", "react"]) expect([banned, server.includes(banned)]).toEqual([banned, false]);
   });
 
-  test("form.js: o único fetch é o relativo /api/card; nenhuma outra URL além do Turnstile; sem storage nem console", () => {
+  test("form.js: o único fetch é o relativo /api/card; nenhuma outra URL (nem o Turnstile); sem storage nem console", () => {
     const form = read("form.js");
     const fetches = [...form.matchAll(/fetch\(([^,)]*)/g)].map((m) => m[1]);
     expect(fetches).toEqual(['"/api/card"']);
     const urls = [...form.matchAll(/[a-z]+:\/\/[^"'`\s)]*/gi)].map((m) => m[0]);
-    expect(urls.filter((u) => !u.startsWith("https://challenges.cloudflare.com/turnstile/v0/api.js")).sort()).toEqual(
+    expect(urls.sort()).toEqual(
       // namespace do SVG (createElementNS), não é requisição
       ["http://www.w3.org/2000/svg"],
     );
@@ -74,7 +74,7 @@ describe("form.js como script clássico (a página o carrega com <script src def
     try {
       const errors: unknown[] = [];
       w.addEventListener("error", (e) => errors.push((e as unknown as { error: unknown }).error));
-      w.document.head.innerHTML = `<script type="application/json" id="cfg">{"allowedOrigins":["https://loja.example"],"turnstileSiteKey":null}</script>`;
+      w.document.head.innerHTML = `<script type="application/json" id="cfg">{"allowedOrigins":["https://loja.example"],"storeId":null}</script>`;
       w.document.body.innerHTML = `<main id="card-form"></main>`;
       const s = w.document.createElement("script");
       s.textContent = read("form.js");

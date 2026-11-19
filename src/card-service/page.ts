@@ -2,16 +2,17 @@
 // Nenhum script inline executável: a configuração vai num <script type="application/json">, que o navegador não
 // executa, e o JSON é escapado para nunca fechar a tag. Módulo puro: o monitor PCI compara contra `cardFormCsp`.
 
-const TURNSTILE = "https://challenges.cloudflare.com";
-
-/** CSP exata da página do formulário. `origins` = origens do checkout da loja (as únicas que podem embutir o iframe). */
-export function cardFormCsp(origins: string[], opts: { turnstile: boolean }): string {
+/**
+ * CSP exata da página do formulário. `origins` = origens do checkout da loja (as únicas que podem embutir o iframe).
+ * Só scripts do próprio domínio (/form.js): nenhum código de terceiro roda no documento dos campos do cartão (o
+ * Turnstile, quando a loja usa, fica no checkout e o token chega no `pay`).
+ */
+export function cardFormCsp(origins: string[]): string {
   return [
     "default-src 'none'",
-    opts.turnstile ? `script-src 'self' ${TURNSTILE}` : "script-src 'self'",
+    "script-src 'self'",
     "style-src 'self'",
     "connect-src 'self'",
-    ...(opts.turnstile ? [`frame-src ${TURNSTILE}`] : []),
     "img-src 'self' data:",
     "base-uri 'none'",
     "form-action 'none'",
@@ -23,7 +24,6 @@ export interface CardFormConfig {
   /** Loja da página (do caminho `/form/<storeId>`): o iframe a manda no POST e o servidor a confere com o bilhete. */
   storeId: string;
   allowedOrigins: string[];
-  turnstileSiteKey?: string;
 }
 
 /** JSON seguro dentro de <script>: `<`, `>`, `&` e os separadores de linha U+2028/U+2029 viram escapes \uXXXX. */
@@ -32,7 +32,7 @@ function scriptJson(v: unknown): string {
 }
 
 export function cardFormHtml(cfg: CardFormConfig): string {
-  const json = scriptJson({ allowedOrigins: cfg.allowedOrigins, turnstileSiteKey: cfg.turnstileSiteKey ?? null, storeId: cfg.storeId });
+  const json = scriptJson({ allowedOrigins: cfg.allowedOrigins, storeId: cfg.storeId });
   return `<!doctype html>
 <html lang="pt-BR">
 <head>

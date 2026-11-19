@@ -95,7 +95,8 @@ export interface CardFrameController {
   /** `validated` do iframe, ou `null` (indisponível ou sem resposta no prazo). */
   validate(): Promise<FrameValidated | null>;
   /** `result` do iframe, ou `null` (indisponível ou sem resposta no prazo). */
-  pay(args: { orderPublicId: string; ticket: string; buyerCpf: string }): Promise<FrameResult | null>;
+  /** `turnstileToken`: desafio resolvido no checkout depois de um `result` com `captcha` (vai no `pay`, o iframe repassa). */
+  pay(args: { orderPublicId: string; ticket: string; buyerCpf: string; turnstileToken?: string }): Promise<FrameResult | null>;
   /** Iframe desmontado: pendências resolvem `null` e nada mais é aceito. */
   dispose(): void;
 }
@@ -188,7 +189,14 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       return wait("validate", { t: "funil-card:validate", id: d.newId() }, FRAME_VALIDATE_TIMEOUT_MS) as Promise<FrameValidated | null>;
     },
     pay(args) {
-      const msg: ParentMsg = { t: "funil-card:pay", id: d.newId(), orderPublicId: args.orderPublicId, ticket: args.ticket, buyerCpf: args.buyerCpf };
+      const msg: ParentMsg = {
+        t: "funil-card:pay",
+        id: d.newId(),
+        orderPublicId: args.orderPublicId,
+        ticket: args.ticket,
+        buyerCpf: args.buyerCpf,
+        ...(args.turnstileToken ? { turnstileToken: args.turnstileToken } : {}),
+      };
       return wait("pay", msg, FRAME_PAY_TIMEOUT_MS) as Promise<FrameResult | null>;
     },
     dispose() {
@@ -221,17 +229,20 @@ export type PayOutcome =
   | { kind: "start_error"; result: StartFailure }
   | { kind: "go"; publicId: string }
   | { kind: "declined"; last4: string }
-  /** `marks`: campos do comprador (no app) que o servidor recusou (ex.: celular que o Asaas não aceita). */
-  | { kind: "failed"; message: string; marks: BuyerField[] };
+  /**
+   * `marks`: campos do comprador (no app) que o servidor recusou (ex.: celular que o Asaas não aceita). `captcha`: o
+   * servidor pediu o Turnstile; o checkout o mostra (no pai, nunca no iframe) e o próximo "Pagar" leva o token.
+   */
+  | { kind: "failed"; message: string; marks: BuyerField[]; captcha?: true };
 
-const failed = (message: string, marks: BuyerField[] = []): PayOutcome => ({ kind: "failed", message, marks });
+const failed = (message: string, marks: BuyerField[] = [], captcha = false): PayOutcome => ({ kind: "failed", message, marks, ...(captcha ? { captcha: true } : {}) });
 
 function outcomeOf(r: FrameResult | null, publicId: string): PayOutcome {
   if (r === null) return failed(CARD_GENERIC_MESSAGE);
   if (r.status === "approved" || r.status === "unknown") return { kind: "go", publicId };
   if (r.status === "declined") return { kind: "declined", last4: r.last4 ?? "" };
   const marks = frameFieldNames(r.fields ?? []).filter((n): n is BuyerField => (BUYER_FIELDS as readonly string[]).includes(n));
-  return failed(r.message ?? CARD_GENERIC_MESSAGE, marks);
+  return failed(r.message ?? CARD_GENERIC_MESSAGE, marks, r.captcha === true);
 }
 
 /**
@@ -241,15 +252,19 @@ function outcomeOf(r: FrameResult | null, publicId: string): PayOutcome {
  * - `ticketExpired`: bilhete novo e o `pay` de novo uma única vez, mesmo pedido. Renovação recusada: mensagem genérica;
  *   o pedido só é esquecido se a recusa for definitiva.
  * - Celular recusado pelo servidor: o pedido é esquecido (como no fluxo antigo), e o corrigido gera outro.
+ * - `turnstileToken` (desafio resolvido no checkout depois de um `captcha`): vai em cada `pay` desta chamada; o servidor
+ *   só o confere depois do bilhete, então ele continua valendo para o `pay` com o bilhete renovado.
  */
 export async function payWithFrame(d: {
   order: CardOrder | null;
   sig: string;
+  turnstileToken?: string;
   now: () => number;
   start: () => Promise<StartLike>;
   renew: (o: { publicId: string; ticket: string }) => Promise<Renewal>;
-  pay: (args: { orderPublicId: string; ticket: string }) => Promise<FrameResult | null>;
+  pay: (args: { orderPublicId: string; ticket: string; turnstileToken?: string }) => Promise<FrameResult | null>;
 }): Promise<{ outcome: PayOutcome; order: CardOrder | null }> {
+  const token = d.turnstileToken ? { turnstileToken: d.turnstileToken } : {};
   let order = d.order !== null && d.order.sig === d.sig ? d.order : null;
   const renew = async (o: CardOrder): Promise<{ order: CardOrder } | { outcome: PayOutcome; order: CardOrder | null }> => {
     const r = await d.renew({ publicId: o.publicId, ticket: o.ticket });
@@ -269,12 +284,12 @@ export async function payWithFrame(d: {
     order = { publicId: r.publicId, sig: d.sig, ticket: r.cardTicket, ticketAt: d.now() };
   }
 
-  let res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket });
+  let res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket, ...token });
   if (res?.status === "error" && res.ticketExpired === true) {
     const r = await renew(order);
     if ("outcome" in r) return r;
     order = r.order;
-    res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket });
+    res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket, ...token });
     if (res?.status === "error" && res.ticketExpired === true) return { outcome: failed(CARD_GENERIC_MESSAGE), order };
   }
   const outcome = outcomeOf(res, order.publicId);
