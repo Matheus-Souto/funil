@@ -245,3 +245,13 @@ test("CARD_ORIGIN precisa ser diferente da origem de BASE_URL", () => {
     "https://pagar.example.com",
   );
 });
+
+test("PLATFORM_DOMAIN: só hostname (minúsculas, sem esquema, porta, caminho ou curinga; ao menos dois rótulos)", () => {
+  const multi = { ...base, MODE: "multi" };
+  for (const ok of ["plataforma.com.br", "lojas.example.com", "lvh.me", "a-b.c1.io"]) {
+    expect(parseEnv({ ...multi, PLATFORM_DOMAIN: ok }).PLATFORM_DOMAIN).toBe(ok);
+  }
+  for (const bad of ["https://plataforma.com", "plataforma.com:8443", "plataforma.com/x", "*.plataforma.com", "com", "Plataforma.com", "plataforma.com.", ".plataforma.com", "a..com", "-a.com", "a b.com"]) {
+    expect(() => parseEnv({ ...multi, PLATFORM_DOMAIN: bad })).toThrow(/PLATFORM_DOMAIN/);
+  }
+});

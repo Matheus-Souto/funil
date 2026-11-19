@@ -174,6 +174,32 @@ describe("storeCheckoutOrigins", () => {
     expect(await storeCheckoutOrigins(b!.id, { mode: "multi", platformDomain: "lvh.me", baseUrl: "https://app.lvh.me" })).toEqual(["https://beta.lvh.me"]);
   });
 
+  test("regra de dev só em loopback: BASE_URL http fora de loopback → https e sem porta; domínio próprio segue https", async () => {
+    const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "loja-a.com.br" }).returning();
+    expect(await storeCheckoutOrigins(a!.id, { mode: "multi", platformDomain: "plataforma.com", baseUrl: "http://app.plataforma.com:3000" })).toEqual([
+      "https://loja-a.com.br",
+      "https://alfa.plataforma.com",
+    ]);
+    expect(await storeCheckoutOrigins(a!.id, { mode: "multi", platformDomain: "lvh.me", baseUrl: "http://localhost:3000" })).toEqual([
+      "https://loja-a.com.br",
+      "http://alfa.lvh.me:3000",
+    ]);
+  });
+
+  test("slug ou domínio malformado (gravado direto no banco) não gera origem; o resto segue", async () => {
+    const mk = async (slug: string, domain: string | null) =>
+      (await t.ownerDb.insert(store).values({ name: slug, slug, domain }).returning())[0]!.id;
+    const o = { mode: "multi", platformDomain: "plataforma.com", baseUrl: "https://app.plataforma.com" } as const;
+    expect(await storeCheckoutOrigins(await mk("evil.com/", null), o)).toEqual([]);
+    expect(await storeCheckoutOrigins(await mk("evil.com?", null), o)).toEqual([]);
+    expect(await storeCheckoutOrigins(await mk("a@evil.com", null), o)).toEqual([]);
+    expect(await storeCheckoutOrigins(await mk("ok1", "x.com:444"), o)).toEqual(["https://ok1.plataforma.com"]);
+    expect(await storeCheckoutOrigins(await mk("ok2", "evil.com/a"), o)).toEqual(["https://ok2.plataforma.com"]);
+    expect(await storeCheckoutOrigins(await mk("ok3", "*"), o)).toEqual(["https://ok3.plataforma.com"]);
+    expect(await storeCheckoutOrigins(await mk("ok4", "a.com *"), o)).toEqual(["https://ok4.plataforma.com"]);
+    expect(await storeCheckoutOrigins(await mk("ok5", "Loja.COM"), o)).toEqual(["https://loja.com", "https://ok5.plataforma.com"]);
+  });
+
   test("com o banco no papel card (só lê id, slug e domain de store)", async () => {
     const [a] = await t.ownerDb.insert(store).values({ name: "A", slug: "alfa", domain: "loja-a.com.br" }).returning();
     await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
@@ -187,7 +213,7 @@ describe("storeCheckoutOrigins", () => {
 });
 
 describe("slug reservado", () => {
-  test("pagar está em RESERVED_SLUGS e a criação de loja recusa (qualquer caixa)", async () => {
+  test("pagar está em RESERVED_SLUGS e a criação de loja recusa", async () => {
     expect(RESERVED_SLUGS).toContain("pagar");
     expect(await code(createStoreWithOwner({ name: "X", slug: "pagar", ownerEmail: "x@exemplo.com" }))).toBe("invalid_input");
     expect(await t.ownerDb.select().from(store)).toHaveLength(0);

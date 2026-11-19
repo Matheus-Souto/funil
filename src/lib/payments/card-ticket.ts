@@ -9,6 +9,8 @@ const FUTURE_SLACK_S = 60;
 const MAX_TOKEN_LEN = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Mesmo formato do `publicId` dos pedidos (`randomToken` em base64url), com teto de 64. */
+/** HMAC-SHA256 em base64url sem padding: 32 bytes = 43 caracteres. Só a forma canônica vale (assinatura não maleável). */
+const SIGNATURE = /^[A-Za-z0-9_-]{43}$/;
 const PUBLIC_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export interface CardTicket {
@@ -32,10 +34,11 @@ export function verifyCardTicket(token: string, key: string, now: Date = new Dat
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const [payload, sig] = parts as [string, string];
-  if (!payload || !sig) return null;
+  if (!payload || !SIGNATURE.test(sig)) return null;
   const given = Buffer.from(sig, "base64url");
   const expected = sign(payload, key);
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  if (given.toString("base64url") !== sig) return null; // bits baixos do último caractere
   let body: unknown;
   try {
     body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
@@ -48,6 +51,7 @@ export function verifyCardTicket(token: string, key: string, now: Date = new Dat
   if (typeof p !== "string" || !PUBLIC_ID.test(p)) return null;
   if (typeof e !== "number" || !Number.isInteger(e)) return null;
   const nowS = Math.floor(now.getTime() / 1000);
+  if (!Number.isFinite(nowS)) return null;
   if (e <= nowS || e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return null;
   return { storeId: s, orderId: o, publicId: p };
 }

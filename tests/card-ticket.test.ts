@@ -82,4 +82,23 @@ describe("bilhete do pedido", () => {
     expect(() => issueCardTicket(t(), "", NOW)).toThrow();
     expect(verifyCardTicket(forge({ s: randomUUID(), o: randomUUID(), p: "a", e: exp(NOW) + 60 }, ""), "", NOW)).toBeNull();
   });
+
+  test("assinatura só na forma canônica (43 chars base64url): padding, alfabeto padrão e lixo → null", () => {
+    const tk = issueCardTicket(t(), KEY, NOW);
+    const [p, sig] = tk.split(".") as [string, string];
+    expect(sig).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(verifyCardTicket(`${p}.${sig}=`, KEY, NOW)).toBeNull();
+    expect(verifyCardTicket(`${p}.${sig}==`, KEY, NOW)).toBeNull();
+    expect(verifyCardTicket(`${p}.${sig.slice(0, 10)}!!${sig.slice(10)}`, KEY, NOW)).toBeNull();
+    expect(verifyCardTicket(`${p}.${sig.slice(0, 10)} ${sig.slice(10)}`, KEY, NOW)).toBeNull();
+    // o último caractere carrega só 4 bits úteis: variantes de bits baixos não valem o mesmo bilhete
+    const last = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const variants = [...last].map((c) => `${p}.${sig.slice(0, 42)}${c}`).filter((v) => verifyCardTicket(v, KEY, NOW) !== null);
+    expect(variants).toEqual([tk]);
+  });
+
+  test("now inválido (NaN) → null", () => {
+    const tk = issueCardTicket(t(), KEY, NOW);
+    expect(verifyCardTicket(tk, KEY, new Date(Number.NaN))).toBeNull();
+  });
 });

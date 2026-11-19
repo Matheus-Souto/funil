@@ -6,6 +6,7 @@ import { randomToken, timingSafeEqualStr } from "@/lib/crypto";
 import { db, ownerDb } from "@/lib/db/client";
 import { membership, store, users } from "@/lib/db/schema";
 import { env, isLoopbackUrl } from "@/lib/env";
+import { log } from "@/lib/log";
 
 export interface ResolvedStore {
   id: string;
@@ -213,11 +214,28 @@ export async function storeCheckoutOrigins(
   const base = new URL(opts.baseUrl ?? env.BASE_URL);
   if (opts.mode === "single") return [base.origin];
   const origins: string[] = [];
-  if (row.domain) origins.push(`https://${normalizeHost(row.domain)}`);
-  const platform = opts.platformDomain ? normalizeHost(opts.platformDomain) : "";
-  if (platform) {
+  const add = (scheme: "http" | "https", host: string, port = "") => {
+    const o = originFor(scheme, host, port);
+    if (o) origins.push(o);
+    else log.warn("origens do checkout: host da loja descartado por formato inválido", { storeId });
+  };
+  if (row.domain) add("https", row.domain.toLowerCase());
+  if (opts.platformDomain) {
     const dev = base.protocol === "http:" && isLoopbackUrl(base.origin);
-    origins.push(dev ? `http://${row.slug}.${platform}${base.port ? `:${base.port}` : ""}` : `https://${row.slug}.${platform}`);
+    add(dev ? "http" : "https", `${row.slug}.${opts.platformDomain.toLowerCase()}`, dev ? base.port : "");
   }
   return origins;
+}
+
+const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+/** Monta a origem com `URL` e só a aceita se o host é exatamente o esperado (sem porta, caminho, `@`, curinga). */
+function originFor(scheme: "http" | "https", host: string, port: string): string | null {
+  if (!HOST.test(host)) return null;
+  const candidate = `${scheme}://${host}${port ? `:${port}` : ""}`;
+  try {
+    const u = new URL(candidate);
+    return u.hostname === host && u.origin === candidate && u.pathname === "/" ? u.origin : null;
+  } catch {
+    return null;
+  }
 }

@@ -31,7 +31,14 @@ const schema = z.object({
   CARD_DB_PASSWORD: z.string().min(1).optional(),
   MODE: z.enum(["single", "multi"]).default("single"),
   BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
-  PLATFORM_DOMAIN: z.string().min(1).optional(),
+  // Só hostname (minúsculas, sem esquema, porta, caminho ou curinga), com ao menos dois rótulos: vira parte das origens do checkout.
+  PLATFORM_DOMAIN: z
+    .string()
+    .regex(
+      /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/,
+      "deve ser só o hostname, em minúsculas, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
+    )
+    .optional(),
   DATABASE_URL: z.string().min(1),
   // Papel dono: só migrações, CLI store-create e testes (ver requireOwnerUrl em db/client.ts). Em produção o
   // entrypoint da imagem a remove do ambiente do servidor.
