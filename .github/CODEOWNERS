@@ -1,0 +1,15 @@
+/.claude/ @Matheus-Souto
+/REVIEW.md @Matheus-Souto
+/CLAUDE.md @Matheus-Souto
+/scripts/verify* @Matheus-Souto
+/scripts/check-test-hygiene.ts @Matheus-Souto
+/e2e/ @Matheus-Souto
+/playwright.config.ts @Matheus-Souto
+/.github/ @Matheus-Souto
+/.verify/gate-mode @Matheus-Souto
+/package.json @Matheus-Souto
+/bun.lock @Matheus-Souto
+/tests/verify/ @Matheus-Souto
+/eslint.config.js @Matheus-Souto
+/compose.dev.yaml @Matheus-Souto
+/scripts/ @Matheus-Souto
