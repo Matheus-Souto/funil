@@ -266,7 +266,8 @@ export const alertAsaasKeyRejected = defineAction({
   input: z.object({ httpStatus: z.number().int() }),
   permission: "system",
   async run(ctx, { httpStatus }) {
-    if (!(await checkRateLimit(`asaas:key_rejected:${ctx.storeId}`, 1, KEY_ALERT_WINDOW_SEC))) return { alerted: false };
+    // Contador na transação da ação: sem segunda conexão do pool (o webhook roda isto sob carga de reenvios).
+    if (!(await checkRateLimit(`asaas:key_rejected:${ctx.storeId}`, 1, KEY_ALERT_WINDOW_SEC, new Date(), ctx.tx))) return { alerted: false };
     await alertSeller(ctx.tx, ctx.storeId, "chave_asaas_invalida", { httpStatus });
     log.warn("chave do Asaas recusada; vendedor avisado para reconectar", { storeId: ctx.storeId, httpStatus });
     return { alerted: true };

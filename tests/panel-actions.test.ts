@@ -4,7 +4,7 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, job, payment, store, storeAlert } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, job, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
@@ -411,6 +411,27 @@ describe("avisos da loja (store_alert)", () => {
     expect(rows.map((r) => [r.kind, r.detail])).toEqual([["chave_asaas_invalida", { httpStatus: 403 }]]);
     const list = await runAction(listAlerts, panelCall(s.storeId), {});
     expect(list.alerts[0]!.title).toBe("O Asaas recusou a chave de API da loja (HTTP 403)");
+  });
+
+  test("aviso de chave recusada: o contador do limite usa a transação da ação (sem 2ª conexão; rollback desfaz)", async () => {
+    const s = await seedPanelStore();
+    const key = `asaas:key_rejected:${s.storeId}`;
+    const ctx = (tx: Parameters<Parameters<typeof withStore>[1]>[0]) => ({ storeId: s.storeId, actor: { kind: "system" as const }, origin: "system" as const, tx });
+    const rollback = new Error("rollback");
+    await withStore(s.storeId, async (tx) => {
+      expect(await alertAsaasKeyRejected.run(ctx(tx), { httpStatus: 401 }, undefined)).toEqual({ alerted: true });
+      throw rollback;
+    }).catch((e: unknown) => {
+      if (e !== rollback) throw e;
+    });
+    // Contador e aviso saíram na mesma transação: o rollback desfez os dois.
+    expect(await t.ownerDb.select().from(rateLimit).where(eq(rateLimit.key, key))).toHaveLength(0);
+    expect(await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, s.storeId))).toHaveLength(0);
+    await withStore(s.storeId, async (tx) => {
+      expect(await alertAsaasKeyRejected.run(ctx(tx), { httpStatus: 401 }, undefined)).toEqual({ alerted: true });
+      expect(await alertAsaasKeyRejected.run(ctx(tx), { httpStatus: 401 }, undefined)).toEqual({ alerted: false });
+    });
+    expect((await t.ownerDb.select().from(rateLimit).where(eq(rateLimit.key, key)))[0]!.count).toBe(2);
   });
 
   test("store_alert tem RLS (outra loja não lê a linha)", async () => {

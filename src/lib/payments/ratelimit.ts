@@ -3,7 +3,7 @@
 import { createHmac } from "node:crypto";
 import { isIP } from "node:net";
 import { and, eq, gt, lt, sql } from "drizzle-orm";
-import { db } from "@/lib/db/client";
+import { db, type Db, type Tx } from "@/lib/db/client";
 import { rateLimit } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 
@@ -13,12 +13,22 @@ function windowStart(now: Date, windowSec: number): Date {
   return new Date(Math.floor(now.getTime() / ms) * ms);
 }
 
+/** Onde o contador é gravado: o pool do app (padrão, conexão própria) ou a transação do chamador. */
+type Executor = Pick<Db, "insert">;
+
 /**
  * Soma 1 ao contador de `key` na janela fixa atual (INSERT ... ON CONFLICT DO UPDATE ... RETURNING, atômico)
- * e devolve se ainda está dentro do limite. A chamada que estoura também conta.
+ * e devolve se ainda está dentro do limite. A chamada que estoura também conta. Dentro de uma ação, passe `ctx.tx`
+ * em `on`: o contador vai na mesma transação (sem segunda conexão do pool de 5; rollback desfaz a contagem junto).
  */
-export async function checkRateLimit(key: string, limit: number, windowSec: number, now: Date = new Date()): Promise<boolean> {
-  const count = await bump(key, windowStart(now, windowSec));
+export async function checkRateLimit(
+  key: string,
+  limit: number,
+  windowSec: number,
+  now: Date = new Date(),
+  on: Executor | Tx = db,
+): Promise<boolean> {
+  const count = await bump(key, windowStart(now, windowSec), on);
   maybeCleanup(now);
   return count <= limit;
 }
@@ -41,8 +51,8 @@ export async function hitRateLimit(key: string, windowSec: number, now: Date = n
   maybeCleanup(now);
 }
 
-async function bump(key: string, start: Date): Promise<number> {
-  const [row] = await db
+async function bump(key: string, start: Date, on: Executor | Tx = db): Promise<number> {
+  const [row] = await on
     .insert(rateLimit)
     .values({ key, windowStart: start, count: 1 })
     .onConflictDoUpdate({ target: [rateLimit.key, rateLimit.windowStart], set: { count: sql`${rateLimit.count} + 1` } })
