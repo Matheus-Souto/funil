@@ -8,6 +8,9 @@ if [ "${1:-start}" != "start" ]; then
   exec "$@"
 fi
 
+# O servidor recebe dados de cartão (só em memória): sem core dump, mesmo fora do compose.yaml (que já fixa core 0).
+ulimit -c 0
+
 fail() {
   echo "entrypoint: $*" >&2
   exit 1

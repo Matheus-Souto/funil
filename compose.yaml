@@ -35,6 +35,13 @@ services:
       - app-data:/data
     # Orçamento de memória em docs/instalacao.md: Next + 1 Worker de PDF (heap até 192 MB) + buffers de um PDF de 50 MB.
     mem_limit: 768m
+    # Este processo recebe número e CVV do cartão (só em memória): nada de core dump nem de swap além da RAM do
+    # container (o swap do host também deve ficar desligado ou cifrado; docs/seguranca-pagamento.md).
+    memswap_limit: 768m
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
     stop_grace_period: 30s
     expose:
       - "3000"

@@ -4,6 +4,56 @@ Páginas do comprador: `/c/<oferta>` (checkout: nome, e-mail, celular, CPF e, no
 `/o/<pedido>` (pedido e obrigado). Referências: PCI DSS 4.0 requisitos 6.4.3 (inventário, autorização e integridade
 dos scripts da página de pagamento) e 11.6.1 (detecção de mudanças nos cabeçalhos de segurança e scripts).
 
+## Escopo PCI real: SAQ D (o cartão passa pelo servidor)
+
+No cartão "transparente", o navegador envia número, validade e CVV em JSON para `POST /api/checkout/card`; o processo
+Node do app recebe, valida e repassa ao Asaas. Nada disso é gravado (banco, log, fila, cache, mensagem de erro: ver
+`src/lib/payments/asaas/card.ts`), mas **transmitir e processar** PAN/CVV coloca o sistema inteiro no ambiente de
+dados do titular (CDE). Por isso:
+
+- **Questionário de autoavaliação: SAQ D** (não SAQ A nem A-EP, que valem só quando a página não envia o cartão ao
+  servidor da loja). Os requisitos 6.4.3 e 11.6.1 abaixo continuam valendo, mas são uma parte pequena do SAQ D.
+- **Tudo o que roda no mesmo servidor entra no escopo:** o processo Node (que também serve o painel, valida PDFs
+  enviados pelo vendedor, fala SMTP e roda a fila), o Caddy (termina o TLS), o Postgres na mesma rede do compose, o
+  sistema operacional do host, a memória, o swap e os core dumps. Uma falha em qualquer um (pacote npm do painel
+  comprometido, PDF malicioso que escape do worker, acesso ao host) expõe os cartões em trânsito de todas as lojas.
+- **`MODE=multi`: o operador da instalação vira provedor de serviço** que processa cartões de terceiros (as lojas).
+  Isso exige o SAQ D para provedores de serviço (ou o relatório de conformidade feito por auditor, o ROC, conforme o
+  volume anual de transações), contratos com cada loja dizendo quais requisitos são responsabilidade de quem, e
+  teste de invasão e varredura trimestral de vulnerabilidades (ASV) da instalação.
+- **O que isso implica para quem instala:** servidor dedicado ao app (nada mais rodando nele), sistema e imagens
+  atualizados todo mês (`docs/instalacao.md`, "Atualizar"), acesso SSH só por chave e com poucas pessoas, firewall
+  liberando só 80/443 (e, com Cloudflare, só as faixas dela), registro de quem acessa o servidor, backups cifrados,
+  `SECRET` guardado fora dos backups e varredura de vulnerabilidades periódica. A adquirente ou bandeira pode pedir o
+  questionário: responda com o escopo acima, não com o de SAQ A.
+- **Endurecimento já feito na instalação padrão:** o container do app roda sem core dump (`ulimits core 0` no
+  `compose.yaml`, e `ulimit -c 0` no entrypoint) e sem swap além da RAM do container (`memswap_limit` igual ao
+  `mem_limit`: a memória do app nunca vai para o swap do host), usuário não-root, código só leitura, papel do banco
+  sem acesso às tabelas de outras lojas. **No host:** o swap que o guia cria serve à montagem da imagem; com RAM de
+  sobra, desligue-o depois (`swapoff -a` e remova a linha do `/etc/fstab`) ou use swap cifrado. Não tire o
+  `memswap_limit` nem o `ulimits` do `compose.yaml`.
+- **Próximo passo recomendado (decisão do dono):** tirar o cartão do processo principal, ou com a página de pagamento
+  hospedada do Asaas para cartão (a loja volta a SAQ A), ou isolando a rota de cartão num processo/container próprio,
+  sem painel, sem PDF e sem SMTP. Enquanto isso não for feito, o escopo é o descrito aqui.
+
+## Monitor semanal em produção (11.6.1)
+
+Além do smoke E2E antes de cada deploy, o job `pci_page_monitor` (`src/lib/security/page-monitor.ts`) roda **toda
+semana** em produção. Para cada loja, ele busca no próprio domínio da loja o checkout de uma oferta ativa
+(`/c/<slug>`, de preferência com cartão) e a página do pedido mais recente (`/o/<id>`) e confere:
+
+- o cabeçalho `Content-Security-Policy` é exatamente a política gerada pelo app (abaixo), com nonce;
+- o inventário de scripts do HTML: só `/_next/static/*` do próprio domínio, `https://connect.facebook.net` e (com
+  Turnstile) `https://challenges.cloudflare.com`; todo script inline com o nonce daquela resposta.
+
+O resultado (um hash do cabeçalho normalizado e do inventário, e os códigos de problema) fica em `page_check`. Quando
+muda, o vendedor recebe um aviso no painel e por e-mail (`monitor_pagina_pagamento`, com a página e o código:
+`csp_ausente`, `csp_diferente`, `script_nao_autorizado`, `script_sem_nonce` ou `inventario_mudou`). Uma atualização do
+sistema que mude a política ou os scripts também dispara o aviso uma vez: confira que a mudança veio da atualização.
+Página fora do ar ou resposta diferente de 200 só vai para o log (não é mudança de página). O servidor precisa
+conseguir acessar o próprio domínio público (o normal numa VPS); se não conseguir, o log mostra "página
+indisponível" toda semana.
+
 ## Política de segurança de conteúdo (CSP)
 
 Aplicada por `src/proxy.ts` só em `/c/*` e `/o/*`, com nonce novo a cada requisição (o Next aplica o nonce aos próprios

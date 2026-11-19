@@ -6,6 +6,7 @@ import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJob, sweepWatermarksJob } from "@/lib/delivery/jobs";
 import { refundOrderJob } from "@/lib/payments/refund";
+import { pciPageMonitorJob } from "@/lib/security/page-monitor";
 import { metaEventJob } from "@/lib/tracking/meta";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
@@ -61,6 +62,7 @@ const registry: JobHandlers = {
   restore_downloads: restoreDownloadsJob,
   sweep_watermarks: sweepWatermarksJob,
   meta_event: metaEventJob,
+  pci_page_monitor: pciPageMonitorJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {

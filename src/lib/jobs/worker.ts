@@ -1,5 +1,6 @@
 import { log } from "@/lib/log";
 import { runDueJobs, scheduleOnce } from "@/lib/jobs";
+import { PCI_MONITOR_EVERY_MS } from "@/lib/security/page-monitor";
 import { getHandlers } from "./handlers";
 
 export const WORKER_INTERVAL_MS = 2000;
@@ -7,7 +8,10 @@ export const EXPIRE_EVERY_MS = 5 * 60 * 1000;
 /** Varredura das cópias carimbadas: uma por dia (agendada para daqui a 24 h sempre que não houver outra na fila). */
 export const SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
 
-/** Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders a cada 5 min, sweep_watermarks diário). Devolve a função de parada. */
+/**
+ * Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders a cada 5 min, sweep_watermarks diário,
+ * pci_page_monitor semanal). Devolve a função de parada.
+ */
 export function startWorker(): () => void {
   let busy = false;
   const tick = async () => {
@@ -25,6 +29,10 @@ export function startWorker(): () => void {
     void scheduleOnce("expire_orders").catch((e: unknown) => log.error("falha ao agendar expire_orders", { error: e }));
     void scheduleOnce("sweep_watermarks", new Date(Date.now() + SWEEP_EVERY_MS)).catch((e: unknown) =>
       log.error("falha ao agendar sweep_watermarks", { error: e }),
+    );
+    // PCI DSS 11.6.1: cabeçalhos e scripts das páginas de pagamento conferidos em produção, toda semana.
+    void scheduleOnce("pci_page_monitor", new Date(Date.now() + PCI_MONITOR_EVERY_MS)).catch((e: unknown) =>
+      log.error("falha ao agendar pci_page_monitor", { error: e }),
     );
   };
   schedule();

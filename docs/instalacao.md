@@ -18,6 +18,11 @@ visitas e cuida do HTTPS sozinho). Tudo definido em `compose.yaml`. Só o Caddy 
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
   ```
 
+  O container do app **não usa esse swap** (`memswap_limit` igual ao `mem_limit` no `compose.yaml`) nem grava core
+  dump: o número e o CVV do cartão passam pela memória dele e nunca devem ir para o disco. O swap serve à montagem da
+  imagem e aos outros serviços. Se o servidor tiver RAM de sobra (2 GB ou mais), pode desligar o swap depois da
+  primeira montagem (`sudo swapoff -a` e apague a linha do `/etc/fstab`). Detalhes em `docs/seguranca-pagamento.md`.
+
 - Instale o Docker (já vem com o `docker compose`):
 
   ```sh

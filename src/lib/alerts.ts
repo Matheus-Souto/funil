@@ -27,8 +27,8 @@ export interface AlertExtra {
   code?: string;
   /** Estorno parcial: quanto já voltou ao comprador (centavos). */
   refundedCents?: number;
-  /** Monitor de página de pagamento: qual página ("/c" ou "/o"). */
-  page?: string;
+  /** Monitor de página de pagamento: qual página. */
+  page?: "/c" | "/o";
 }
 
 const safeCode = (v: string) => v.replace(/[^\w.:-]/g, "").slice(0, 64);
@@ -40,7 +40,7 @@ export async function alertSeller(tx: Tx, storeId: string, reason: AlertReason, 
     ...(extra.paymentId !== undefined ? { paymentId: extra.paymentId } : {}),
     ...(extra.code !== undefined ? { code: safeCode(extra.code) } : {}),
     ...(extra.refundedCents !== undefined ? { refundedCents: extra.refundedCents } : {}),
-    ...(extra.page !== undefined ? { page: safeCode(extra.page) } : {}),
+    ...(extra.page === "/c" || extra.page === "/o" ? { page: extra.page } : {}),
   };
   await tx.insert(storeAlert).values({ storeId, kind: reason, orderId: extra.orderId ?? null, detail });
   await enqueue(tx, { storeId, type: "notify_seller", payload: { ...(extra.orderId ? { orderId: extra.orderId } : {}), reason, ...detail } });
