@@ -277,9 +277,11 @@ docker compose up -d --build
 rm banco.dump arquivos.tgz
 ```
 
-`--no-privileges` pula as permissões do papel `app` gravadas no dump (sem ele, o `pg_restore` mostra erros de
-`GRANT ... TO app` quando o papel ainda não existe no servidor novo; são esperados e inofensivos). O app recria o
-papel `app` e as permissões sozinho ao iniciar (migração).
+`--no-privileges` pula as permissões dos papéis `app` e `card` gravadas no dump (sem ele, o `pg_restore` mostra erros
+de `GRANT ... TO app` quando o papel ainda não existe no servidor novo). As políticas ligadas a esses papéis não são
+puladas: no servidor novo o `pg_restore` mostra erros de `CREATE POLICY ... TO app`/`TO card` ("role does not exist")
+e termina com "errors ignored on restore"; são esperados e inofensivos. O app recria os papéis, as permissões e essas
+políticas sozinho ao iniciar (migração).
 
 **Atualizar** (faça o backup antes). Uma vez por mês, mesmo sem versão nova do projeto, para receber as correções de
 segurança das imagens base (Node, Postgres e Caddy ficam fixados por versão menor, ex.: `postgres:17.12`; o `pull`
