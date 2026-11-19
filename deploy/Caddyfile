@@ -1,0 +1,7 @@
+# Caddy na frente do app: HTTPS automático (Let's Encrypt) para DOMAIN, HTTP -> HTTPS.
+# O reverse_proxy do Caddy MANTÉM o Host do navegador (a rota do cartão confere Origin contra o Host) e acrescenta
+# X-Forwarded-For (IP do comprador, lido com TRUST_PROXY=1) e X-Forwarded-Proto. Não reescreva o Host aqui.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3000
+}

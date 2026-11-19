@@ -1,0 +1,22 @@
+# Contexto do build da imagem (deploy/Dockerfile): só o que o build precisa.
+.git
+.github
+.claude
+.superpowers
+.verify
+.next
+.env
+.env.*
+!.env.example
+node_modules
+data
+docs
+e2e
+tests
+*.tsbuildinfo
+playwright-report
+test-results
+# Scripts de desenvolvimento usam APIs do Bun (o typecheck do `next build` não tem os tipos do Bun sem tests/);
+# a imagem só precisa da CLI de criação de loja.
+scripts/*
+!scripts/store-create.ts

@@ -1,0 +1,19 @@
+# MODE=multi: domínio principal + um certificado curinga para *.PLATFORM_DOMAIN (lojas em <slug>.PLATFORM_DOMAIN).
+# Certificado curinga só sai por desafio DNS, que exige um Caddy com o plugin do seu DNS (a imagem caddy:2 padrão não
+# tem). Passo a passo em docs/instalacao.md ("Várias lojas"). Exemplo com Cloudflare: imagem de deploy/caddy-dns.Dockerfile
+# e CLOUDFLARE_API_TOKEN (permissão Zone:DNS:Edit) no ambiente do serviço caddy.
+#
+# Sem desafio DNS: apague o bloco do curinga e liste cada loja no primeiro bloco, separadas por vírgula
+# (ex.: {$DOMAIN}, loja1.plataforma.com.br, loja2.plataforma.com.br); cada nome recebe o próprio certificado por HTTP.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3000
+}
+
+*.{$PLATFORM_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	encode zstd gzip
+	reverse_proxy app:3000
+}

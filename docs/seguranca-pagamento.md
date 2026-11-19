@@ -28,7 +28,7 @@ comprador). Mudar esta política é mudança de verificação: revisar junto com
 |---|---|---|---|---|
 | Runtime do Next.js/React e chunks da página (`/_next/static/...`) | própria (`'self'`) | sempre | renderização e formulário do checkout | build do próprio app; servido pelo próprio domínio |
 | Scripts inline do Next (dados do RSC, `self.__next_f`) | própria, inline | sempre | hidratação das páginas | só executam com o nonce da requisição |
-| Meta Pixel `fbevents.js` (e a configuração do pixel que ele busca) | `https://connect.facebook.net` | só com Pixel configurado (oferta ou loja) | medir anúncios (spec 7.8: InitiateCheckout, AddPaymentInfo, Purchase; deduplicado com a API de Conversões) | `fbq('set','autoConfig',false,<pixel>)` antes do `init` (sem coleta automática de cliques, campos ou metadados); eventos só com `currency`, `value` e `payment_type` (tipados como valores simples em `src/lib/tracking/fbq.ts`); nenhum dado do formulário; carregado por código próprio (`src/lib/tracking/fbq.ts`), sem HTML inline |
+| Meta Pixel `fbevents.js` (e a configuração do pixel que ele busca) | `https://connect.facebook.net` | só com Pixel configurado (oferta ou loja) | medir anúncios (spec 7.8: InitiateCheckout, AddPaymentInfo, Purchase; deduplicado com a API de Conversões) | `fbq('set','autoConfig',false,<pixel>)` antes do `init` (desliga a configuração automática de eventos: cliques em botões e metadados da página); a correspondência avançada automática (leitura de e-mail/telefone digitados) NÃO é coberta pelo autoConfig e fica desligada no Gerenciador de Eventos (seção abaixo); eventos só com `currency`, `value` e `payment_type` (tipados como valores simples em `src/lib/tracking/fbq.ts`); nenhum dado do formulário; carregado por código próprio (`src/lib/tracking/fbq.ts`), sem HTML inline |
 | Cloudflare Turnstile `api.js` | `https://challenges.cloudflare.com` | só se configurado E a API do cartão pedir o desafio (muitas tentativas) | antifraude de teste de cartões | o desafio roda em iframe da Cloudflare; script e frame só dessa origem |
 
 Não há outros scripts de terceiros. `public/t.js` NÃO roda nestas páginas: ele é embutido pelo vendedor na página de
@@ -42,3 +42,15 @@ própria, `default-src 'none'`).
   (normalizados conforme a documentação do Meta); IP, user agent, `fbc` e `fbp` sem hash; valor, moeda, ids dos
   produtos e o id público do pedido. Nunca dados de cartão nem CPF. Token só no header `Authorization: Bearer`.
 - Reembolso não é enviado. Purchase só sai com o pedido ainda pago no momento do envio.
+
+## Ação obrigatória do dono no Meta
+
+O `autoConfig` desligado não controla a **correspondência avançada automática** (Automatic Advanced Matching): esse
+recurso só é configurado no Meta. Ligado, o Pixel pode ler campos de e-mail e telefone digitados no checkout e enviá-los
+(com hash) ao Meta pelo navegador. Desligue em: Gerenciador de Eventos → pixel da loja → **Configurações** →
+**Correspondência avançada automática** → desligado. Os dados do comprador já vão ao Meta pelo servidor (API de
+Conversões, acima), com hash e sem nada do cartão. Passo a passo em `docs/instalacao.md` (seção 8).
+
+A CSP foi testada com um Pixel falso (o smoke E2E não chama o Meta): depois de publicar, abra o checkout no navegador
+com o Pixel real e confira que o console não mostra violações de CSP.
+

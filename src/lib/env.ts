@@ -35,6 +35,9 @@ const schema = z.object({
 
 export type Env = z.infer<typeof schema>;
 
+/** Nomes de todas as variáveis lidas pelo app (documentadas no .env.example; ver tests/deploy-config.test.ts). */
+export const ENV_KEYS = Object.keys(schema.shape) as (keyof Env)[];
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
 /**

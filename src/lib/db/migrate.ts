@@ -1,6 +1,6 @@
 // Migração (rodar com Bun): papel `app`, rls.sql e migrations do drizzle, com o papel dono.
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate as drizzleMigrate } from "drizzle-orm/postgres-js/migrator";
@@ -23,7 +23,9 @@ export async function migrate(ownerUrl: string, appPassword: string): Promise<vo
   }
 }
 
-if (import.meta.main) {
+// Executado direto (`bun src/lib/db/migrate.ts` ou `node cli/src/lib/db/migrate.mjs` na imagem Docker), nunca ao ser
+// importado. Não usa `import.meta.main`: no pacote para Node ele vira uma checagem que é sempre verdadeira.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const url = process.env.OWNER_DATABASE_URL;
   const password = process.env.APP_DB_PASSWORD;
   if (!url || !password) {
