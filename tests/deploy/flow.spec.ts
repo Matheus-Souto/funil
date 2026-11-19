@@ -54,6 +54,8 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   // Setup do modo single (primeiro acesso).
   await owner.goto("/admin");
   await expect(owner).toHaveURL(/\/admin\/setup$/);
+  // Código impresso pelo entrypoint no log do container (tests/smoke.sh o repassa).
+  await owner.getByLabel("Código de configuração").fill(process.env.SETUP_TOKEN ?? "");
   await owner.getByLabel("Nome da loja").fill("Loja Deploy");
   await owner.getByLabel("Seu nome").fill("Dono");
   await owner.getByLabel("E-mail").fill(OWNER.email);

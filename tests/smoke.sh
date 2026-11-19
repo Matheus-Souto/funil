@@ -2,12 +2,14 @@
 # Smoke de deploy: constrói a imagem (deploy/Dockerfile), sobe a pilha do compose.yaml completa (app + Postgres + Caddy,
 # mais um Mailpit só do smoke) com DOMAIN=localhost (HTTPS pela CA interna do Caddy), e confere:
 #   1. /api/health pelo Caddy; Postgres e app sem portas publicadas; app como usuário não-root;
-#   2. o Caddy preserva o Host e manda X-Forwarded-Proto (POST de cartão da mesma origem passa do 403);
+#   2. o Caddy preserva o Host e manda X-Forwarded-Proto (POST de cartão da mesma origem passa do 403) e HSTS; o
+#      entrypoint gera e imprime o código do primeiro acesso (SETUP_TOKEN) quando o .env não traz um;
 #   3. fluxo mínimo pelo navegador (tests/deploy/flow.spec.ts): setup -> produto com PDF de ~46 MB -> oferta -> Pix
 #      manual -> liberar -> e-mail -> download carimbado (Worker de PDF dentro do container);
 #   4. memória: pico do container no fluxo (cgroup memory.peak) abaixo de 700 MiB e nenhum OOM kill (teto 768 MB);
 #      ociosa (docker stats) abaixo de 512 MiB; tamanho da imagem;
-#   4b. o servidor (tini e node) roda sem OWNER_DATABASE_URL; a CLI store-create via `docker compose exec` funciona;
+#   4b. o servidor (tini e node) roda sem OWNER_DATABASE_URL, sem core dump e sem swap; a CLI store-create via
+#       `docker compose exec` funciona e avisa da troca obrigatória da senha temporária;
 #   5. recriar o container do app: migrações rodam de novo no banco já migrado e o PDF continua no volume /data.
 # Projeto compose com nome único e portas livres em 127.0.0.1: não toca no compose.dev.yaml nem em outros containers.
 # Sempre termina com `docker compose down -v` (volumes do smoke apagados). Métricas em <saída>/metrics.json.
@@ -88,12 +90,20 @@ code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'content-type: applica
 code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "origin: https://evil.example" --data "$card" "$BASE/api/checkout/card")
 [ "$code" = "403" ] || fail "POST de cartão de outra origem deveria ser 403, veio $code"
 
+step "HSTS no Caddy e código de configuração inicial gerado pelo entrypoint"
+HEALTH_HEADERS="$(curl -fsSk -D - -o /dev/null "$BASE/api/health")" || fail "/api/health pelo Caddy (cabeçalhos)"
+printf '%s\n' "$HEALTH_HEADERS" | grep -qi '^strict-transport-security: max-age=31536000' \
+  || fail "o Caddy não manda Strict-Transport-Security"
+# Sem SETUP_TOKEN no .env do smoke: o entrypoint gera, guarda no volume e imprime no log do app.
+SETUP_TOKEN="$(dc logs --no-color app | sed -n 's/.*código de configuração inicial (\/admin\/setup): \([0-9a-f]\{48\}\).*/\1/p' | tail -n1)"
+[ -n "$SETUP_TOKEN" ] || fail "o entrypoint não imprimiu o código de configuração inicial"
+
 step "fluxo pelo navegador"
 # Amostrador dentro do container: maior memória anônima (heap do Next + Worker de PDF + buffers, sem o cache de
 # arquivos) a cada 100 ms durante o fluxo. O total com cache vem exato do memory.peak abaixo.
 dc exec -d app sh -c 'm=0; while [ ! -f /tmp/anon-stop ]; do a=$(sed -n "s/^anon //p" /sys/fs/cgroup/memory.stat); if [ "$a" -gt "$m" ]; then m=$a; echo "$m" > /tmp/anon-peak; fi; sleep 0.1; done'
 TF=$(date +%s)
-BASE_URL="$BASE" MAILPIT_URL="http://127.0.0.1:$MAIL_PORT" SMOKE_OUT="$OUT" \
+BASE_URL="$BASE" MAILPIT_URL="http://127.0.0.1:$MAIL_PORT" SMOKE_OUT="$OUT" SETUP_TOKEN="$SETUP_TOKEN" \
   bunx playwright test --config tests/deploy/playwright.config.ts
 FLOW_S=$(( $(date +%s) - TF ))
 
@@ -123,9 +133,14 @@ step "servidor sem o papel dono; CLI store-create com ele"
 [ "$(dc exec -T app cat /proc/1/comm)" = "tini" ] || fail "PID 1 do app deveria ser o tini"
 leaks=$(dc exec -T app sh -c 'n=0; for p in /proc/[0-9]*; do case "$(cat $p/comm 2>/dev/null)" in tini|node) if tr "\0" "\n" < $p/environ | grep -q "^OWNER_DATABASE_URL="; then n=$((n+1)); fi;; esac; done; echo $n')
 [ "$leaks" = "0" ] || fail "OWNER_DATABASE_URL no ambiente de $leaks processo(s) do servidor"
-dc exec -T -e MODE=multi -e PLATFORM_DOMAIN=lojas.localhost app \
-  store-create --name "Loja CLI" --slug loja-cli --owner-email cli@exemplo.com | grep -q "Loja criada: loja-cli" \
-  || fail "store-create via docker compose exec"
+# O processo que recebe o cartão: sem core dump e sem swap (cgroup do container).
+dc exec -T app sh -c 'grep -Eq "^Max core file size +0 +0 " /proc/1/limits' || fail "core dump deveria estar desligado no app (ulimit core 0)"
+[ "$(dc exec -T app cat /sys/fs/cgroup/memory.swap.max)" = "0" ] || fail "o container do app não deveria usar swap (memswap_limit = mem_limit)"
+# Saída inteira numa variável (grep -q fecharia o pipe antes das últimas linhas da CLI: EPIPE com pipefail).
+cli_out="$(dc exec -T -e MODE=multi -e PLATFORM_DOMAIN=lojas.localhost app \
+  store-create --name "Loja CLI" --slug loja-cli --owner-email cli@exemplo.com)" || fail "store-create via docker compose exec"
+printf '%s\n' "$cli_out" | grep -q "Loja criada: loja-cli" || fail "store-create via docker compose exec (saída inesperada)"
+printf '%s\n' "$cli_out" | grep -q "exige trocar esta senha" || fail "store-create deveria avisar da troca obrigatória da senha temporária"
 
 step "recriar o app: migração repetida e /data persistente"
 dc up -d --wait --wait-timeout 180 --force-recreate --no-deps app
