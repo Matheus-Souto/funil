@@ -21,6 +21,7 @@ import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
 import { refundOrder } from "@/lib/payments/refund";
+import { enqueue } from "@/lib/jobs";
 import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 import { createFakeAsaas, newAsaasOrder, newCardOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
 import type { FakeAsaas } from "./fakes/asaas";
@@ -891,6 +892,135 @@ describe("payWithCard: parcelado", () => {
     });
     expect(r.status).toBe(200);
     expect((await orderRow(storeId, o.id)).status).toBe("paid");
+  });
+});
+
+describe("parcelado: estorno de uma parcela só (painel do Asaas) não estorna a venda", () => {
+  const hook = (storeId: string, token: string, id: string, ev = "PAYMENT_REFUNDED") =>
+    handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": token }), { event: ev, payment: { id } });
+  const alerts = async (storeId: string, orderId: string, reason: string) =>
+    (await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"))).filter(
+      (j) => j.storeId === storeId && (j.payload as { orderId?: string; reason?: string }).orderId === orderId && (j.payload as { reason?: string }).reason === reason,
+    );
+
+  async function paidInThree() {
+    const s = await setup(1000, 3);
+    const o = await newCardOrder(s.storeId, s.offerId, email());
+    expect((await payWithCard(s.call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("approved");
+    const [inst] = [...s.fake.installments.values()];
+    for (const pid of inst!.payments) expect((await hook(s.storeId, s.webhookToken, pid, "PAYMENT_CONFIRMED")).status).toBe(200);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    return { ...s, o, parcels: inst!.payments };
+  }
+
+  for (const which of [0, 1] as const) {
+    test(`parcela ${which + 1} estornada no Asaas: pedido continua pago, vendedor avisado; o resto estornado conclui`, async () => {
+      const s = await paidInThree();
+      s.fake.refundExternally(s.parcels[which]!);
+      expect((await hook(s.storeId, s.webhookToken, s.parcels[which]!)).status).toBe(200);
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+      const partial = await alerts(s.storeId, s.o.id, "estorno_parcial");
+      expect(partial).toHaveLength(1);
+      expect(partial[0]!.payload).toMatchObject({ refundedCents: 333 });
+      // Webhook repetido: sem aviso novo.
+      expect((await hook(s.storeId, s.webhookToken, s.parcels[which]!)).status).toBe(200);
+      expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(1);
+
+      // O vendedor pede o reembolso pelo painel: parcial num parcelamento não é resolvido por nós (mantém pago).
+      const call = { storeId: s.storeId, actor: owner, origin: "panel" as const };
+      if (which === 0) {
+        // A parcela estornada é a que o pedido guarda: recusa na hora, com o motivo.
+        await expect(runAction(refundOrder, call, { orderId: s.o.id })).rejects.toMatchObject({
+          code: "conflict",
+          message: expect.stringContaining("Parte das parcelas já foi estornada no Asaas"),
+        });
+      } else {
+        // Outra parcela: o job reconsulta o parcelamento inteiro, não pede estorno e avisa o vendedor.
+        await runAction(refundOrder, call, { orderId: s.o.id });
+        await runRefundJobs(new Date(Date.now() + 1000));
+        expect((await alerts(s.storeId, s.o.id, "estorno_falhou")).map((j) => (j.payload as { code?: string }).code)).toEqual(["parcial_parcelado"]);
+      }
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+      expect(s.fake.calls.some((c) => c.method === "POST" && c.path.endsWith("/refund"))).toBe(false);
+
+      // As outras parcelas estornadas no Asaas: agora sim o pedido é estornado (pelo webhook de qualquer parcela).
+      for (const pid of s.parcels) if (pid !== s.parcels[which]) s.fake.refundExternally(pid);
+      const last = s.parcels.find((pid) => pid !== s.parcels[which])!;
+      expect((await hook(s.storeId, s.webhookToken, last)).status).toBe(200);
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
+    });
+  }
+
+  test("listagem de parcelas: só em evento de estorno; falha (4xx/5xx) ou incompleta -> 500 (o Asaas reenvia), pedido intacto", async () => {
+    const s = await setup(1000, 3);
+    const o = await newCardOrder(s.storeId, s.offerId, email());
+    expect((await payWithCard(s.call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("approved");
+    const [inst] = [...s.fake.installments.values()];
+    const parcels = inst!.payments;
+    // Confirmação não depende da listagem (nem a consulta).
+    s.fake.fail("GET /payments?installment=", 400, "filtro inválido");
+    for (const pid of parcels) expect((await hook(s.storeId, s.webhookToken, pid, "PAYMENT_CONFIRMED")).status).toBe(200);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    expect(s.fake.calls.some((c) => c.path === "/payments" && c.query.get("installment"))).toBe(false);
+
+    s.fake.refundExternally(parcels[1]!);
+    for (const status of [400, 404, 503]) {
+      s.fake.clearFailures();
+      s.fake.fail("GET /payments?installment=", status, "erro");
+      expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+    }
+    // Listagem incompleta (uma parcela some): também não decide.
+    s.fake.clearFailures();
+    s.fake.payments.get(parcels[2]!)!.deleted = true;
+    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(0);
+    s.fake.payments.get(parcels[2]!)!.deleted = false;
+    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
+    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(1);
+  });
+
+  test("nosso estorno do parcelamento com parcelas voltando em momentos diferentes: sem aviso de parcial, job não desiste", async () => {
+    const s = await paidInThree();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, { storeId: s.storeId, actor: owner, origin: "panel" }, { orderId: s.o.id });
+    await runRefundJobs(new Date(Date.now() + 1000));
+    // Meio-tempo: parcela 1 já voltou; 2 e 3 ainda aparecem pagas, sem item em refunds[].
+    s.fake.setRefundStatus(s.parcels[0]!, "DONE");
+    s.fake.setStatus(s.parcels[0]!, "REFUNDED");
+    for (const pid of s.parcels.slice(1)) s.fake.payments.get(pid)!.refunds = [];
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(0);
+    // Retentativa do job nesse meio-tempo: continua aguardando (sem "estorno_falhou", sem novo POST, pedido segue pedido).
+    await withStore(s.storeId, (tx) => enqueue(tx, { storeId: s.storeId, type: "refund_order", payload: { orderId: s.o.id } }));
+    await runRefundJobs(new Date(Date.now() + 2000));
+    expect(await alerts(s.storeId, s.o.id, "estorno_falhou")).toHaveLength(0);
+    expect(s.fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund"))).toHaveLength(1);
+    expect((await orderRow(s.storeId, s.o.id)).refundRequestedAt).not.toBeNull();
+    for (const pid of s.parcels.slice(1)) s.fake.refundExternally(pid);
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[2]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
+  });
+
+  test("estorno do parcelamento em andamento (parcelas ainda pendentes): o pedido só vira estornado quando todas voltam", async () => {
+    const s = await paidInThree();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, { storeId: s.storeId, actor: owner, origin: "panel" }, { orderId: s.o.id });
+    await runRefundJobs(new Date(Date.now() + 1000));
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    // Uma parcela conclui antes das outras: continua pago, sem aviso de estorno parcial.
+    s.fake.setRefundStatus(s.parcels[0]!, "DONE");
+    s.fake.setStatus(s.parcels[0]!, "REFUNDED");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(0);
+    for (const pid of s.parcels.slice(1)) {
+      s.fake.setRefundStatus(pid, "DONE");
+      s.fake.setStatus(pid, "REFUNDED");
+    }
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[2]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
   });
 });
 

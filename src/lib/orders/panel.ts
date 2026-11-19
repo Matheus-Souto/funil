@@ -9,6 +9,7 @@ import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
 import { hasOpenJob } from "@/lib/jobs";
 import { refundMarkerOf } from "@/lib/payments/asaas/refunds";
+import { hasOldAccountEvent } from "@/lib/payments/asaas/webhook";
 import { METHOD_LABEL, ORDER_METHODS, ORDER_STATUSES, STATUS_LABEL, type OrderMethod, type OrderStatus, type RefundState } from "./labels";
 
 export { allowedOrderActions } from "./labels";
@@ -249,11 +250,11 @@ export const getOrderDetail = defineAction({
       },
       items,
       payments: pays.map((p) => {
-        const raw = (p.raw ?? {}) as { duplicate?: boolean; oldAccountEventAt?: string };
+        const raw = (p.raw ?? {}) as { duplicate?: boolean };
         const flags: PaymentFlag[] = [];
         if (raw.duplicate === true) flags.push("duplicate");
         if (p.status === "superseded") flags.push("superseded");
-        if (raw.oldAccountEventAt) flags.push("old_account_event");
+        if (hasOldAccountEvent(p.raw)) flags.push("old_account_event");
         return { id: p.id, provider: p.provider, providerId: p.providerId, status: p.status, amountCents: p.amountCents, flags };
       }),
       links,

@@ -96,7 +96,10 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
   async function handle(key: string, body: Record<string, unknown> | undefined, query: URLSearchParams): Promise<Response> {
     if (key === "GET /payments") {
       const ref = query.get("externalReference");
-      const data = [...payments.values()].filter((p) => !p.deleted && (ref === null || p.externalReference === ref));
+      const inst = query.get("installment");
+      const data = [...payments.values()].filter(
+        (p) => !p.deleted && (ref === null || p.externalReference === ref) && (inst === null || p.installment === inst),
+      );
       return json(200, { object: "list", hasMore: false, totalCount: data.length, limit: 100, offset: 0, data });
     }
 
@@ -225,6 +228,13 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       const p = payments.get(id);
       if (!p) throw new Error(`cobrança desconhecida: ${id}`);
       p.refunds = [...refundsOf(p), { status: "DONE", value }];
+    },
+    /** Estorno total de UMA cobrança feito por fora (painel do Asaas), ex.: uma parcela de um parcelamento. */
+    refundExternally(id: string) {
+      const p = payments.get(id);
+      if (!p) throw new Error(`cobrança desconhecida: ${id}`);
+      p.refunds = [...refundsOf(p), { status: "DONE", value: (cents(p.value) - refundedCents(p)) / 100 }];
+      p.status = "REFUNDED";
     },
     setValue(id: string, value: number) {
       const p = payments.get(id);

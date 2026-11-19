@@ -135,6 +135,12 @@ export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?:
       if (!Array.isArray(r.data)) throw providerError("Resposta inválida do Asaas", { status: 200, errorCodes: [] } satisfies AsaasErrorDetails);
       return r.data as AsaasPayment[];
     },
+    /** GET /payments?installment=… : as parcelas (cobranças) de um parcelamento (até 12; limite 100 por folga). */
+    listInstallmentPayments: async (installment: string): Promise<AsaasPayment[]> => {
+      const r = await call<{ data?: unknown }>("GET", `/payments?installment=${encodeURIComponent(installment)}&limit=100`);
+      if (!Array.isArray(r.data)) throw providerError("Resposta inválida do Asaas", { status: 200, errorCodes: [] } satisfies AsaasErrorDetails);
+      return r.data as AsaasPayment[];
+    },
     getPixQrCode: (id: string) =>
       call<{ encodedImage: string; payload: string; expirationDate: string }>("GET", `/payments/${encodeURIComponent(id)}/pixQrCode`),
     deletePayment: (id: string) => call<{ deleted: boolean }>("DELETE", `/payments/${encodeURIComponent(id)}`),

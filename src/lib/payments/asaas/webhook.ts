@@ -10,7 +10,17 @@ import { log } from "@/lib/log";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
-import { classifyRefund, refundItems, refundMarkerOf, refundedCents, type RefundItem } from "./refunds";
+import {
+  classifyInstallmentRefund,
+  classifyRefund,
+  installmentParcels,
+  installmentRefundedCents,
+  refundItems,
+  refundMarkerOf,
+  refundedCents,
+  type InstallmentParcel,
+  type RefundItem,
+} from "./refunds";
 
 /** Estado das cobranças Asaas abertas de uma conta anterior da loja (fora do índice de cobrança aberta). */
 export const SUPERSEDED = "superseded";
@@ -58,8 +68,21 @@ export const applyAsaasPayment = defineAction({
     installment: z.string().min(1).max(100).nullable().optional(),
     /** Itens `refunds[]` da cobrança reconsultada (status e centavos; estorno só concluído com DONE cobrindo o total). */
     refunds: z.array(z.object({ status: z.string().max(64), cents: z.number().int().min(0) })).max(50).optional(),
-    /** Valor desta cobrança (centavos). Parcela de cartão parcelado: o estorno total da parcela é o valor dela. */
-    chargeCents: z.number().int().optional(),
+    /**
+     * Parcelado: todas as parcelas do parcelamento, reconsultadas. O estorno da venda é decidido pelo conjunto (uma
+     * parcela estornada sozinha é estorno parcial). Ausente num parcelado: estorno nunca conclui por esta cobrança.
+     */
+    parcels: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(100),
+          status: z.string().max(64),
+          refunds: z.array(z.object({ status: z.string().max(64), cents: z.number().int().min(0) })).max(50),
+          cents: z.number().int().min(0),
+        }),
+      )
+      .max(24)
+      .optional(),
   }),
   permission: "system",
   auditInput: (i) => ({
@@ -68,7 +91,7 @@ export const applyAsaasPayment = defineAction({
     valueCents: i.valueCents,
     installment: i.installment ?? null,
     refunds: i.refunds ?? [],
-    chargeCents: i.chargeCents ?? null,
+    parcels: i.parcels?.map((x) => ({ id: x.id, status: x.status, cents: x.cents, refunds: x.refunds })) ?? null,
   }),
   async run(ctx, input) {
     let p = input;
@@ -91,10 +114,18 @@ export const applyAsaasPayment = defineAction({
     // Outra parcela de um parcelamento que o pedido já conhece: é a mesma venda, não cobrança órfã nem em dobro.
     const sibling =
       !row && installment !== null ? rows.find((r) => (r.raw as { installment?: string } | null)?.installment === installment) : undefined;
+    const known = row ?? sibling;
+    const marker = refundMarkerOf(known?.raw, o.refundRequestedAt);
+    // Parcelado: o estorno é da venda inteira só quando TODAS as parcelas voltaram (a marca do pedido de estorno fica
+    // na linha da parcela que o pedido conhece). Sem a lista de parcelas, nunca conclui por uma parcela só.
+    const parcels: InstallmentParcel[] | null = installment !== null ? (p.parcels ?? []) : null;
     // Estorno: a cobrança pode seguir CONFIRMED/RECEIVED com refunds[DONE] cobrindo o total -> trata como REFUNDED.
-    const fullCents = installment !== null && p.chargeCents !== undefined ? p.chargeCents : o.totalCents;
-    const refund = classifyRefund(p.status, p.refunds ?? [], refundMarkerOf((row ?? sibling)?.raw, o.refundRequestedAt), fullCents);
+    const refund = parcels
+      ? classifyInstallmentRefund(parcels, (id) => (id === known?.providerId ? marker : null))
+      : classifyRefund(p.status, p.refunds ?? [], marker, o.totalCents);
     if (refund === "done" && mapAsaasStatus(p.status) === "paid") p = { ...p, status: "REFUNDED" };
+    // Parcela estornada (REFUNDED) sem o parcelamento inteiro: a linha acompanha o status, o pedido continua pago.
+    const parcelOnly = parcels !== null && refund !== "done" && mapAsaasStatus(p.status) === "refunded";
     if (refund === "cancelled" && o.status === "paid" && o.refundRequestedAt) {
       await ctx.tx.update(orders).set({ refundRequestedAt: null }).where(eq(orders.id, o.id));
       await alertSeller(ctx.tx, ctx.storeId, "estorno_cancelado", { orderId: o.id });
@@ -153,9 +184,12 @@ export const applyAsaasPayment = defineAction({
       await ctx.tx.update(payment).set({ status: p.status }).where(eq(payment.id, row.id));
     }
 
-    const known = row ?? sibling;
-    if (o.status === "paid" && known && refund === "requested") await noteRefundInFlight(ctx, o, known, p.refunds ?? []);
-    if (o.status === "paid" && known && refund === "partial") await notePartialRefund(ctx, o.id, known, refundedCents(p.refunds ?? []));
+    // Parcelado: os itens e o valor devolvido são os da parcela que o pedido conhece / do parcelamento inteiro.
+    const knownItems = parcels ? (parcels.find((x) => x.id === known?.providerId)?.refunds ?? []) : (p.refunds ?? []);
+    const back = parcels ? installmentRefundedCents(parcels) : refundedCents(p.refunds ?? []);
+    if (o.status === "paid" && known && refund === "requested") await noteRefundInFlight(ctx, o, known, knownItems);
+    if (o.status === "paid" && known && refund === "partial") await notePartialRefund(ctx, o.id, known, back);
+    if (parcelOnly) return { applied: false, reason: refund === "requested" ? "estorno_parcelado_em_andamento" : "estorno_parcial_parcelado" };
 
     const target = mapAsaasStatus(p.status);
     if (!target) return { applied: false, reason: "status_ignorado" };
@@ -203,7 +237,9 @@ async function notePartialRefund(ctx: Ctx, orderId: string, pay: PaymentRow, cen
 /**
  * Evento de uma cobrança que a chave atual não consegue reconsultar (4xx permanente: em geral, cobrança da conta Asaas
  * anterior da loja). Se for uma linha `superseded`, registra o evento nela e avisa o vendedor uma vez (pode ter havido
- * pagamento na conta anterior); PAYMENT_DELETED (o cancelamento que nós mesmos pedimos) só é registrado.
+ * pagamento na conta anterior). PAYMENT_DELETED (o cancelamento que nós mesmos pedimos na troca de conta) não é
+ * movimento de dinheiro: fica só em `oldAccountDeletedAt`, sem aviso, sem selo no painel e sem abrir a liberação manual,
+ * e nunca apaga um evento real registrado antes.
  */
 export const noteUnreachableAsaasPayment = defineAction({
   name: "payments.noteUnreachableAsaasPayment",
@@ -222,9 +258,12 @@ export const noteUnreachableAsaasPayment = defineAction({
       .for("update");
     if (!row || row.status !== SUPERSEDED) return { recorded: false, notified: false };
     const raw = (row.raw as Record<string, unknown> | null) ?? {};
-    const notify = p.event !== "PAYMENT_DELETED" && !raw.oldAccountNotifiedAt;
+    const deleted = p.event === OUR_CLEANUP_EVENT;
+    const notify = !deleted && !raw.oldAccountNotifiedAt;
     const now = new Date().toISOString();
-    const patch = { oldAccountEventAt: now, oldAccountEvent: p.event, ...(notify ? { oldAccountNotifiedAt: now } : {}) };
+    const patch = deleted
+      ? { oldAccountDeletedAt: now }
+      : { oldAccountEventAt: now, oldAccountEvent: p.event, ...(notify ? { oldAccountNotifiedAt: now } : {}) };
     await ctx.tx
       .update(payment)
       .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
@@ -235,6 +274,56 @@ export const noteUnreachableAsaasPayment = defineAction({
     return { recorded: true, notified: notify };
   },
 });
+
+/** Status do Asaas de cobrança com estorno pedido, em andamento ou concluído. */
+const REFUND_STATUSES = new Set(["REFUNDED", "REFUND_REQUESTED", "REFUND_IN_PROGRESS"]);
+
+/** Erro do Asaas tratado como transitório (webhook 500 / job re-tenta), sem repassar texto do Asaas. */
+const transientAsaasError = (message: string) =>
+  new ActionError("provider_error", message, { status: 0, errorCodes: [] } satisfies { status: number; errorCodes: string[] });
+
+/**
+ * Todas as parcelas de um parcelamento (HTTP: fora de transação). A listagem precisa trazer exatamente
+ * `installmentCount` parcelas (sem `count` válido, busca o parcelamento): vazia ou incompleta lança erro transitório
+ * (decidir estorno com parte das parcelas poderia concluir cedo demais ou nunca). `permanentIsTransient`: 4xx da
+ * listagem também vira transitório (no webhook, para o evento não ser descartado como cobrança inalcançável).
+ */
+export async function fetchInstallmentParcels(
+  client: AsaasClient,
+  installment: string,
+  count?: number,
+  o: { permanentIsTransient?: boolean } = {},
+): Promise<InstallmentParcel[]> {
+  const expected = count !== undefined && Number.isInteger(count) && count > 0 ? count : Number((await client.getInstallment(installment)).installmentCount);
+  let list: AsaasPayment[];
+  try {
+    list = await client.listInstallmentPayments(installment);
+  } catch (e) {
+    if (o.permanentIsTransient && permanentAsaasError(e) !== null) throw transientAsaasError("Não foi possível listar as parcelas no Asaas");
+    throw e;
+  }
+  const parcels = installmentParcels(list, installment);
+  if (!Number.isInteger(expected) || expected < 1 || parcels.length !== expected) {
+    log.warn("Asaas: listagem de parcelas incompleta; estorno não decidido agora", { installment, expected, got: parcels.length });
+    throw transientAsaasError("Parcelas do parcelamento incompletas no Asaas");
+  }
+  return parcels;
+}
+
+/** Evento que a limpeza da troca de conta gera (DELETE da cobrança aberta): nunca indica pagamento. */
+export const OUR_CLEANUP_EVENT = "PAYMENT_DELETED";
+
+/**
+ * A linha `superseded` recebeu evento real da conta Asaas anterior (o comprador pode ter pago lá)? Linhas antigas
+ * gravadas com PAYMENT_DELETED em `oldAccountEvent` (antes desta regra) não contam.
+ */
+export function hasOldAccountEvent(raw: unknown): boolean {
+  const r = raw as { oldAccountEventAt?: unknown; oldAccountEvent?: unknown; oldAccountNotifiedAt?: unknown } | null;
+  // `oldAccountNotifiedAt` só é gravado por evento real (inclusive nas linhas antigas em que um DELETED posterior
+  // sobrescreveu `oldAccountEvent`).
+  if (typeof r?.oldAccountNotifiedAt === "string") return true;
+  return typeof r?.oldAccountEventAt === "string" && r.oldAccountEvent !== OUR_CLEANUP_EVENT;
+}
 
 /** Status HTTP do erro do Asaas (0 = rede/timeout), ou null se não for erro do cliente Asaas. */
 function asaasHttpStatus(e: unknown): number | null {
@@ -281,7 +370,7 @@ export type AsaasPaymentInput = {
   externalReference: string | null;
   installment: string | null;
   refunds: RefundItem[];
-  chargeCents: number;
+  parcels?: InstallmentParcel[];
 };
 
 /**
@@ -291,9 +380,16 @@ export type AsaasPaymentInput = {
 export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment): Promise<AsaasPaymentInput> {
   let valueCents = reaisToCents(Number(fresh.value));
   let installment: string | null = null;
+  let parcels: InstallmentParcel[] | undefined;
   if (typeof fresh.installment === "string" && fresh.installment) {
     installment = fresh.installment;
-    valueCents = reaisToCents(Number((await client.getInstallment(installment)).value));
+    const inst = await client.getInstallment(installment);
+    valueCents = reaisToCents(Number(inst.value));
+    // Todas as parcelas, só quando a parcela mostra estorno: a confirmação de pagamento nunca depende desta listagem.
+    // Falha aqui (inclusive 4xx) é transitória: o webhook responde 500 e o Asaas reenvia; nunca decide estorno às cegas.
+    if (REFUND_STATUSES.has(String(fresh.status)) || refundItems(fresh).length > 0) {
+      parcels = await fetchInstallmentParcels(client, installment, Number(inst.installmentCount), { permanentIsTransient: true });
+    }
   }
   return {
     paymentId: fresh.id,
@@ -302,7 +398,7 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
     externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
     installment,
     refunds: refundItems(fresh),
-    chargeCents: reaisToCents(Number(fresh.value)),
+    ...(parcels ? { parcels } : {}),
   };
 }
 

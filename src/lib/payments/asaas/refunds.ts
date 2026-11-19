@@ -71,3 +71,52 @@ export function classifyRefund(status: string, items: RefundItem[], marker: Refu
   if (done > 0) return "partial";
   return "none";
 }
+
+/** Parcela de um parcelamento reconsultada no Asaas: id, status, `refunds[]` e valor da parcela (centavos). */
+export interface InstallmentParcel {
+  id: string;
+  status: string;
+  refunds: RefundItem[];
+  cents: number;
+}
+
+/** Parcelas de um parcelamento a partir da listagem do Asaas (só as do parcelamento pedido, sem as apagadas). */
+export function installmentParcels(list: { id?: unknown; status?: unknown; value?: unknown; installment?: unknown; deleted?: unknown }[], installment: string): InstallmentParcel[] {
+  return list
+    .filter((p) => p.installment === installment && p.deleted !== true && typeof p.id === "string" && p.id)
+    .slice(0, 24)
+    .map((p) => ({
+      id: String(p.id).slice(0, 100),
+      status: String(p.status ?? "").slice(0, 64),
+      refunds: refundItems(p as object),
+      cents: Math.max(0, reaisToCents(Number(p.value) || 0)),
+    }));
+}
+
+/**
+ * Estado de estorno de um parcelamento inteiro (cartão parcelado: cada parcela é uma cobrança). A venda só está
+ * estornada quando TODAS as parcelas voltaram; uma parcela estornada sozinha (painel do Asaas) é estorno parcial.
+ * `markerFor(id)`: a marca do pedido de estorno gravada na linha daquela parcela (para detectar `cancelled`).
+ * - `done`: todas as parcelas `done`;
+ * - `requested`: alguma em andamento (o estorno do parcelamento ainda está correndo: sem aviso de parcial), ou há
+ *   marca de um pedido de estorno NOSSO do parcelamento inteiro e só parte das parcelas voltou até agora (o Asaas
+ *   conclui as parcelas em momentos diferentes; esse meio-tempo não é estorno parcial);
+ * - `partial`: alguma `done` ou com estorno parcial, nada em andamento e sem pedido nosso;
+ * - `cancelled`: o estorno pedido agora terminou sem nada devolvido;
+ * - `none`: nada em andamento nem devolvido. Sem parcelas (resposta vazia): `none` (nunca conclui às cegas).
+ */
+export function classifyInstallmentRefund(parcels: InstallmentParcel[], markerFor: (id: string) => RefundMarker | null): RefundState {
+  if (parcels.length === 0) return "none";
+  const states = parcels.map((p) => classifyRefund(p.status, p.refunds, markerFor(p.id), p.cents));
+  if (states.every((x) => x === "done")) return "done";
+  if (states.includes("requested")) return "requested";
+  const ours = parcels.some((p) => markerFor(p.id) !== null);
+  if (states.some((x) => x === "done" || x === "partial")) return ours ? "requested" : "partial";
+  if (states.includes("cancelled")) return "cancelled";
+  return "none";
+}
+
+/** Quanto do parcelamento já voltou (centavos): parcela estornada inteira conta o valor dela; as demais, os DONE. */
+export function installmentRefundedCents(parcels: InstallmentParcel[]): number {
+  return parcels.reduce((n, p) => n + (p.status === "REFUNDED" ? p.cents : Math.min(p.cents, refundedCents(p.refunds))), 0);
+}

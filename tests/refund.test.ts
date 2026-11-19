@@ -10,7 +10,7 @@ import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { log } from "@/lib/log";
 import { refundOrder } from "@/lib/payments/refund";
-import { classifyRefund, refundItems } from "@/lib/payments/asaas/refunds";
+import { classifyInstallmentRefund, classifyRefund, installmentParcels, installmentRefundedCents, refundItems } from "@/lib/payments/asaas/refunds";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
 import { ctxOf, createFakeAsaas, newAsaasOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
@@ -511,5 +511,21 @@ describe("estorno em andamento e parcial (webhook e job)", () => {
     expect(classifyRefund("RECEIVED", items(["DONE", 3], ["PENDING", 6.9]), null, 990)).toBe("requested");
     expect(classifyRefund("RECEIVED", items(["DONE", 3], ["CANCELLED", 6.9]), { at: "x", before: 1 }, 990)).toBe("cancelled");
     expect(classifyRefund("RECEIVED", [], null, 990)).toBe("none");
+  });
+
+  test("classifyInstallmentRefund: a venda parcelada só está estornada com TODAS as parcelas de volta", () => {
+    const parcel = (id: string, status: string, refunds: [string, number][] = []) => ({ id, status, value: 3.33, installment: "ins_1", refunds: refunds.map(([s, value]) => ({ status: s, value })) });
+    const of = (...ps: ReturnType<typeof parcel>[]) => installmentParcels(ps, "ins_1");
+    const none = () => null;
+    expect(classifyInstallmentRefund(of(parcel("a", "REFUNDED"), parcel("b", "REFUNDED"), parcel("c", "REFUNDED")), none)).toBe("done");
+    expect(classifyInstallmentRefund(of(parcel("a", "REFUNDED"), parcel("b", "CONFIRMED"), parcel("c", "CONFIRMED")), none)).toBe("partial");
+    expect(classifyInstallmentRefund(of(parcel("a", "CONFIRMED"), parcel("b", "REFUNDED"), parcel("c", "CONFIRMED")), none)).toBe("partial");
+    expect(classifyInstallmentRefund(of(parcel("a", "REFUNDED"), parcel("b", "CONFIRMED", [["PENDING", 3.33]]), parcel("c", "CONFIRMED")), none)).toBe("requested");
+    expect(classifyInstallmentRefund(of(parcel("a", "CONFIRMED"), parcel("b", "CONFIRMED")), none)).toBe("none");
+    expect(classifyInstallmentRefund(of(parcel("a", "CONFIRMED", [["CANCELLED", 3.33]]), parcel("b", "CONFIRMED")), (id) => (id === "a" ? { at: "x", before: 0 } : null))).toBe("cancelled");
+    // Sem parcelas (lista vazia ou de outro parcelamento / apagadas): nunca conclui às cegas.
+    expect(classifyInstallmentRefund([], none)).toBe("none");
+    expect(installmentParcels([{ ...parcel("x", "REFUNDED"), installment: "ins_2" }, { ...parcel("y", "REFUNDED"), deleted: true }], "ins_1")).toEqual([]);
+    expect(installmentRefundedCents(of(parcel("a", "REFUNDED"), parcel("b", "CONFIRMED", [["DONE", 1]]), parcel("c", "CONFIRMED")))).toBe(433);
   });
 });

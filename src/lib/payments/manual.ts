@@ -6,7 +6,7 @@ import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { PIX_MANUAL_RESERVE_MS } from "@/lib/orders/labels";
 import { transitionOrder } from "@/lib/orders/state";
 import { validCpf } from "@/lib/validation/br";
-import { SUPERSEDED } from "./asaas/webhook";
+import { SUPERSEDED, hasOldAccountEvent } from "./asaas/webhook";
 import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
 
 export const MANUAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -169,7 +169,7 @@ export const releaseOrder = defineAction({
         .select({ providerId: payment.providerId, raw: payment.raw })
         .from(payment)
         .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas"), eq(payment.status, SUPERSEDED)));
-      const withEvent = rows.find((r) => typeof (r.raw as { oldAccountEventAt?: unknown } | null)?.oldAccountEventAt === "string");
+      const withEvent = rows.find((r) => hasOldAccountEvent(r.raw));
       if (!withEvent) {
         throw new ActionError("conflict", "Só pedidos de Pix manual, ou de Pix Asaas com cobrança movimentada na conta Asaas anterior, podem ser liberados à mão");
       }

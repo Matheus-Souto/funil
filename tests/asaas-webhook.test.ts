@@ -7,6 +7,9 @@ import { ALLOWED, type OrderStatus } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook, mapAsaasStatus } from "@/lib/payments/asaas/webhook";
+import { runAction } from "@/lib/actions/core";
+import { getOrderDetail } from "@/lib/orders/panel";
+import { releaseOrder } from "@/lib/payments/manual";
 import { POST } from "@/app/api/webhooks/asaas/[storeId]/route";
 import { createTestDb, type TestDb } from "./db";
 import { createFakeAsaas, newAsaasOrder, seedAsaasStore } from "./asaas-helpers";
@@ -368,12 +371,40 @@ describe("reconsulta com erro permanente (4xx) não vira 500 em loop", () => {
     expect(await statusOf(s.order.id)).toBe("pending");
   });
 
-  test("PAYMENT_DELETED (o cancelamento que nós pedimos na conta anterior) é registrado sem avisar o vendedor", async () => {
+  test("PAYMENT_DELETED (o cancelamento que nós pedimos na conta anterior) só é registrado: sem aviso e sem liberar à mão", async () => {
     const s = await superseded();
-    const r = await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), { event: "PAYMENT_DELETED", payment: { id: s.paymentId } });
-    expect(r.status).toBe(200);
-    expect(((await rowOf(s.paymentId)).raw as { oldAccountEvent?: string }).oldAccountEvent).toBe("PAYMENT_DELETED");
+    const deleted = { event: "PAYMENT_DELETED", payment: { id: s.paymentId } };
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), deleted)).status).toBe(200);
+    const raw = (await rowOf(s.paymentId)).raw as { oldAccountEventAt?: string; oldAccountEvent?: string; oldAccountDeletedAt?: string };
+    expect(typeof raw.oldAccountDeletedAt).toBe("string");
+    // Não conta como movimento na conta anterior: nem selo no painel nem botão de liberar.
+    expect(raw.oldAccountEventAt).toBeUndefined();
+    expect(raw.oldAccountEvent).toBeUndefined();
     expect(await notifies(s.order.id)).toHaveLength(0);
+    const call = { storeId: s.storeId, actor: { kind: "user" as const, userId: "u1", role: "owner" as const }, origin: "panel" as const };
+    await expect(runAction(releaseOrder, call, { orderId: s.order.id })).rejects.toMatchObject({ code: "conflict" });
+    const detail = await runAction(getOrderDetail, call, { id: s.order.id });
+    expect(detail.payments.flatMap((p) => p.flags)).not.toContain("old_account_event");
+  });
+
+  test("evento real e depois PAYMENT_DELETED (em qualquer ordem): o evento real continua valendo", async () => {
+    for (const order of [
+      ["PAYMENT_RECEIVED", "PAYMENT_DELETED"],
+      ["PAYMENT_DELETED", "PAYMENT_RECEIVED"],
+    ]) {
+      const s = await superseded();
+      for (const ev of order) {
+        expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), { event: ev, payment: { id: s.paymentId } })).status).toBe(200);
+      }
+      const raw = (await rowOf(s.paymentId)).raw as { oldAccountEventAt?: string; oldAccountEvent?: string };
+      expect(typeof raw.oldAccountEventAt).toBe("string");
+      expect(raw.oldAccountEvent).toBe("PAYMENT_RECEIVED");
+      expect(await notifies(s.order.id)).toHaveLength(1);
+      await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, s.order.id));
+      const call = { storeId: s.storeId, actor: { kind: "user" as const, userId: "u1", role: "owner" as const }, origin: "panel" as const };
+      await runAction(releaseOrder, call, { orderId: s.order.id });
+      expect(await statusOf(s.order.id)).toBe("paid");
+    }
   });
 
   test("404 de cobrança desconhecida e 400: 200 sem efeito", async () => {

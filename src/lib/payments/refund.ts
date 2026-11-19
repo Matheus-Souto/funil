@@ -10,9 +10,17 @@ import { orders, payment } from "@/lib/db/schema";
 import { enqueue, hasOpenJob, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
-import { asaasClientFor, reaisToCents, type AsaasPayment } from "./asaas/client";
-import { classifyRefund, refundItems, refundMarkerOf, refundedCents, type RefundMarker } from "./asaas/refunds";
-import { mapAsaasStatus } from "./asaas/webhook";
+import { asaasClientFor, type AsaasPayment } from "./asaas/client";
+import {
+  classifyInstallmentRefund,
+  classifyRefund,
+  refundItems,
+  refundMarkerOf,
+  refundedCents,
+  type RefundMarker,
+  type RefundState,
+} from "./asaas/refunds";
+import { fetchInstallmentParcels, mapAsaasStatus } from "./asaas/webhook";
 
 type PaymentRow = typeof payment.$inferSelect;
 
@@ -59,7 +67,15 @@ export const refundOrder = defineAction({
       .select()
       .from(payment)
       .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas")));
-    if (!refundable(rows, false)) throw new ActionError("conflict", "Pedido sem cobrança paga no Asaas para estornar");
+    if (!refundable(rows, false)) {
+      // Pedido pago cuja parcela conhecida já foi estornada no painel do Asaas: o parcelamento está parcialmente estornado.
+      const parcel = rows.find((r) => (r.raw as { installment?: string } | null)?.installment && ALREADY_REFUNDED.has(r.status));
+      if (parcel?.status === "REFUNDED") {
+        throw new ActionError("conflict", "Parte das parcelas já foi estornada no Asaas. Conclua o estorno das demais parcelas no painel do Asaas.");
+      }
+      if (parcel) throw new ActionError("conflict", "O estorno deste pedido já está em andamento no Asaas. Acompanhe por lá.");
+      throw new ActionError("conflict", "Pedido sem cobrança paga no Asaas para estornar");
+    }
     const message = "Estorno solicitado. O pedido muda para reembolsado assim que o Asaas confirmar.";
     // Já há um job na fila/rodando para este pedido: não enfileira outro (o job é idempotente, mas evita ruído).
     if (await hasOpenJob(ctx.tx, "refund_order", o.id)) return { orderId: o.id, status: "refund_requested" as const, message };
@@ -160,8 +176,13 @@ export const refundOrderJob: JobHandler = async (j) => {
   }
   const { client, providerId, pay } = pre;
   const installment = (pay.raw as { installment?: string } | null)?.installment;
-  // Parcela de cartão parcelado: cada parcela volta inteira (o estorno é do parcelamento todo).
-  const fullCentsOf = (p: AsaasPayment) => (installment ? reaisToCents(Number(p.value)) : pre.totalCents);
+  // Estado do estorno. Cartão parcelado: decidido por TODAS as parcelas (uma parcela estornada sozinha no painel do
+  // Asaas é estorno parcial, nunca a venda estornada); a marca vale para a parcela desta linha. HTTP: fora de transação.
+  const stateOf = async (p: AsaasPayment, m: RefundMarker | null): Promise<RefundState> => {
+    if (!installment) return classifyRefund(String(p.status), refundItems(p), m, pre.totalCents);
+    const parcels = await fetchInstallmentParcels(client, installment);
+    return classifyInstallmentRefund(parcels, (id) => (id === providerId ? m : null));
+  };
 
   // 2. HTTP fora de transação.
   let fresh: AsaasPayment;
@@ -174,11 +195,26 @@ export const refundOrderJob: JobHandler = async (j) => {
     return;
   }
   let marker = refundMarkerOf(pay.raw, pre.requestedAt);
-  let state = classifyRefund(String(fresh.status), refundItems(fresh), marker, fullCentsOf(fresh));
+  let state: RefundState;
+  try {
+    state = await stateOf(fresh, marker);
+  } catch (e) {
+    const refused = permanentAsaasRefusal(e);
+    if (!refused) throw e;
+    await refundRefused(storeId, orderId, pay.id, refused);
+    return;
+  }
   if (state === "requested" && marker && !marker.acceptedAt) {
     // O POST anterior foi aceito (a resposta se perdeu): agora há prova de que o Asaas está estornando.
     marker = { ...marker, acceptedAt: new Date().toISOString() };
     await patchRaw(storeId, pay.id, { refundPost: marker });
+  }
+  if (state === "partial" && installment) {
+    // Parcial num parcelamento (ex.: uma parcela estornada no painel do Asaas): o restante por parcela não é
+    // calculável com segurança; o vendedor resolve no Asaas. Antes da checagem de "paga": a parcela desta linha pode
+    // ser justamente a estornada.
+    await refundRefused(storeId, orderId, pay.id, { code: "parcial_parcelado" });
+    return;
   }
   if (state === "none" || state === "partial") {
     if (mapAsaasStatus(String(fresh.status)) !== "paid") {
@@ -186,12 +222,7 @@ export const refundOrderJob: JobHandler = async (j) => {
       log.warn("refund_order: cobrança não está paga no Asaas; estorno não enviado", { orderId, paymentId: providerId, status: fresh.status });
       return;
     }
-    const remaining = state === "partial" ? fullCentsOf(fresh) - refundedCents(refundItems(fresh)) : undefined;
-    if (state === "partial" && installment) {
-      // Parcial num parcelamento: o restante por parcela não é calculável com segurança; o vendedor resolve no Asaas.
-      await refundRefused(storeId, orderId, pay.id, { code: "parcial_parcelado" });
-      return;
-    }
+    const remaining = state === "partial" ? pre.totalCents - refundedCents(refundItems(fresh)) : undefined;
     // Marca antes do POST: numa retentativa, os itens de refunds[] depois de `before` são deste pedido de estorno.
     const posted: RefundMarker = { at: new Date().toISOString(), before: refundItems(fresh).length };
     await patchRaw(storeId, pay.id, { refundPost: posted });
@@ -206,8 +237,7 @@ export const refundOrderJob: JobHandler = async (j) => {
     }
     marker = { ...posted, acceptedAt: new Date().toISOString() };
     await patchRaw(storeId, pay.id, { refundPost: marker });
-    const after = await client.getPayment(providerId);
-    state = classifyRefund(String(after.status), refundItems(after), marker, fullCentsOf(after));
+    state = await stateOf(await client.getPayment(providerId), marker);
   }
 
   if (state === "cancelled") {

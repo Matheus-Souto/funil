@@ -316,6 +316,18 @@ describe("orders.release", () => {
       .set({ raw: { oldAccountEventAt: new Date().toISOString(), oldAccountEvent: "PAYMENT_RECEIVED" } })
       .where(eq(payment.providerId, old.providerId));
     await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, o.id));
+    // Linha antiga gravada só com PAYMENT_DELETED (a nossa limpeza na troca de conta): não é pagamento, não libera.
+    await t.ownerDb
+      .update(payment)
+      .set({ raw: { oldAccountEventAt: new Date().toISOString(), oldAccountEvent: "PAYMENT_DELETED" } })
+      .where(eq(payment.providerId, old.providerId));
+    await expect(runAction(releaseOrder, call, { orderId: o.id })).rejects.toMatchObject({ code: "conflict" });
+    // Linha antiga em que um DELETED posterior sobrescreveu o evento real: o aviso já dado (oldAccountNotifiedAt) vale.
+    const at = new Date().toISOString();
+    await t.ownerDb
+      .update(payment)
+      .set({ raw: { oldAccountEventAt: at, oldAccountEvent: "PAYMENT_DELETED", oldAccountNotifiedAt: at } })
+      .where(eq(payment.providerId, old.providerId));
     await runAction(releaseOrder, call, { orderId: o.id });
     const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, o.id));
     expect(row!.status).toBe("paid");
