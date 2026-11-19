@@ -57,7 +57,7 @@ describe("sessão", () => {
     const { storeId } = await seedStore();
     const u = await seedUser(storeId, "support");
     const token = await createSession(u.userId, storeId);
-    expect(await lookupSession(token)).toEqual({ storeId, actor: { kind: "user", userId: u.userId, role: "support" } });
+    expect(await lookupSession(token)).toEqual({ storeId, actor: { kind: "user", userId: u.userId, role: "support" }, mustChangePassword: false });
     const rows = await t.ownerDb.select().from(session).where(eq(session.idHash, sha256(token)));
     expect(rows).toHaveLength(1);
     expect(await lookupSession("token-inexistente")).toBeNull();

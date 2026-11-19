@@ -59,7 +59,24 @@ describe("requirePanelActor", () => {
       .returning({ id: users.id });
     await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "admin" });
     jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
-    expect(await requirePanelActor()).toEqual({ storeId, actor: { kind: "user", userId: u!.id, role: "admin" } });
+    expect(await requirePanelActor()).toEqual({ storeId, actor: { kind: "user", userId: u!.id, role: "admin" }, mustChangePassword: false });
+  });
+
+  test("senha temporária: toda página/ação vai para a troca de senha; só a tela de troca passa", async () => {
+    const { storeId } = await seedStore();
+    const [u] = await t.ownerDb
+      .insert(users)
+      .values({ email: "temporaria@exemplo.com", name: "T", passwordHash: await hashPassword("senha-correta-123"), mustChangePassword: true })
+      .returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "owner" });
+    jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
+    expect(await redirectTarget(() => requirePanelActor())).toBe("/admin/senha");
+    expect(await requirePanelActor({ allowPasswordChange: true })).toMatchObject({ storeId, mustChangePassword: true });
+  });
+
+  test("a tela de troca de senha exige sessão", async () => {
+    const mod = (await import(join(import.meta.dir, "..", "src", "app", "admin", "senha", "page.tsx"))) as { default: (p: unknown) => unknown };
+    expect(await redirectTarget(() => mod.default({ searchParams: Promise.resolve({}) }))).toBe("/admin/login");
   });
 });
 

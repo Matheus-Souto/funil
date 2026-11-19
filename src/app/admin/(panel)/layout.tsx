@@ -3,7 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
-import { getPanelActor, getPanelIdentity } from "@/lib/auth/session";
+import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { ROLE_LABEL } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
@@ -19,6 +19,7 @@ export const dynamic = "force-dynamic";
 export default async function PanelLayout({ children }: { children: ReactNode }) {
   const panel = await getPanelActor();
   if (!panel) redirect((await needsSetup()) ? "/admin/setup" : "/admin/login");
+  if (panel.mustChangePassword) redirect(CHANGE_PASSWORD_PATH);
   const role = panel.actor.role;
   const can = (p: Parameters<typeof hasPermission>[1]) => hasPermission(role, p);
   const id = await getPanelIdentity(panel);
@@ -78,6 +79,9 @@ export default async function PanelLayout({ children }: { children: ReactNode })
               <b>{id.userName}</b>
               <small>{id.userEmail}</small>
             </span>
+            <Link href={CHANGE_PASSWORD_PATH} className={s.iconBtn} aria-label="Trocar senha" title="Trocar senha">
+              <PIcon name="lock" />
+            </Link>
             <form action={logoutAction}>
               <button type="submit" className={s.iconBtn} aria-label="Sair" title="Sair">
                 <PIcon name="log-out" />

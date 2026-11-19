@@ -85,6 +85,10 @@ export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Pro
               {i.label}
             </Link>
           ))}
+          <Link className={s.navItem} href="/admin/senha" onClick={() => setOpen(false)}>
+            <PIcon name="lock" />
+            Trocar senha
+          </Link>
           <form action={logout}>
             <button type="submit" className={s.navItem} style={{ width: "100%", border: 0, background: "none", font: "inherit", cursor: "pointer" }}>
               <PIcon name="log-out" />

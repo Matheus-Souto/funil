@@ -1,5 +1,6 @@
 import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
+import { listTeam } from "@/lib/auth/account";
 import { requirePanelActor } from "@/lib/auth/session";
 import { getStoreSettings } from "@/lib/store-settings";
 import { PageHead } from "../../blocks";
@@ -7,6 +8,7 @@ import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { SettingsForm } from "./form";
+import { TeamList } from "./team";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Configurações" };
@@ -15,6 +17,7 @@ export default async function SettingsPage() {
   const panel = await requirePanelActor();
   const st = await runAction(getStoreSettings, { ...panel, origin: "panel" }, {});
   const canWrite = hasPermission(panel.actor.role, "connections.write");
+  const team = hasPermission(panel.actor.role, "team.manage") ? await runAction(listTeam, { ...panel, origin: "panel" }, {}) : null;
   const host = new URL(st.checkoutBaseUrl).host;
   return (
     <>
@@ -59,6 +62,19 @@ export default async function SettingsPage() {
           </details>
         </section>
       </div>
+
+      {team ? (
+        <div className={s.settingsRow} id="equipe">
+          <div>
+            <h2 className={s.sectionTitle}>Equipe</h2>
+            <p>
+              Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
+              <a href="/admin/senha">Trocar senha</a>.
+            </p>
+          </div>
+          <TeamList members={team} />
+        </div>
+      ) : null}
 
       <div className={s.settingsRow}>
         <div>

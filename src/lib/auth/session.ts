@@ -17,7 +17,15 @@ const LOCK_MINUTES = 15;
 export const MAX_EMAIL_LENGTH = 254;
 export const MAX_PASSWORD_LENGTH = 256;
 
-export type PanelActor = { storeId: string; actor: Extract<Actor, { kind: "user" }> };
+export type PanelActor = {
+  storeId: string;
+  actor: Extract<Actor, { kind: "user" }>;
+  /** Senha temporária ainda não trocada: o painel só abre a tela de troca de senha. */
+  mustChangePassword?: boolean;
+};
+
+/** Tela de troca de senha (fora do grupo do painel, para a troca obrigatória não entrar em laço). */
+export const CHANGE_PASSWORD_PATH = "/admin/senha";
 
 /** Cria a sessão (guarda só sha256 do token) e devolve o token para o cookie. */
 export async function createSession(userId: string, storeId: string): Promise<string> {
@@ -35,13 +43,14 @@ export async function createSession(userId: string, storeId: string): Promise<st
 export async function lookupSession(token: string): Promise<PanelActor | null> {
   if (!token) return null;
   const [row] = await db
-    .select({ storeId: session.storeId, userId: session.userId, role: membership.role })
+    .select({ storeId: session.storeId, userId: session.userId, role: membership.role, mustChangePassword: users.mustChangePassword })
     .from(session)
     .innerJoin(membership, and(eq(membership.userId, session.userId), eq(membership.storeId, session.storeId)))
+    .innerJoin(users, eq(users.id, session.userId))
     .where(and(eq(session.idHash, sha256(token)), gt(session.expiresAt, sql`now()`)))
     .limit(1);
   if (!row) return null;
-  return { storeId: row.storeId, actor: { kind: "user", userId: row.userId, role: row.role as Role } };
+  return { storeId: row.storeId, actor: { kind: "user", userId: row.userId, role: row.role as Role }, mustChangePassword: row.mustChangePassword };
 }
 
 export async function deleteSession(token: string): Promise<void> {
@@ -129,12 +138,19 @@ export async function getPanelActor(): Promise<PanelActor | null> {
 
 /**
  * Porta de entrada de TODA página e server action do painel (o layout não protege server actions):
- * sem sessão válida redireciona para /admin/login; com sessão devolve a loja e o ator para `runAction`.
+ * sem sessão válida redireciona para /admin/login; com senha temporária ainda não trocada, para a troca de senha
+ * (só a própria tela de troca passa `allowPasswordChange`); com sessão devolve a loja e o ator para `runAction`.
  */
-export async function requirePanelActor(): Promise<PanelActor> {
+export async function requirePanelActor(opts: { allowPasswordChange?: boolean } = {}): Promise<PanelActor> {
   const panel = await getPanelActor();
   if (!panel) redirect("/admin/login");
+  if (panel.mustChangePassword && !opts.allowPasswordChange) redirect(CHANGE_PASSWORD_PATH);
   return panel;
+}
+
+/** Depois de trocar a senha (todas as sessões do usuário foram apagadas): sessão nova só para este navegador. */
+export async function renewSessionCookie(panel: PanelActor): Promise<void> {
+  await setSessionCookie(await createSession(panel.actor.userId, panel.storeId));
 }
 
 export async function destroySession(): Promise<void> {

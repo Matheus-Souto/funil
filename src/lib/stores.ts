@@ -156,7 +156,8 @@ export async function createStoreWithOwner(raw: {
         ? []
         : await tx
             .insert(users)
-            .values({ email: input.ownerEmail, name: input.ownerEmail.split("@")[0]!, passwordHash })
+            // Senha temporária (impressa no terminal do operador): troca obrigatória no primeiro login.
+            .values({ email: input.ownerEmail, name: input.ownerEmail.split("@")[0]!, passwordHash, mustChangePassword: true })
             .returning({ id: users.id });
       const userId = (existing ?? created)!.id;
       await tx.insert(membership).values({ userId, storeId: s!.id, role: "owner" });

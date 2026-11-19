@@ -304,6 +304,10 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
    docker compose exec app store-create --name "Minha Loja" --slug minhaloja --owner-email dono@exemplo.com
    ```
 
+   No primeiro login, o painel exige que o dono troque a senha temporária (ela passou pelo terminal do operador).
+   Depois, qualquer pessoa troca a própria senha em "Trocar senha" (ícone de cadeado), o que encerra as outras sessões
+   dela; o dono encerra as sessões de um membro em Configurações → Equipe.
+
 3. HTTPS dos subdomínios e domínios próprios. Duas opções:
    - **Lista fixa (sem plugin):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (fora do git), ponha
      `CADDYFILE=Caddyfile.local` no `.env` e, no `Caddyfile.local`, troque a primeira linha por

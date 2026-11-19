@@ -5,7 +5,8 @@
 import { redirect } from "next/navigation";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { ackAlert } from "@/lib/alerts";
-import { destroySession, requirePanelActor, type PanelActor } from "@/lib/auth/session";
+import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
+import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
 import { resendOrder } from "@/lib/delivery/jobs";
@@ -44,6 +45,31 @@ async function call<I, O>(panel: PanelActor, action: Action<I, O>, input: unknow
     if (e instanceof ActionError) return { ok: false, error: describe(e), code: e.code };
     throw e;
   }
+}
+
+// ---- conta e equipe --------------------------------------------------------------------------------------------
+
+const formField = (f: FormData, k: string) => (typeof f.get(k) === "string" ? (f.get(k) as string) : "");
+
+/** Tela /admin/senha: troca a senha, encerra todas as sessões do usuário e abre uma sessão nova neste navegador. */
+export async function changePasswordFormAction(form: FormData): Promise<void> {
+  const panel = await requirePanelActor({ allowPasswordChange: true });
+  const next = formField(form, "newPassword");
+  if (next !== formField(form, "confirmPassword")) redirect("/admin/senha?erro=confirmacao");
+  let target = "/admin/senha?ok=1";
+  try {
+    await runAction(changePassword, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, { currentPassword: formField(form, "currentPassword"), newPassword: next });
+    await renewSessionCookie(panel);
+  } catch (e) {
+    if (!(e instanceof ActionError)) throw e;
+    target = `/admin/senha?erro=${e.code === "forbidden" ? "atual" : e.code === "rate_limited" ? "limite" : "nova"}`;
+  }
+  redirect(target);
+}
+
+export async function revokeMemberSessionsAction(userId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, revokeMemberSessions, { userId }, (o) => (o.revoked === 1 ? "1 sessão encerrada." : `${o.revoked} sessões encerradas.`));
 }
 
 export async function logoutAction(): Promise<void> {

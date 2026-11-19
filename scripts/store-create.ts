@@ -34,6 +34,7 @@ async function main(): Promise<number> {
     console.log(`Loja criada: ${values.slug} (${r.storeId})`);
     if (r.temporaryPassword) {
       console.log(`Senha temporária de ${values["owner-email"]} (aparece só agora): ${r.temporaryPassword}`);
+      console.log("No primeiro acesso ao painel, o sistema exige trocar esta senha.");
     } else {
       console.log(`${values["owner-email"]} já existia e foi vinculado como dono (senha inalterada).`);
     }
