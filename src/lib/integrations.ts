@@ -71,6 +71,17 @@ let processSecrets: IntegrationSecrets | undefined;
 const defaultSecrets = (): IntegrationSecrets =>
   (processSecrets ??= integrationSecretsFor(env));
 
+/**
+ * Segredo de conexão que as chaves do processo não abrem (ex.: `v1.` no serviço de cartão, que não tem o SECRET, ou
+ * `a1.` com a ASAAS_SEAL_KEY trocada). A mensagem não leva valores; a causa original fica em `cause`.
+ */
+export class IntegrationSecretUnreadable extends Error {
+  override name = "IntegrationSecretUnreadable";
+  constructor(kind: string, options?: { cause?: unknown }) {
+    super(`o segredo da conexão ${kind} não pode ser aberto com as chaves deste processo`, options);
+  }
+}
+
 /** Abre o segredo de uma conexão com as chaves do processo (ver `IntegrationSecrets`). */
 export const openIntegrationSecret = (kind: string, sealed: string): string => defaultSecrets().open(kind, sealed);
 
@@ -82,7 +93,14 @@ export async function getIntegration<K extends IntegrationKind>(
 ): Promise<{ config: IntegrationConfig; secret: string | null } | null> {
   const [row] = await tx.select().from(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, kind)));
   if (!row) return null;
-  return { config: row.config as IntegrationConfig, secret: row.secret === null ? null : openIntegrationSecret(kind, row.secret) };
+  if (row.secret === null) return { config: row.config as IntegrationConfig, secret: null };
+  let secret: string;
+  try {
+    secret = openIntegrationSecret(kind, row.secret);
+  } catch (e) {
+    throw new IntegrationSecretUnreadable(kind, { cause: e });
+  }
+  return { config: row.config as IntegrationConfig, secret };
 }
 
 /**
@@ -192,13 +210,17 @@ export async function unsealAsaasSecrets(keys: { secret?: string; asaasKey?: str
 
 /**
  * Confere se as chaves do processo abrem as conexões `asaas` já em `a1.`: `sealed` = quantas estão em a1,
- * `unreadable` = quantas delas não abrem (ASAAS_SEAL_KEY ausente ou diferente). Usada no boot do app e do serviço de
- * cartão. Erro de banco propaga. `secrets` existe para os testes.
+ * `unreadable` = quantas delas não abrem (ASAAS_SEAL_KEY ausente ou diferente), `legacy` = quantas seguem em `v1.`
+ * (o serviço de cartão, sem SECRET, não as abre). Usada no boot do app e do serviço de cartão. Erro de banco propaga.
+ * `secrets` existe para os testes.
  */
-export async function checkAsaasSealKey(secrets: IntegrationSecrets = defaultSecrets()): Promise<{ sealed: number; unreadable: number }> {
+export async function checkAsaasSealKey(
+  secrets: IntegrationSecrets = defaultSecrets(),
+): Promise<{ sealed: number; unreadable: number; legacy: number }> {
   const stores = await db.select({ id: store.id }).from(store);
   let sealed = 0;
   let unreadable = 0;
+  let legacy = 0;
   for (const s of stores) {
     const [row] = await withStore(s.id, (tx) =>
       tx
@@ -206,6 +228,7 @@ export async function checkAsaasSealKey(secrets: IntegrationSecrets = defaultSec
         .from(integration)
         .where(and(eq(integration.storeId, s.id), eq(integration.kind, "asaas"))),
     );
+    if (row?.secret?.startsWith("v1.")) legacy++;
     if (!row?.secret?.startsWith("a1.")) continue;
     sealed++;
     try {
@@ -214,7 +237,7 @@ export async function checkAsaasSealKey(secrets: IntegrationSecrets = defaultSec
       unreadable++;
     }
   }
-  return { sealed, unreadable };
+  return { sealed, unreadable, legacy };
 }
 
 /**
@@ -224,7 +247,7 @@ export async function checkAsaasSealKey(secrets: IntegrationSecrets = defaultSec
 export async function prepareAsaasSealOnBoot(
   opts: { cardIsolated: boolean },
   secrets: IntegrationSecrets = defaultSecrets(),
-): Promise<{ resealed: number; sealed: number; unreadable: number }> {
+): Promise<{ resealed: number; sealed: number; unreadable: number; legacy: number }> {
   let resealed = 0;
   if (opts.cardIsolated) {
     try {

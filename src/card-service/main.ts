@@ -36,7 +36,12 @@ async function main(): Promise<void> {
   // Chave trocada, removida ou rollback trancaria o Asaas de todas as lojas sem aviso (mesma regra do app).
   let unreadable = 0;
   try {
-    unreadable = (await checkAsaasSealKey()).unreadable;
+    const seal = await checkAsaasSealKey();
+    unreadable = seal.unreadable;
+    // Conexões ainda em v1 (o app só re-sela com CARD_ISOLATED=1): o serviço não as abre e a loja recebe "indisponível".
+    if (seal.legacy > 0) {
+      log.warn("conexões Asaas ainda em v1: o serviço de cartão não as abre (o app re-sela no boot com CARD_ISOLATED=1)", { count: seal.legacy });
+    }
   } catch (e) {
     // Banco fora no boot: o healthcheck acusa; a conferência fica para a próxima subida.
     log.error("não foi possível conferir a ASAAS_SEAL_KEY no boot", { error: e });

@@ -128,6 +128,8 @@ describe("servidor empacotado em Node", () => {
   const PAN = "4444444444444444";
   let t: TestDb;
   let shop: { storeId: string; offerId: string };
+  /** Loja com a conexão Asaas ainda em v1 (o app não re-selou): o serviço, sem SECRET, não a abre. */
+  let legacy: { storeId: string; offerId: string };
   let fakeServer: Server;
   let proc: ChildProcess;
   let base: string;
@@ -141,6 +143,8 @@ describe("servidor empacotado em Node", () => {
     // O serviço só abre a conexão selada com a ASAAS_SEAL_KEY (a1.), como depois da re-selagem do app.
     const sealed = createIntegrationSecrets({ secret: requireSecret(), asaasKey: SEAL }).seal("asaas", fake.apiKey);
     await t.ownerDb.update(integration).set({ secret: sealed }).where(and(eq(integration.storeId, shop.storeId), eq(integration.kind, "asaas")));
+    legacy = await seedAsaasStore(fake, 2700); // gravada pelo app de teste, sem ASAAS_SEAL_KEY: v1
+    setAsaasFetchForTests();
 
     // Asaas falso atrás de HTTP numa porta efêmera.
     fakeServer = createServer((req, res) => {
@@ -218,6 +222,34 @@ describe("servidor empacotado em Node", () => {
     const page = await fetch(`${base}/form/${shop.storeId}`);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-security-policy")).toContain("frame-ancestors http://localhost:3000");
+  });
+
+  test("boot: registra quantas conexões Asaas seguem em v1 (não abríveis pelo serviço), só a contagem", () => {
+    const rows = output
+      .split("\n")
+      .filter((l) => l.startsWith("{"))
+      .map((l) => JSON.parse(l) as { level: string; msg: string; data?: unknown });
+    const row = rows.find((r) => r.msg.includes("v1"));
+    expect(row).toMatchObject({ level: "warn", data: { count: 1 } });
+  });
+
+  test("conexão Asaas que o serviço não abre (v1): resposta unavailable, sem cobrança, não 500", async () => {
+    const order = await newCardOrder(legacy.storeId, legacy.offerId, `v1-${randomUUID()}@example.com`);
+    const ticket = issueCardTicket({ storeId: legacy.storeId, orderId: order.id, publicId: order.publicId }, KEY);
+    const res = await post({
+      storeId: legacy.storeId,
+      ticket,
+      orderPublicId: order.publicId,
+      idempotencyKey: randomUUID(),
+      installments: 1,
+      card: { holderName: "TITULAR V1", number: PAN, expiryMonth: "08", expiryYear: "2034", ccv: "987" },
+      holder: { cpf: "52998224725", postalCode: "01310100", addressNumber: "100" },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "unavailable" });
+    expect((await t.ownerDb.select().from(orders).where(eq(orders.id, order.id)))[0]!.status).toBe("pending");
+    expect(output).not.toContain(PAN);
+    expect(output).not.toContain("TITULAR V1");
   });
 
   test("bilhete inválido: 403 com ticketExpired, sem chegar ao pagamento", async () => {

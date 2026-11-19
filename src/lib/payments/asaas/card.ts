@@ -23,6 +23,7 @@ import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, integration, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
+import { IntegrationSecretUnreadable } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
@@ -263,6 +264,12 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   } catch (e) {
     // Nenhuma cobrança foi enviada: libera o pedido para nova tentativa.
     await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: NO_CHARGE }, now());
+    if (e instanceof IntegrationSecretUnreadable) {
+      // Chave do Asaas da loja que este processo não abre (no serviço de cartão: conexão ainda em v1). Configuração,
+      // não o comprador: "indisponível" (o iframe não trava o cartão) e o operador vê no log.
+      log.error("cartão: a conexão Asaas da loja não pode ser aberta; confira a ASAAS_SEAL_KEY e a re-selagem", { storeId, orderId: order.id, attemptId: attempt.id });
+      return unavailable();
+    }
     throw e;
   }
 
