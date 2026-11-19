@@ -65,6 +65,21 @@ describe("papel card: atributos e o que fica de fora", () => {
     expect((await card`select current_user as u`)[0]!.u).toBe("card");
   });
 
+  test("teto de 10 conexões e consultas de no máximo 10 s (um card comprometido não esgota o Postgres do app)", async () => {
+    const [role] = await t.ownerDb.execute<{ rolconnlimit: number; rolconfig: string[] | null }>(
+      sql`select rolconnlimit, rolconfig from pg_roles where rolname = 'card'`,
+    );
+    expect(role!.rolconnlimit).toBe(10);
+    expect(role!.rolconfig).toContain("statement_timeout=10s");
+    // Vale para a sessão do papel (conexão nova pega a configuração do papel).
+    const fresh = postgres(t.cardUrl, { max: 1, onnotice: () => {} });
+    try {
+      expect((await fresh`show statement_timeout`)[0]!.statement_timeout).toBe("10s");
+    } finally {
+      await fresh.end();
+    }
+  });
+
   test("select em users, session, membership, login_attempt, product e download_token: permission denied", async () => {
     for (const table of ["users", "session", "membership", "login_attempt", "product", "download_token"]) {
       await expect(card.unsafe(`select 1 from "${table}" limit 1`)).rejects.toThrow(PERMISSION_DENIED);
