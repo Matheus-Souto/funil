@@ -59,6 +59,30 @@ const ASSETS = new Map<string, { file: string; type: string }>([
   ["/form.css", { file: "form.css", type: "text/css; charset=utf-8" }],
 ]);
 
+/**
+ * Origens do checkout por loja (frame-ancestors) com cache em memória: `ttlMs` (60 s) por loja, inclusive a resposta
+ * vazia (loja inexistente: um `GET /form/<uuid-aleatório>` em série não vira uma consulta ao banco por requisição), no
+ * máximo `max` lojas (a mais antiga sai). Erro não fica guardado. Trocar o domínio da loja leva até `ttlMs` para valer.
+ */
+export function cacheOrigins(
+  fetchOrigins: (storeId: string) => Promise<string[]>,
+  opts: { ttlMs?: number; max?: number; now?: () => number } = {},
+): (storeId: string) => Promise<string[]> {
+  const ttl = opts.ttlMs ?? 60_000;
+  const max = opts.max ?? 1000;
+  const now = opts.now ?? Date.now;
+  const cache = new Map<string, { at: number; origins: string[] }>();
+  return async (storeId) => {
+    const hit = cache.get(storeId);
+    if (hit && now() - hit.at < ttl) return hit.origins;
+    const origins = await fetchOrigins(storeId);
+    cache.delete(storeId); // reinsere no fim (a ordem do Map é a idade)
+    cache.set(storeId, { at: now(), origins });
+    while (cache.size > max) cache.delete(cache.keys().next().value!);
+    return origins;
+  };
+}
+
 function send(res: ServerResponse, status: number, body = "", headers: Record<string, string> = {}): void {
   res.writeHead(status, { "x-content-type-options": "nosniff", ...headers, "content-length": String(Buffer.byteLength(body)) });
   res.end(body);
@@ -116,7 +140,7 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
 
 export function createCardServer(opts: CardServerOptions): Server {
   const pay = opts.payWithCard ?? defaultPayWithCard;
-  const originsOf = opts.origins ?? ((storeId: string) => storeCheckoutOrigins(storeId));
+  const originsOf = cacheOrigins(opts.origins ?? ((storeId: string) => storeCheckoutOrigins(storeId)));
   const cardUrl = new URL(opts.cardOrigin);
   if (cardUrl.origin !== opts.cardOrigin) throw new Error("cardOrigin deve ser só a origem (esquema, host e porta)");
   // HTTP só em loopback (desenvolvimento e testes); fora dele, a conexão do comprador precisa ser HTTPS no proxy.

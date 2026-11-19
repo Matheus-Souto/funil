@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError } from "@/lib/actions/core";
 import { cardFormCsp, cardFormHtml } from "@/card-service/page";
-import { createCardServer, type CardServerOptions } from "@/card-service/server";
+import { cacheOrigins, createCardServer, type CardServerOptions } from "@/card-service/server";
 import { db, setDbForTests } from "@/lib/db/client";
 import { integration, orders } from "@/lib/db/schema";
 import { env, requireSecret } from "@/lib/env";
@@ -515,6 +515,69 @@ describe("GET /form/<storeId>", () => {
       expect(res.status).toBe(404);
       expect(await res.text()).toBe("");
     }
+  });
+});
+
+describe("cache das origens da loja (frame-ancestors)", () => {
+  test("60 s por loja, inclusive a resposta vazia (loja inexistente); depois consulta de novo", async () => {
+    let clock = 0;
+    const calls: string[] = [];
+    const get = cacheOrigins(
+      async (id) => {
+        calls.push(id);
+        return id === "a" ? ["https://a.example"] : [];
+      },
+      { ttlMs: 60_000, max: 100, now: () => clock },
+    );
+    expect(await get("a")).toEqual(["https://a.example"]);
+    expect(await get("x")).toEqual([]);
+    clock = 59_999;
+    expect(await get("a")).toEqual(["https://a.example"]);
+    expect(await get("x")).toEqual([]);
+    expect(calls).toEqual(["a", "x"]);
+    clock = 60_000;
+    await get("a");
+    await get("x");
+    expect(calls).toEqual(["a", "x", "a", "x"]);
+  });
+
+  test("tamanho limitado: a mais antiga sai; erro não fica guardado", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const get = cacheOrigins(
+      async (id) => {
+        calls.push(id);
+        if (id === "erro" && fail) throw new Error("banco fora");
+        return [`https://${id}.example`];
+      },
+      { ttlMs: 60_000, max: 2, now: () => 0 },
+    );
+    await get("a");
+    await get("b");
+    await get("c"); // passa do teto: "a" sai
+    await get("b");
+    await get("c");
+    await get("a");
+    expect(calls).toEqual(["a", "b", "c", "a"]);
+    await expect(get("erro")).rejects.toThrow("banco fora");
+    fail = false;
+    expect(await get("erro")).toEqual(["https://erro.example"]);
+  });
+
+  test("o servidor usa o cache: duas páginas da mesma loja, uma consulta", async () => {
+    let n = 0;
+    const base = await start({
+      origins: async (id) => {
+        n++;
+        return id === shop.storeId ? [APP_ORIGIN] : [];
+      },
+    });
+    expect((await fetch(`${base}/form/${shop.storeId}`)).status).toBe(200);
+    expect((await fetch(`${base}/form/${shop.storeId}`)).status).toBe(200);
+    const missing = randomUUID();
+    expect((await fetch(`${base}/form/${missing}`)).status).toBe(404);
+    expect((await fetch(`${base}/form/${missing}`)).status).toBe(404);
+    expect(n).toBe(2);
   });
 });
 
