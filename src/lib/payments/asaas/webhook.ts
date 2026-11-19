@@ -194,11 +194,13 @@ export const applyAsaasPayment = defineAction({
     const knownItems = parcels ? (parcels.find((x) => x.id === known?.providerId)?.refunds ?? []) : (p.refunds ?? []);
     const back = parcels ? installmentRefundedCents(parcels) : refundedCents(p.refunds ?? []);
     if (installment !== null && p.parcelsUnavailable) {
-      // Estorno numa parcela, sem como conferir o parcelamento: não decide (o pedido segue como está) e avisa o
-      // vendedor uma vez por valor; "Reembolsar" no painel conclui pelo job, que re-tenta com espera crescente.
+      // Estorno numa parcela, sem como conferir o parcelamento: não decide o estorno e avisa o vendedor uma vez por
+      // valor; "Reembolsar" no painel conclui pelo job, que re-tenta com espera crescente. Pagamento e chargeback da
+      // parcela seguem o fluxo normal (só a decisão de estorno depende das parcelas).
       const own = mapAsaasStatus(p.status) === "refunded" ? (p.chargeCents ?? 0) : refundedCents(p.refunds ?? []);
       if (o.status === "paid" && known && own > 0) await notePartialRefund(ctx, o.id, known, own);
-      return { applied: false, reason: "parcelas_indisponiveis" };
+      const t = mapAsaasStatus(p.status);
+      if (t !== "paid" && t !== "disputed") return { applied: false, reason: "parcelas_indisponiveis" };
     }
     if (o.status === "paid" && known && refund === "requested") await noteRefundInFlight(ctx, o, known, knownItems);
     if (o.status === "paid" && known && refund === "partial") await notePartialRefund(ctx, o.id, known, back);
@@ -312,8 +314,11 @@ export async function fetchInstallmentParcels(client: AsaasClient, installment: 
 /** A listagem de parcelas não vai se resolver reenviando o webhook (4xx permanente ou listagem incompleta)? */
 function parcelsUnavailableError(e: unknown): boolean {
   if (permanentAsaasError(e) !== null) return true;
-  const codes = (e instanceof ActionError ? (e.details as { errorCodes?: unknown } | undefined)?.errorCodes : undefined) ?? [];
-  return Array.isArray(codes) && codes.includes(PARCELS_INCOMPLETE);
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return false;
+  const d = e.details as { status?: unknown; errorCodes?: unknown } | undefined;
+  // 200 com corpo inválido (listagem sem `data`): reenviar não resolve.
+  if (d?.status === 200) return true;
+  return Array.isArray(d?.errorCodes) && d.errorCodes.includes(PARCELS_INCOMPLETE);
 }
 
 /** Evento que a limpeza da troca de conta gera (DELETE da cobrança aberta): nunca indica pagamento. */

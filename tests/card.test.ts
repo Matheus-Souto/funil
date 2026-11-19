@@ -990,6 +990,15 @@ describe("parcelado: estorno de uma parcela só (painel do Asaas) não estorna a
     expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
   });
 
+  test("listagem de parcelas indisponível não bloqueia chargeback da parcela", async () => {
+    const s = await paidInThree();
+    s.fake.partialRefund(s.parcels[0]!, 1);
+    s.fake.setStatus(s.parcels[0]!, "CHARGEBACK_REQUESTED");
+    s.fake.fail("GET /payments?installment=", 400, "erro");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!, "PAYMENT_CHARGEBACK_REQUESTED")).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("disputed");
+  });
+
   test("estorno de parcela no painel do Asaas visto em andamento antes de concluir: o parcial ainda avisa o vendedor", async () => {
     const s = await paidInThree();
     // O Asaas mostra o estorno da parcela 2 em andamento (o webhook grava a marca de estorno em andamento) ...
