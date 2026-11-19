@@ -153,18 +153,28 @@ export const revokeDownloadsJob: JobHandler = async (j) => {
   if (revoked) await deleteWatermarks(tg.orderId!);
 };
 
-/** `restore_downloads` {orderId}: só se o pedido está AGORA pago; desfaz só a revogação por status (sem e-mail). */
+/**
+ * `restore_downloads` {orderId}: só se o pedido está AGORA pago; desfaz só a revogação por status (sem e-mail). Se o
+ * comprador nunca recebeu o e-mail de acesso (a entrega falhou ou foi pulada enquanto o pedido estava contestado),
+ * enfileira a entrega, uma vez (não há outra na fila).
+ */
 export const restoreDownloadsJob: JobHandler = async (j) => {
   const tg = target(j, true);
   if (!tg) return;
+  const orderId = tg.orderId!;
   await withStore(tg.storeId, async (tx) => {
-    const [o] = await tx.select({ status: orders.status }).from(orders).where(eq(orders.id, tg.orderId!)).for("update");
+    const [o] = await tx.select({ status: orders.status }).from(orders).where(eq(orders.id, orderId)).for("update");
     if (o?.status !== "paid") {
-      log.info("restore_downloads: pedido não está pago; nada a restaurar", { orderId: tg.orderId, status: o?.status });
+      log.info("restore_downloads: pedido não está pago; nada a restaurar", { orderId, status: o?.status });
       return;
     }
-    const n = await restoreLinks(tx, tg.orderId!);
-    log.info("links de download restaurados", { orderId: tg.orderId, count: n });
+    const n = await restoreLinks(tx, orderId);
+    log.info("links de download restaurados", { orderId, count: n });
+    const delivered = await alreadySent(tx, and(eq(emailLog.orderId, orderId), eq(emailLog.kind, "delivery")));
+    if (!delivered && !(await hasOpenJob(tx, "deliver_order", orderId))) {
+      await enqueue(tx, { storeId: tg.storeId, type: "deliver_order", payload: { orderId } });
+      log.info("restore_downloads: acesso nunca enviado; entrega enfileirada", { orderId });
+    }
   });
 };
 

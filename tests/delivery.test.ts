@@ -366,6 +366,26 @@ describe("GET /d/[token]", () => {
     await runJobs(order.id, "restore_downloads");
     expect(outbox).toHaveLength(0);
     expect((await download(shop, tokens[0]!)).status).toBe(200);
+    // Já houve e-mail de entrega: o restore não enfileira outra entrega.
+    expect((await jobsOf(order.id, "deliver_order")).filter((j) => j.status === "queued")).toHaveLength(0);
+  }, HEAVY_TEST_MS);
+
+  test("contestação revertida de pedido que nunca recebeu o e-mail de acesso: o restore enfileira a entrega (uma vez)", async () => {
+    const shop = await seedShop();
+    const order = await paidOrder(shop);
+    // A entrega não chegou a sair (ex.: SMTP fora do ar) e o pedido foi contestado: o job de entrega terminou sem enviar.
+    await t.ownerDb.update(job).set({ status: "failed" }).where(and(eq(job.type, "deliver_order"), sql`${job.payload}->>'orderId' = ${order.id}`));
+    await withStore(shop.storeId, (tx) => transitionOrder(systemCtx(shop.storeId, tx), order.id, "disputed", "chargeback"));
+    await runJobs(order.id, "revoke_downloads");
+    await withStore(shop.storeId, (tx) => transitionOrder(systemCtx(shop.storeId, tx), order.id, "paid", "chargeback revertido"));
+    const [restore] = await jobsOf(order.id, "restore_downloads");
+    await getHandlers().restore_downloads!(restore!, new AbortController().signal);
+    await getHandlers().restore_downloads!(restore!, new AbortController().signal); // at-least-once
+    const queued = (await jobsOf(order.id, "deliver_order")).filter((j) => j.status === "queued");
+    expect(queued).toHaveLength(1);
+    outbox = [];
+    await runJobs(order.id, "deliver_order");
+    expect(outbox.filter((m) => m.subject.includes("acesso") || tokensIn(m.text).length > 0)).toHaveLength(1);
   }, HEAVY_TEST_MS);
 
   test("fora de ordem: restore com o pedido ainda contestado não reativa; revoke com o pedido pago não revoga", async () => {
