@@ -68,3 +68,17 @@ export async function withStore<T>(storeId: string, fn: (tx: Tx) => Promise<T>):
     return fn(tx);
   });
 }
+
+/** `select 1` com o papel `app` (pool do app) em até `timeoutMs`. Nunca lança: falha ou demora = `false`. */
+export async function dbHealthy(timeoutMs = 3000): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([db.execute(sql`select 1`).then(() => true, () => false), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
