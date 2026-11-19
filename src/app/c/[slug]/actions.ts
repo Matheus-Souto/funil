@@ -4,7 +4,7 @@
 // navegador) e chamam `startCheckout` / `checkout.view`; a regra de negócio fica em src/lib/checkout.ts.
 import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
-import { NEEDS_CPF, checkoutView, startCheckout } from "@/lib/checkout";
+import { NEEDS_CPF, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
 import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { clientIpFrom } from "@/lib/payments/asaas/card-http";
@@ -12,7 +12,8 @@ import { resolveStore } from "@/lib/stores";
 import { fbcFromFbclid } from "@/lib/tracking/touch";
 
 export type StartResult =
-  | { ok: true; publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas" }
+  // `cardTicket`: só com CARD_ISOLATED=1 e cartão; o checkout o repassa ao iframe do cartão no `pay`.
+  | { ok: true; publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }
   | { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean };
 
 const GENERIC = "Não foi possível continuar agora. Tente de novo em instantes.";
@@ -49,8 +50,8 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
     fbp: jar.get("_fbp")?.value?.slice(0, 500),
   };
   try {
-    const r = await startCheckout({ storeId: store.id }, raw);
-    return { ok: true, publicId: r.publicId, method: r.method };
+    const r = await startCheckout({ storeId: store.id }, raw, env.CARD_ISOLATED ? { cardTicketKey: env.CARD_TICKET_KEY } : {});
+    return { ok: true, publicId: r.publicId, method: r.method, ...(r.cardTicket ? { cardTicket: r.cardTicket } : {}) };
   } catch (e) {
     if (e instanceof ActionError) {
       if (e.code === "conflict" && e.message === NEEDS_CPF) return { ok: false, needsCpf: true, message: NEEDS_CPF_MESSAGE };
@@ -59,6 +60,24 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
       return { ok: false, message: e.message };
     }
     log.error("checkout: erro inesperado ao criar o pedido", { error: e });
+    return { ok: false, message: GENERIC };
+  }
+}
+
+/**
+ * Bilhete novo do mesmo pedido de cartão (CARD_ISOLATED=1): o anterior venceu ou está perto de vencer. Só para pedido
+ * `card_asaas` pendente da loja do host; a regra fica em `checkout.renewCardTicket`.
+ */
+export async function renewCardTicketAction(input: { publicId: string }): Promise<{ ok: true; ticket: string } | { ok: false; message: string }> {
+  if (!env.CARD_ISOLATED || !env.CARD_TICKET_KEY) return { ok: false, message: GENERIC };
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
+  if (!store) return { ok: false, message: "Loja não encontrada" };
+  const publicId = input !== null && typeof input === "object" ? (input as { publicId?: unknown }).publicId : undefined;
+  try {
+    return { ok: true, ticket: await renewCardTicket({ storeId: store.id }, { publicId }, env.CARD_TICKET_KEY) };
+  } catch (e) {
+    if (!(e instanceof ActionError)) log.error("checkout: erro inesperado ao renovar o bilhete do cartão", { error: e });
     return { ok: false, message: GENERIC };
   }
 }

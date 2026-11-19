@@ -5,17 +5,23 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { env } from "@/lib/env";
 
-/** Política das páginas do comprador. `turnstile`: o desafio da Cloudflare pode ser carregado no checkout. */
-export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean }): string {
+/**
+ * Política das páginas do comprador. `turnstile`: o desafio da Cloudflare pode ser carregado no checkout.
+ * `cardOrigin` (só com CARD_ISOLATED=1): o formulário do cartão vem em iframe desse domínio.
+ */
+export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean; cardOrigin?: string }): string {
   const scripts = ["'self'", `'nonce-${nonce}'`, "https://connect.facebook.net"];
   if (opts.turnstile) scripts.push("https://challenges.cloudflare.com");
   // Só em `next dev`: o React usa eval para as pilhas de erro (não em produção).
   if (opts.dev) scripts.push("'unsafe-eval'");
+  const frames: string[] = [];
+  if (opts.turnstile) frames.push("https://challenges.cloudflare.com");
+  if (opts.cardOrigin) frames.push(opts.cardOrigin);
   return [
     `script-src ${scripts.join(" ")}`,
     "connect-src 'self' https://www.facebook.com https://connect.facebook.net",
     "img-src 'self' data: https://www.facebook.com",
-    ...(opts.turnstile ? ["frame-src https://challenges.cloudflare.com"] : []),
+    ...(frames.length > 0 ? [`frame-src ${frames.join(" ")}`] : []),
     "frame-ancestors 'none'",
     "base-uri 'none'",
     "form-action 'self'",
@@ -25,7 +31,11 @@ export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean
 
 export function proxy(request: NextRequest): NextResponse {
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
-  const csp = buyerCsp(nonce, { dev: process.env.NODE_ENV === "development", turnstile: Boolean(env.TURNSTILE_SITE_KEY) });
+  const csp = buyerCsp(nonce, {
+    dev: process.env.NODE_ENV === "development",
+    turnstile: Boolean(env.TURNSTILE_SITE_KEY),
+    cardOrigin: env.CARD_ISOLATED ? env.CARD_ORIGIN : undefined,
+  });
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("content-security-policy", csp);
   const response = NextResponse.next({ request: { headers: requestHeaders } });

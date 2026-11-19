@@ -365,7 +365,7 @@ export function mountCardForm(deps: FormDeps): void {
     } finally {
       payload = null;
     }
-    const out = mapApiResponse(res.status, json, last4);
+    const out = mapApiResponse(res.status, json, last4, other);
     // Bilhete recusado (vencido ou não): o servidor parou antes de qualquer cobrança e do Turnstile, então a chave e o
     // token continuam valendo para a tentativa com o bilhete novo.
     if (out.ticketExpired === undefined) {
@@ -377,9 +377,8 @@ export function mountCardForm(deps: FormDeps): void {
     }
     if (out.fields) {
       const errors: Partial<Record<FieldName, string>> = {};
-      for (const [n] of out.fields) errors[n as FieldName] = serverFieldMessage(n as FieldName);
-      // "titular é outra pessoa" desligado: o CPF do titular é o do comprador, campo do app (o app marca o dele).
-      if (!other) delete errors.holderCpf;
+      // `cpf` (titular = comprador) é campo do app: o app marca o dele; aqui só os campos do iframe.
+      for (const [n] of out.fields) if (n !== "cpf") errors[n as FieldName] = serverFieldMessage(n as FieldName);
       const names = showErrors(errors);
       if (names[0]) (f[names[0]].control as HTMLElement).focus();
     }

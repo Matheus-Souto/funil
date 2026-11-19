@@ -17,8 +17,10 @@ import {
   getOrderPublic,
   handleOrderStatus,
   regenerateOrderPix,
+  renewCardTicket,
   startCheckout,
 } from "@/lib/checkout";
+import { CARD_TICKET_TTL_MS, verifyCardTicket } from "@/lib/payments/card-ticket";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard } from "@/lib/payments/asaas/card";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
@@ -592,5 +594,52 @@ describe("fix 1: checkout.view (gravação anônima)", () => {
     expect(row!.touch).toEqual({ first: null, last: null });
     const r = await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { touch: { first: big, last: null } }));
     expect((await orderBy(s.storeId, r.publicId)).firstTouch).toBeNull();
+  });
+});
+
+describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
+  const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+
+  test("startCheckout com a chave: cartão devolve um bilhete que verifyCardTicket aceita para aquele pedido; Pix não", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    expect(card.method).toBe("card_asaas");
+    const o = await orderBy(s.storeId, card.publicId);
+    expect(verifyCardTicket(card.cardTicket!, KEY)).toEqual({ storeId: s.storeId, orderId: o.id, publicId: card.publicId });
+    const pix = await startCheckout({ storeId: s.storeId }, startInput(s.slug), { cardTicketKey: KEY });
+    expect(pix.method).toBe("pix_manual");
+    expect("cardTicket" in pix).toBe(false);
+  });
+
+  test("startCheckout sem a chave (flag desligada): cartão sem bilhete, como hoje", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }));
+    expect(card).toEqual({ publicId: card.publicId, method: "card_asaas" });
+  });
+
+  test("renewCardTicket: pedido de cartão pendente da loja ganha bilhete novo do mesmo pedido", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const later = new Date(Date.now() + CARD_TICKET_TTL_MS + 60_000); // o primeiro já venceu
+    expect(verifyCardTicket(card.cardTicket!, KEY, later)).toBeNull();
+    const ticket = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId }, KEY, later);
+    const o = await orderBy(s.storeId, card.publicId);
+    expect(verifyCardTicket(ticket, KEY, later)).toEqual({ storeId: s.storeId, orderId: o.id, publicId: card.publicId });
+  });
+
+  test("renewCardTicket: pedido de outra loja, pago ou de Pix -> falha", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const other = await seed({ asaas: createFakeAsaas() });
+    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    expect((await fail(renewCardTicket({ storeId: other.storeId }, { publicId: card.publicId }, KEY))).code).toBe("not_found");
+
+    const pix = await startCheckout({ storeId: s.storeId }, startInput(s.slug), { cardTicketKey: KEY });
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: pix.publicId }, KEY))).code).toBe("conflict");
+
+    await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.publicId, card.publicId));
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId }, KEY))).code).toBe("conflict");
+
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "nao-existe" }, KEY))).code).toBe("not_found");
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "../x y" }, KEY))).code).toBe("invalid_input");
   });
 });

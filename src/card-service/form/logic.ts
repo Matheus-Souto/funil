@@ -17,9 +17,15 @@ export interface CardFields {
   addressNumber: string;
 }
 
-/** Os únicos nomes de campo que saem do iframe (em `validated.fields` e `result.fields`), na ordem do formulário. */
+/** Campos do formulário do iframe, na ordem da tela (os únicos nomes em `validated.fields`). */
 export const FIELD_NAMES = ["cardNumber", "holderName", "expiry", "cvv", "holderCpf", "cep", "addressNumber", "installments"] as const;
 export type FieldName = (typeof FIELD_NAMES)[number];
+/**
+ * Os únicos nomes que saem em `result.fields`: os do iframe mais `cpf`, o CPF do comprador (campo do app). Com
+ * "titular é outra pessoa" desligado, o CPF do titular é o do comprador, e o erro dele é marcado no app.
+ */
+export const RESULT_FIELD_NAMES = [...FIELD_NAMES, "cpf"] as const;
+export type ResultFieldName = (typeof RESULT_FIELD_NAMES)[number];
 
 export const NETWORK_MESSAGE = "Sem conexão. Confira a internet e toque em pagar de novo.";
 export const GENERIC_MESSAGE = "Não foi possível processar o pagamento. Tente de novo em instantes.";
@@ -75,30 +81,31 @@ export function validateCardFields(v: CardFields, holderOther: boolean, now: Dat
 export const fieldsMessage = (n: number): string =>
   n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`;
 
-/** Filtra para os nomes conhecidos, sem repetir, na ordem recebida. */
-export function safeFieldNames(names: readonly unknown[]): FieldName[] {
-  const out: FieldName[] = [];
+/** Filtra para os nomes conhecidos de `result.fields`, sem repetir, na ordem recebida. */
+export function safeFieldNames(names: readonly unknown[]): ResultFieldName[] {
+  const out: ResultFieldName[] = [];
   for (const n of names) {
-    if (typeof n === "string" && (FIELD_NAMES as readonly string[]).includes(n) && !out.includes(n as FieldName)) out.push(n as FieldName);
+    if (typeof n === "string" && (RESULT_FIELD_NAMES as readonly string[]).includes(n) && !out.includes(n as ResultFieldName)) out.push(n as ResultFieldName);
   }
   return out;
 }
 
-/** Caminho de erro do servidor (zod / payWithCard) -> campo do formulário do iframe. */
+/** Caminho de erro do servidor (zod / payWithCard) -> campo do formulário do iframe (`holder.cpf`: ver `fieldFromPath`). */
 const PATHS: Record<string, FieldName> = {
   "card.number": "cardNumber",
   "card.holderName": "holderName",
   "card.expiryMonth": "expiry",
   "card.expiryYear": "expiry",
   "card.ccv": "cvv",
-  "holder.cpf": "holderCpf",
   "holder.postalCode": "cep",
   "holder.addressNumber": "addressNumber",
   installments: "installments",
 };
-export function fieldFromPath(path: unknown): FieldName | null {
+/** `holder.cpf` vira `holderCpf` com "titular é outra pessoa" ligado e `cpf` (o do comprador, no app) com ele desligado. */
+export function fieldFromPath(path: unknown, holderOther: boolean): ResultFieldName | null {
   if (!Array.isArray(path) || !path.every((p) => typeof p === "string" || typeof p === "number")) return null;
   const key = path.join(".");
+  if (key === "holder.cpf") return holderOther ? "holderCpf" : "cpf";
   return Object.prototype.hasOwnProperty.call(PATHS, key) ? PATHS[key]! : null;
 }
 
@@ -189,7 +196,7 @@ const text = (v: unknown): string | undefined => (typeof v === "string" && v.len
 const PAID_STATUSES: readonly string[] = ["approved", "declined", "unknown", "unavailable"];
 
 /** Resposta do POST /api/card -> corpo do `result` (sem dados do cartão; os 4 últimos só na recusa). */
-export function mapApiResponse(httpStatus: number, body: unknown, last4: string): ResultBody {
+export function mapApiResponse(httpStatus: number, body: unknown, last4: string, holderOther: boolean): ResultBody {
   const message = text(own(body, "message"));
   if (httpStatus === 200) {
     const status = own(body, "status");
@@ -204,7 +211,7 @@ export function mapApiResponse(httpStatus: number, body: unknown, last4: string)
   const captcha = own(body, "captcha") === true ? { captcha: true } : {};
   const paths = own(body, "fields");
   if (httpStatus === 400 && Array.isArray(paths)) {
-    const names = safeFieldNames(paths.map(fieldFromPath));
+    const names = safeFieldNames(paths.map((p) => fieldFromPath(p, holderOther)));
     if (names.length > 0) {
       return { status: "error", message: !message || message === SERVER_FIELDS_MESSAGE ? fieldsMessage(names.length) : message, fields: names.map((n) => [n]), ...captcha };
     }

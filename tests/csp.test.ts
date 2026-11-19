@@ -16,6 +16,17 @@ test("buyerCsp: nonce, Meta só nos destinos necessários, sem frames de fora", 
   expect(buyerCsp("n", { dev: true, turnstile: false })).toContain("'unsafe-eval'");
 });
 
+test("buyerCsp: com cardOrigin, o iframe do cartão entra em frame-src; sem ele, igual ao de hoje", () => {
+  const base = { dev: false, turnstile: false };
+  expect(buyerCsp("n", { ...base, cardOrigin: "https://pagar.loja.test" })).toContain("frame-src https://pagar.loja.test");
+  expect(buyerCsp("n", { ...base, cardOrigin: undefined })).toBe(buyerCsp("n", base));
+  expect(buyerCsp("n", base)).not.toContain("frame-src");
+  const both = buyerCsp("n", { dev: false, turnstile: true, cardOrigin: "https://pagar.loja.test" });
+  expect(both).toContain("frame-src https://challenges.cloudflare.com https://pagar.loja.test");
+  expect(both.match(/frame-src/g)).toHaveLength(1);
+  expect(both).toContain("frame-ancestors 'none'");
+});
+
 test("proxy: CSP com nonce novo a cada requisição, na resposta e na requisição (o Next aplica o nonce nos scripts)", () => {
   const a = proxy(new NextRequest("http://127.0.0.1:3000/c/oferta"));
   const b = proxy(new NextRequest("http://127.0.0.1:3000/o/abc"));

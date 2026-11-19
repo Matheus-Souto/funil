@@ -129,15 +129,15 @@ describe("installmentOptions", () => {
 
 describe("safeFieldNames e mapApiResponse", () => {
   test("só nomes conhecidos saem; caminhos do servidor viram nomes do formulário", () => {
-    expect(safeFieldNames(["cardNumber", "__proto__", "cpf", "cep", "cep", 7 as unknown as string])).toEqual(["cardNumber", "cep"]);
+    expect(safeFieldNames(["cardNumber", "__proto__", "cpf", "cep", "cep", "customer", 7 as unknown as string])).toEqual(["cardNumber", "cpf", "cep"]);
   });
 
   test("200: status do servidor; recusa leva os 4 últimos dígitos", () => {
-    expect(mapApiResponse(200, { status: "approved" }, "1111")).toEqual({ status: "approved" });
-    expect(mapApiResponse(200, { status: "declined", message: "Pagamento recusado." }, "1111")).toEqual({ status: "declined", message: "Pagamento recusado.", last4: "1111" });
-    expect(mapApiResponse(200, { status: "unknown", message: "x" }, "1111")).toEqual({ status: "unknown", message: "x" });
-    expect(mapApiResponse(200, { status: "unavailable", message: "y" }, "1111")).toEqual({ status: "unavailable", message: "y" });
-    expect(mapApiResponse(200, { status: "hacked" }, "1111").status).toBe("error");
+    expect(mapApiResponse(200, { status: "approved" }, "1111", true)).toEqual({ status: "approved" });
+    expect(mapApiResponse(200, { status: "declined", message: "Pagamento recusado." }, "1111", true)).toEqual({ status: "declined", message: "Pagamento recusado.", last4: "1111" });
+    expect(mapApiResponse(200, { status: "unknown", message: "x" }, "1111", true)).toEqual({ status: "unknown", message: "x" });
+    expect(mapApiResponse(200, { status: "unavailable", message: "y" }, "1111", true)).toEqual({ status: "unavailable", message: "y" });
+    expect(mapApiResponse(200, { status: "hacked" }, "1111", true).status).toBe("error");
   });
 
   test("400 com campos: holder.cpf -> holderCpf, card.number -> cardNumber, desconhecidos caem fora", () => {
@@ -145,28 +145,35 @@ describe("safeFieldNames e mapApiResponse", () => {
       400,
       { error: "invalid_input", message: "Dados de pagamento inválidos", fields: [["holder", "cpf"], ["card", "number"], ["card", "expiryMonth"], ["card", "expiryYear"], ["holder", "postalCode"], ["holder", "addressNumber"], ["installments"], ["customer", "phone"], ["card", "ccv"], ["card", "holderName"]] },
       "1111",
+      true,
     );
     expect(r).toEqual({
       status: "error",
       message: "Confira os 8 campos marcados para continuar.",
       fields: [["holderCpf"], ["cardNumber"], ["expiry"], ["cep"], ["addressNumber"], ["installments"], ["cvv"], ["holderName"]],
     });
-    expect(mapApiResponse(400, { message: "Dados de pagamento inválidos", fields: [["card", "number"]] }, "1111").message).toBe("Confira o campo marcado para continuar.");
-    expect(mapApiResponse(400, { message: "Parcelas inválidas", fields: [["installments"]] }, "1111").message).toBe("Parcelas inválidas");
-    expect(mapApiResponse(400, { message: "JSON inválido" }, "1111")).toEqual({ status: "error", message: "JSON inválido" });
+    expect(mapApiResponse(400, { message: "Dados de pagamento inválidos", fields: [["card", "number"]] }, "1111", true).message).toBe("Confira o campo marcado para continuar.");
+    expect(mapApiResponse(400, { message: "Parcelas inválidas", fields: [["installments"]] }, "1111", true).message).toBe("Parcelas inválidas");
+    expect(mapApiResponse(400, { message: "JSON inválido" }, "1111", true)).toEqual({ status: "error", message: "JSON inválido" });
+  });
+
+  test("holder.cpf com 'titular é outra pessoa' desligado sai como `cpf` (o CPF do comprador, campo do app)", () => {
+    const body = { message: "Dados de pagamento inválidos", fields: [["holder", "cpf"], ["holder", "postalCode"]] };
+    expect(mapApiResponse(400, body, "1111", false)).toEqual({ status: "error", message: "Confira os 2 campos marcados para continuar.", fields: [["cpf"], ["cep"]] });
+    expect(mapApiResponse(400, body, "1111", true).fields).toEqual([["holderCpf"], ["cep"]]);
   });
 
   test("403 de bilhete: erro com ticketExpired; 429: captcha; outros: mensagem do servidor ou a genérica", () => {
-    expect(mapApiResponse(403, { error: "ticket", ticketExpired: true }, "1111")).toEqual({
+    expect(mapApiResponse(403, { error: "ticket", ticketExpired: true }, "1111", true)).toEqual({
       status: "error",
       ticketExpired: true,
       message: "Não foi possível processar o pagamento. Tente de novo em instantes.",
     });
-    expect(mapApiResponse(403, { error: "ticket", ticketExpired: false }, "1111").ticketExpired).toBe(false);
-    expect(mapApiResponse(429, { captcha: true, message: "Muitas tentativas." }, "1111")).toEqual({ status: "error", captcha: true, message: "Muitas tentativas." });
-    expect(mapApiResponse(502, {}, "1111")).toEqual({ status: "error", message: "Não foi possível processar o pagamento. Tente de novo em instantes." });
-    expect(mapApiResponse(500, "lixo", "1111").status).toBe("error");
-    expect(mapApiResponse(503, { message: "x".repeat(400) }, "1111").message!.length).toBeLessThanOrEqual(300);
+    expect(mapApiResponse(403, { error: "ticket", ticketExpired: false }, "1111", true).ticketExpired).toBe(false);
+    expect(mapApiResponse(429, { captcha: true, message: "Muitas tentativas." }, "1111", true)).toEqual({ status: "error", captcha: true, message: "Muitas tentativas." });
+    expect(mapApiResponse(502, {}, "1111", true)).toEqual({ status: "error", message: "Não foi possível processar o pagamento. Tente de novo em instantes." });
+    expect(mapApiResponse(500, "lixo", "1111", true).status).toBe("error");
+    expect(mapApiResponse(503, { message: "x".repeat(400) }, "1111", true).message!.length).toBeLessThanOrEqual(300);
   });
 });
 
@@ -478,6 +485,22 @@ describe("formulário no iframe", () => {
     pay("p1");
     await next("funil-card:result");
     expect((calls[0]!.body.holder as { cpf: string }).cpf).toBe("11144477735");
+  });
+
+  test("400 em holder.cpf: titular desligado devolve `cpf` (o app marca); ligado, marca o CPF do titular no iframe", async () => {
+    const bad = () => Response.json({ error: "invalid_input", message: "Dados de pagamento inválidos", fields: [["holder", "cpf"]] }, { status: 400 });
+    const { fill, pay, next, doc, w } = setup({ responses: [bad(), bad()] });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: "Confira o campo marcado para continuar.", fields: [["cpf"]] });
+    expect(doc.getElementById("holderCpf-msg")?.textContent ?? "").toBe("");
+    const box = doc.getElementById("holderOther") as unknown as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new w.Event("change", { bubbles: true }) as unknown as Event);
+    fill({ holderCpf: "111.444.777-35" });
+    pay("p2");
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", fields: [["holderCpf"]] });
+    expect(doc.getElementById("holderCpf-msg")!.textContent).toBe("Confira este campo.");
   });
 
   test("400 com campos: marca os campos no iframe e devolve os nomes; 403 de bilhete: ticketExpired", async () => {
