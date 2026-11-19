@@ -558,6 +558,33 @@ describe("notify_seller", () => {
     expect(generic.html).not.toContain("<img src=x>");
   });
 
+  test("estorno recusado, estorno parcial e página de pagamento alterada: texto próprio, só com códigos", async () => {
+    const shop = await seedShop();
+    const h = getHandlers().notify_seller!;
+    await h(sellerJob(shop.storeId, { reason: "estorno_falhou", httpStatus: 400, code: "insufficient_balance" }), new AbortController().signal);
+    const refused = lastMailTo("dono@loja.com")!;
+    expect(refused.subject).toMatch(/recusou o estorno/i);
+    expect(refused.text).toContain("insufficient_balance");
+    expect(refused.text).toMatch(/continua pago/);
+    await h(sellerJob(shop.storeId, { reason: "estorno_parcial", refundedCents: 300 }), new AbortController().signal);
+    const partial = lastMailTo("dono@loja.com")!;
+    expect(partial.subject).toMatch(/parcial/i);
+    expect(partial.text).toContain("R$ 3,00");
+    await h(sellerJob(shop.storeId, { reason: "monitor_pagina_pagamento", page: "/c", code: "csp_diferente" }), new AbortController().signal);
+    const monitor = lastMailTo("dono@loja.com")!;
+    expect(monitor.subject).toMatch(/página de pagamento/i);
+    expect(monitor.text).toContain("csp_diferente");
+    // Código fora do formato não é ecoado.
+    await h(sellerJob(shop.storeId, { reason: "estorno_falhou", code: "<b>x</b>" }), new AbortController().signal);
+    expect(lastMailTo("dono@loja.com")!.html).not.toContain("<b>x</b>");
+  });
+
+  test("conta Asaas anterior: manda liberar o pedido pelo botão do painel", async () => {
+    const shop = await seedShop();
+    await getHandlers().notify_seller!(sellerJob(shop.storeId, { reason: "evento_conta_asaas_anterior", paymentId: "pay_1" }), new AbortController().signal);
+    expect(lastMailTo("dono@loja.com")!.text).toContain("Liberar pedido");
+  });
+
   test("loja sem notify_email: job concluído sem enviar (não é falha)", async () => {
     const shop = await seedShop({ notifyEmail: null });
     const o = await paidOrder(shop);

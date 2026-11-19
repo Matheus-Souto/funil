@@ -64,7 +64,9 @@ describe("cliente Asaas", () => {
 describe("mapAsaasStatus", () => {
   test("tabela de status", () => {
     for (const s of ["CONFIRMED", "RECEIVED", "RECEIVED_IN_CASH"]) expect(mapAsaasStatus(s)).toBe("paid");
-    for (const s of ["REFUNDED", "REFUND_IN_PROGRESS"]) expect(mapAsaasStatus(s)).toBe("refunded");
+    expect(mapAsaasStatus("REFUNDED")).toBe("refunded");
+    // Estorno em andamento: o dinheiro ainda não voltou (sem transição; o pedido fica com o estorno solicitado).
+    for (const s of ["REFUND_IN_PROGRESS", "REFUND_REQUESTED"]) expect(mapAsaasStatus(s)).toBeNull();
     for (const s of ["CHARGEBACK_REQUESTED", "CHARGEBACK_DISPUTE", "AWAITING_CHARGEBACK_REVERSAL"]) expect(mapAsaasStatus(s)).toBe("disputed");
     expect(mapAsaasStatus("OVERDUE")).toBe("expired");
     expect(mapAsaasStatus("PENDING")).toBeNull();

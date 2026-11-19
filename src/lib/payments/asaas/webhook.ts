@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, defineAction, runAction } from "@/lib/actions/core";
+import { ActionError, defineAction, runAction, type Ctx } from "@/lib/actions/core";
 import { alertSeller } from "@/lib/alerts";
 import { timingSafeEqualStr } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
@@ -10,7 +10,7 @@ import { log } from "@/lib/log";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { asaasClientFor, reaisToCents, type AsaasClient, type AsaasPayment } from "./client";
-import { classifyRefund, refundMarkerOf, refundStatuses } from "./refunds";
+import { classifyRefund, refundItems, refundMarkerOf, refundedCents, type RefundItem } from "./refunds";
 
 /** Estado das cobranças Asaas abertas de uma conta anterior da loja (fora do índice de cobrança aberta). */
 export const SUPERSEDED = "superseded";
@@ -21,8 +21,9 @@ export function mapAsaasStatus(s: string): OrderStatus | null {
     case "RECEIVED":
     case "RECEIVED_IN_CASH":
       return "paid";
+    // REFUND_REQUESTED/REFUND_IN_PROGRESS: estorno em andamento, o dinheiro ainda não voltou (sem transição; o pedido
+    // fica com o estorno solicitado). Só REFUNDED (ou refunds[DONE] cobrindo o total) conclui.
     case "REFUNDED":
-    case "REFUND_IN_PROGRESS":
       return "refunded";
     case "CHARGEBACK_REQUESTED":
     case "CHARGEBACK_DISPUTE":
@@ -55,8 +56,10 @@ export const applyAsaasPayment = defineAction({
     externalReference: z.string().nullable(),
     /** Id do parcelamento (cartão parcelado): cada parcela é uma cobrança; `valueCents` é então o total do parcelamento. */
     installment: z.string().min(1).max(100).nullable().optional(),
-    /** Status dos itens `refunds[]` da cobrança reconsultada (estorno só concluído com DONE). */
-    refunds: z.array(z.string().max(64)).max(50).optional(),
+    /** Itens `refunds[]` da cobrança reconsultada (status e centavos; estorno só concluído com DONE cobrindo o total). */
+    refunds: z.array(z.object({ status: z.string().max(64), cents: z.number().int().min(0) })).max(50).optional(),
+    /** Valor desta cobrança (centavos). Parcela de cartão parcelado: o estorno total da parcela é o valor dela. */
+    chargeCents: z.number().int().optional(),
   }),
   permission: "system",
   auditInput: (i) => ({
@@ -65,6 +68,7 @@ export const applyAsaasPayment = defineAction({
     valueCents: i.valueCents,
     installment: i.installment ?? null,
     refunds: i.refunds ?? [],
+    chargeCents: i.chargeCents ?? null,
   }),
   async run(ctx, input) {
     let p = input;
@@ -87,8 +91,9 @@ export const applyAsaasPayment = defineAction({
     // Outra parcela de um parcelamento que o pedido já conhece: é a mesma venda, não cobrança órfã nem em dobro.
     const sibling =
       !row && installment !== null ? rows.find((r) => (r.raw as { installment?: string } | null)?.installment === installment) : undefined;
-    // Estorno: a cobrança pode seguir CONFIRMED/RECEIVED com refunds[DONE] (dinheiro devolvido) -> trata como REFUNDED.
-    const refund = classifyRefund(p.status, p.refunds ?? [], refundMarkerOf((row ?? sibling)?.raw, o.refundRequestedAt));
+    // Estorno: a cobrança pode seguir CONFIRMED/RECEIVED com refunds[DONE] cobrindo o total -> trata como REFUNDED.
+    const fullCents = installment !== null && p.chargeCents !== undefined ? p.chargeCents : o.totalCents;
+    const refund = classifyRefund(p.status, p.refunds ?? [], refundMarkerOf((row ?? sibling)?.raw, o.refundRequestedAt), fullCents);
     if (refund === "done" && mapAsaasStatus(p.status) === "paid") p = { ...p, status: "REFUNDED" };
     if (refund === "cancelled" && o.status === "paid" && o.refundRequestedAt) {
       await ctx.tx.update(orders).set({ refundRequestedAt: null }).where(eq(orders.id, o.id));
@@ -148,6 +153,10 @@ export const applyAsaasPayment = defineAction({
       await ctx.tx.update(payment).set({ status: p.status }).where(eq(payment.id, row.id));
     }
 
+    const known = row ?? sibling;
+    if (o.status === "paid" && known && refund === "requested") await noteRefundInFlight(ctx, o, known, p.refunds ?? []);
+    if (o.status === "paid" && known && refund === "partial") await notePartialRefund(ctx, o.id, known, refundedCents(p.refunds ?? []));
+
     const target = mapAsaasStatus(p.status);
     if (!target) return { applied: false, reason: "status_ignorado" };
     if (target === "paid" && p.valueCents < o.totalCents) {
@@ -164,6 +173,32 @@ export const applyAsaasPayment = defineAction({
     }
   },
 });
+
+type PaymentRow = typeof payment.$inferSelect;
+
+const mergeRaw = (patch: Record<string, unknown>) => sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb`;
+
+/**
+ * Estorno em andamento no Asaas (pedido pelo job ou direto no painel do Asaas): o pedido fica pago com o estorno
+ * solicitado e a marca de aceite (o painel mostra "aguardando o Asaas"). Nada é revogado até o dinheiro voltar.
+ */
+async function noteRefundInFlight(ctx: Ctx, o: { id: string; refundRequestedAt: Date | null }, pay: PaymentRow, items: RefundItem[]): Promise<void> {
+  const now = new Date();
+  const marker = refundMarkerOf(pay.raw, o.refundRequestedAt);
+  if (marker?.acceptedAt) return;
+  if (!o.refundRequestedAt) await ctx.tx.update(orders).set({ refundRequestedAt: now }).where(eq(orders.id, o.id));
+  const settled = items.filter((r) => r.status === "CANCELLED" || r.status === "DONE").length;
+  const next = marker ? { ...marker, acceptedAt: now.toISOString() } : { at: now.toISOString(), before: settled, acceptedAt: now.toISOString() };
+  await ctx.tx.update(payment).set({ raw: mergeRaw({ refundPost: next }) }).where(eq(payment.id, pay.id));
+}
+
+/** Estorno parcial (soma dos DONE menor que o total): registra quanto voltou e avisa o vendedor a cada valor novo. */
+async function notePartialRefund(ctx: Ctx, orderId: string, pay: PaymentRow, cents: number): Promise<void> {
+  if ((pay.raw as { partialRefundCents?: unknown } | null)?.partialRefundCents === cents) return;
+  await ctx.tx.update(payment).set({ raw: mergeRaw({ partialRefundCents: cents }) }).where(eq(payment.id, pay.id));
+  await alertSeller(ctx.tx, ctx.storeId, "estorno_parcial", { orderId, refundedCents: cents });
+  log.warn("estorno parcial no Asaas; o pedido continua pago", { orderId, refundedCents: cents });
+}
 
 /**
  * Evento de uma cobrança que a chave atual não consegue reconsultar (4xx permanente: em geral, cobrança da conta Asaas
@@ -244,7 +279,8 @@ export type AsaasPaymentInput = {
   valueCents: number;
   externalReference: string | null;
   installment: string | null;
-  refunds: string[];
+  refunds: RefundItem[];
+  chargeCents: number;
 };
 
 /**
@@ -264,7 +300,8 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
     valueCents,
     externalReference: typeof fresh.externalReference === "string" ? fresh.externalReference : null,
     installment,
-    refunds: refundStatuses(fresh),
+    refunds: refundItems(fresh),
+    chargeCents: reaisToCents(Number(fresh.value)),
   };
 }
 

@@ -51,13 +51,19 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
   // "immediate": o estorno conclui na hora (status REFUNDED + refunds[DONE]). "pending": a cobrança continua paga e
   // ganha refunds[PENDING]; `setRefundStatus` depois leva a DONE ou CANCELLED (como o Asaas faz com cartão).
   let refundMode: "immediate" | "pending" = "immediate";
-  const applyRefund = (p: FakePayment) => {
-    const list = Array.isArray(p.refunds) ? (p.refunds as { status: string; value: number }[]) : [];
+  const cents = (reais: number) => Math.round(reais * 100);
+  const refundsOf = (p: FakePayment) => (Array.isArray(p.refunds) ? (p.refunds as { status: string; value: number }[]) : []);
+  /** Quanto já foi estornado (DONE) da cobrança, em centavos. */
+  const refundedCents = (p: FakePayment) => refundsOf(p).reduce((n, r) => n + (r.status === "DONE" ? cents(r.value) : 0), 0);
+  /** Estorno total (`value` omitido: o que falta) ou parcial (`value` em reais). A cobrança só vira REFUNDED quando a soma cobre o valor. */
+  const applyRefund = (p: FakePayment, value?: number) => {
+    const list = refundsOf(p);
+    const amount = value ?? (cents(p.value) - refundedCents(p)) / 100;
     if (refundMode === "immediate") {
-      p.status = "REFUNDED";
-      p.refunds = [...list, { status: "DONE", value: p.value }];
+      p.refunds = [...list, { status: "DONE", value: amount }];
+      if (refundedCents(p) >= cents(p.value)) p.status = "REFUNDED";
     } else {
-      p.refunds = [...list, { status: "PENDING", value: p.value }];
+      p.refunds = [...list, { status: "PENDING", value: amount }];
     }
   };
   // "METHOD /path" (prefixo): processa normalmente e depois perde a resposta (simula timeout com efeito no Asaas).
@@ -179,7 +185,11 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       }
       if (m[1] === "POST" && m[3] === "/refund") {
         if (p.status !== "RECEIVED" && p.status !== "CONFIRMED") return err(400, "Cobrança não pode ser estornada");
-        applyRefund(p);
+        const value = typeof body?.value === "number" ? body.value : undefined;
+        if (value !== undefined && (value <= 0 || cents(value) > cents(p.value) - refundedCents(p))) {
+          return err(400, "Valor do estorno maior que o disponível", "invalid_value");
+        }
+        applyRefund(p, value);
         return json(200, { object: "payment", ...p });
       }
     }
@@ -209,6 +219,12 @@ export function createFakeAsaas(opts: { apiKey?: string; walletId?: string | nul
       const list = p && Array.isArray(p.refunds) ? (p.refunds as { status: string }[]) : [];
       if (list.length === 0) throw new Error(`cobrança sem estorno: ${id}`);
       list[list.length - 1]!.status = status;
+    },
+    /** Estorno parcial feito por fora (painel do Asaas): refunds[DONE] com `value` (reais); a cobrança continua paga. */
+    partialRefund(id: string, value: number) {
+      const p = payments.get(id);
+      if (!p) throw new Error(`cobrança desconhecida: ${id}`);
+      p.refunds = [...refundsOf(p), { status: "DONE", value }];
     },
     setValue(id: string, value: number) {
       const p = payments.get(id);

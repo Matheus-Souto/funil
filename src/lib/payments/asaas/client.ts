@@ -138,7 +138,9 @@ export function createAsaasClient(opts: { apiKey: string; env: AsaasEnv; fetch?:
     getPixQrCode: (id: string) =>
       call<{ encodedImage: string; payload: string; expirationDate: string }>("GET", `/payments/${encodeURIComponent(id)}/pixQrCode`),
     deletePayment: (id: string) => call<{ deleted: boolean }>("DELETE", `/payments/${encodeURIComponent(id)}`),
-    refundPayment: (id: string) => call<AsaasPayment>("POST", `/payments/${encodeURIComponent(id)}/refund`, {}),
+    /** Estorno total (sem `valueCents`) ou só de `valueCents` (o restante depois de um estorno parcial). */
+    refundPayment: (id: string, valueCents?: number) =>
+      call<AsaasPayment>("POST", `/payments/${encodeURIComponent(id)}/refund`, valueCents === undefined ? {} : { value: centsToReais(valueCents) }),
     /** Parcelamento: `value` é o total (reais), `paymentValue` o de cada parcela. */
     getInstallment: (id: string) =>
       call<{ id: string; value: number; installmentCount: number }>("GET", `/installments/${encodeURIComponent(id)}`),

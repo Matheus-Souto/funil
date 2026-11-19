@@ -10,8 +10,8 @@ import { orders, payment } from "@/lib/db/schema";
 import { enqueue, hasOpenJob, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
-import { asaasClientFor } from "./asaas/client";
-import { classifyRefund, refundMarkerOf, refundStatuses, type RefundMarker } from "./asaas/refunds";
+import { asaasClientFor, reaisToCents, type AsaasPayment } from "./asaas/client";
+import { classifyRefund, refundItems, refundMarkerOf, refundedCents, type RefundMarker } from "./asaas/refunds";
 import { mapAsaasStatus } from "./asaas/webhook";
 
 type PaymentRow = typeof payment.$inferSelect;
@@ -69,17 +69,60 @@ export const refundOrder = defineAction({
   },
 });
 
+/** Erro do Asaas que não se resolve re-tentando: 4xx, menos 429. Devolve status e códigos; senão `null` (transitório). */
+function permanentAsaasRefusal(e: unknown): { httpStatus: number; code: string } | null {
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return null;
+  const d = e.details as { status?: unknown; errorCodes?: unknown } | undefined;
+  const status = typeof d?.status === "number" ? d.status : 0;
+  if (status < 400 || status >= 500 || status === 429) return null;
+  const codes = Array.isArray(d?.errorCodes) ? d.errorCodes.filter((c): c is string => typeof c === "string") : [];
+  return { httpStatus: status, code: codes[0] ?? `http_${status}` };
+}
+
+/** Grava em `payment.raw` (merge jsonb), numa transação curta. */
+const patchRaw = (storeId: string, paymentId: string, patch: Record<string, unknown>) =>
+  withStore(storeId, (tx) =>
+    tx
+      .update(payment)
+      .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
+      .where(eq(payment.id, paymentId)),
+  );
+
+/**
+ * O Asaas recusou o estorno de vez (4xx): o pedido continua pago, o pedido de estorno é desfeito (o vendedor pode pedir
+ * de novo) e o vendedor é avisado com o código. Só quem limpou avisa (retentativa ou corrida não duplicam o aviso).
+ */
+async function refundRefused(storeId: string, orderId: string, paymentRowId: string, why: { httpStatus?: number; code: string }): Promise<void> {
+  await withStore(storeId, async (tx) => {
+    await tx
+      .update(payment)
+      .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify({ refundError: { at: new Date().toISOString(), ...why } })}::jsonb` })
+      .where(eq(payment.id, paymentRowId));
+    const cleared = await tx
+      .update(orders)
+      .set({ refundRequestedAt: null })
+      .where(and(eq(orders.id, orderId), eq(orders.status, "paid"), isNotNull(orders.refundRequestedAt)))
+      .returning({ id: orders.id });
+    if (cleared.length > 0) await alertSeller(tx, storeId, "estorno_falhou", { orderId, ...why });
+  });
+  log.warn("estorno recusado pelo Asaas; o pedido continua pago e o vendedor foi avisado", { orderId, ...why });
+}
+
 /**
  * Job `refund_order` {orderId}. At-least-once e idempotente:
  *  1. leitura curta: pedido ainda `paid` e com estorno pedido? (o webhook REFUNDED pode ter chegado antes, ou o estorno
  *     foi cancelado -> nada a fazer) e qual cobrança;
- *  2. fora de transação: reconsulta a cobrança no Asaas e classifica o estorno (`refunds[]` + status):
+ *  2. fora de transação: reconsulta a cobrança no Asaas e classifica o estorno (`refunds[]` + status + valores):
  *     em andamento -> não pede de novo; nenhum -> grava a marca `raw.refundPost` (transação curta) e pede o estorno
- *     (parcelado: o parcelamento inteiro); o estorno pedido agora terminou CANCELLED -> limpa o pedido e avisa;
- *  3. só com o estorno concluído (REFUNDED ou refunds[DONE]): transação curta, trava o pedido e, se ainda `paid`,
- *     muda para `refunded`. Estorno ainda pendente: o job termina e o webhook do Asaas conclui depois.
- * Falha do Asaas lança e o worker re-tenta pelo backoff. Queda entre o pedido do estorno e a gravação: a próxima
- * execução vê o estorno em `refunds[]` e não pede outro.
+ *     (parcelado: o parcelamento inteiro); parcial (feito no painel do Asaas) -> pede só o restante (cobrança à vista;
+ *     parcelado: avisa o vendedor); o estorno pedido agora terminou CANCELLED -> limpa o pedido e avisa;
+ *  3. só com o estorno concluído (REFUNDED ou soma dos refunds[DONE] >= total): transação curta, trava o pedido e, se
+ *     ainda `paid`, muda para `refunded`. Estorno ainda pendente: o job termina e o webhook do Asaas conclui depois.
+ * A marca ganha `acceptedAt` só depois da resposta 2xx do POST (ou quando a reconsulta já mostra o estorno em
+ * andamento): só assim o painel diz "aguardando o Asaas". Recusa definitiva do Asaas (4xx, menos 429), na reconsulta
+ * ou no POST: não re-tenta; limpa o pedido de estorno e avisa o vendedor (`estorno_falhou`, com o código). Rede, 429
+ * e 5xx lançam e o worker re-tenta pelo backoff. Queda entre o pedido do estorno e a gravação: a próxima execução vê o
+ * estorno em `refunds[]` e não pede outro.
  */
 export const refundOrderJob: JobHandler = async (j) => {
   const storeId = j.storeId;
@@ -92,7 +135,7 @@ export const refundOrderJob: JobHandler = async (j) => {
   // 1.
   const pre = await withStore(storeId, async (tx) => {
     const [o] = await tx
-      .select({ id: orders.id, status: orders.status, refundRequestedAt: orders.refundRequestedAt })
+      .select({ id: orders.id, status: orders.status, refundRequestedAt: orders.refundRequestedAt, totalCents: orders.totalCents })
       .from(orders)
       .where(eq(orders.id, orderId));
     if (!o || o.status !== "paid") return { skip: o?.status ?? "inexistente" } as const;
@@ -103,37 +146,68 @@ export const refundOrderJob: JobHandler = async (j) => {
       .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas")));
     const pay = refundable(rows, true);
     if (!pay?.providerId) return { skip: "sem_cobranca" } as const;
-    return { pay, providerId: pay.providerId, requestedAt: o.refundRequestedAt, client: await asaasClientFor(tx, storeId) } as const;
+    return {
+      pay,
+      providerId: pay.providerId,
+      requestedAt: o.refundRequestedAt,
+      totalCents: o.totalCents,
+      client: await asaasClientFor(tx, storeId),
+    } as const;
   });
   if ("skip" in pre) {
     log.info("refund_order: nada a estornar", { orderId, reason: pre.skip });
     return;
   }
   const { client, providerId, pay } = pre;
+  const installment = (pay.raw as { installment?: string } | null)?.installment;
+  // Parcela de cartão parcelado: cada parcela volta inteira (o estorno é do parcelamento todo).
+  const fullCentsOf = (p: AsaasPayment) => (installment ? reaisToCents(Number(p.value)) : pre.totalCents);
 
   // 2. HTTP fora de transação.
-  const fresh = await client.getPayment(providerId);
-  const status = String(fresh.status);
-  let state = classifyRefund(status, refundStatuses(fresh), refundMarkerOf(pay.raw, pre.requestedAt));
-  if (state === "none") {
-    if (mapAsaasStatus(status) !== "paid") {
+  let fresh: AsaasPayment;
+  try {
+    fresh = await client.getPayment(providerId);
+  } catch (e) {
+    const refused = permanentAsaasRefusal(e);
+    if (!refused) throw e;
+    await refundRefused(storeId, orderId, pay.id, refused);
+    return;
+  }
+  let marker = refundMarkerOf(pay.raw, pre.requestedAt);
+  let state = classifyRefund(String(fresh.status), refundItems(fresh), marker, fullCentsOf(fresh));
+  if (state === "requested" && marker && !marker.acceptedAt) {
+    // O POST anterior foi aceito (a resposta se perdeu): agora há prova de que o Asaas está estornando.
+    marker = { ...marker, acceptedAt: new Date().toISOString() };
+    await patchRaw(storeId, pay.id, { refundPost: marker });
+  }
+  if (state === "none" || state === "partial") {
+    if (mapAsaasStatus(String(fresh.status)) !== "paid") {
       // Ex.: chargeback em andamento. Não estorna; o webhook leva o pedido ao estado certo.
-      log.warn("refund_order: cobrança não está paga no Asaas; estorno não enviado", { orderId, paymentId: providerId, status });
+      log.warn("refund_order: cobrança não está paga no Asaas; estorno não enviado", { orderId, paymentId: providerId, status: fresh.status });
+      return;
+    }
+    const remaining = state === "partial" ? fullCentsOf(fresh) - refundedCents(refundItems(fresh)) : undefined;
+    if (state === "partial" && installment) {
+      // Parcial num parcelamento: o restante por parcela não é calculável com segurança; o vendedor resolve no Asaas.
+      await refundRefused(storeId, orderId, pay.id, { code: "parcial_parcelado" });
       return;
     }
     // Marca antes do POST: numa retentativa, os itens de refunds[] depois de `before` são deste pedido de estorno.
-    const marker: RefundMarker = { at: new Date().toISOString(), before: refundStatuses(fresh).length };
-    await withStore(storeId, (tx) =>
-      tx
-        .update(payment)
-        .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify({ refundPost: marker })}::jsonb` })
-        .where(eq(payment.id, pay.id)),
-    );
-    const installment = (pay.raw as { installment?: string } | null)?.installment;
-    if (installment) await client.refundInstallment(installment);
-    else await client.refundPayment(providerId);
+    const posted: RefundMarker = { at: new Date().toISOString(), before: refundItems(fresh).length };
+    await patchRaw(storeId, pay.id, { refundPost: posted });
+    try {
+      if (installment) await client.refundInstallment(installment);
+      else await client.refundPayment(providerId, remaining);
+    } catch (e) {
+      const refused = permanentAsaasRefusal(e);
+      if (!refused) throw e;
+      await refundRefused(storeId, orderId, pay.id, refused);
+      return;
+    }
+    marker = { ...posted, acceptedAt: new Date().toISOString() };
+    await patchRaw(storeId, pay.id, { refundPost: marker });
     const after = await client.getPayment(providerId);
-    state = classifyRefund(String(after.status), refundStatuses(after), marker);
+    state = classifyRefund(String(after.status), refundItems(after), marker, fullCentsOf(after));
   }
 
   if (state === "cancelled") {
@@ -150,7 +224,7 @@ export const refundOrderJob: JobHandler = async (j) => {
     return;
   }
   if (state !== "done") {
-    log.info("refund_order: estorno pedido ao Asaas; aguardando a conclusão (webhook)", { orderId, paymentId: providerId });
+    log.info("refund_order: estorno pedido ao Asaas; aguardando a conclusão (webhook)", { orderId, paymentId: providerId, state });
     return;
   }
 

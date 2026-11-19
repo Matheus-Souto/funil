@@ -122,7 +122,8 @@ export type PaymentFlag = "duplicate" | "superseded" | "old_account_event";
 async function refundState(ctx: Ctx, o: { id: string; status: string; refundRequestedAt: Date | null }, payments: { raw: unknown }[]) {
   if (o.status !== "paid" || !o.refundRequestedAt) return { state: "none" as RefundState, requestedAt: o.refundRequestedAt };
   if (await hasOpenJob(ctx.tx, "refund_order", o.id)) return { state: "processing" as RefundState, requestedAt: o.refundRequestedAt };
-  const sent = payments.some((p) => refundMarkerOf(p.raw, o.refundRequestedAt) !== null);
+  // "Aguardando o Asaas" só com a marca de aceite (POST respondido com 2xx ou estorno visto em andamento no Asaas).
+  const sent = payments.some((p) => refundMarkerOf(p.raw, o.refundRequestedAt)?.acceptedAt !== undefined);
   const fresh = Date.now() - o.refundRequestedAt.getTime() < REFUND_STALE_MS;
   return { state: (sent && fresh ? "awaiting_provider" : "stale") as RefundState, requestedAt: o.refundRequestedAt };
 }

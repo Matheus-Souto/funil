@@ -161,9 +161,22 @@ describe("orders.get", () => {
       providerId: "pay_sent",
       status: "RECEIVED",
       amountCents: 990,
-      raw: { refundPost: { at: new Date().toISOString(), before: 0 } },
+      raw: { refundPost: { at: new Date().toISOString(), before: 0, acceptedAt: new Date().toISOString() } },
     });
     expect((await runAction(getOrderDetail, panelCall(s.storeId), { id: sent.id })).refund).toMatchObject({ state: "awaiting_provider" });
+
+    // Marca sem aceite (POST sem resposta 2xx): não diz "aguardando o Asaas".
+    const unaccepted = await seedOrder(s, { status: "paid", refundRequestedAt: new Date(Date.now() - 60_000) });
+    await t.ownerDb.insert(payment).values({
+      storeId: s.storeId,
+      orderId: unaccepted.id,
+      provider: "asaas",
+      providerId: "pay_unaccepted",
+      status: "RECEIVED",
+      amountCents: 990,
+      raw: { refundPost: { at: new Date().toISOString(), before: 0 } },
+    });
+    expect((await runAction(getOrderDetail, panelCall(s.storeId), { id: unaccepted.id })).refund).toMatchObject({ state: "stale" });
 
     const stale = await seedOrder(s, { status: "paid", refundRequestedAt: new Date() });
     expect((await runAction(getOrderDetail, panelCall(s.storeId), { id: stale.id })).refund).toMatchObject({ state: "stale" });

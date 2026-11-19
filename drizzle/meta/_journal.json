@@ -134,6 +134,13 @@
       "when": 1795044884228,
       "tag": "0018_store_alert",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795069970781,
+      "tag": "0019_alert_kinds",
+      "breakpoints": true
     }
   ]
 }

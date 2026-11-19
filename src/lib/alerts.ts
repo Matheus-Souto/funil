@@ -6,29 +6,54 @@ import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
 import { emailLog, orders, storeAlert } from "@/lib/db/schema";
-import { orderCode } from "@/lib/format";
+import { brl, orderCode } from "@/lib/format";
 import { enqueue } from "@/lib/jobs";
 
-export type AlertReason = "chave_asaas_invalida" | "evento_conta_asaas_anterior" | "estorno_cancelado" | "disjuntor_cartao";
+export type AlertReason =
+  | "chave_asaas_invalida"
+  | "evento_conta_asaas_anterior"
+  | "estorno_cancelado"
+  | "estorno_falhou"
+  | "estorno_parcial"
+  | "disjuntor_cartao"
+  | "monitor_pagina_pagamento";
+
+/** Detalhes do aviso: só códigos e números (nunca texto de provedor nem dado de comprador). */
+export interface AlertExtra {
+  orderId?: string;
+  httpStatus?: number;
+  paymentId?: string;
+  /** Código curto (ex.: código de erro do Asaas, problema do monitor de página). */
+  code?: string;
+  /** Estorno parcial: quanto já voltou ao comprador (centavos). */
+  refundedCents?: number;
+  /** Monitor de página de pagamento: qual página ("/c" ou "/o"). */
+  page?: string;
+}
+
+const safeCode = (v: string) => v.replace(/[^\w.:-]/g, "").slice(0, 64);
 
 /** Grava o aviso do painel e enfileira o e-mail ao vendedor (`notify_seller` com `reason`), na transação `tx`. */
-export async function alertSeller(
-  tx: Tx,
-  storeId: string,
-  reason: AlertReason,
-  extra: { orderId?: string; httpStatus?: number; paymentId?: string } = {},
-): Promise<void> {
+export async function alertSeller(tx: Tx, storeId: string, reason: AlertReason, extra: AlertExtra = {}): Promise<void> {
   const detail = {
     ...(extra.httpStatus !== undefined ? { httpStatus: extra.httpStatus } : {}),
     ...(extra.paymentId !== undefined ? { paymentId: extra.paymentId } : {}),
+    ...(extra.code !== undefined ? { code: safeCode(extra.code) } : {}),
+    ...(extra.refundedCents !== undefined ? { refundedCents: extra.refundedCents } : {}),
+    ...(extra.page !== undefined ? { page: safeCode(extra.page) } : {}),
   };
   await tx.insert(storeAlert).values({ storeId, kind: reason, orderId: extra.orderId ?? null, detail });
   await enqueue(tx, { storeId, type: "notify_seller", payload: { ...(extra.orderId ? { orderId: extra.orderId } : {}), reason, ...detail } });
 }
 
 /** Título e orientação curtos para o painel (o e-mail tem o texto completo: noticeFor em delivery/jobs.ts). */
-export function alertText(kind: string, detail: { httpStatus?: unknown; paymentId?: unknown }, code: string | null): { title: string; body: string } {
+export function alertText(
+  kind: string,
+  detail: { httpStatus?: unknown; paymentId?: unknown; code?: unknown; refundedCents?: unknown; page?: unknown },
+  code: string | null,
+): { title: string; body: string } {
   const pedido = code ? ` (pedido #${code})` : "";
+  const motivo = typeof detail.code === "string" && detail.code ? ` (motivo: ${detail.code})` : "";
   switch (kind) {
     case "chave_asaas_invalida":
       return {
@@ -38,12 +63,27 @@ export function alertText(kind: string, detail: { httpStatus?: unknown; paymentI
     case "evento_conta_asaas_anterior":
       return {
         title: `Movimento numa cobrança da conta Asaas anterior${pedido}`,
-        body: "Confira na conta anterior do Asaas se o comprador pagou; se pagou, libere o pedido ou devolva o valor por lá.",
+        body: "Confira na conta anterior do Asaas se o comprador pagou. Se pagou, abra o pedido e use “Liberar pedido” (ou devolva o valor pela conta anterior).",
       };
     case "estorno_cancelado":
       return {
         title: `Estorno cancelado no Asaas${pedido}`,
         body: "O pedido continua pago e o comprador mantém o acesso. Confira o motivo no Asaas e peça o reembolso de novo, se for o caso.",
+      };
+    case "estorno_falhou":
+      return {
+        title: `O Asaas recusou o estorno${pedido}${motivo}`,
+        body: "O pedido continua pago e o comprador mantém o acesso. Confira no Asaas (saldo, chave de API, se a cobrança ainda pode ser estornada) e peça o reembolso de novo.",
+      };
+    case "estorno_parcial":
+      return {
+        title: `Estorno parcial no Asaas${pedido}${typeof detail.refundedCents === "number" ? `: ${brl(detail.refundedCents)} devolvidos` : ""}`,
+        body: "Parte do valor foi devolvida pelo Asaas e o pedido continua pago (o comprador mantém o acesso). Para devolver o resto e encerrar o acesso, use “Reembolsar” no pedido.",
+      };
+    case "monitor_pagina_pagamento":
+      return {
+        title: `A página de pagamento mudou${typeof detail.page === "string" ? ` (${detail.page})` : ""}${motivo}`,
+        body: "A verificação semanal encontrou cabeçalho de segurança ou scripts diferentes do esperado na página do checkout ou do pedido. Se você não atualizou o sistema, investigue antes de continuar vendendo com cartão.",
       };
     case "disjuntor_cartao":
       return {

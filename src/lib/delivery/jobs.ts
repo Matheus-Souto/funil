@@ -17,7 +17,16 @@ import { deleteWatermarks, ensureWatermarkedPdf, watermarkText } from "./waterma
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type Payload = { orderId?: unknown; reason?: unknown; resend?: unknown; httpStatus?: unknown; paymentId?: unknown };
+type Payload = {
+  orderId?: unknown;
+  reason?: unknown;
+  resend?: unknown;
+  httpStatus?: unknown;
+  paymentId?: unknown;
+  code?: unknown;
+  refundedCents?: unknown;
+  page?: unknown;
+};
 const payloadOf = (j: Job) => (j.payload ?? {}) as Payload;
 
 /** storeId e orderId (opcional) válidos do job, ou null (payload inválido: o job é descartado com log). */
@@ -162,7 +171,7 @@ export const restoreDownloadsJob: JobHandler = async (j) => {
 // ---- notify_seller ---------------------------------------------------------------------------------------------
 
 type Notice = { subject: string; heading: string; paragraphs: string[] };
-const safeId = (v: unknown) => (typeof v === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? v : null);
+const safeId = (v: unknown) => (typeof v === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(v) ? v : null);
 
 /** Texto do aviso por motivo (payload sem pedido ou evento do pagamento). Motivo desconhecido: aviso genérico. */
 export function noticeFor(reason: string, p: Payload, code: string | null): Notice {
@@ -188,7 +197,8 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
         heading: "Evento de uma cobrança da conta Asaas anterior",
         paragraphs: [
           `Recebemos do Asaas um evento de uma cobrança${pay ? ` (${pay})` : ""}${pedido} criada na conta Asaas que a loja usava antes da troca.`,
-          "Essa cobrança foi descartada quando a conta foi trocada. Confira na conta anterior do Asaas se o comprador chegou a pagar: se pagou, libere o pedido no painel ou devolva o valor por lá.",
+          "Essa cobrança foi descartada quando a conta foi trocada. Confira na conta anterior do Asaas se o comprador chegou a pagar.",
+          "Se pagou, abra o pedido no painel e use o botão “Liberar pedido” (o comprador recebe o acesso), ou devolva o valor pela conta anterior.",
         ],
       };
     }
@@ -201,6 +211,40 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
           "Confira no Asaas o motivo e peça o reembolso de novo no painel, se for o caso.",
         ],
       };
+    case "estorno_falhou": {
+      const code = safeId(p.code);
+      return {
+        subject: `O Asaas recusou o estorno${pedido}`,
+        heading: "O estorno não foi feito",
+        paragraphs: [
+          `O Asaas recusou o estorno${pedido}${code ? ` (motivo: ${code})` : ""}. O pedido continua pago e o comprador mantém o acesso.`,
+          "Confira no Asaas o saldo da conta, se a chave de API ainda vale e se a cobrança ainda pode ser estornada. Depois, peça o reembolso de novo no painel.",
+        ],
+      };
+    }
+    case "estorno_parcial": {
+      const cents = typeof p.refundedCents === "number" && Number.isInteger(p.refundedCents) && p.refundedCents > 0 ? p.refundedCents : null;
+      return {
+        subject: `Estorno parcial no Asaas${pedido}`,
+        heading: "Parte do valor foi devolvida",
+        paragraphs: [
+          `O Asaas devolveu ${cents !== null ? brl(cents) : "parte do valor"}${pedido} ao comprador. O pedido continua pago e o comprador mantém o acesso.`,
+          "Para devolver o restante e encerrar o acesso, use “Reembolsar” no pedido, no painel.",
+        ],
+      };
+    }
+    case "monitor_pagina_pagamento": {
+      const page = typeof p.page === "string" && (p.page === "/c" || p.page === "/o") ? p.page : null;
+      const code = safeId(p.code);
+      return {
+        subject: "A página de pagamento da sua loja mudou",
+        heading: "Mudança na página de pagamento",
+        paragraphs: [
+          `A verificação semanal encontrou na página ${page === "/o" ? "do pedido" : "do checkout"} um cabeçalho de segurança ou scripts diferentes do esperado${code ? ` (${code})` : ""}.`,
+          "Se você não atualizou o sistema nem mudou a configuração, trate como incidente: confira o servidor antes de continuar vendendo com cartão (docs/seguranca-pagamento.md).",
+        ],
+      };
+    }
     case "disjuntor_cartao":
       return {
         subject: "Muitas recusas de cartão na sua loja",

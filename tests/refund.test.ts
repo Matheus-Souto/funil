@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "b
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { job, orders, payment } from "@/lib/db/schema";
+import { job, orders, payment, storeAlert } from "@/lib/db/schema";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { transitionOrder } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
@@ -10,6 +10,8 @@ import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { log } from "@/lib/log";
 import { refundOrder } from "@/lib/payments/refund";
+import { classifyRefund, refundItems } from "@/lib/payments/asaas/refunds";
+import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
 import { ctxOf, createFakeAsaas, newAsaasOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
 
@@ -117,10 +119,10 @@ describe("orders.refund (Asaas, assíncrono)", () => {
     expect(await statusOf(order.id)).toBe("refunded");
   });
 
-  test("falha do Asaas re-tenta pelo backoff e depois conclui", async () => {
+  test("falha transitória do Asaas (5xx) re-tenta pelo backoff e depois conclui", async () => {
     const { fake, storeId, order, providerId, refundCalls } = await paidAsaasOrder();
     await runAction(refundOrder, panel(storeId), { orderId: order.id });
-    fake.fail("POST /payments/", 400, "Saldo insuficiente para estorno");
+    fake.fail("POST /payments/", 503, "Asaas fora do ar");
     const t0 = later(1);
     await runRefundJobs(t0);
     const [j] = await refundJobs(order.id);
@@ -340,5 +342,174 @@ describe("refund_order: estorno que fica pendente no Asaas (refunds[])", () => {
     expect(await cancelNotices(s.order.id)).toBe(1);
     await runRefundJobs(new Date(t0.getTime() + 3600_000));
     expect(await cancelNotices(s.order.id)).toBe(1); // nada de aviso repetido
+  });
+});
+
+const alertsOf = (storeId: string, kind: string) =>
+  t.ownerDb.select().from(storeAlert).where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, kind)));
+const noticesOf = async (storeId: string, reason: string) =>
+  (await t.ownerDb.select().from(job).where(and(eq(job.type, "notify_seller"), eq(job.storeId, storeId)))).filter(
+    (j) => (j.payload as { reason?: string }).reason === reason,
+  );
+const payRaw = async (providerId: string) =>
+  (await t.ownerDb.select().from(payment).where(eq(payment.providerId, providerId)))[0]!.raw as Record<string, unknown> | null;
+const orderRow = async (id: string) => (await t.ownerDb.select().from(orders).where(eq(orders.id, id)))[0]!;
+
+describe("refund_order: estorno recusado pelo Asaas (4xx permanente)", () => {
+  test("saldo insuficiente (400): não re-tenta, limpa o pedido de estorno e avisa o vendedor com o código", async () => {
+    const s = await paidAsaasOrder();
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.fail(`POST /payments/${s.providerId}/refund`, 400, "Saldo insuficiente para estorno", "insufficient_balance");
+    await runRefundJobs(later(1));
+    const [j] = await refundJobs(s.order.id);
+    expect([j!.status, j!.attempts]).toEqual(["done", 1]);
+    expect(await runRefundJobs(later(4000)).then(() => s.refundCalls())).toBe(1); // nada de nova tentativa
+    const o = await orderRow(s.order.id);
+    expect([o.status, o.refundRequestedAt]).toEqual(["paid", null]);
+    const alerts = await alertsOf(s.storeId, "estorno_falhou");
+    expect(alerts.map((a) => [a.orderId, a.detail])).toEqual([[s.order.id, { httpStatus: 400, code: "insufficient_balance" }]]);
+    expect((await noticesOf(s.storeId, "estorno_falhou")).map((n) => n.payload)).toEqual([
+      { orderId: s.order.id, reason: "estorno_falhou", httpStatus: 400, code: "insufficient_balance" },
+    ]);
+    // O POST não foi aceito: nada de "aguardando Asaas" (sem marca de aceite) e o vendedor pode pedir de novo.
+    expect((await payRaw(s.providerId))?.refundPost).not.toHaveProperty("acceptedAt");
+    expect((await runAction(getOrderDetail, panel(s.storeId), { id: s.order.id })).refund.state).toBe("none");
+    s.fake.clearFailures();
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(5000));
+    expect(await statusOf(s.order.id)).toBe("refunded");
+  });
+
+  test("chave revogada (401 no estorno): termina sem re-tentar e avisa o vendedor", async () => {
+    const s = await paidAsaasOrder();
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.fail(`POST /payments/${s.providerId}/refund`, 401, "A chave de API fornecida é inválida", "invalid_access_token");
+    await runRefundJobs(later(1));
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("done");
+    expect((await orderRow(s.order.id)).refundRequestedAt).toBeNull();
+    expect((await alertsOf(s.storeId, "estorno_falhou")).map((a) => a.detail)).toEqual([{ httpStatus: 401, code: "invalid_access_token" }]);
+  });
+
+  test("chave revogada já na reconsulta (401 no GET): termina sem re-tentar e avisa", async () => {
+    const s = await paidAsaasOrder();
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.fail(`GET /payments/${s.providerId}`, 401, "A chave de API fornecida é inválida", "invalid_access_token");
+    await runRefundJobs(later(1));
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("done");
+    expect(s.refundCalls()).toBe(0);
+    expect((await alertsOf(s.storeId, "estorno_falhou")).map((a) => a.detail)).toEqual([{ httpStatus: 401, code: "invalid_access_token" }]);
+  });
+
+  test("429 e rede continuam transitórios (backoff)", async () => {
+    const s = await paidAsaasOrder();
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.fail(`POST /payments/${s.providerId}/refund`, 429, "Muitas requisições");
+    await runRefundJobs(later(1));
+    expect((await refundJobs(s.order.id))[0]!.status).toBe("queued");
+    expect(await alertsOf(s.storeId, "estorno_falhou")).toHaveLength(0);
+  });
+
+  test("marca de POST aceito só depois do 2xx: aceito e pendente -> 'aguardando Asaas'", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    expect(typeof (await payRaw(s.providerId))?.refundPost).toBe("object");
+    expect((await payRaw(s.providerId))!.refundPost).toHaveProperty("acceptedAt");
+    expect((await runAction(getOrderDetail, panel(s.storeId), { id: s.order.id })).refund.state).toBe("awaiting_provider");
+  });
+
+  test("resposta do POST perdida: sem marca de aceite até a próxima execução ver o estorno em refunds[]", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.loseResponse(`POST /payments/${s.providerId}/refund`);
+    const t0 = later(1);
+    await runRefundJobs(t0);
+    expect((await payRaw(s.providerId))!.refundPost).not.toHaveProperty("acceptedAt");
+    s.fake.clearFailures();
+    await runRefundJobs(new Date(t0.getTime() + 60_000));
+    expect((await payRaw(s.providerId))!.refundPost).toHaveProperty("acceptedAt");
+    expect(s.refundCalls()).toBe(1);
+  });
+});
+
+describe("estorno em andamento e parcial (webhook e job)", () => {
+  const hook = (s: { storeId: string; webhookToken: string }, paymentId: string, ev = "PAYMENT_UPDATED") =>
+    handleAsaasWebhook(s.storeId, new Headers({ "asaas-access-token": s.webhookToken }), { event: ev, payment: { id: paymentId } });
+  const revokes = async (orderId: string) =>
+    (await t.ownerDb.select().from(job).where(eq(job.type, "revoke_downloads"))).filter((j) => (j.payload as { orderId?: string }).orderId === orderId);
+
+  test("REFUND_IN_PROGRESS: o pedido fica pago com estorno solicitado (sem revogar); REFUNDED depois conclui", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.setStatus(s.providerId, "REFUND_IN_PROGRESS");
+    expect((await hook(s, s.providerId, "PAYMENT_REFUND_IN_PROGRESS")).status).toBe(200);
+    const o = await orderRow(s.order.id);
+    expect(o.status).toBe("paid");
+    expect(o.refundRequestedAt).toBeInstanceOf(Date);
+    expect(await revokes(s.order.id)).toHaveLength(0);
+    expect((await runAction(getOrderDetail, panel(s.storeId), { id: s.order.id })).refund.state).toBe("awaiting_provider");
+    s.fake.setStatus(s.providerId, "REFUNDED");
+    await hook(s, s.providerId, "PAYMENT_REFUNDED");
+    expect(await statusOf(s.order.id)).toBe("refunded");
+    expect(await revokes(s.order.id)).toHaveLength(1);
+  });
+
+  test("estorno parcial feito no painel do Asaas (refunds[DONE] < total): sem transição; registra e avisa uma vez", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.partialRefund(s.providerId, 3);
+    expect((await hook(s, s.providerId, "PAYMENT_PARTIALLY_REFUNDED")).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect(await revokes(s.order.id)).toHaveLength(0);
+    expect((await payRaw(s.providerId))!.partialRefundCents).toBe(300);
+    expect((await alertsOf(s.storeId, "estorno_parcial")).map((a) => [a.orderId, a.detail])).toEqual([[s.order.id, { refundedCents: 300 }]]);
+    await hook(s, s.providerId);
+    expect(await alertsOf(s.storeId, "estorno_parcial")).toHaveLength(1); // o mesmo valor não avisa de novo
+    // Outro parcial (soma ainda menor que o total): registra e avisa o novo valor.
+    s.fake.partialRefund(s.providerId, 2);
+    await hook(s, s.providerId);
+    expect((await payRaw(s.providerId))!.partialRefundCents).toBe(500);
+    expect(await alertsOf(s.storeId, "estorno_parcial")).toHaveLength(2);
+    expect(await statusOf(s.order.id)).toBe("paid");
+  });
+
+  test("parciais que somam o total concluem o estorno", async () => {
+    const s = await paidAsaasOrder(); // 9,90
+    s.fake.partialRefund(s.providerId, 4.9);
+    s.fake.partialRefund(s.providerId, 5);
+    await hook(s, s.providerId);
+    expect(await statusOf(s.order.id)).toBe("refunded");
+  });
+
+  test("pedido de estorno total depois de um parcial: o job faz POST só do restante", async () => {
+    const s = await paidAsaasOrder(); // 9,90
+    s.fake.partialRefund(s.providerId, 3);
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    await runRefundJobs(later(1));
+    const posts = s.fake.calls.filter((c) => c.method === "POST" && c.path === `/payments/${s.providerId}/refund`);
+    expect(posts.map((c) => c.body)).toEqual([{ value: 6.9 }]);
+    expect(await statusOf(s.order.id)).toBe("refunded");
+  });
+
+  test("restante recusado pelo Asaas: alerta o vendedor e o pedido continua pago", async () => {
+    const s = await paidAsaasOrder();
+    s.fake.partialRefund(s.providerId, 3);
+    await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id });
+    s.fake.fail(`POST /payments/${s.providerId}/refund`, 400, "Estorno parcial não permitido", "invalid_action");
+    await runRefundJobs(later(1));
+    expect(await statusOf(s.order.id)).toBe("paid");
+    expect((await alertsOf(s.storeId, "estorno_falhou")).map((a) => a.detail)).toEqual([{ httpStatus: 400, code: "invalid_action" }]);
+  });
+
+  test("classifyRefund: concluído só com REFUNDED ou soma DONE >= total (centavos)", () => {
+    const items = (...xs: [string, number][]) => refundItems({ refunds: xs.map(([status, value]) => ({ status, value })) });
+    expect(classifyRefund("RECEIVED", items(["DONE", 9.9]), null, 990)).toBe("done");
+    expect(classifyRefund("RECEIVED", items(["DONE", 3]), null, 990)).toBe("partial");
+    expect(classifyRefund("RECEIVED", items(["DONE", 3], ["DONE", 6.9]), null, 990)).toBe("done");
+    expect(classifyRefund("REFUNDED", [], null, 990)).toBe("done");
+    expect(classifyRefund("REFUND_IN_PROGRESS", [], null, 990)).toBe("requested");
+    expect(classifyRefund("RECEIVED", items(["DONE", 3], ["PENDING", 6.9]), null, 990)).toBe("requested");
+    expect(classifyRefund("RECEIVED", items(["DONE", 3], ["CANCELLED", 6.9]), { at: "x", before: 1 }, 990)).toBe("cancelled");
+    expect(classifyRefund("RECEIVED", [], null, 990)).toBe("none");
   });
 });

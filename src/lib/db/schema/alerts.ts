@@ -5,8 +5,8 @@ import { orders } from "./orders";
 
 // Com RLS (enable_store_rls na migration). Aviso operacional ao vendedor, gravado na MESMA transação que enfileira o
 // `notify_seller` com motivo (src/lib/alerts.ts): o e-mail pode falhar ou a loja não ter e-mail de aviso, o painel
-// mostra o aviso até alguém clicar em "ok". `detail` só guarda códigos (status HTTP, id da cobrança), nunca dados
-// pessoais.
+// mostra o aviso até alguém clicar em "ok". `detail` só guarda códigos e números (status HTTP, id da cobrança, código
+// de erro, centavos estornados, página conferida), nunca dados pessoais.
 export const storeAlert = pgTable(
   "store_alert",
   {
@@ -23,7 +23,7 @@ export const storeAlert = pgTable(
   (t) => [
     check(
       "store_alert_kind_check",
-      sql`${t.kind} in ('chave_asaas_invalida','evento_conta_asaas_anterior','estorno_cancelado','disjuntor_cartao')`,
+      sql`${t.kind} in ('chave_asaas_invalida','evento_conta_asaas_anterior','estorno_cancelado','estorno_falhou','estorno_parcial','disjuntor_cartao','monitor_pagina_pagamento')`,
     ),
     index("store_alert_open_idx").on(t.storeId, t.createdAt).where(sql`${t.acknowledgedAt} is null`),
   ],
