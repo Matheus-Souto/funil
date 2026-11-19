@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { requirePanelActor } from "@/lib/auth/session";
 import { brl, dateTimeSP, shortWhenSP, splitUniqueAmount, validUntilSP } from "@/lib/format";
-import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, pixManualExpiry } from "@/lib/orders/labels";
+import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, paidOnOldAsaasAccount, pixManualExpiry } from "@/lib/orders/labels";
 import { allowedOrderActions, getOrderDetail, type OrderDetail } from "@/lib/orders/panel";
 import { Badge, PageHead, StatusBadge } from "../../../blocks";
 import { PIcon } from "../../../icons";
@@ -65,6 +65,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             expired={late.expired}
             reservedUntil={late.reservedUntil?.toISOString() ?? null}
             allowed={allowed}
+            oldAsaasAccount={paidOnOldAsaasAccount(d)}
           />
         }
       />

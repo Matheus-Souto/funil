@@ -25,6 +25,8 @@ export interface OrderActionsProps {
   /** Até quando o valor único de um Pix manual vencido fica reservado (48 h depois da validade). */
   reservedUntil: string | null;
   allowed: { release: boolean; resend: boolean; refund: boolean };
+  /** Pix Asaas pago numa cobrança da conta Asaas anterior: a conferência é na conta antiga, não no extrato. */
+  oldAsaasAccount?: boolean;
 }
 
 export function OrderActions(p: OrderActionsProps) {
@@ -96,7 +98,15 @@ export function OrderActions(p: OrderActionsProps) {
         <p>
           {p.buyerName} recebe o acesso por e-mail na hora e a venda é enviada ao Meta. Isso não pode ser desfeito sem reembolso.
         </p>
-        {expired ? (
+        {p.oldAsaasAccount ? (
+          <div className={s.banner} role="note">
+            <PIcon name="triangle-alert" />
+            <div>
+              <b>Cobrança da conta Asaas anterior.</b>
+              <p>Este pedido tem uma cobrança criada na conta Asaas que a loja usava antes da troca, e ela teve movimento depois. Confira nessa conta se ela foi paga.</p>
+            </div>
+          </div>
+        ) : expired ? (
           <div className={s.banner} data-tone="danger" role="note">
             <PIcon name="triangle-alert" />
             <div>
@@ -110,10 +120,16 @@ export function OrderActions(p: OrderActionsProps) {
         ) : null}
         <label className={s.confirmCheck}>
           <input type="checkbox" data-autofocus checked={checks.seen} onChange={(e) => setChecks({ ...checks, seen: e.target.checked })} />
-          <span>
-            Vi um Pix de <b>{brl(p.amountCents)}</b> no extrato do banco, recebido depois de {created}
-            {expired && reserved ? ` e antes de ${reserved}` : ""}.
-          </span>
+          {p.oldAsaasAccount ? (
+            <span>
+              Conferi na conta Asaas anterior que a cobrança de <b>{brl(p.amountCents)}</b> deste pedido foi paga.
+            </span>
+          ) : (
+            <span>
+              Vi um Pix de <b>{brl(p.amountCents)}</b> no extrato do banco, recebido depois de {created}
+              {expired && reserved ? ` e antes de ${reserved}` : ""}.
+            </span>
+          )}
         </label>
         <label className={s.confirmCheck}>
           <input type="checkbox" checked={checks.noReceipt} onChange={(e) => setChecks({ ...checks, noReceipt: e.target.checked })} />

@@ -302,6 +302,33 @@ describe("orders.release", () => {
     }
   });
 
+  test("Pix Asaas pago na conta Asaas anterior (linha superseded com evento): liberado à mão, uma vez", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId, 990, "asaas");
+    const o = await newOrder(storeId, offer.id, "pix_asaas");
+    const call = { storeId, actor: owner, origin: "panel" as const };
+    const old = { storeId, orderId: o.id, provider: "asaas", providerId: `pay_old_${o.id.slice(0, 8)}`, status: "superseded", amountCents: 990 };
+    // Só descartada (sem evento da conta anterior): não libera.
+    await t.ownerDb.insert(payment).values({ ...old, raw: null });
+    await expect(runAction(releaseOrder, call, { orderId: o.id })).rejects.toMatchObject({ code: "conflict" });
+    await t.ownerDb
+      .update(payment)
+      .set({ raw: { oldAccountEventAt: new Date().toISOString(), oldAccountEvent: "PAYMENT_RECEIVED" } })
+      .where(eq(payment.providerId, old.providerId));
+    await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, o.id));
+    await runAction(releaseOrder, call, { orderId: o.id });
+    const [row] = await t.ownerDb.select().from(orders).where(eq(orders.id, o.id));
+    expect(row!.status).toBe("paid");
+    const manual = (await t.ownerDb.select().from(payment).where(eq(payment.orderId, o.id))).filter((p) => p.provider === "manual");
+    expect(manual).toHaveLength(1);
+    expect(manual[0]).toMatchObject({ amountCents: 990, raw: { releasedFrom: "asaas_conta_anterior", paymentId: old.providerId } });
+    const deliveries = (await t.ownerDb.select().from(job).where(eq(job.type, "deliver_order"))).filter(
+      (j) => (j.payload as { orderId?: string }).orderId === o.id,
+    );
+    expect(deliveries).toHaveLength(1);
+    await expect(runAction(releaseOrder, call, { orderId: o.id })).rejects.toMatchObject({ code: "conflict" });
+  });
+
   test("pedido de outra loja não é liberado (RLS) e fica pendente", async () => {
     const a = await seedStore();
     const b = await seedStore();

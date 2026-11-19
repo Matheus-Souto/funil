@@ -61,15 +61,25 @@ export function pixManualExpiry(
 export type RefundState = "none" | "processing" | "awaiting_provider" | "stale";
 
 /**
+ * Pix Asaas com cobrança da conta Asaas anterior da loja (descartada na troca de conta) que recebeu evento depois: o
+ * comprador pode ter pago lá, e esse dinheiro nunca confirma o pedido sozinho. O vendedor confere e libera à mão.
+ */
+export function paidOnOldAsaasAccount(o: { method: string; payments?: { flags: readonly string[] }[] }): boolean {
+  return o.method === "pix_asaas" && (o.payments ?? []).some((p) => p.flags.includes("superseded") && p.flags.includes("old_account_event"));
+}
+
+/**
  * Botões do pedido conforme o papel e o estado (o servidor confere de novo em cada ação).
- * Liberar: Pix manual pendente ou expirado. Reenviar: pago. Reembolsar: pago e sem estorno em andamento (ou parado).
+ * Liberar: pendente ou expirado de Pix manual, ou de Pix Asaas pago na conta Asaas anterior. Reenviar: pago.
+ * Reembolsar: pago e sem estorno em andamento (ou parado).
  */
 export function allowedOrderActions(
   role: Role,
-  o: { status: string; method: string; refund: { state: RefundState } },
+  o: { status: string; method: string; refund: { state: RefundState }; payments?: { flags: readonly string[] }[] },
 ): { release: boolean; resend: boolean; refund: boolean } {
+  const releasable = o.method === "pix_manual" || paidOnOldAsaasAccount(o);
   return {
-    release: hasPermission(role, "orders.release") && o.method === "pix_manual" && (o.status === "pending" || o.status === "expired"),
+    release: hasPermission(role, "orders.release") && releasable && (o.status === "pending" || o.status === "expired"),
     resend: hasPermission(role, "orders.resend") && o.status === "paid",
     refund: hasPermission(role, "orders.refund") && o.status === "paid" && (o.refund.state === "none" || o.refund.state === "stale"),
   };

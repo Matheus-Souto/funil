@@ -208,6 +208,16 @@ describe("botões do pedido por papel", () => {
     expect(allowedOrderActions("owner", { ...paid, refund: { state: "stale" } })).toMatchObject({ refund: true });
     expect(allowedOrderActions("owner", { ...paid, status: "refunded" })).toEqual({ release: false, resend: false, refund: false });
   });
+  test("Liberar no Pix Asaas só com cobrança da conta anterior que teve evento (comprador pode ter pago lá)", () => {
+    const asaas = { status: "pending" as const, method: "pix_asaas" as const, refund: { state: "none" as const } };
+    const oldPaid = { flags: ["superseded", "old_account_event"] as ("superseded" | "old_account_event")[] };
+    expect(allowedOrderActions("owner", { ...asaas, payments: [oldPaid] })).toMatchObject({ release: true });
+    expect(allowedOrderActions("owner", { ...asaas, status: "expired", payments: [oldPaid] })).toMatchObject({ release: true });
+    expect(allowedOrderActions("owner", { ...asaas, payments: [{ flags: ["superseded"] }] })).toMatchObject({ release: false });
+    expect(allowedOrderActions("owner", { ...asaas, payments: [] })).toMatchObject({ release: false });
+    expect(allowedOrderActions("owner", { ...asaas, method: "card_asaas", payments: [oldPaid] })).toMatchObject({ release: false });
+    expect(allowedOrderActions("support", { ...asaas, payments: [oldPaid] })).toMatchObject({ release: false });
+  });
   test("traffic não vê nenhum", () => {
     expect(allowedOrderActions("traffic", paid)).toEqual({ release: false, resend: false, refund: false });
   });

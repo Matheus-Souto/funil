@@ -6,6 +6,7 @@ import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { PIX_MANUAL_RESERVE_MS } from "@/lib/orders/labels";
 import { transitionOrder } from "@/lib/orders/state";
 import { validCpf } from "@/lib/validation/br";
+import { SUPERSEDED } from "./asaas/webhook";
 import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
 
 export const MANUAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -147,16 +148,35 @@ export const savePixManual = defineAction({
   },
 });
 
+/**
+ * Libera à mão: Pix manual pendente ou expirado (o vendedor viu o Pix no extrato) ou Pix Asaas cujo comprador pagou uma
+ * cobrança da conta Asaas ANTERIOR da loja (linha `superseded` que recebeu evento depois da troca de conta: a chave
+ * atual não enxerga essa cobrança, então o webhook nunca confirma o pedido sozinho).
+ */
 export const releaseOrder = defineAction({
   name: "orders.release",
-  description: "Libera manualmente um pedido Pix manual pendente ou expirado depois de conferir o recebimento.",
+  description:
+    "Libera manualmente um pedido pendente ou expirado depois de conferir o recebimento (Pix manual, ou Pix Asaas pago na conta Asaas anterior da loja).",
   input: z.object({ orderId: z.uuid() }),
   permission: "orders.release",
   sensitive: true,
   async run(ctx, { orderId }) {
-    const [o] = await ctx.tx.select().from(orders).where(eq(orders.id, orderId));
+    const [o] = await ctx.tx.select().from(orders).where(eq(orders.id, orderId)).for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
-    if (o.method !== "pix_manual") throw new ActionError("conflict", "Só pedidos de Pix manual podem ser liberados à mão");
+    let oldAccountPayment: string | null = null;
+    if (o.method === "pix_asaas") {
+      const rows = await ctx.tx
+        .select({ providerId: payment.providerId, raw: payment.raw })
+        .from(payment)
+        .where(and(eq(payment.orderId, o.id), eq(payment.provider, "asaas"), eq(payment.status, SUPERSEDED)));
+      const withEvent = rows.find((r) => typeof (r.raw as { oldAccountEventAt?: unknown } | null)?.oldAccountEventAt === "string");
+      if (!withEvent) {
+        throw new ActionError("conflict", "Só pedidos de Pix manual, ou de Pix Asaas com cobrança movimentada na conta Asaas anterior, podem ser liberados à mão");
+      }
+      oldAccountPayment = withEvent.providerId;
+    } else if (o.method !== "pix_manual") {
+      throw new ActionError("conflict", "Só pedidos de Pix manual podem ser liberados à mão");
+    }
     // Pendente ou já expirado: quem pagou depois da validade ainda precisa ser liberado.
     if (o.status !== "pending" && o.status !== "expired") throw new ActionError("conflict", `Pedido não está pendente (${o.status})`);
     const r = await transitionOrder(ctx, o.id, "paid", "liberado manualmente", { allowFromExpired: true });
@@ -168,6 +188,7 @@ export const releaseOrder = defineAction({
       providerId: null,
       status: "paid",
       amountCents: o.manualAmountCents ?? o.totalCents,
+      ...(oldAccountPayment !== null ? { raw: { releasedFrom: "asaas_conta_anterior", paymentId: oldAccountPayment } } : {}),
     });
     return { orderId: o.id };
   },
