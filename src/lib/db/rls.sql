@@ -38,8 +38,12 @@ $$;
 --
 --   schema public   usage                    resolver os nomes das tabelas.
 --   orders          select                   ler o pedido (total, método, estado, comprador) e travá-lo (FOR UPDATE).
---                   update (status, paid_at) transitionOrder("paid") ao aprovar ou na conferência no Asaas. Também é
+--                   update (status, paid_at) transitionOrder("paid") ao aprovar (pending -> paid, card.ts) ou na
+--                                            conferência no Asaas (applyAsaasPayment: pending/expired -> paid). Também é
 --                                            o que permite o FOR UPDATE. Nada de insert/delete nem de outras colunas.
+--                                            Gatilho `orders_card_guard`: para o `card`, só pending/expired -> paid com
+--                                            paid_at = coalesce(paid_at, now()) e nenhuma outra coluna mudando. Sem ele,
+--                                            o `card` tiraria pedidos de `paid` (o download confere `status = 'paid'`).
 --   offer           select                   máximo de parcelas da oferta (dados públicos do checkout).
 --   customer        select                   e-mail, nome, telefone e CPF do comprador para o cliente/cobrança no Asaas.
 --                   update (asaas_customer_id, asaas_account_key)
@@ -67,8 +71,11 @@ $$;
 --   store           select (id, slug, domain) origens da loja para o frame-ancestors do iframe (storeCheckoutOrigins);
 --                                            notify_email e o resto ficam de fora.
 --
--- Segurança: a política por loja depende de `app.store_id`, que quem tem a conexão escolhe. Contra um serviço `card`
--- comprometido, o que segura é a lista acima (colunas e operações) e as políticas por tipo/chave de job e rate_limit.
+-- Segurança: a política por loja depende de `app.store_id`, que quem tem a conexão escolhe; não é barreira contra um
+-- serviço `card` comprometido. Esse serviço AINDA consegue, em qualquer loja: marcar pedido pendente/expirado como pago
+-- e enfileirar a entrega; ler pedidos e clientes (PII) e a chave de API do Asaas; gravar auditoria e avisos falsos;
+-- mudar status de cobrança e o cliente Asaas guardado. NÃO consegue: tirar pedido de pago, reembolsar ou revogar
+-- (fila), mexer nos limites do app, ler usuários, sessões, produtos, a fila e as conexões SMTP/Meta.
 create or replace function card_role_grants() returns void
 language plpgsql as $$
 begin
@@ -93,13 +100,18 @@ begin
 
   -- rate_limit e job não têm store_id obrigatório nem RLS por loja: o `app` segue vendo tudo; o `card` só o que é dele.
   -- Sem FORCE: o dono (migrações, CLIs) continua de fora das políticas.
-  alter table rate_limit enable row level security;
+  -- Só liga quando ainda está desligado: `alter table` pega ACCESS EXCLUSIVE, e isto roda a cada subida.
+  if not (select relrowsecurity from pg_class where oid = 'rate_limit'::regclass) then
+    alter table rate_limit enable row level security;
+  end if;
   drop policy if exists rate_limit_app on rate_limit;
   create policy rate_limit_app on rate_limit to app using (true) with check (true);
   drop policy if exists rate_limit_card on rate_limit;
   create policy rate_limit_card on rate_limit to card using (starts_with(key, 'card:')) with check (starts_with(key, 'card:'));
 
-  alter table job enable row level security;
+  if not (select relrowsecurity from pg_class where oid = 'job'::regclass) then
+    alter table job enable row level security;
+  end if;
   drop policy if exists job_app on job;
   create policy job_app on job to app using (true) with check (true);
   drop policy if exists job_card_insert on job;
@@ -107,5 +119,30 @@ begin
     store_id = nullif(current_setting('app.store_id', true), '')::uuid
     and type in ('deliver_order', 'meta_event', 'notify_seller')
   );
+
+  -- Pedidos: a regra de transição do `card` (orders_card_guard, abaixo). Criado uma vez (sem trava a cada subida).
+  if not exists (select 1 from pg_trigger where tgrelid = 'orders'::regclass and tgname = 'orders_card_guard') then
+    create trigger orders_card_guard before update on orders
+      for each row when (current_user = 'card') execute function orders_card_guard();
+  end if;
+end;
+$$;
+-- Só o dono (migrate.ts) chama.
+revoke execute on function card_role_grants() from public;
+
+-- Papel `card` em `orders`: só marca como pago um pedido pendente ou expirado (o que transitionOrder faz no caminho do
+-- cartão: card.ts e a conferência via applyAsaasPayment), com paid_at = coalesce(paid_at, now()) e nenhuma outra coluna
+-- mudando. Nunca tira um pedido de `paid`. Gatilho, não política: uma política restritiva de UPDATE também valeria para
+-- o SELECT ... FOR UPDATE, que trava pedidos já pagos. Para os outros papéis o gatilho nem dispara (WHEN).
+create or replace function orders_card_guard() returns trigger
+language plpgsql as $$
+begin
+  if not (old.status in ('pending', 'expired') and new.status = 'paid'
+          and new.paid_at is not distinct from coalesce(old.paid_at, now()))
+     or (to_jsonb(new) - 'status' - 'paid_at') is distinct from (to_jsonb(old) - 'status' - 'paid_at') then
+    raise exception 'papel card só marca como pago um pedido pendente ou expirado (% -> %)', old.status, new.status
+      using errcode = 'insufficient_privilege';
+  end if;
+  return new;
 end;
 $$;

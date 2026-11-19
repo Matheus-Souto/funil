@@ -8,7 +8,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { ActionError } from "@/lib/actions/core";
-import { setDbForTests } from "@/lib/db/client";
+import { setDbForTests, withStore } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
 import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert } from "@/lib/db/schema";
 import { env } from "@/lib/env";
@@ -44,6 +44,16 @@ const asCardIn = <T>(storeId: string, fn: (tx: postgres.TransactionSql) => Promi
   }) as Promise<T>;
 
 const PERMISSION_DENIED = /permission denied/;
+const ORDER_GUARD = /papel card só marca como pago/;
+
+/** Loja com Asaas e um pedido de cartão pendente (preparo com o papel `app`). */
+async function pendingOrder() {
+  const fake = createFakeAsaas();
+  const shop = await seedAsaasStore(fake);
+  const order = await newCardOrder(shop.storeId, shop.offerId, `c-${randomUUID()}@example.com`);
+  setAsaasFetchForTests();
+  return { shop, order };
+}
 const RLS_DENIED = /row-level security/;
 
 describe("papel card: atributos e o que fica de fora", () => {
@@ -85,21 +95,60 @@ describe("papel card: atributos e o que fica de fora", () => {
     await expect(asCardIn(storeId, (tx) => tx`delete from integration where kind = 'asaas'`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
-  test("pedidos: insert dá permission denied; update só em status e paid_at", async () => {
-    const fake = createFakeAsaas();
-    const shop = await seedAsaasStore(fake);
-    const o = await newCardOrder(shop.storeId, shop.offerId, `c-${randomUUID()}@example.com`);
-    setAsaasFetchForTests();
+  test("pedidos: insert, delete e update de outras colunas dão permission denied", async () => {
+    const { shop, order } = await pendingOrder();
     await expect(
       asCardIn(
         shop.storeId,
         (tx) =>
           tx`insert into orders (store_id, public_id, offer_id, customer_id, status, method, subtotal_cents, total_cents)
-             values (${shop.storeId}, 'x', ${shop.offerId}, ${o.customerId}, 'paid', 'card_asaas', 1, 1)`,
+             values (${shop.storeId}, 'x', ${shop.offerId}, ${order.customerId}, 'paid', 'card_asaas', 1, 1)`,
       ),
     ).rejects.toThrow(PERMISSION_DENIED);
-    await expect(asCardIn(shop.storeId, (tx) => tx`update orders set total_cents = 1 where id = ${o.id}`)).rejects.toThrow(PERMISSION_DENIED);
-    await expect(asCardIn(shop.storeId, (tx) => tx`delete from orders where id = ${o.id}`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`update orders set total_cents = 1 where id = ${order.id}`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from orders where id = ${order.id}`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("pedidos: o card nunca tira um pedido de pago (paid -> expired, refunded, pending, declined, disputed)", async () => {
+    const { shop, order } = await pendingOrder();
+    await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, order.id));
+    for (const to of ["expired", "refunded", "pending", "declined", "disputed"]) {
+      await expect(asCardIn(shop.storeId, (tx) => tx`update orders set status = ${to} where id = ${order.id}`)).rejects.toThrow(ORDER_GUARD);
+    }
+    // Nem "trocar" para o mesmo estado mexendo no paid_at.
+    await expect(asCardIn(shop.storeId, (tx) => tx`update orders set paid_at = now() - interval '1 day' where id = ${order.id}`)).rejects.toThrow(
+      ORDER_GUARD,
+    );
+    expect((await t.ownerDb.select().from(orders).where(eq(orders.id, order.id)))[0]!.status).toBe("paid");
+    // O FOR UPDATE (trava do pedido já pago, como em payWithCard e applyAsaasPayment) continua valendo.
+    const locked = await asCardIn(shop.storeId, (tx) => tx`select status from orders where id = ${order.id} for update`);
+    expect(locked.map((r) => r.status)).toEqual(["paid"]);
+  });
+
+  test("pedidos: o card só marca como pago (de pendente ou expirado), com paid_at do momento", async () => {
+    const { shop, order } = await pendingOrder();
+    for (const to of ["expired", "declined", "refunded"]) {
+      await expect(asCardIn(shop.storeId, (tx) => tx`update orders set status = ${to} where id = ${order.id}`)).rejects.toThrow(ORDER_GUARD);
+    }
+    await expect(
+      asCardIn(shop.storeId, (tx) => tx`update orders set status = 'paid', paid_at = '2000-01-01' where id = ${order.id}`),
+    ).rejects.toThrow(ORDER_GUARD);
+    const { shop: other, order: expired } = await pendingOrder();
+    await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, expired.id));
+    await asCardIn(other.storeId, (tx) => tx`update orders set status = 'paid', paid_at = coalesce(paid_at, now()) where id = ${expired.id}`);
+    await asCardIn(shop.storeId, (tx) => tx`update orders set status = 'paid', paid_at = coalesce(paid_at, now()) where id = ${order.id}`);
+    const rows = await t.ownerDb.select().from(orders).where(sql`${orders.id} in (${order.id}, ${expired.id})`);
+    expect(rows.map((r) => [r.status, r.paidAt !== null])).toEqual([
+      ["paid", true],
+      ["paid", true],
+    ]);
+  });
+
+  test("pedidos: o papel app não passa pela trava do card (paid -> refunded)", async () => {
+    const { shop, order } = await pendingOrder();
+    await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, order.id));
+    await withStore(shop.storeId, (tx) => tx.update(orders).set({ status: "refunded" }).where(eq(orders.id, order.id)));
+    expect((await t.ownerDb.select().from(orders).where(eq(orders.id, order.id)))[0]!.status).toBe("refunded");
   });
 
   test("loja: lê id, slug e domain (origens do iframe); o e-mail do vendedor não", async () => {
@@ -152,6 +201,22 @@ describe("papel card: atributos e o que fica de fora", () => {
 
   test("lista final de permissões (tabela e coluna) é exatamente a documentada no rls.sql", async () => {
     expect(await cardGrants()).toEqual(EXPECTED_GRANTS);
+  });
+
+  test("políticas que citam o card são só as documentadas; a trava de pedidos existe e card_role_grants não é executável por todos", async () => {
+    const policies = await t.ownerDb.execute<{ p: string }>(
+      sql`select tablename || '.' || policyname || ' ' || permissive || ' ' || cmd as p from pg_policies where 'card' = any(roles) order by 1`,
+    );
+    expect(policies.map((r) => r.p)).toEqual([
+      "integration.card_asaas_only RESTRICTIVE SELECT",
+      "job.job_card_insert PERMISSIVE INSERT",
+      "rate_limit.rate_limit_card PERMISSIVE ALL",
+    ]);
+    const [trg] = await t.ownerDb.execute<{ n: number }>(
+      sql`select count(*)::int as n from pg_trigger where tgrelid = 'orders'::regclass and tgname = 'orders_card_guard' and tgenabled = 'O'`,
+    );
+    expect(trg!.n).toBe(1);
+    expect((await card`select has_function_privilege('card_role_grants()', 'execute') as x`)[0]!.x).toBe(false);
   });
 
   test("migrate de novo, com e sem a senha do card: idempotente, mesmas permissões, o papel segue entrando", async () => {
