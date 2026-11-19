@@ -93,9 +93,43 @@ test("log escreve JSON em stdout já redigido", () => {
   expect(lines.join("")).not.toContain("4444");
 });
 
-test("hash sha256 em hex (ex.: emailHash da auditoria) não é mutilado por ter 13+ dígitos seguidos", () => {
+test("hash sha256 só é poupado sob chave *Hash (emailHash, toHash, tokenHash); fora disso é texto comum", () => {
   const h = "c3f33f3d2f3c7750cc85d2911851444941e0672c8a9c085d4759a0220784ed9d";
-  expect(redact({ emailHash: h, note: `hash ${h}` })).toEqual({ emailHash: h, note: "hash c3f33f3d2f3c7750cc85d[redacted]e0672c8a9c085d4759a0220784ed9d" });
-  // PAN continua mascarado em qualquer outro texto, inclusive colado em letras.
+  expect(redact({ emailHash: h, toHash: h, tokenHash: h })).toEqual({ emailHash: h, toHash: h, tokenHash: h });
+  // O mesmo digest fora de uma chave *Hash: a corrida de 13 dígitos é mascarada como sempre.
+  expect(redact({ note: h })).toEqual({ note: "c3f33f3d2f3c7750cc85d[redacted]e0672c8a9c085d4759a0220784ed9d" });
+  expect(redact(h)).toBe("c3f33f3d2f3c7750cc85d[redacted]e0672c8a9c085d4759a0220784ed9d");
+  // Formato de hash não basta: 64 dígitos, PAN repetido ou PAN + zeros são mascarados fora de *Hash.
+  for (const v of ["1".repeat(64), "4111111111111111".repeat(4), "4111111111111111" + "0".repeat(48)]) {
+    expect(redact(v)).toBe("[redacted]");
+    expect(redact({ id: v })).toEqual({ id: "[redacted]" });
+  }
+  // Sob chave *Hash, só um digest sha256 hex de verdade sobrevive; PAN em texto comum sob *Hash é mascarado.
+  expect(redact({ emailHash: "cartão 4111111111111111" })).toEqual({ emailHash: "cartão [redacted]" });
   expect(redact("a4111111111111111b")).toBe("a[redacted]b");
+});
+
+const hex = fc.constantFrom(..."0123456789abcdef");
+/** Cadeias de 64 caracteres hex/dígitos (o formato de um sha256) com um PAN de 13 a 19 dígitos dentro. */
+const panIn64 = fc
+  .tuple(fc.integer({ min: 13, max: 19 }), fc.array(hex, { minLength: 64, maxLength: 64 }), fc.boolean())
+  .chain(([n, filler, onlyDigits]) =>
+    fc.tuple(digits(n), fc.integer({ min: 0, max: 64 - n })).map(([p, at]) => {
+      const base = onlyDigits ? filler.map((c) => (/\d/.test(c) ? c : "0")) : filler;
+      const chars = [...base];
+      chars.splice(at, n, ...p);
+      return { p, v: chars.join("") };
+    }),
+  );
+
+test("propriedade: PAN dentro de 64 caracteres hex/dígitos (formato de sha256) nunca sobrevive fora de chave *Hash", () => {
+  fc.assert(
+    fc.property(panIn64, fc.constantFrom("id", "note", "msg", "hashes", "value"), ({ p, v }, key) => {
+      expect(v).toHaveLength(64);
+      for (const out of [redact(v), (redact({ [key]: v }) as Rec)[key], (redact([{ deep: v }]) as Rec[])[0]!.deep]) {
+        expect(String(out)).not.toContain(p);
+        expect(String(out)).not.toMatch(/\d{13}/);
+      }
+    }),
+  );
 });

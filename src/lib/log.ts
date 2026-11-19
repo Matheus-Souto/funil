@@ -3,11 +3,10 @@ const SENSITIVE_KEY = /^(number|ccv|cvv|cardNumber|creditCard|expiryMonth|expiry
 const PAN = /\d(?:[\s.-]*\d){12,}/g;
 const MASK = "[redacted]";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+const HASH_KEY = /hash$/i;
 
 function walk(v: unknown, seen: WeakSet<object>): unknown {
-  // Um digest sha256 inteiro em hex (emailHash da auditoria, hashes de token) tem 13+ dígitos seguidos em ~11% dos casos:
-  // não é PAN e mutilá-lo quebra a auditoria. Só a string INTEIRA nesse formato é poupada.
-  if (typeof v === "string") return SHA256_HEX.test(v) ? v : v.replace(PAN, MASK);
+  if (typeof v === "string") return v.replace(PAN, MASK);
   if (v === null || typeof v !== "object") return v;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
   if (seen.has(v)) return "[circular]";
@@ -15,7 +14,14 @@ function walk(v: unknown, seen: WeakSet<object>): unknown {
   if (v instanceof Error) return { name: v.name, message: walk(v.message, seen) };
   if (Array.isArray(v)) return v.map((x) => walk(x, seen));
   const out: Record<string, unknown> = {};
-  for (const [k, val] of Object.entries(v)) out[k] = SENSITIVE_KEY.test(k) ? MASK : walk(val, seen);
+  for (const [k, val] of Object.entries(v)) {
+    if (SENSITIVE_KEY.test(k)) out[k] = MASK;
+    // Digest sha256 hex (emailHash, toHash, tokenHash) tem 13+ dígitos seguidos em ~11% dos casos e não é PAN: poupado
+    // SÓ sob uma chave *Hash, com o valor inteiro no formato. Formato sozinho não basta (PAN repetido também tem 64
+    // caracteres hex); em qualquer outra chave o valor é texto comum e passa pela máscara.
+    else if (HASH_KEY.test(k) && typeof val === "string" && SHA256_HEX.test(val)) out[k] = val;
+    else out[k] = walk(val, seen);
+  }
   return out;
 }
 
