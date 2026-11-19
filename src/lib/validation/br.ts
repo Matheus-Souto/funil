@@ -1,0 +1,62 @@
+// Validações brasileiras compartilhadas entre o formulário do checkout (navegador) e os esquemas do servidor.
+// Sem imports do servidor: este arquivo vai para o bundle do cliente.
+
+export const onlyDigits = (s: string): string => s.replace(/\D/g, "");
+
+/** CPF com dígitos verificadores corretos (11 dígitos, não todos iguais). Recebe só dígitos. */
+export function validCpf(d: string): boolean {
+  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
+  for (const n of [9, 10]) {
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += Number(d[i]) * (n + 1 - i);
+    const dv = ((sum * 10) % 11) % 10;
+    if (dv !== Number(d[n])) return false;
+  }
+  return true;
+}
+
+/** DDDs válidos no Brasil (Anatel). */
+const DDD = new Set([
+  11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 24, 27, 28, 31, 32, 33, 34, 35, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+  51, 53, 54, 55, 61, 62, 63, 64, 65, 66, 67, 68, 69, 71, 73, 74, 75, 77, 79, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92,
+  93, 94, 95, 96, 97, 98, 99,
+]);
+
+/**
+ * Celular brasileiro: DDD válido + 9 + 8 dígitos, aceitando máscara e o prefixo 55. Devolve os 11 dígitos ou `null`.
+ * Recusa números com todos os dígitos do assinante iguais (ex.: 11 99999-9999, que o Asaas recusa).
+ */
+export function normalizeBrMobile(raw: string): string | null {
+  let d = onlyDigits(raw);
+  if (d.length === 13 && d.startsWith("55")) d = d.slice(2);
+  if (!/^\d{11}$/.test(d)) return null;
+  if (!DDD.has(Number(d.slice(0, 2)))) return null;
+  if (d[2] !== "9") return null;
+  if (/^(\d)\1{8}$/.test(d.slice(2)) || /^(\d)\1{7}$/.test(d.slice(3))) return null;
+  return d;
+}
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+export const validEmail = (s: string): boolean => s.length <= 254 && EMAIL.test(s.trim());
+
+const SP_MONTH = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" });
+
+/** Ano e mês atuais no calendário de America/Sao_Paulo. */
+export function saoPauloYearMonth(now: Date): { year: number; month: number } {
+  const [y, m] = SP_MONTH.format(now).split("-").map(Number) as [number, number];
+  return { year: y, month: m };
+}
+
+/**
+ * Validade do cartão (mês 1–12, ano com 2 ou 4 dígitos) não anterior ao mês atual em São Paulo
+ * e no máximo 20 anos à frente. O cartão vale até o fim do mês impresso.
+ */
+export function cardExpiryValid(month: string | number, year: string | number, now: Date = new Date()): boolean {
+  const m = Number(month);
+  const ys = String(year).trim();
+  if (!Number.isInteger(m) || m < 1 || m > 12 || !/^(\d{2}|\d{4})$/.test(ys)) return false;
+  const y = ys.length === 2 ? 2000 + Number(ys) : Number(ys);
+  const cur = saoPauloYearMonth(now);
+  if (y < cur.year || (y === cur.year && m < cur.month)) return false;
+  return y <= cur.year + 20;
+}

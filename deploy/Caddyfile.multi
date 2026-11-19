@@ -1,0 +1,25 @@
+# MODE=multi: domínio principal + um certificado curinga para *.PLATFORM_DOMAIN (lojas em <slug>.PLATFORM_DOMAIN).
+# Certificado curinga só sai por desafio DNS, que exige um Caddy com o plugin do seu DNS (a imagem caddy:2 padrão não
+# tem). Passo a passo em docs/instalacao.md ("Várias lojas"). Exemplo com Cloudflare: imagem de deploy/caddy-dns.Dockerfile
+# e CLOUDFLARE_API_TOKEN (permissão Zone:DNS:Edit) no ambiente do serviço caddy.
+#
+# Não edite este arquivo (vem do git): para personalizar, copie para deploy/Caddyfile.local (fora do git) e use
+# CADDYFILE=Caddyfile.local. Sem desafio DNS, use a lista fixa de lojas descrita em docs/instalacao.md ("Várias lojas").
+{$DOMAIN} {
+	# HSTS (1 ano): o navegador não volta a tentar http:// (rebaixamento na rede local justo na página do cartão). Fora
+	# da lista de pré-carga dos navegadores por padrão (difícil de desfazer): entre nela depois de estável, se quiser.
+	header Strict-Transport-Security "max-age=31536000"
+	encode zstd gzip
+	reverse_proxy app:3000
+}
+
+*.{$PLATFORM_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	# HSTS (1 ano): o navegador não volta a tentar http:// (rebaixamento na rede local justo na página do cartão). Fora
+	# da lista de pré-carga dos navegadores por padrão (difícil de desfazer): entre nela depois de estável, se quiser.
+	header Strict-Transport-Security "max-age=31536000"
+	encode zstd gzip
+	reverse_proxy app:3000
+}

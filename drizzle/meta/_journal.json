@@ -1,0 +1,160 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1795021958926,
+      "tag": "0000_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795022483330,
+      "tag": "0001_login_attempt",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795023302998,
+      "tag": "0002_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795023996823,
+      "tag": "0003_orders_integrations_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795024296978,
+      "tag": "0004_job_locked_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795024872860,
+      "tag": "0005_pix_manual_amount_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795026440948,
+      "tag": "0006_asaas_open_payment_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795027734437,
+      "tag": "0007_card",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795030284981,
+      "tag": "0008_refund_requested_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795030703646,
+      "tag": "0009_customer_asaas_account_key",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795031393587,
+      "tag": "0010_card_attempt_resolved_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795033245899,
+      "tag": "0011_buyer_snapshot_brand_color",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795035490756,
+      "tag": "0012_payment_pix_qr",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795036862175,
+      "tag": "0013_delivery",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1795039039267,
+      "tag": "0014_download_token",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1795039048387,
+      "tag": "0015_drop_link_token_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795041630070,
+      "tag": "0016_conversion",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795043528849,
+      "tag": "0017_conversion_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795044884228,
+      "tag": "0018_store_alert",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795069970781,
+      "tag": "0019_alert_kinds",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1795071367250,
+      "tag": "0020_must_change_password",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795071724218,
+      "tag": "0021_page_check",
+      "breakpoints": true
+    }
+  ]
+}

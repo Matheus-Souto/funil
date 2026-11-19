@@ -1,0 +1,14 @@
+# Sobreposição do compose.yaml só para o smoke de deploy (tests/smoke.sh). Nunca use em produção.
+# - imagem com nome próprio (não sobrescreve a da instalação);
+# - Caddy publicado só em 127.0.0.1, numa porta livre (a pilha real usa 80/443);
+# - Mailpit na rede do compose (o SMTP da loja aponta para mailpit:1025) com a API publicada em 127.0.0.1.
+services:
+  app:
+    image: funil-smoke:latest
+  caddy:
+    ports: !override
+      - "127.0.0.1:${SMOKE_HTTPS_PORT:?}:443"
+  mailpit:
+    image: axllent/mailpit:v1.34.0
+    ports:
+      - "127.0.0.1:${SMOKE_MAIL_PORT:?}:8025"

@@ -1,0 +1,1277 @@
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomUUID } from "node:crypto";
+import { eq, sql } from "drizzle-orm";
+import { ActionError, runAction } from "@/lib/actions/core";
+import { withStore } from "@/lib/db/client";
+import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
+import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import {
+  payWithCard,
+  BREAKER,
+  BUSY_MESSAGE,
+  DECLINE_MESSAGE,
+  UNAVAILABLE_MESSAGE,
+  UNKNOWN_IP,
+  UNKNOWN_MESSAGE,
+  type CardDeps,
+  type CardPaymentInput,
+} from "@/lib/payments/asaas/card";
+import { clientIpFrom, handleCardCheckout } from "@/lib/payments/asaas/card-http";
+import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
+import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
+import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
+import { refundOrder } from "@/lib/payments/refund";
+import { enqueue } from "@/lib/jobs";
+import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
+import { createFakeAsaas, newAsaasOrder, newCardOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
+import type { FakeAsaas } from "./fakes/asaas";
+
+let t: TestDb;
+beforeAll(async () => {
+  t = await createTestDb();
+});
+afterAll(async () => {
+  setAsaasFetchForTests();
+  await t.drop();
+});
+afterEach(() => {
+  setAsaasFetchForTests();
+  resetCardFingerprintsForTests();
+});
+
+// Dados de cartão únicos para as varreduras (CVV 987, validade 08/2034, titular inconfundível).
+const APPROVE = "4444444444444444";
+const DECLINE = "5184019740373151";
+const CVV = "987";
+const HOLDER = "TITULAR UNICO ZETA";
+
+const sha256hex = (v: string) => createHash("sha256").update(v).digest("hex");
+/** Acrescenta o dígito verificador (Luhn) a `body`: números sintéticos válidos para os testes de limite. */
+function luhn(body: string): string {
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) {
+    let d = Number(body[body.length - 1 - i]);
+    if (i % 2 === 0) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+    sum += d;
+  }
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+const tick = () => new Promise<void>((r) => setImmediate(r));
+const fastDeps: CardDeps = { wait: tick };
+let ipSeq = 0;
+const nextIp = () => `198.51.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
+const email = () => `c-${randomUUID()}@example.com`;
+
+function input(orderPublicId: string, over: Partial<CardPaymentInput> & { number?: string } = {}): CardPaymentInput {
+  const { number, ...rest } = over;
+  return {
+    orderPublicId,
+    idempotencyKey: randomUUID(),
+    installments: 1,
+    card: { holderName: HOLDER, number: number ?? APPROVE, expiryMonth: "08", expiryYear: "2034", ccv: CVV },
+    holder: { cpf: "52998224725", postalCode: "01310-100", addressNumber: "100" },
+    clientIp: nextIp(),
+    ...rest,
+  };
+}
+
+const lookups = (fake: FakeAsaas, orderId: string) =>
+  fake.calls.filter((c) => c.method === "GET" && c.path === "/payments" && c.query.get("externalReference") === orderId);
+const paymentPosts = (fake: FakeAsaas) => fake.calls.filter((c) => c.method === "POST" && c.path === "/payments");
+const attempts = (storeId: string, orderId: string) =>
+  withStore(storeId, (tx) => tx.select().from(cardAttempt).where(eq(cardAttempt.orderId, orderId)));
+const orderRow = async (storeId: string, id: string) =>
+  (await withStore(storeId, (tx) => tx.select().from(orders).where(eq(orders.id, id))))[0]!;
+
+async function setup(priceCents = 990, maxInstallments = 1) {
+  const fake = createFakeAsaas();
+  const s = await seedAsaasStore(fake, priceCents, { maxInstallments });
+  return { fake, ...s, call: { storeId: s.storeId } };
+}
+
+/** Segura o POST /payments até `release()`; `arrived` resolve quando a chamada chega ao "Asaas". */
+function gatePayments(fake: FakeAsaas) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const arrived = new Promise<void>((r) => (reached = r));
+  setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+    if (init?.method === "POST" && String(i).endsWith("/payments")) {
+      reached();
+      await gate;
+    }
+    return fake.fetch(i, init);
+  }) as unknown as typeof fetch);
+  return { release, arrived };
+}
+
+/** Captura stdout/stderr e console.* (tudo o que `log` ou um console.* escreveria). */
+function captureOutput() {
+  const chunks: string[] = [];
+  const out = process.stdout.write;
+  const err = process.stderr.write;
+  const cons = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  const grab = ((c: unknown) => {
+    chunks.push(String(c));
+    return true;
+  }) as typeof process.stdout.write;
+  process.stdout.write = grab;
+  process.stderr.write = grab;
+  for (const k of Object.keys(cons) as (keyof typeof cons)[]) console[k] = (...a: unknown[]) => chunks.push(a.map(String).join(" "));
+  return {
+    text: () => chunks.join("\n"),
+    restore() {
+      process.stdout.write = out;
+      process.stderr.write = err;
+      Object.assign(console, cons);
+    },
+  };
+}
+
+/** Texto sem ids/uuids/datas, para procurar dados de cartão sem falso positivo. */
+const scrub = (s: string) =>
+  s
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "U")
+    .replace(/\d{4}-\d{2}-\d{2}[T ][\d:.]+(Z|[+-]\d{2}(:\d{2})?)?/g, "D")
+    .replace(/(pay|cus|ins)_\d+/g, "ID");
+const token = (v: string) => new RegExp(`(?<![0-9A-Za-z_-])${v}(?![0-9A-Za-z_-])`);
+
+async function dumpAllTables(): Promise<string> {
+  const tables = (await t.ownerDb.execute(sql`select tablename from pg_tables where schemaname = 'public'`)) as unknown as {
+    tablename: string;
+  }[];
+  expect(tables.map((r) => r.tablename)).toEqual(expect.arrayContaining(["card_attempt", "audit_log", "job", "payment", "rate_limit"]));
+  const parts: string[] = [];
+  for (const { tablename } of tables) {
+    parts.push(JSON.stringify(await t.ownerDb.execute(sql.raw(`select * from "${tablename}"`))));
+  }
+  return parts.join("\n");
+}
+
+function expectNoCardData(text: string, pans: string[]) {
+  const clean = scrub(text);
+  for (const pan of pans) {
+    expect(text).not.toContain(pan);
+    expect(text).not.toContain(pan.slice(0, 8));
+  }
+  expect(text).not.toContain(HOLDER);
+  expect(clean).not.toMatch(token(CVV));
+  expect(clean).not.toMatch(token("2034"));
+}
+
+describe("payWithCard: aprovação", () => {
+  test("cobra uma vez no cartão com remoteIp do cliente; pedido pago, payment e tentativa gravados", async () => {
+    const { fake, call, storeId, offerId } = await setup(990);
+    const o = await newCardOrder(storeId, offerId, email());
+    const inp = input(o.publicId);
+    const r = await payWithCard(call, inp, fastDeps);
+    expect(r).toEqual({ status: "approved" });
+
+    const posts = paymentPosts(fake);
+    expect(posts).toHaveLength(1);
+    const body = posts[0]!.body as Record<string, unknown>;
+    expect(body.billingType).toBe("CREDIT_CARD");
+    expect(body.value).toBe(9.9);
+    expect(body.remoteIp).toBe(inp.clientIp);
+    expect(body.externalReference).toBe(o.id);
+    expect(body.installmentCount).toBeUndefined();
+    expect(body.creditCard).toEqual({ holderName: HOLDER, number: APPROVE, expiryMonth: "08", expiryYear: "2034", ccv: CVV });
+    expect(body.creditCardHolderInfo).toEqual({
+      name: HOLDER,
+      email: expect.stringContaining("@example.com"),
+      cpfCnpj: "52998224725",
+      postalCode: "01310100",
+      addressNumber: "100",
+      phone: "11988887777",
+      mobilePhone: "11988887777",
+    });
+
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+    const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, o.id)));
+    expect(pays).toHaveLength(1);
+    expect(pays[0]!.status).toBe("CONFIRMED");
+    expect(pays[0]!.amountCents).toBe(990);
+    const [a] = await attempts(storeId, o.id);
+    expect(a!.status).toBe("approved");
+    expect(a!.asaasPaymentId).toBe(pays[0]!.providerId);
+    const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(jobs.map((j) => j.type)).toContain("deliver_order");
+  });
+
+  test("mesma idempotencyKey em 2 chamadas paralelas -> uma única cobrança no Asaas", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const inp = input(o.publicId);
+    const rs = await Promise.all([payWithCard(call, inp, fastDeps), payWithCard(call, inp, fastDeps)]);
+    expect(rs).toEqual([{ status: "approved" }, { status: "approved" }]);
+    expect(paymentPosts(fake)).toHaveLength(1);
+    expect(await attempts(storeId, o.id)).toHaveLength(1);
+  });
+
+  test("segunda chamada com a mesma chave enquanto a primeira está no Asaas espera o resultado dela", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const inp = input(o.publicId);
+    const gate = gatePayments(fake);
+    const first = payWithCard(call, inp, fastDeps);
+    await gate.arrived;
+    let waited = 0;
+    const second = payWithCard(call, inp, {
+      wait: async () => {
+        waited++;
+        gate.release();
+        await tick();
+      },
+    });
+    expect(await Promise.all([first, second])).toEqual([{ status: "approved" }, { status: "approved" }]);
+    expect(waited).toBeGreaterThan(0);
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("outra chave enquanto uma tentativa está em andamento -> conflict, sem segunda cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const gate = gatePayments(fake);
+    const first = payWithCard(call, input(o.publicId), fastDeps);
+    await gate.arrived;
+    const e = await payWithCard(call, input(o.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("conflict");
+    gate.release();
+    expect(await first).toEqual({ status: "approved" });
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("chaves diferentes em pedido já pago -> approved sem nova cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
+    expect(await payWithCard(call, input(o.publicId), fastDeps)).toEqual({ status: "approved" });
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("pedido sem CPF do comprador: invalid_input; o CPF do titular nunca vira o CPF do comprador", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email(), null);
+    const e = await payWithCard(call, input(o.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("invalid_input");
+    expect(fake.calls.filter((c) => c.path === "/customers" || c.path === "/payments")).toHaveLength(0);
+    const [c] = await withStore(storeId, (tx) => tx.select().from(customer).where(eq(customer.id, o.customerId)));
+    expect(c!.cpf).toBeNull();
+    expect((await attempts(storeId, o.id)).map((a) => a.status)).toEqual(["error"]);
+  });
+});
+
+describe("payWithCard: validação e isolamento", () => {
+  test("parcelas acima do máximo da oferta -> invalid_input, sem Asaas e sem tentativa", async () => {
+    const { fake, call, storeId, offerId } = await setup(990, 1);
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { installments: 2 }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("invalid_input");
+    expect(paymentPosts(fake)).toHaveLength(0);
+    expect(await attempts(storeId, o.id)).toHaveLength(0);
+  });
+
+  test("dados do cartão inválidos -> invalid_input sem ecoar valores", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o.publicId, { number: "12345" }), fastDeps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("invalid_input");
+    expect(JSON.stringify({ m: e.message, d: e.details })).not.toContain("12345");
+    expect(JSON.stringify({ m: e.message, d: e.details })).not.toContain(CVV);
+  });
+
+  test("pedido de outra loja, inexistente ou de outro método -> not_found / conflict", async () => {
+    const a = await setup();
+    const b = await setup();
+    const ob = await newCardOrder(b.storeId, b.offerId, email());
+    const e1 = await payWithCard(a.call, input(ob.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e1 as ActionError).code).toBe("not_found");
+    const e2 = await payWithCard(a.call, input("nao-existe"), fastDeps).catch((x: unknown) => x);
+    expect((e2 as ActionError).code).toBe("not_found");
+    const pix = await newAsaasOrder(a.storeId, a.offerId, email());
+    const e3 = await payWithCard(a.call, input(pix.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e3 as ActionError).code).toBe("conflict");
+    expect(paymentPosts(a.fake)).toHaveLength(0);
+  });
+
+  test("a mesma chave reutilizada em outro pedido -> conflict", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o1 = await newCardOrder(storeId, offerId, email());
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const inp = input(o1.publicId);
+    await payWithCard(call, inp, fastDeps);
+    const e = await payWithCard(call, { ...inp, orderPublicId: o2.publicId }, fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("conflict");
+  });
+});
+
+describe("payWithCard: recusa e vazamento de dados (Review Focus 5)", () => {
+  test("recusa cujo erro ecoa número e CVV: mensagem genérica; logs, resposta e tentativa sem dados do cartão", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.fail("POST /payments", 400, `Cartão ${APPROVE} cvv ${CVV} validade 08/2034 de ${HOLDER} recusado`, "invalid_creditCard");
+    const cap = captureOutput();
+    let r;
+    try {
+      r = await payWithCard(call, input(o.publicId), fastDeps);
+    } finally {
+      cap.restore();
+    }
+    expect(r).toEqual({ status: "declined", message: DECLINE_MESSAGE });
+    expect(DECLINE_MESSAGE).toBe("Pagamento recusado. Confira os dados ou pague com Pix.");
+    expect(cap.text()).not.toContain("4444");
+    expectNoCardData(cap.text() + JSON.stringify(r), [APPROVE]);
+    const [a] = await attempts(storeId, o.id);
+    expect(a!.status).toBe("declined");
+    expect(JSON.stringify(a)).not.toContain("4444");
+    expect((await orderRow(storeId, o.id)).status).toBe("pending");
+  });
+
+  test("varredura: depois de uma aprovação e uma recusa, nenhuma tabela nem log contém número, CVV, validade ou titular", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o1 = await newCardOrder(storeId, offerId, email());
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const cap = captureOutput();
+    let r1, r2;
+    try {
+      r1 = await payWithCard(call, input(o1.publicId), fastDeps);
+      r2 = await payWithCard(call, input(o2.publicId, { number: DECLINE }), fastDeps);
+    } finally {
+      cap.restore();
+    }
+    expect(r1!.status).toBe("approved");
+    expect(r2!.status).toBe("declined");
+    expectNoCardData(cap.text(), [APPROVE, DECLINE]);
+    expectNoCardData(await dumpAllTables(), [APPROVE, DECLINE]);
+  });
+});
+
+describe("payWithCard: resultado desconhecido (timeout/rede)", () => {
+  test("não diz recusado; tentativa 'error'; nova tentativa em 2 min é recusada; o webhook liquida", async () => {
+    const { fake, call, storeId, offerId, webhookToken } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    const r = await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 });
+    expect(r).toEqual({ status: "unknown", message: UNKNOWN_MESSAGE });
+    expect(UNKNOWN_MESSAGE).toBe("Não foi possível confirmar o pagamento. Verifique em instantes antes de tentar de novo.");
+    expect((await attempts(storeId, o.id))[0]!.status).toBe("error");
+    expect((await orderRow(storeId, o.id)).status).toBe("pending");
+    fake.clearFailures();
+
+    const soon = new Date(t0.getTime() + 60_000);
+    const e = await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => soon }).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("conflict");
+    expect(paymentPosts(fake)).toHaveLength(1);
+
+    const charged = [...fake.payments.values()].find((p) => p.externalReference === o.id)!;
+    const res = await handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": webhookToken }), {
+      event: "PAYMENT_CONFIRMED",
+      payment: { id: charged.id },
+    });
+    expect(res.status).toBe(200);
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    expect(await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later })).toEqual({ status: "approved" });
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("passados 2 min sem confirmação, uma nova tentativa é permitida", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.fail("POST /payments", 503, "indisponível");
+    const t0 = new Date();
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 })).status).toBe("unknown");
+    fake.clearFailures();
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later })).status).toBe("approved");
+    // Antes de permitir, conferiu no Asaas se a tentativa desconhecida cobrou (nenhuma cobrança: segue).
+    expect(lookups(fake, o.id)).toHaveLength(1);
+    expect(paymentPosts(fake)).toHaveLength(2);
+  });
+
+  test("conferência no Asaas após 2 min: cobrança paga liquida o pedido pelo caminho do webhook, sem nova cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 })).status).toBe("unknown");
+    fake.clearFailures();
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    expect(await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later })).toEqual({ status: "approved" });
+    expect(lookups(fake, o.id)).toHaveLength(1);
+    expect(paymentPosts(fake)).toHaveLength(1);
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+    const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, o.id)));
+    expect(pays.map((p) => p.status)).toEqual(["CONFIRMED"]);
+    const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(jobs.filter((j) => j.type === "deliver_order")).toHaveLength(1);
+  });
+
+  test("conferência no Asaas: cobrança em análise -> recusa a nova tentativa", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 });
+    fake.clearFailures();
+    const charged = [...fake.payments.values()].find((p) => p.externalReference === o.id)!;
+    fake.setStatus(charged.id, "AWAITING_RISK_ANALYSIS");
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe("Já existe um pagamento em análise para este pedido. Aguarde alguns minutos.");
+    expect(paymentPosts(fake)).toHaveLength(1);
+    expect((await orderRow(storeId, o.id)).status).toBe("pending");
+  });
+
+  test("conferência no Asaas falha -> recusa (fail closed), sem nova cobrança", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    const t0 = new Date();
+    await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => t0 });
+    fake.clearFailures();
+    fake.fail("GET /payments?", 500, "fora do ar");
+    const later = new Date(t0.getTime() + 3 * 60_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe(UNKNOWN_MESSAGE);
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+
+  test("tentativa 'processing' abandonada (mais velha que a janela) também passa pela conferência", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    await withStore(storeId, (tx) =>
+      tx.insert(cardAttempt).values({
+        storeId,
+        orderId: o.id,
+        idempotencyKey: randomUUID(),
+        status: "processing",
+        createdAt: new Date(Date.now() - 10 * 60_000),
+      }),
+    );
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
+    expect(lookups(fake, o.id)).toHaveLength(1);
+  });
+
+  test("sem tentativa anterior desconhecida, não consulta o Asaas", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("approved");
+    expect(lookups(fake, o.id)).toHaveLength(0);
+  });
+
+  test("falha antes da cobrança (Asaas desconectado) não trava o pedido", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    await t.ownerDb.execute(sql`delete from integration where store_id = ${storeId}`);
+    const e = await payWithCard(call, input(o.publicId), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("conflict");
+    const [a] = await attempts(storeId, o.id);
+    expect(a!.status).toBe("error");
+    expect(a!.errorMessage).toBe("sem_cobranca");
+  });
+});
+
+describe("payWithCard: janela de bloqueio conta do fim da tentativa", () => {
+  test("resposta perdida depois de 60 s: 90 s após o fim (150 s após o início) ainda recusa, sem consultar o Asaas", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const t0 = new Date();
+    let clock = t0;
+    fake.loseResponse("POST /payments");
+    setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+      if (init?.method === "POST" && String(i).endsWith("/payments")) clock = new Date(t0.getTime() + 60_000);
+      return fake.fetch(i, init);
+    }) as unknown as typeof fetch);
+    expect((await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => clock })).status).toBe("unknown");
+    const [a] = await attempts(storeId, o.id);
+    expect(a!.resolvedAt!.getTime()).toBe(t0.getTime() + 60_000);
+    fake.clearFailures();
+    setAsaasFetchForTests(fake.fetch);
+
+    const at = new Date(t0.getTime() + 150_000);
+    const e = (await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => at }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("conflict");
+    expect(e.message).toBe(BUSY_MESSAGE);
+    expect(lookups(fake, o.id)).toHaveLength(0);
+    expect(paymentPosts(fake)).toHaveLength(1);
+
+    // passados 2 min do fim, segue para a conferência no Asaas (que acha a cobrança paga)
+    const after = new Date(t0.getTime() + 60_000 + 121_000);
+    expect(await payWithCard(call, input(o.publicId), { ...fastDeps, now: () => after })).toEqual({ status: "approved" });
+    expect(lookups(fake, o.id)).toHaveLength(1);
+  });
+
+  test("recusa e aprovação também gravam resolved_at", async () => {
+    const { call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T15:00:00Z");
+    const o1 = await newCardOrder(storeId, offerId, email());
+    const o2 = await newCardOrder(storeId, offerId, email());
+    await payWithCard(call, input(o1.publicId), { ...fastDeps, now: () => t0 });
+    await payWithCard(call, input(o2.publicId, { number: DECLINE }), { ...fastDeps, now: () => t0 });
+    expect((await attempts(storeId, o1.id))[0]!.resolvedAt).toEqual(t0);
+    expect((await attempts(storeId, o2.id))[0]!.resolvedAt).toEqual(t0);
+  });
+});
+
+describe("payWithCard: 400 do Asaas — recusa do cartão x erro de integração", () => {
+  for (const [label, setFail] of [
+    ["código desconhecido", (f: FakeAsaas) => f.fail("POST /payments", 400, "O campo customer é inválido", "invalid_customer")],
+    ["código genérico", (f: FakeAsaas) => f.fail("POST /payments", 400, "Ação inválida")],
+    ["401 (chave revogada)", (f: FakeAsaas) => f.fail("POST /payments", 401, "Chave inválida", "invalid_access_token")],
+  ] as const) {
+    test(`${label}: "indisponível", não conta como recusa (sem Turnstile nem disjuntor), loga só o código`, async () => {
+      const { fake, call, storeId, offerId } = await setup();
+      const ip = nextIp();
+      const mail = email();
+      const o = await newCardOrder(storeId, offerId, mail);
+      setFail(fake);
+      let verified = 0;
+      const deps: CardDeps = {
+        ...fastDeps,
+        turnstileConfigured: true,
+        verifyTurnstile: async () => {
+          verified++;
+          return false;
+        },
+      };
+      const cap = captureOutput();
+      let r;
+      try {
+        r = await payWithCard(call, input(o.publicId, { clientIp: ip }), deps);
+      } finally {
+        cap.restore();
+      }
+      expect(r).toEqual({ status: "unavailable", message: UNAVAILABLE_MESSAGE });
+      expect(UNAVAILABLE_MESSAGE).toBe("Pagamento por cartão indisponível no momento. Tente pagar com Pix.");
+      const [a] = await attempts(storeId, o.id);
+      expect(a!.status).toBe("error");
+      expect(a!.errorMessage).toBe("erro_integracao");
+      expect(cap.text()).toContain("erro de integração");
+      expect(cap.text()).not.toContain("inválid");
+      const declines = await t.ownerDb.execute(
+        sql`select key from rate_limit where key = ${`card:decline:ip:${ip}`} or key = ${`card:decline:email:${sha256hex(mail)}`}
+            or key = ${`card:decline:store:${storeId}`} or key = ${`card:breaker:store:${storeId}`}`,
+      );
+      expect(declines).toHaveLength(0);
+      // nova tentativa no mesmo pedido, mesmo IP: sem bloqueio, sem conferência, sem Turnstile
+      fake.clearFailures();
+      expect((await payWithCard(call, input(o.publicId, { clientIp: ip }), deps)).status).toBe("approved");
+      expect(verified).toBe(0);
+      expect(lookups(fake, o.id)).toHaveLength(0);
+    });
+  }
+
+  test("400 sem lista de códigos também é erro de integração", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+      if (init?.method === "POST" && String(i).endsWith("/payments")) return Response.json({ message: "bad" }, { status: 400 });
+      return fake.fetch(i, init);
+    }) as unknown as typeof fetch);
+    expect((await payWithCard(call, input(o.publicId), fastDeps)).status).toBe("unavailable");
+  });
+
+  test("invalid_creditCard é recusa do cartão", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    expect(await payWithCard(call, input(o.publicId), fastDeps)).toEqual({ status: "declined", message: DECLINE_MESSAGE });
+  });
+});
+
+describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
+  test("IPv6: endereços diferentes na mesma /64 contam juntos no limite por IP", async () => {
+    const { call, storeId, offerId } = await setup();
+    for (let i = 0; i < 10; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const ip = `2001:db8:77:${i % 2 === 0 ? "0" : "0000"}:${(i + 1).toString(16)}::${i + 7}`;
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4300000000${String(i).padStart(5, "0")}`) }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:0db8:0077:0000:ffff:ffff:ffff:ffff", number: luhn("430000000009999") }), fastDeps).catch(
+      (x: unknown) => x,
+    );
+    expect((e as ActionError).code).toBe("rate_limited");
+    const other = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(other.publicId, { clientIp: "2001:db8:77:1::1", number: luhn("430000000008888") }), fastDeps)).status).toBe(
+      "approved",
+    );
+  });
+
+  test("IPv6: recusa de um endereço exige Turnstile de outro endereço da mesma /64", async () => {
+    const { call, storeId, offerId } = await setup();
+    const deps: CardDeps = { ...fastDeps, verifyTurnstile: async (tok) => tok === "ok" };
+    const o1 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: "2001:db8:99:5::1", number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: "2001:db8:99:5:abcd::42" }), deps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    expect(e.details).toEqual({ captcha: true });
+  });
+
+  async function tripBreaker(fake: FakeAsaas, call: { storeId: string }, storeId: string, offerId: string, now: Date, deps: CardDeps) {
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    for (let i = 0; i < 10; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { number: luhn(`4410000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => now });
+      expect(r.status).toBe("declined");
+    }
+    fake.clearFailures();
+  }
+
+  test("disjuntor: 10 recusas na loja em 15 min exigem Turnstile de todos por 1 h; avisa o vendedor; depois volta ao normal", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T16:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: true, verifyTurnstile: async (tok) => tok === "ok" };
+    const cap = captureOutput();
+    try {
+      await tripBreaker(fake, call, storeId, offerId, t0, deps);
+    } finally {
+      cap.restore();
+    }
+    const warn = cap
+      .text()
+      .split("\n")
+      .find((l) => l.includes("muitas recusas de cartão"));
+    expect(warn).toBeDefined();
+    // (o storeId vai no log, mas o redact de PAN pode mascarar trechos de UUID com muitos dígitos: não comparar aqui)
+    expect(JSON.parse(warn!).data).toMatchObject({ declines: 10, windowMin: 15 });
+    // e-mail ao vendedor: um notify_seller sem pedido, motivo disjuntor_cartao
+    const notices = await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"));
+    expect(notices.filter((j) => j.storeId === storeId).map((j) => j.payload)).toEqual([{ reason: "disjuntor_cartao" }]);
+
+    const later = new Date(t0.getTime() + 5 * 60_000);
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o.publicId), { ...deps, now: () => later }).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    expect(e.details).toEqual({ captcha: true });
+    expect((await payWithCard(call, input(o.publicId, { turnstileToken: "ok" }), { ...deps, now: () => later })).status).toBe("approved");
+
+    // outra loja não é afetada
+    const b = await setup();
+    const ob = await newCardOrder(b.storeId, b.offerId, email());
+    expect((await payWithCard(b.call, input(ob.publicId, { number: luhn("441000000007777") }), { ...deps, now: () => later })).status).toBe("approved");
+
+    // passada 1 h do disparo, volta ao normal
+    const reset = new Date(t0.getTime() + 61 * 60_000);
+    const o2 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o2.publicId, { number: luhn("441000000006666") }), { ...deps, now: () => reset })).status).toBe("approved");
+  }, HEAVY_TEST_MS);
+
+  test("disjuntor: 9 recusas não disparam; recusas fora da janela de 15 min não somam", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T17:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: true, verifyTurnstile: async (tok) => tok === "ok" };
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    for (let i = 0; i < 18; i++) {
+      // 9 recusas em t0 e 9 em t0 + 16 min: nunca 10 dentro de 15 min
+      const at = new Date(t0.getTime() + (i < 9 ? 0 : 16 * 60_000));
+      const o = await newCardOrder(storeId, offerId, email());
+      expect((await payWithCard(call, input(o.publicId, { number: luhn(`4420000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at })).status).toBe(
+        "declined",
+      );
+    }
+    fake.clearFailures();
+    const o = await newCardOrder(storeId, offerId, email());
+    const at = new Date(t0.getTime() + 17 * 60_000);
+    expect((await payWithCard(call, input(o.publicId), { ...deps, now: () => at })).status).toBe("approved");
+  }, 30_000);
+
+  test("disjuntor sem Turnstile configurado: teto por IP (/64) por hora, não global (o atacante não esgota a loja)", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const t0 = new Date("2026-11-18T18:00:00Z");
+    const deps: CardDeps = { ...fastDeps, turnstileConfigured: false };
+    await tripBreaker(fake, call, storeId, offerId, t0, deps);
+    const at = new Date(t0.getTime() + 60_000);
+    // Um IP (vários endereços da mesma /64) esgota só o próprio teto.
+    for (let i = 0; i < BREAKER.capPerSourceWithoutTurnstile; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const ip = `2001:db8:44:3::${i + 1}`;
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4430000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at });
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:db8:44:3::ff", number: luhn("443000000009999") }), { ...deps, now: () => at }).catch(
+      (x: unknown) => x,
+    );
+    expect((e as ActionError).code).toBe("rate_limited");
+    // Compradores de outros IPs continuam comprando (bem mais que o antigo teto global de 20).
+    for (let i = 0; i < 25; i++) {
+      const other = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(other.publicId, { number: luhn(`4431000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at });
+      expect(r.status).toBe("approved");
+    }
+    const global = await t.ownerDb.execute(sql`select key from rate_limit where key = ${`card:store:${storeId}`}`);
+    expect(global).toHaveLength(0);
+  }, 30_000);
+
+  test("número que falha no Luhn: invalid_input antes do Asaas; não conta como recusa, nem no disjuntor, nem nos limites", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const ip = "203.0.113.77";
+    for (let i = 0; i < 12; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const bad = `${luhn(`4400000000${String(i).padStart(5, "0")}`).slice(0, 15)}${(Number(luhn(`4400000000${String(i).padStart(5, "0")}`).slice(15)) + 1) % 10}`;
+      const e = (await payWithCard(call, input(o.publicId, { clientIp: ip, number: bad }), fastDeps).catch((x: unknown) => x)) as ActionError;
+      expect(e.code).toBe("invalid_input");
+      expect(e.details).toEqual([{ path: ["card", "number"] }]);
+      expect(JSON.stringify({ m: e.message, d: e.details })).not.toContain(bad);
+    }
+    expect(paymentPosts(fake)).toHaveLength(0);
+    const keys = await t.ownerDb.execute(
+      sql`select key from rate_limit where key like ${`card:%${storeId}%`} or key = ${`card:ip:${ip}`} or key like 'card:decline:ip:203.0.113.77%'`,
+    );
+    expect(keys).toHaveLength(0);
+    // O mesmo IP segue podendo pagar com um cartão válido.
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn("440000000009999") }), fastDeps)).status).toBe("approved");
+  }, 30_000);
+
+  test("cartão de teste do sandbox (4444 4444 4444 4444, falha no Luhn) só é aceito com a conexão sandbox", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId, { number: APPROVE }), fastDeps)).status).toBe("approved");
+    await t.ownerDb.execute(sql`update integration set config = config || '{"env":"production"}'::jsonb where store_id = ${storeId} and kind = 'asaas'`);
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o2.publicId, { number: APPROVE }), fastDeps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("invalid_input");
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
+});
+
+describe("payWithCard: limites e Turnstile", () => {
+  test("11ª tentativa do mesmo IP na hora -> rate_limited (sem chamar o Asaas)", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const ip = "203.0.113.11";
+    for (let i = 0; i < 10; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4000000000${String(i).padStart(5, "0")}`) }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn("400000000009999") }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+    expect(paymentPosts(fake)).toHaveLength(10);
+  });
+
+  test("IP desconhecido (sem proxy confiável): sem limite por IP; e-mail e cartão continuam valendo", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    for (let i = 0; i < 11; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: luhn(`4200000000${String(i).padStart(5, "0")}`) }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const rows = await t.ownerDb.execute(sql`select key from rate_limit where key like 'card:ip:%unknown%'`);
+    expect(rows).toHaveLength(0);
+    expect((paymentPosts(fake)[0]!.body as { remoteIp: string }).remoteIp).toBe("0.0.0.0");
+    const pan = luhn("420000000008888");
+    for (let i = 0; i < 3; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps);
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+  }, HEAVY_TEST_MS);
+
+  test("IP desconhecido: uma recusa exige Turnstile para o mesmo e-mail", async () => {
+    const { call, storeId, offerId } = await setup();
+    const mail = email();
+    const deps: CardDeps = { ...fastDeps, verifyTurnstile: async (tok) => tok === "ok" };
+    const o1 = await newCardOrder(storeId, offerId, mail);
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: UNKNOWN_IP, number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, mail);
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: UNKNOWN_IP }), deps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    // outro comprador (outro e-mail) não é afetado pela recusa
+    const o3 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o3.publicId, { clientIp: UNKNOWN_IP }), deps)).status).toBe("approved");
+  });
+
+  test("4ª tentativa do mesmo cartão na hora -> rate_limited", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const pan = luhn("400000000007777");
+    for (let i = 0; i < 3; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      expect((await payWithCard(call, input(o.publicId, { number: pan }), fastDeps)).status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, email());
+    const e = await payWithCard(call, input(o.publicId, { number: pan }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+    expect(paymentPosts(fake)).toHaveLength(3);
+  }, HEAVY_TEST_MS);
+
+  test("6ª tentativa do mesmo e-mail na hora -> rate_limited", async () => {
+    const { call, storeId, offerId } = await setup();
+    const mail = email();
+    for (let i = 0; i < 5; i++) {
+      const o = await newCardOrder(storeId, offerId, mail);
+      const r = await payWithCard(call, input(o.publicId, { number: luhn(`4100000000${String(i).padStart(5, "0")}`) }), fastDeps);
+      expect(r.status).toBe("approved");
+    }
+    const o = await newCardOrder(storeId, offerId, mail);
+    const e = await payWithCard(call, input(o.publicId, { number: luhn("410000000009999") }), fastDeps).catch((x: unknown) => x);
+    expect((e as ActionError).code).toBe("rate_limited");
+  });
+
+  test("Turnstile só é exigido depois de uma recusa do mesmo IP", async () => {
+    const { call, storeId, offerId } = await setup();
+    const ip = "203.0.113.77";
+    const seen: (string | undefined)[] = [];
+    const deps: CardDeps = {
+      ...fastDeps,
+      verifyTurnstile: async (tok) => {
+        seen.push(tok);
+        return tok === "ok";
+      },
+    };
+    const o1 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: ip, number: DECLINE }), deps)).status).toBe("declined");
+    expect(seen).toHaveLength(0);
+
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: ip }), deps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("rate_limited");
+    expect(e.details).toEqual({ captcha: true });
+    const ok = await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "ok" }), deps);
+    expect(ok.status).toBe("approved");
+    expect(seen).toEqual([undefined, "ok"]);
+  });
+});
+
+describe("payWithCard: parcelado", () => {
+  test("envia installmentCount + totalValue (sem value); webhook de outra parcela não vira cobrança em dobro; estorno pelo parcelamento", async () => {
+    const { fake, call, storeId, offerId, webhookToken } = await setup(1000, 3);
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("approved");
+    const body = paymentPosts(fake)[0]!.body as Record<string, unknown>;
+    expect(body.installmentCount).toBe(3);
+    expect(body.totalValue).toBe(10);
+    expect(body.value).toBeUndefined();
+    expect(body.installmentValue).toBeUndefined();
+
+    const [inst] = [...fake.installments.values()];
+    const cap = captureOutput();
+    try {
+      for (const pid of inst!.payments) {
+        const r = await handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": webhookToken }), {
+          event: "PAYMENT_CONFIRMED",
+          payment: { id: pid },
+        });
+        expect(r.status).toBe(200);
+      }
+    } finally {
+      cap.restore();
+    }
+    expect(cap.text()).not.toContain("pagamento em dobro");
+    const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, o.id)));
+    expect(pays.every((p) => (p.raw as { duplicate?: boolean } | null)?.duplicate !== true)).toBe(true);
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+
+    await runAction(refundOrder, { storeId, actor: owner, origin: "panel" }, { orderId: o.id });
+    await runRefundJobs(new Date(Date.now() + 1000));
+    expect(fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund")).map((c) => c.path)).toEqual([`/installments/${inst!.id}/refund`]);
+    expect((await orderRow(storeId, o.id)).status).toBe("refunded");
+  });
+
+  test("parcelado com resposta perdida: o webhook de qualquer parcela libera o pedido pelo total do parcelamento", async () => {
+    const { fake, call, storeId, offerId, webhookToken } = await setup(1000, 3);
+    const o = await newCardOrder(storeId, offerId, email());
+    fake.loseResponse("POST /payments");
+    expect((await payWithCard(call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("unknown");
+    fake.clearFailures();
+    const [inst] = [...fake.installments.values()];
+    const r = await handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": webhookToken }), {
+      event: "PAYMENT_CONFIRMED",
+      payment: { id: inst!.payments[2]! },
+    });
+    expect(r.status).toBe(200);
+    expect((await orderRow(storeId, o.id)).status).toBe("paid");
+  });
+});
+
+describe("parcelado: estorno de uma parcela só (painel do Asaas) não estorna a venda", () => {
+  const hook = (storeId: string, token: string, id: string, ev = "PAYMENT_REFUNDED") =>
+    handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": token }), { event: ev, payment: { id } });
+  const alerts = async (storeId: string, orderId: string, reason: string) =>
+    (await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"))).filter(
+      (j) => j.storeId === storeId && (j.payload as { orderId?: string; reason?: string }).orderId === orderId && (j.payload as { reason?: string }).reason === reason,
+    );
+
+  async function paidInThree() {
+    const s = await setup(1000, 3);
+    const o = await newCardOrder(s.storeId, s.offerId, email());
+    expect((await payWithCard(s.call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("approved");
+    const [inst] = [...s.fake.installments.values()];
+    for (const pid of inst!.payments) expect((await hook(s.storeId, s.webhookToken, pid, "PAYMENT_CONFIRMED")).status).toBe(200);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    return { ...s, o, parcels: inst!.payments };
+  }
+
+  for (const which of [0, 1] as const) {
+    test(`parcela ${which + 1} estornada no Asaas: pedido continua pago, vendedor avisado; o resto estornado conclui`, async () => {
+      const s = await paidInThree();
+      s.fake.refundExternally(s.parcels[which]!);
+      expect((await hook(s.storeId, s.webhookToken, s.parcels[which]!)).status).toBe(200);
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+      const partial = await alerts(s.storeId, s.o.id, "estorno_parcial");
+      expect(partial).toHaveLength(1);
+      expect(partial[0]!.payload).toMatchObject({ refundedCents: 333 });
+      // Webhook repetido: sem aviso novo.
+      expect((await hook(s.storeId, s.webhookToken, s.parcels[which]!)).status).toBe(200);
+      expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(1);
+
+      // O vendedor pede o reembolso pelo painel: parcial num parcelamento não é resolvido por nós (mantém pago).
+      const call = { storeId: s.storeId, actor: owner, origin: "panel" as const };
+      if (which === 0) {
+        // A parcela estornada é a que o pedido guarda: recusa na hora, com o motivo.
+        await expect(runAction(refundOrder, call, { orderId: s.o.id })).rejects.toMatchObject({
+          code: "conflict",
+          message: expect.stringContaining("Parte das parcelas já foi estornada no Asaas"),
+        });
+      } else {
+        // Outra parcela: o job reconsulta o parcelamento inteiro, não pede estorno e avisa o vendedor.
+        await runAction(refundOrder, call, { orderId: s.o.id });
+        await runRefundJobs(new Date(Date.now() + 1000));
+        expect((await alerts(s.storeId, s.o.id, "estorno_falhou")).map((j) => (j.payload as { code?: string }).code)).toEqual(["parcial_parcelado"]);
+      }
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+      expect(s.fake.calls.some((c) => c.method === "POST" && c.path.endsWith("/refund"))).toBe(false);
+
+      // As outras parcelas estornadas no Asaas: agora sim o pedido é estornado (pelo webhook de qualquer parcela).
+      for (const pid of s.parcels) if (pid !== s.parcels[which]) s.fake.refundExternally(pid);
+      const last = s.parcels.find((pid) => pid !== s.parcels[which])!;
+      expect((await hook(s.storeId, s.webhookToken, last)).status).toBe(200);
+      expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
+    });
+  }
+
+  test("listagem de parcelas: só em evento de estorno; falha (4xx/5xx) ou incompleta -> 500 (o Asaas reenvia), pedido intacto", async () => {
+    const s = await setup(1000, 3);
+    const o = await newCardOrder(s.storeId, s.offerId, email());
+    expect((await payWithCard(s.call, input(o.publicId, { installments: 3 }), fastDeps)).status).toBe("approved");
+    const [inst] = [...s.fake.installments.values()];
+    const parcels = inst!.payments;
+    // Confirmação não depende da listagem (nem a consulta).
+    s.fake.fail("GET /payments?installment=", 400, "filtro inválido");
+    for (const pid of parcels) expect((await hook(s.storeId, s.webhookToken, pid, "PAYMENT_CONFIRMED")).status).toBe(200);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    expect(s.fake.calls.some((c) => c.path === "/payments" && c.query.get("installment"))).toBe(false);
+
+    s.fake.refundExternally(parcels[1]!);
+    // Transitório (5xx): 500, o Asaas reenvia; nada decidido.
+    s.fake.clearFailures();
+    s.fake.fail("GET /payments?installment=", 503, "indisponível");
+    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(0);
+    // Permanente (4xx) ou listagem incompleta, repetidos: 200 sempre (sem loop que pausaria a fila de webhooks),
+    // pedido segue pago e o vendedor é avisado uma vez.
+    for (const status of [400, 404]) {
+      s.fake.clearFailures();
+      s.fake.fail("GET /payments?installment=", status, "erro");
+      for (let i = 0; i < 3; i++) expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
+    }
+    s.fake.clearFailures();
+    s.fake.payments.get(parcels[2]!)!.deleted = true;
+    for (let i = 0; i < 3; i++) expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+    const partial = await alerts(s.storeId, o.id, "estorno_parcial");
+    expect(partial).toHaveLength(1);
+    expect(partial[0]!.payload).toMatchObject({ refundedCents: 333 });
+    // Listagem volta: o parcial conferido tem o mesmo valor, sem aviso novo.
+    s.fake.payments.get(parcels[2]!)!.deleted = false;
+    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
+    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(1);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+  });
+
+  test("listagem de parcelas indisponível não bloqueia chargeback da parcela", async () => {
+    const s = await paidInThree();
+    s.fake.partialRefund(s.parcels[0]!, 1);
+    s.fake.setStatus(s.parcels[0]!, "CHARGEBACK_REQUESTED");
+    s.fake.fail("GET /payments?installment=", 400, "erro");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!, "PAYMENT_CHARGEBACK_REQUESTED")).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("disputed");
+  });
+
+  test("estorno de parcela no painel do Asaas visto em andamento antes de concluir: o parcial ainda avisa o vendedor", async () => {
+    const s = await paidInThree();
+    // O Asaas mostra o estorno da parcela 2 em andamento (o webhook grava a marca de estorno em andamento) ...
+    s.fake.setStatus(s.parcels[1]!, "REFUND_IN_PROGRESS");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[1]!, "PAYMENT_REFUND_IN_PROGRESS")).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    // ... e depois conclui só essa parcela: é estorno parcial (a marca não é de um estorno nosso do parcelamento).
+    s.fake.setStatus(s.parcels[1]!, "CONFIRMED");
+    s.fake.refundExternally(s.parcels[1]!);
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[1]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(1);
+  });
+
+  test("nosso estorno do parcelamento com parcelas voltando em momentos diferentes: sem aviso de parcial, job não desiste", async () => {
+    const s = await paidInThree();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, { storeId: s.storeId, actor: owner, origin: "panel" }, { orderId: s.o.id });
+    await runRefundJobs(new Date(Date.now() + 1000));
+    // Meio-tempo: parcela 1 já voltou; 2 e 3 ainda aparecem pagas, sem item em refunds[].
+    s.fake.setRefundStatus(s.parcels[0]!, "DONE");
+    s.fake.setStatus(s.parcels[0]!, "REFUNDED");
+    for (const pid of s.parcels.slice(1)) s.fake.payments.get(pid)!.refunds = [];
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(0);
+    // Retentativa do job nesse meio-tempo: continua aguardando (sem "estorno_falhou", sem novo POST, pedido segue pedido).
+    await withStore(s.storeId, (tx) => enqueue(tx, { storeId: s.storeId, type: "refund_order", payload: { orderId: s.o.id } }));
+    await runRefundJobs(new Date(Date.now() + 2000));
+    expect(await alerts(s.storeId, s.o.id, "estorno_falhou")).toHaveLength(0);
+    expect(s.fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/refund"))).toHaveLength(1);
+    expect((await orderRow(s.storeId, s.o.id)).refundRequestedAt).not.toBeNull();
+    for (const pid of s.parcels.slice(1)) s.fake.refundExternally(pid);
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[2]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
+  });
+
+  test("estorno do parcelamento em andamento (parcelas ainda pendentes): o pedido só vira estornado quando todas voltam", async () => {
+    const s = await paidInThree();
+    s.fake.setRefundMode("pending");
+    await runAction(refundOrder, { storeId: s.storeId, actor: owner, origin: "panel" }, { orderId: s.o.id });
+    await runRefundJobs(new Date(Date.now() + 1000));
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    // Uma parcela conclui antes das outras: continua pago, sem aviso de estorno parcial.
+    s.fake.setRefundStatus(s.parcels[0]!, "DONE");
+    s.fake.setStatus(s.parcels[0]!, "REFUNDED");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[0]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(0);
+    for (const pid of s.parcels.slice(1)) {
+      s.fake.setRefundStatus(pid, "DONE");
+      s.fake.setStatus(pid, "REFUNDED");
+    }
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[2]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("refunded");
+  });
+});
+
+describe("cliente Asaas: erros de cobrança com cartão são opacos", () => {
+  test("400 no CREDIT_CARD: mensagem sem o texto do Asaas; details só com status e códigos", async () => {
+    const fake = createFakeAsaas();
+    const c = createAsaasClient({ apiKey: fake.apiKey, env: "sandbox", fetch: fake.fetch });
+    fake.fail("POST /payments", 400, `Cartão ${APPROVE} cvv ${CVV} de ${HOLDER}`);
+    const e = (await c
+      .createPayment({ customer: "cus_x", billingType: "CREDIT_CARD", value: 1, dueDate: "2026-11-18", externalReference: "r" })
+      .catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("provider_error");
+    expect(e.message).toBe("Asaas respondeu 400");
+    expect(e.details).toEqual({ status: 400, errorCodes: ["invalid_action"] });
+    const lost = createAsaasClient({
+      apiKey: "k",
+      env: "sandbox",
+      fetch: (() => Promise.reject(new Error("timeout"))) as unknown as typeof fetch,
+    });
+    const n = (await lost
+      .createPayment({ customer: "cus_x", billingType: "CREDIT_CARD", value: 1, dueDate: "2026-11-18", externalReference: "r" })
+      .catch((x: unknown) => x)) as ActionError;
+    expect(n.details).toEqual({ status: 0, errorCodes: [] });
+  });
+});
+
+describe("Asaas (pendências da Task 9)", () => {
+  test("createCustomer envia notificationDisabled: true", async () => {
+    const { fake, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    await ensureAsaasCustomer({ storeId }, o.customerId);
+    const body = fake.calls.find((c) => c.path === "/customers")!.body as Record<string, unknown>;
+    expect(body.notificationDisabled).toBe(true);
+  });
+
+  test("asaasDueDate usa o calendário de America/Sao_Paulo", () => {
+    // 02:30 UTC do dia 19 ainda é 23:30 do dia 18 em São Paulo.
+    expect(asaasDueDate(new Date("2026-11-19T02:30:00Z"))).toBe("2026-11-18");
+    expect(asaasDueDate(new Date("2026-11-19T02:30:00Z"), 1)).toBe("2026-11-19");
+    expect(asaasDueDate(new Date("2026-12-31T12:00:00Z"), 1)).toBe("2027-01-01");
+  });
+
+  test("Pix: dueDate = amanhã em São Paulo; cartão: hoje em São Paulo", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const pix = await newAsaasOrder(storeId, offerId, email());
+    await startAsaasPix({ storeId }, pix.id, { now: new Date("2026-11-18T12:00:00Z") });
+    expect((paymentPosts(fake)[0]!.body as { dueDate: string }).dueDate).toBe("2026-11-19");
+    const card = await newCardOrder(storeId, offerId, email());
+    const late = new Date("2026-11-19T02:30:00Z");
+    await payWithCard(call, input(card.publicId), { ...fastDeps, now: () => late });
+    expect((paymentPosts(fake)[1]!.body as { dueDate: string }).dueDate).toBe("2026-11-18");
+  });
+});
+
+describe("rota POST /api/checkout/card", () => {
+  const store = { id: "", slug: "s", name: "Loja" };
+  const req = (body: string, headers: Record<string, string> = {}, url = "http://127.0.0.1:3000/api/checkout/card") =>
+    new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000", ...headers },
+      body,
+    });
+  const noOrigin = (body: string, headers: Record<string, string> = {}) =>
+    new Request("http://127.0.0.1:3000/api/checkout/card", {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "127.0.0.1:3000", ...headers },
+      body,
+    });
+
+  test("POST entre sites: Content-Type e Origin (ou Sec-Fetch-Site) exigidos, 403 antes de qualquer trabalho", async () => {
+    let resolved = 0;
+    let paid = 0;
+    const opts = {
+      nodeEnv: "test",
+      resolveStore: async () => {
+        resolved++;
+        return store;
+      },
+      payWithCard: async () => {
+        paid++;
+        return { status: "approved" as const };
+      },
+    };
+    const body = JSON.stringify(input("p"));
+    const bad: Request[] = [
+      req(body, { "content-type": "text/plain" }),
+      req(body, { "content-type": "application/x-www-form-urlencoded" }),
+      req(body, { origin: "https://evil.example" }),
+      req(body, { origin: "http://127.0.0.1:3001" }),
+      req(body, { origin: "null" }),
+      noOrigin(body),
+      noOrigin(body, { "sec-fetch-site": "cross-site" }),
+      noOrigin(body, { "sec-fetch-site": "same-site" }),
+    ];
+    for (const r of bad) {
+      const res = await handleCardCheckout(r, opts);
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toBe("forbidden_origin");
+    }
+    expect(resolved).toBe(0);
+    expect(paid).toBe(0);
+
+    expect((await handleCardCheckout(req(body), opts)).status).toBe(200);
+    expect((await handleCardCheckout(req(body, { "content-type": "application/json; charset=utf-8" }), opts)).status).toBe(200);
+    expect((await handleCardCheckout(noOrigin(body, { "sec-fetch-site": "same-origin" }), opts)).status).toBe(200);
+    expect(paid).toBe(3);
+  });
+
+  test("POST entre sites é recusado antes da repetição idempotente (não revela o resultado de outra requisição)", async () => {
+    const { call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    const inp = input(o.publicId);
+    expect((await payWithCard(call, inp, fastDeps)).status).toBe("approved");
+    const opts = { nodeEnv: "test", resolveStore: async () => ({ ...store, id: storeId }) };
+    const res = await handleCardCheckout(req(JSON.stringify(inp), { origin: "https://evil.example" }), opts);
+    expect(res.status).toBe(403);
+    expect(await res.text()).not.toContain("approved");
+  });
+
+  test("clientIpFrom: com proxy confiável, a entrada mais à direita; entradas forjadas à esquerda não mudam a chave", () => {
+    for (const xff of ["203.0.113.4", "6.6.6.6, 203.0.113.4", "1.1.1.1, 2.2.2.2, 203.0.113.4"]) {
+      expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 1)).toBe("203.0.113.4");
+    }
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, 203.0.113.4, 10.0.0.1" }), 2)).toBe("203.0.113.4");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, ::ffff:127.0.0.1" }), 1)).toBe("127.0.0.1");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "6.6.6.6, lixo" }), 1)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 1)).toBe(UNKNOWN_IP);
+  });
+
+  test("clientIpFrom: menos entradas que TRUST_PROXY (acesso direto à origem, sem a Cloudflare) usa a mais à esquerda", () => {
+    // O Caddy descarta o X-Forwarded-For de quem não é proxy confiável e escreve só o IP do socket: é a única entrada.
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "203.0.113.9" }), 2)).toBe("203.0.113.9");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "203.0.113.9, 10.0.0.2" }), 3)).toBe("203.0.113.9");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "lixo" }), 2)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 2)).toBe(UNKNOWN_IP);
+  });
+
+  test("clientIpFrom: sem proxy confiável nunca lê X-Forwarded-For (chave fixa 'unknown')", () => {
+    expect(UNKNOWN_IP).toBe("unknown");
+    for (const xff of ["10.0.0.5", "6.6.6.6, 203.0.113.4"]) expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 0)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 0)).toBe(UNKNOWN_IP);
+  });
+
+  test("loja desconhecida -> 404; corpo > 16 KB -> 413; JSON inválido -> 400", async () => {
+    const none = { resolveStore: async () => null, nodeEnv: "test" };
+    expect((await handleCardCheckout(req("{}"), none)).status).toBe(404);
+    const opts = { resolveStore: async () => store, nodeEnv: "test" };
+    expect((await handleCardCheckout(req("x".repeat(17 * 1024)), opts)).status).toBe(413);
+    expect((await handleCardCheckout(req("{nao json"), opts)).status).toBe(400);
+  });
+
+  test("produção exige HTTPS, exceto em loopback; com proxy confiável vale x-forwarded-proto", async () => {
+    const pay = async () => ({ status: "approved" as const });
+    const prod = { resolveStore: async () => store, nodeEnv: "production", payWithCard: pay, trustProxy: 0 };
+    const remote = req("{}", { host: "loja.example.com", origin: "http://loja.example.com" }, "http://loja.example.com/api/checkout/card");
+    const remoteRes = await handleCardCheckout(remote, prod);
+    expect(remoteRes.status).toBe(403);
+    expect((await remoteRes.json()).error).toBe("https_required");
+    expect((await handleCardCheckout(req("{}"), prod)).status).toBe(200);
+    const proxied = req(
+      "{}",
+      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.4" },
+      "http://loja.example.com/api/checkout/card",
+    );
+    expect((await handleCardCheckout(proxied, { ...prod, trustProxy: 1 })).status).toBe(200);
+    const forged = req(
+      "{}",
+      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https" },
+      "http://loja.example.com/api/checkout/card",
+    );
+    expect((await handleCardCheckout(forged, prod)).status).toBe(403);
+  });
+
+  test("pedido desconhecido -> 404 sem ecoar dados; IP do cliente vai para payWithCard", async () => {
+    const { storeId } = await setup();
+    const body = JSON.stringify({ ...input("pedido-que-nao-existe"), clientIp: "6.6.6.6" });
+    const res = await handleCardCheckout(req(body, { "x-forwarded-for": "203.0.113.50" }), {
+      resolveStore: async () => ({ ...store, id: storeId }),
+      nodeEnv: "test",
+    });
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain("4444");
+    expect(JSON.parse(text)).toEqual({ error: "not_found", message: "Pedido não encontrado" });
+
+    let seenIp = "";
+    await handleCardCheckout(req(body, { "x-forwarded-for": "6.6.6.6, 203.0.113.50" }), {
+      resolveStore: async () => ({ ...store, id: storeId }),
+      nodeEnv: "test",
+      trustProxy: 1,
+      payWithCard: async (_c, i) => {
+        seenIp = i.clientIp;
+        return { status: "approved" };
+      },
+    });
+    expect(seenIp).toBe("203.0.113.50");
+  });
+
+  test("erro inesperado -> 500 genérico; o log não recebe dados do cartão", async () => {
+    const cap = captureOutput();
+    let res: Response;
+    try {
+      res = await handleCardCheckout(req(JSON.stringify(input("x"))), {
+        resolveStore: async () => store,
+        nodeEnv: "test",
+        payWithCard: async (_c, i) => {
+          throw new Error(`falhou com ${i.card.number}`);
+        },
+      });
+    } finally {
+      cap.restore();
+    }
+    expect(res!.status).toBe(500);
+    expect(await res!.json()).toEqual({
+      error: "internal",
+      message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.",
+    });
+    expect(cap.text()).toContain("[redacted]");
+    expect(cap.text()).not.toContain("44444444");
+  });
+});

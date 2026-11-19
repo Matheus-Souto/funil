@@ -1,0 +1,89 @@
+# Instalação de produção: app (Next em Node) + Postgres 17 + Caddy (HTTPS automático).
+# Guia passo a passo: docs/instalacao.md. Variáveis: copie .env.example para .env e preencha.
+#   docker compose up -d --build
+# Só o Caddy publica portas (80/443). Postgres e app ficam na rede interna do compose.
+name: funil
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      MODE: ${MODE:-single}
+      BASE_URL: ${BASE_URL:-https://${DOMAIN:?defina DOMAIN no .env}}
+      PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
+      SECRET: ${SECRET:?defina SECRET no .env (openssl rand -hex 32)}
+      # Papel `app` (sem BYPASSRLS, não dono das tabelas): usado pelo app em execução.
+      DATABASE_URL: postgres://app:${APP_DB_PASSWORD:?defina APP_DB_PASSWORD no .env (openssl rand -hex 24)}@postgres:5432/funil
+      # Papel dono (superusuário do Postgres): migrações no início do container e criação de lojas.
+      OWNER_DATABASE_URL: postgres://owner:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env (openssl rand -hex 24)}@postgres:5432/funil
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      DATA_DIR: /data
+      # Atrás do Caddy: o IP do comprador é a entrada que o Caddy acrescenta em X-Forwarded-For.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      # Código do primeiro acesso (/admin/setup). Vazio: o entrypoint gera um, guarda no volume e mostra no log.
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+    volumes:
+      - app-data:/data
+    # Orçamento de memória em docs/instalacao.md: Next + 1 Worker de PDF (heap até 192 MB) + buffers de um PDF de 50 MB.
+    mem_limit: 768m
+    # Este processo recebe número e CVV do cartão (só em memória): nada de core dump nem de swap além da RAM do
+    # container (o swap do host também deve ficar desligado ou cifrado; docs/seguranca-pagamento.md).
+    memswap_limit: 768m
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    stop_grace_period: 30s
+    expose:
+      - "3000"
+
+  postgres:
+    # Versões fixadas por versão menor; atualizar: docker compose pull && docker compose build --pull (docs/instalacao.md).
+    image: postgres:17.12
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: owner
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env (openssl rand -hex 24)}
+      POSTGRES_DB: funil
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U owner -d funil"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  caddy:
+    image: caddy:2.11
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?defina DOMAIN no .env}
+      PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
+    volumes:
+      # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
+      # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
+      - ./deploy/${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  app-data:
+  db-data:
+  caddy-data:
+  caddy-config:

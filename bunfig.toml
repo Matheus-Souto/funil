@@ -1,0 +1,4 @@
+[test]
+preload = ["./tests/setup.ts"]
+# Smoke de deploy (Playwright, via tests/smoke.sh): fora do bun test.
+pathIgnorePatterns = ["tests/deploy/**"]

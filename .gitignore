@@ -5,3 +5,7 @@ data/
 .verify/*
 !.verify/.gitkeep
 !.verify/gate-mode
+.superpowers/
+next-env.d.ts
+*.tsbuildinfo
+deploy/Caddyfile.local

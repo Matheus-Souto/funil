@@ -1,0 +1,2 @@
+ALTER TABLE "store_alert" DROP CONSTRAINT "store_alert_kind_check";--> statement-breakpoint
+ALTER TABLE "store_alert" ADD CONSTRAINT "store_alert_kind_check" CHECK ("store_alert"."kind" in ('chave_asaas_invalida','evento_conta_asaas_anterior','estorno_cancelado','estorno_falhou','estorno_parcial','disjuntor_cartao','monitor_pagina_pagamento'));
