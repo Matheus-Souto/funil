@@ -1,0 +1,64 @@
+name: verify
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # O verify sobe Postgres 17 e Mailpit pelo compose.dev.yaml (Docker do runner) e roda `bun run check` antes do build
+    # e do E2E; com mudança em deploy/, compose.yaml ou tests/smoke*, roda também o smoke de deploy (tests/smoke.sh:
+    # imagem + pilha completa), que leva alguns minutos a mais.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      # Navegadores do Playwright em cache por versão; as dependências do sistema são instaladas sempre (não ficam no cache).
+      - name: Versão do Playwright
+        id: pw
+        run: echo "version=$(bunx playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: pw-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium
+      - if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: bunx playwright install --with-deps chromium
+      - if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: bunx playwright install-deps chromium
+      # Higiene de testes: o checker vem do main (um PR não muda a régua que o julga).
+      - name: Higiene de testes (checker do main)
+        run: |
+          if git fetch origin main && git cat-file -e origin/main:scripts/check-test-hygiene.ts 2>/dev/null; then
+            git show origin/main:scripts/check-test-hygiene.ts > "$RUNNER_TEMP/check-test-hygiene.ts"
+            bun "$RUNNER_TEMP/check-test-hygiene.ts"
+          else
+            bun scripts/check-test-hygiene.ts
+          fi
+      # Roda o verify.sh do main (um PR que edite o verify não muda quem o julga).
+      # Sem main remoto ainda (primeiro push), usa o arquivo local.
+      - name: Rodar verify
+        run: |
+          if git fetch origin main && git cat-file -e origin/main:scripts/verify.sh 2>/dev/null; then
+            git show origin/main:scripts/verify.sh > "$RUNNER_TEMP/verify.sh"
+            bash "$RUNNER_TEMP/verify.sh"
+          else
+            bash scripts/verify.sh
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-runs
+          path: |
+            .verify/runs/
+            .verify/smoke/
+            !.verify/smoke/**/env
+            !.verify/runs/**/setup-token
+          if-no-files-found: ignore
