@@ -250,14 +250,29 @@ export async function startCheckout(
 /** Mesmo formato do `publicId` dos pedidos (base64url), com teto de 64. */
 const publicIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "Pedido inválido");
 
+const BAD_TICKET = "Bilhete inválido";
+
 export const checkoutRenewCardTicket = defineAction({
   name: "checkout.renewCardTicket",
-  description: "Confere que um pedido de cartão da loja ainda está pendente, para o checkout emitir um bilhete novo do mesmo pedido.",
-  input: z.object({ publicId: publicIdSchema }),
+  description:
+    "Emite um bilhete novo de um pedido de cartão pendente da loja para quem já tinha um bilhete do mesmo pedido (o anterior venceu ou está perto de vencer).",
+  // `ticketKey` (CARD_TICKET_KEY) e `nowMs` vêm do servidor, como o `clientIp` do checkout. Uma chave escolhida por
+  // quem chama não ajuda ninguém: o bilhete novo sai assinado com ela, e o serviço de cartão só aceita a verdadeira.
+  input: z.object({
+    publicId: publicIdSchema,
+    ticket: z.string().min(1).max(2048),
+    ticketKey: z.string().min(32),
+    nowMs: z.number().int().optional(),
+  }),
   permission: "public",
-  // Só leitura, anônima e repetível (o bilhete dura 30 min): sem linha de auditoria, como checkout.view.
+  // Anônima e repetível (o bilhete dura 30 min); a entrada tem a chave: sem linha de auditoria, como checkout.view.
   audit: false,
-  async run(ctx, input): Promise<{ orderId: string; publicId: string }> {
+  async run(ctx, input): Promise<{ ticket: string }> {
+    const now = input.nowMs === undefined ? new Date() : new Date(input.nowMs);
+    // Só quem tinha um bilhete do MESMO pedido e da MESMA loja (íntegro; vencido há no máximo 24 h): saber o
+    // `publicId` não basta. Conferido antes de olhar o pedido.
+    const prev = verifyCardTicketForRenewal(input.ticket, input.ticketKey, now);
+    if (!prev || prev.storeId !== ctx.storeId || prev.publicId !== input.publicId) throw new ActionError("forbidden", BAD_TICKET);
     // RLS: pedido de outra loja não aparece (not_found, como um publicId inexistente).
     const [o] = await ctx.tx
       .select({ id: orders.id, publicId: orders.publicId, method: orders.method, status: orders.status })
@@ -266,26 +281,20 @@ export const checkoutRenewCardTicket = defineAction({
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
     if (o.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
-    return { orderId: o.id, publicId: o.publicId };
+    if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
+    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId }, input.ticketKey, now) };
   },
 });
 
-const renewInput = z.object({ publicId: publicIdSchema, ticket: z.string().min(1).max(2048) });
-const BAD_TICKET = "Bilhete inválido";
-
 /**
- * Bilhete novo para um pedido de cartão pendente da loja (o comprador demorou ou o anterior venceu). Só para quem já
- * tinha um bilhete do MESMO pedido e da MESMA loja (íntegro; vencido há no máximo 24 h): saber o `publicId` não basta.
- * Erros: `invalid_input` (entrada), `forbidden` (bilhete), `not_found` / `conflict` (pedido, ver a ação).
+ * Bilhete novo para um pedido de cartão pendente da loja (o comprador demorou ou o anterior venceu); a regra fica em
+ * `checkout.renewCardTicket`. Erros: `invalid_input` (entrada), `forbidden` (bilhete), `not_found` / `conflict` (pedido).
  */
 export async function renewCardTicket(call: { storeId: string }, raw: unknown, key: string, now: Date = new Date()): Promise<string> {
-  const parsed = renewInput.safeParse(raw);
-  if (!parsed.success) throw new ActionError("invalid_input", "Entrada inválida");
-  const prev = verifyCardTicketForRenewal(parsed.data.ticket, key, now);
-  if (!prev || prev.storeId !== call.storeId || prev.publicId !== parsed.data.publicId) throw new ActionError("forbidden", BAD_TICKET);
-  const o = await runAction(checkoutRenewCardTicket, publicCall(call.storeId), { publicId: parsed.data.publicId });
-  if (o.orderId !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
-  return issueCardTicket({ storeId: call.storeId, orderId: o.orderId, publicId: o.publicId }, key, now);
+  const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  // Só os dois campos do navegador; a chave e a hora são do servidor.
+  const input = { publicId: body.publicId, ticket: body.ticket, ticketKey: key, nowMs: now.getTime() };
+  return (await runAction(checkoutRenewCardTicket, publicCall(call.storeId), input)).ticket;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

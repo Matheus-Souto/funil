@@ -12,6 +12,7 @@ import {
   PIX_UNAVAILABLE_MESSAGE,
   TOUCH_MAX_BYTES,
   VIEW_LIMIT_PER_HOUR,
+  checkoutRenewCardTicket,
   checkoutStart,
   checkoutView as checkoutViewAction,
   getOrderPublic,
@@ -642,6 +643,17 @@ describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
     expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: mixed }, KEY))).code).toBe("forbidden");
     const tooLate = new Date(Date.now() + CARD_TICKET_TTL_MS + CARD_TICKET_RENEW_WINDOW_MS + 60_000);
     expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: a.cardTicket }, KEY, tooLate))).code).toBe("forbidden");
+  });
+
+  test("checkout.renewCardTicket confere o bilhete anterior dentro da ação (não só quem a chama)", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const b = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const run = (ticket: unknown) => runAction(checkoutRenewCardTicket, pub(s.storeId), { publicId: a.publicId, ticket, ticketKey: KEY });
+    expect((await fail(run(b.cardTicket))).code).toBe("forbidden");
+    expect((await fail(run(undefined))).code).toBe("invalid_input");
+    const ok = await run(a.cardTicket);
+    expect(verifyCardTicket(ok.ticket, KEY)).toMatchObject({ storeId: s.storeId, publicId: a.publicId });
   });
 
   test("renewCardTicket: pedido de outra loja, pago ou de Pix -> falha", async () => {
