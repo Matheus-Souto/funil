@@ -73,7 +73,8 @@ export async function revokeMemberSessionsAction(userId: string) {
 }
 
 export async function logoutAction(): Promise<void> {
-  await requirePanelActor();
+  // Sair vale também com a senha temporária ainda não trocada (senão a pessoa ficaria presa na troca de senha).
+  await requirePanelActor({ allowPasswordChange: true });
   await destroySession();
   redirect("/admin/login");
 }

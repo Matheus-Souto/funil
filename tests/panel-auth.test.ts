@@ -72,6 +72,9 @@ describe("requirePanelActor", () => {
     jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
     expect(await redirectTarget(() => requirePanelActor())).toBe("/admin/senha");
     expect(await requirePanelActor({ allowPasswordChange: true })).toMatchObject({ storeId, mustChangePassword: true });
+    // Sair continua possível com a senha temporária.
+    const { logoutAction } = await import("@/app/admin/(panel)/actions");
+    expect(await redirectTarget(() => logoutAction())).toBe("/admin/login");
   });
 
   test("a tela de troca de senha exige sessão", async () => {

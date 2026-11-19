@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
-import { changePasswordFormAction } from "../(panel)/actions";
+import { changePasswordFormAction, logoutAction } from "../(panel)/actions";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 
@@ -26,7 +26,13 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
         <span className={s.brand} style={{ padding: 0 }}>
           funil
         </span>
-        {forced ? null : (
+        {forced ? (
+          <form action={logoutAction}>
+            <button type="submit" className={`${s.btn} ${s.btnSm}`}>
+              Sair
+            </button>
+          </form>
+        ) : (
           <Link href="/admin" className={s.muted}>
             Voltar ao painel
           </Link>
