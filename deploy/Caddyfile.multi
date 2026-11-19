@@ -6,6 +6,9 @@
 # Não edite este arquivo (vem do git): para personalizar, copie para deploy/Caddyfile.local (fora do git) e use
 # CADDYFILE=Caddyfile.local. Sem desafio DNS, use a lista fixa de lojas descrita em docs/instalacao.md ("Várias lojas").
 {$DOMAIN} {
+	# HSTS (1 ano): o navegador não volta a tentar http:// (rebaixamento na rede local justo na página do cartão). Fora
+	# da lista de pré-carga dos navegadores por padrão (difícil de desfazer): entre nela depois de estável, se quiser.
+	header Strict-Transport-Security "max-age=31536000"
 	encode zstd gzip
 	reverse_proxy app:3000
 }
@@ -14,6 +17,9 @@
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 	}
+	# HSTS (1 ano): o navegador não volta a tentar http:// (rebaixamento na rede local justo na página do cartão). Fora
+	# da lista de pré-carga dos navegadores por padrão (difícil de desfazer): entre nela depois de estável, se quiser.
+	header Strict-Transport-Security "max-age=31536000"
 	encode zstd gzip
 	reverse_proxy app:3000
 }

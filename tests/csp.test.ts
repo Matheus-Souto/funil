@@ -34,3 +34,14 @@ test("matcher: só /c e /o; painel, API, download e t.js ficam de fora", () => {
   expect(m("/o/abc123")).toBe(true);
   for (const url of ["/admin", "/admin/login", "/api/health", "/d/token", "/t.js", "/", "/cx", "/order"]) expect(m(url), url).toBe(false);
 });
+
+test("painel e login: não podem ser embutidos em frame (frame-ancestors 'none' + X-Frame-Options DENY)", async () => {
+  const { default: nextConfig } = await import("../next.config");
+  const rules = await nextConfig.headers!();
+  const admin = rules.find((r) => r.source === "/admin/:path*");
+  expect(admin).toBeDefined();
+  const h = Object.fromEntries(admin!.headers.map((x) => [x.key.toLowerCase(), x.value]));
+  expect(h["x-frame-options"]).toBe("DENY");
+  expect(h["content-security-policy"]).toBe("frame-ancestors 'none'");
+  // O e2e confere a resposta real em /admin/login (o padrão :path* do Next casa /admin e /admin/...).
+});

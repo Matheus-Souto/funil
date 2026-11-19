@@ -11,6 +11,15 @@ const config: NextConfig = {
   // CORS aberto e cache longo (1 dia + 7 dias servindo o antigo enquanto revalida; a URL não tem versão).
   async headers() {
     return [
+      // Painel e login nunca dentro de frame de outro site (clickjacking; no MODE=multi as lojas são subdomínios do
+      // mesmo site, então o cookie SameSite=Lax não basta). As páginas do comprador já têm CSP própria (src/proxy.ts).
+      {
+        source: "/admin/:path*",
+        headers: [
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+          { key: "X-Frame-Options", value: "DENY" },
+        ],
+      },
       {
         source: "/t.js",
         headers: [
