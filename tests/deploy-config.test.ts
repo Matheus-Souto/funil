@@ -66,6 +66,9 @@ type Compose = {
       depends_on?: Record<string, { condition?: string }>;
       read_only?: boolean;
       tmpfs?: string[];
+      cap_drop?: string[];
+      security_opt?: string[];
+      pids_limit?: number;
       ports?: unknown[];
       mem_limit?: string;
       stop_grace_period?: string;
@@ -148,6 +151,12 @@ describe("compose.yaml: serviço de cartão isolado (profile card)", () => {
     expect(card.tmpfs).toEqual(["/tmp"]);
   });
 
+  test("sem capabilities, sem ganhar privilégio (setuid da imagem base) e com teto de processos", () => {
+    expect(card.cap_drop).toEqual(["ALL"]);
+    expect(card.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(card.pids_limit).toBe(64);
+  });
+
   test("teto de 192 MB sem swap extra, sem core dump e parada que espera a cobrança em curso (até 75 s)", () => {
     expect(card.mem_limit).toBe("192m");
     expect(card.memswap_limit).toBe(card.mem_limit);
@@ -188,17 +197,35 @@ describe("Caddy: domínio do cartão só para o card, e nada do card fora dele",
   });
 
   for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi"]) {
-    test(`${file}: importa o site do cartão só quando o compose o liga; nenhum site seu manda para o card`, () => {
+    test(`${file}: importa o site do cartão por glob (nunca por variável); nenhum site seu manda para o card`, () => {
       const text = read(file);
-      expect(text).toMatch(/^import \{\$CARD_CADDYFILE:\/dev\/null\}$/m);
+      expect(text).toMatch(/^import card\/\*\.caddy$/m);
+      // `{$X:padrão}` do Caddy NÃO usa o padrão quando X existe vazia (o compose passa vazia): `import` sem argumento
+      // derruba o Caddy de toda instalação sem o cartão. Nenhum import pode depender de variável.
+      for (const line of text.split("\n").filter((l) => /^\s*import\b/.test(l))) expect(line).not.toContain("{$");
       for (const s of caddySites(text)) expect(s.body, s.head).not.toContain("card:3100");
     });
   }
 
-  test("compose: Caddyfile.card montado e ligado só com CARD_ORIGIN definido", () => {
+  /** Interpolação do compose para as formas usadas aqui: `${X:+valor}` (só se X não vazia) e `${X:-padrão}`. */
+  const interpolate = (text: string, vars: Record<string, string>) =>
+    text.replace(/\$\{(\w+):([+-])([^}]*)\}/g, (_m, name: string, op: string, word: string) => {
+      const v = vars[name] ?? "";
+      return op === "+" ? (v ? word : "") : v || word;
+    });
+
+  test.each([
+    ["sem CARD_ORIGIN (instalação sem o cartão)", "", false],
+    ["com CARD_ORIGIN", "https://pagar.loja.example.com", true],
+  ])("compose + Caddyfile, %s: o glob do import pega o Caddyfile.card só quando deve", (_name, origin, served) => {
     const caddy = compose.services.caddy!;
-    expect(caddy.volumes).toContain("./deploy/Caddyfile.card:/etc/caddy/Caddyfile.card:ro");
-    expect(caddy.environment!.CARD_CADDYFILE).toBe("${CARD_ORIGIN:+/etc/caddy/Caddyfile.card}");
+    const mounts = (caddy.volumes as string[]).map((v) => interpolate(v, { CARD_ORIGIN: origin }).split(":"));
+    const card = mounts.find(([src]) => src === "./deploy/Caddyfile.card");
+    expect(card).toBeDefined();
+    const target = card![1]!;
+    expect(target.startsWith("/etc/caddy/")).toBe(true);
+    // O import é relativo ao /etc/caddy/Caddyfile.
+    expect(new Bun.Glob("card/*.caddy").match(target.slice("/etc/caddy/".length))).toBe(served);
     expect(caddy.environment!.CARD_ORIGIN).toBe("${CARD_ORIGIN:-}");
   });
 });
@@ -288,6 +315,9 @@ describe("deploy/entrypoint.sh: senhas fracas do Postgres recusadas antes de mig
   test.each([
     ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: "card" }],
     ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: "curta123" }],
+    // Igual à do papel app ou à do dono: quem comprometer o card (que tem a senha no ambiente) entraria como eles.
+    ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: `${strong}x` }],
+    ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: strong }],
     ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "app" }],
     ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "curta123" }],
     ["POSTGRES_PASSWORD", { OWNER_DATABASE_URL: "postgres://owner:owner@postgres:5432/funil" }],

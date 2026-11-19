@@ -56,8 +56,10 @@ pedido (`CARD_TICKET_KEY`) e recebe do iframe o resultado (aprovado, recusado).
   `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY`, `TRUST_PROXY`, o Turnstile, `MODE`, `PLATFORM_DOMAIN` e `BASE_URL`. Nunca o
   `SECRET`, o papel dono, a senha do papel `app` nem credenciais de SMTP/Meta (o serviço recusa subir com elas).
 - **Endurecimento do container:** sem volume, raiz só leitura (`/tmp` em memória), 192 MB sem swap além da RAM, sem
-  core dump, usuário não-root, imagem só com o bundle do serviço (sem `node_modules`). Rede `card` própria, só com o
-  Postgres e o Caddy: o `card` não alcança o app. O Caddy só encaminha `/form/*`, `/form.js`, `/form.css` e
+  core dump, usuário não-root, sem capabilities (`cap_drop: ALL`), `no-new-privileges` (um binário setuid da imagem
+  base não vira root), no máximo 64 processos, imagem só com o bundle do serviço (sem `node_modules`). Rede `card`
+  própria, só com o Postgres e o Caddy: o `card` não alcança o app diretamente (só pelo Caddy, pelo domínio público,
+  como qualquer visitante). A senha do papel `card` precisa ser diferente das do `app` e do dono (o entrypoint recusa). O Caddy só encaminha `/form/*`, `/form.js`, `/form.css` e
   `/api/card` do domínio do cartão para o `card`, e nada mais vai para ele.
 - **Papel `card` no Postgres** (`src/lib/db/rls.sql`, `card_role_grants`): sem `BYPASSRLS`, só o necessário para cobrar.
   Tabelas novas não ganham permissão para ele.
@@ -81,12 +83,17 @@ pedido (`CARD_TICKET_KEY`) e recebe do iframe o resultado (aprovado, recusado).
 - **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois que o app re-selou as conexões (primeira subida com
   `CARD_ISOLATED=1`). O app e o `card` recusam subir com "ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão
   Asaas de N loja(s); restaure a chave correta". Guarde-a com o `SECRET`, fora dos backups.
-- **Defina a `ASAAS_SEAL_KEY` só ao ligar o isolamento.** Com `CARD_ISOLATED=0` o app grava a chave do Asaas com o
-  `SECRET` (`v1`), mesmo com a `ASAAS_SEAL_KEY` presente; só com `CARD_ISOLATED=1` ela passa a ser cifrada com a chave
-  própria (`a1`) e a re-selagem roda.
+- **A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`.** Com `CARD_ISOLATED=0` o app grava a chave do Asaas com
+  o `SECRET` (`v1`), mesmo com a `ASAAS_SEAL_KEY` presente; só com `CARD_ISOLATED=1` ela passa a ser cifrada com a
+  chave própria (`a1`) e a re-selagem roda.
 - **Rollback:** voltar para `CARD_ISOLATED=0` na mesma versão é seguro (o app ainda abre `a1` com a chave). Voltar
-  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`): depois da volta,
-  cole de novo a chave de API do Asaas de cada loja em Conexões.
+  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback
+  preventivo: desligue o isolamento na versão atual, cole de novo a chave de API do Asaas de cada loja em Conexões
+  (com o isolamento desligado ela é gravada em `v1`) e só então volte a imagem. Se já voltou, cole a chave do mesmo
+  jeito. Desligando de vez: `alter role card nologin` (`docs/instalacao.md`, seção 12).
+- **Cloudflare:** o checkout e o `pagar.` com o mesmo estado de proxy (o `TRUST_PROXY` é um só para o app e o `card`)
+  e sem recursos que injetam scripts (Rocket Loader, Email Obfuscation, JS Detections, Zaraz, Web Analytics
+  automático): ver `docs/instalacao.md`, seção 12.
 - **Restore de backup:** precisa do mesmo `SECRET` e da mesma `ASAAS_SEAL_KEY`. Os erros de `CREATE POLICY ... TO
   card` ("role does not exist") e o "errors ignored on restore" no `pg_restore` são esperados (`docs/instalacao.md`,
   seção 10); a migração do app recria o papel `card` (com login, se houver `CARD_DB_PASSWORD`) ao iniciar.
@@ -108,7 +115,11 @@ Com o cartão isolado (`CARD_ISOLATED=1`), confere também a página do iframe d
 - o cabeçalho `Content-Security-Policy` é exatamente o de `cardFormCsp` (`src/card-service/page.ts`), com o
   `frame-ancestors` das origens do checkout da loja;
 - o inventário de scripts: só `/form.js` do domínio do cartão e (com Turnstile) `https://challenges.cloudflare.com`;
-  nenhum script inline executável (a configuração vai num `<script type="application/json">`, que não executa).
+  nenhum script inline executável (a configuração vai num `<script type="application/json">`, que não executa);
+- o sha256 do conteúdo do `/form.js` baixado, que entra no inventário: o mesmo caminho com outro conteúdo (skimmer
+  servido por um Caddy ou host comprometido) avisa com `inventario_mudou`. Cada atualização que mude o formulário
+  também avisa uma vez: confira que a mudança veio da atualização. Se o `/form.js` não responder, a página não é
+  conferida nessa semana (só log).
 
 O resultado (um hash do cabeçalho normalizado e do inventário, e os códigos de problema) fica em `page_check`. Quando
 muda, o vendedor recebe um aviso no painel e por e-mail (`monitor_pagina_pagamento`, com a página, `/c`, `/o` ou

@@ -1,7 +1,7 @@
 # Site do serviço de cartão isolado (COMPOSE_PROFILES=card, CARD_ISOLATED=1; docs/instalacao.md, "Cartão isolado").
-# Importado pelo deploy/Caddyfile e pelo deploy/Caddyfile.multi só quando CARD_ORIGIN está definida no .env (o compose
-# passa CARD_CADDYFILE para o Caddy; sem ela, o import lê /dev/null e nada muda). O endereço é a própria origem
-# (https://pagar.<domínio>): o Caddy emite o certificado e serve só esse host.
+# Importado pelo deploy/Caddyfile e pelo deploy/Caddyfile.multi (`import card/*.caddy`) só quando CARD_ORIGIN está
+# definida no .env: o compose o monta como /etc/caddy/card/site.caddy; sem ela, como card/site, fora do glob, e nada
+# muda. O endereço é a própria origem (https://pagar.<domínio>): o Caddy emite o certificado e serve só esse host.
 #
 # Regras (tests/deploy-config.test.ts):
 #   - este domínio vai SÓ para o container `card`; nenhum outro site manda nada para ele, e ele nunca para o app;
@@ -11,8 +11,7 @@
 #     que o Node já está fechando.
 # O tempo para ler o cabeçalho é do servidor :443 inteiro (compartilhado com o app); o card já corta em 10 s
 # (headersTimeout) e limita 256 conexões.
-# Não edite este arquivo (vem do git): para personalizar, copie o Caddyfile para deploy/Caddyfile.local e mantenha o
-# `import` do fim.
+# Não edite este arquivo (vem do git). Num deploy/Caddyfile.local, acrescente no fim a linha `import card/*.caddy`.
 {$CARD_ORIGIN} {
 	# HSTS (1 ano), como nos outros sites. Sem o cabeçalho Server (versão do proxy não interessa a ninguém).
 	header {

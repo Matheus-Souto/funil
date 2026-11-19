@@ -5,7 +5,8 @@
 // gera (src/proxy.ts) e o inventário de scripts do HTML (só origens autorizadas; inline só com o nonce da resposta), e
 // avisa o vendedor (store_alert + e-mail) quando o resultado muda. Com o cartão isolado (CARD_ISOLATED=1), confere
 // também a página do iframe no domínio do cartão (CARD_ORIGIN/form/<loja>, page "/form") contra `cardFormCsp` e o
-// inventário do serviço (só /form.js e, se a loja usa, o Turnstile). HTTP fora de transação; sem dados de comprador.
+// inventário do serviço (só /form.js e, se a loja usa, o Turnstile), com o sha256 do conteúdo do /form.js (troca do
+// conteúdo no mesmo caminho também avisa). HTTP fora de transação; sem dados de comprador.
 import { createHash } from "node:crypto";
 import { desc, eq, sql } from "drizzle-orm";
 import { alertSeller } from "@/lib/alerts";
@@ -108,12 +109,13 @@ export function inspectBuyerPage(
  * Confere a página do iframe do cartão (`CARD_ORIGIN/form/<loja>`, src/card-service/page.ts). CSP exata de
  * `cardFormCsp(origens da loja)`; scripts: só `/form.js` do próprio domínio e, se a loja usa, o Turnstile; nenhum
  * inline executável (a configuração vai em `application/json`). O hash guarda a política com as origens da loja
- * trocadas por um marcador quando ela confere: mudar o domínio da loja não vira aviso.
+ * trocadas por um marcador quando ela confere: mudar o domínio da loja não vira aviso. `formJsSha256` (sha256 do
+ * conteúdo baixado do /form.js) entra no inventário: conteúdo trocado no mesmo caminho muda o hash e avisa.
  */
 export function inspectCardFormPage(
   html: string,
   cspHeader: string | null,
-  opts: { origins: string[]; turnstile: boolean; pageUrl: string },
+  opts: { origins: string[]; turnstile: boolean; pageUrl: string; formJsSha256?: string },
 ): { problems: string[]; inventory: string[]; hash: string; csp: string | null } {
   const problems = new Set<string>();
   const pageUrl = new URL(opts.pageUrl);
@@ -135,9 +137,10 @@ export function inspectCardFormPage(
       continue;
     }
     const same = url.origin === pageUrl.origin;
-    inventory.add(same ? `self:${url.pathname}` : `${url.origin}${url.pathname}`);
-    const ok = (same && url.pathname === "/form.js" && !url.search) || (opts.turnstile && url.origin === TURNSTILE);
-    if (!ok) problems.add("script_nao_autorizado");
+    const formJs = same && url.pathname === "/form.js" && !url.search;
+    const entry = same ? `self:${url.pathname}` : `${url.origin}${url.pathname}`;
+    inventory.add(formJs && opts.formJsSha256 ? `${entry} sha256:${opts.formJsSha256}` : entry);
+    if (!(formJs || (opts.turnstile && url.origin === TURNSTILE))) problems.add("script_nao_autorizado");
   }
   const list = [...inventory].sort();
   const hashed = csp === expected ? cardFormCsp(["<loja>"], { turnstile: opts.turnstile }) : csp;
@@ -219,9 +222,12 @@ export function createPciPageMonitorHandler(deps: { fetch?: typeof fetch; storeI
         if (card) {
           const url = `${card.origin}/form/${s.id}`;
           const got = await fetchPage(doFetch, "/form", url, signal);
-          if (got) {
+          // Conteúdo do script do formulário: sem ele, nada é conferido desta vez (não muda o estado guardado).
+          const js = got && (await fetchPage(doFetch, "/form", `${card.origin}/form.js`, signal));
+          if (got && js) {
             const origins = await storeCheckoutOrigins(s.id);
-            await record(s.id, "/form", inspectCardFormPage(got.html, got.csp, { origins, turnstile, pageUrl: url }));
+            const formJsSha256 = createHash("sha256").update(js.html).digest("hex");
+            await record(s.id, "/form", inspectCardFormPage(got.html, got.csp, { origins, turnstile, pageUrl: url, formJsSha256 }));
           }
         }
       } catch (e) {

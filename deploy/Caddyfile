@@ -11,6 +11,8 @@
 	reverse_proxy app:3000
 }
 
-# Cartão isolado (COMPOSE_PROFILES=card): o compose aponta CARD_CADDYFILE para deploy/Caddyfile.card quando CARD_ORIGIN
-# está definida. Sem ela, importa /dev/null (vazio) e o Caddy sobe igual. Mantenha esta linha numa cópia .local.
-import {$CARD_CADDYFILE:/dev/null}
+# Cartão isolado (COMPOSE_PROFILES=card): com CARD_ORIGIN definida, o compose monta deploy/Caddyfile.card como
+# /etc/caddy/card/site.caddy; sem ela, como /etc/caddy/card/site, que este glob não pega (nenhum arquivo: o Caddy só
+# avisa e sobe igual). Sem variável aqui de propósito: `{$X:padrão}` não usa o padrão com X vazia, e o compose passa
+# vazia. Numa cópia Caddyfile.local, acrescente esta mesma linha no fim.
+import card/*.caddy

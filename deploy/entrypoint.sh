@@ -29,12 +29,18 @@ check_password() { # <nome> <valor>
 [ -n "${DATABASE_URL:-}" ] || fail "defina DATABASE_URL (papel app)"
 [ -n "${APP_DB_PASSWORD:-}" ] || fail "defina APP_DB_PASSWORD (senha do papel app)"
 check_password APP_DB_PASSWORD "$APP_DB_PASSWORD"
-if [ -n "${CARD_DB_PASSWORD:-}" ]; then check_password CARD_DB_PASSWORD "$CARD_DB_PASSWORD"; fi
 # Senha do papel dono = POSTGRES_PASSWORD do compose (postgres://owner:<senha>@...).
 owner_password="${OWNER_DATABASE_URL#*://}"
 owner_password="${owner_password%%@*}"
 owner_password="${owner_password#*:}"
 check_password POSTGRES_PASSWORD "$owner_password"
+# Senha do papel `card` (cartão isolado): o serviço de cartão a tem no ambiente; repetir a do `app` ou a do dono daria a
+# quem comprometer o `card` a entrada como esses papéis.
+if [ -n "${CARD_DB_PASSWORD:-}" ]; then
+  check_password CARD_DB_PASSWORD "$CARD_DB_PASSWORD"
+  [ "$CARD_DB_PASSWORD" != "$APP_DB_PASSWORD" ] && [ "$CARD_DB_PASSWORD" != "$owner_password" ] ||
+    fail "CARD_DB_PASSWORD precisa ser diferente de APP_DB_PASSWORD e de POSTGRES_PASSWORD (openssl rand -hex 24)"
+fi
 unset owner_password
 
 # Código do primeiro acesso (/admin/setup, modo single). O certificado do domínio aparece nos logs de Certificate

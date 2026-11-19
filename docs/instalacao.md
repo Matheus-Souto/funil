@@ -82,6 +82,7 @@ Se quiser o proxy **ligado**, faça tudo isto (senão o cartão e os limites ant
    echo 'CADDYFILE=Caddyfile.local' >> .env
    ```
 
+   (Cópia feita antes do cartão isolado? Acrescente no fim dela a linha `import card/*.caddy`; seção 12.)
    No `deploy/Caddyfile.local`, acrescente no topo (lista atual em <https://www.cloudflare.com/ips/>):
 
    ```
@@ -337,6 +338,8 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
      No `.env`: `CADDYFILE=Caddyfile.multi` e `CLOUDFLARE_API_TOKEN=...`; no DNS, um registro `*` (curinga) apontando
      para o servidor. Depois `docker compose up -d --build`. Domínios próprios de lojas entram como blocos extras numa
      cópia `deploy/Caddyfile.local` do `Caddyfile.multi` (`loja.com.br { reverse_proxy app:3000 }`).
+   - Nas duas opções, um `Caddyfile.local` copiado antes do cartão isolado precisa da linha `import card/*.caddy` no fim
+     para servir o `pagar.` (seção 12).
 4. No modo multi, o SMTP de cada loja só aceita servidores públicos nas portas 587, 465, 2525 ou 25.
 
 ## 12. Cartão isolado (`CARD_ISOLATED=1`)
@@ -354,8 +357,14 @@ domínio próprio (`pagar.`). O app, o painel, o PDF e o e-mail saem do ambiente
 | `multi` | `pagar.` + `PLATFORM_DOMAIN` (um só para todas as lojas) | `pagar.plataforma.com.br` |
 
 O Caddy emite o certificado sozinho. No `multi`, o nome `pagar` fica reservado (nenhuma loja pode usar esse slug), e o
-curinga `*` do DNS já cobre o `pagar.` (com a lista fixa de lojas, crie o registro). Proxy da Cloudflare: mesma regra do
-checkout (seção 2).
+curinga `*` do DNS já cobre o `pagar.` (com a lista fixa de lojas, crie o registro).
+
+**Proxy da Cloudflare: o `pagar.` e o checkout precisam do MESMO estado** (os dois com a nuvem laranja ligada ou os
+dois desligados). O `TRUST_PROXY` vale para o app e para o `card`: com a nuvem laranja só no `pagar.` e
+`TRUST_PROXY=1`, todo comprador aparece com o IP da Cloudflare (os limites por IP viram compartilhados e o Asaas recebe
+um `remoteIp` errado). Com a nuvem ligada, siga a seção 2 inteira (`trusted_proxies`, `TRUST_PROXY=2`) e, nos dois
+hosts, deixe desligados Rocket Loader, Email Obfuscation, JS Detections/Bot Fight Mode, Zaraz e o Web Analytics
+automático: eles injetam scripts na página, a CSP os bloqueia e o monitor semanal passa a avisar toda semana.
 
 **2. Variáveis no `.env`.** Gere cada chave com o comando ao lado (um valor diferente para cada uma; as três chaves
 `SECRET`, `CARD_TICKET_KEY` e `ASAAS_SEAL_KEY` precisam ser diferentes entre si) e guarde-as junto com o `SECRET`, no
@@ -373,36 +382,63 @@ gerenciador de senhas, nunca com os backups:
 **3. Ordem de ativação** (faça o backup antes, seção 10):
 
 1. DNS do `pagar.` criado e respondendo (`ping pagar.checkout.minhaloja.com.br` mostra o IP do servidor).
-2. As seis linhas acima no `.env`, de uma vez. Não defina a `ASAAS_SEAL_KEY` antes de ligar o isolamento: é com ela
-   ligada que o app passa a cifrar a chave do Asaas com ela (avisos abaixo).
-3. `docker compose up -d --build`. O app reinicia, a migração dá login ao papel `card` com a `CARD_DB_PASSWORD` e a
+2. As seis linhas acima no `.env`, de uma vez. A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`: é aí que o app
+   passa a cifrar a chave do Asaas com ela (avisos abaixo).
+3. **Se usa `CADDYFILE=Caddyfile.local`** (Cloudflare com proxy, lista fixa de lojas): a sua cópia é anterior ao
+   cartão isolado. Acrescente no fim do `deploy/Caddyfile.local` a linha
+
+   ```
+   import card/*.caddy
+   ```
+
+   Sem ela, o Caddy não serve o `pagar.` (o checkout mostra "Pagamento com cartão indisponível agora").
+4. `docker compose up -d --build`. O app reinicia, a migração dá login ao papel `card` com a `CARD_DB_PASSWORD` e a
    chave do Asaas de cada loja passa a ser cifrada com a `ASAAS_SEAL_KEY` (log: "conexões Asaas re-seladas"). O
    `card` pode aparecer `unhealthy` por alguns segundos, até o app terminar a migração.
-4. `docker compose ps`: `app` e `card` "healthy". `curl -sI https://pagar.checkout.minhaloja.com.br/form.js` responde
-   `200`.
-5. Uma compra de cartão de teste (valor baixo) no celular. Se o formulário do cartão não aparecer em 10 segundos, o
+5. `docker compose ps`: `app` e `card` "healthy".
+   `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.checkout.minhaloja.com.br/form.js` mostra `200` (use GET,
+   como neste comando: o `card` responde 404 a `curl -I`, que manda HEAD).
+6. Uma compra de cartão de teste (valor baixo) no celular. Se o formulário do cartão não aparecer em 10 segundos, o
    checkout mostra "Pagamento com cartão indisponível agora" e oferece o Pix: confira o DNS e `docker compose logs card`.
 
-O Caddy só serve o domínio do cartão com `CARD_ORIGIN` definida (`deploy/Caddyfile.card`, importado pelo
-`deploy/Caddyfile`; numa cópia `Caddyfile.local`, mantenha a linha `import` do fim). O container `card` fica numa rede
-só com o Postgres e o Caddy, sem volume, com raiz só leitura, 192 MB de memória e sem core dump.
+O Caddy só serve o domínio do cartão com `CARD_ORIGIN` definida: o compose monta o `deploy/Caddyfile.card` como
+`/etc/caddy/card/site.caddy`, que o `import card/*.caddy` do fim do `deploy/Caddyfile` (e do `Caddyfile.multi`) pega;
+sem `CARD_ORIGIN`, o glob não acha nada e o Caddy sobe igual. O container `card` fica numa rede só com o Postgres e o
+Caddy (não fala com o app direto; só pelo Caddy, como qualquer visitante), sem volume, com raiz só leitura, sem
+capabilities, 192 MB de memória e sem core dump.
 
 **Avisos (leia antes de ligar):**
 
 - **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois da primeira subida com o isolamento ligado. Sem ela (ou com
   outra), o app e o `card` recusam subir com `ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão Asaas de N
   loja(s); restaure a chave correta`. Restaure o valor do gerenciador de senhas.
-- **Desligar** (`CARD_ISOLATED=0`, tirar `card` de `COMPOSE_PROFILES`) com a mesma versão do sistema é seguro: o
-  checkout volta ao formulário antigo e a chave do Asaas continua abrindo (mantenha a `ASAAS_SEAL_KEY` no `.env`).
+- **Desligar** com a mesma versão do sistema é seguro: no `.env`, `CARD_ISOLATED=0`, tire `card` de
+  `COMPOSE_PROFILES` e apague a `CARD_ORIGIN` (senão o Caddy segue servindo o `pagar.`, com erro 502); depois
+
+  ```sh
+  docker compose stop card && docker compose rm -f card
+  docker compose up -d
+  ```
+
+  O checkout volta ao formulário antigo e a chave do Asaas continua abrindo (mantenha a `ASAAS_SEAL_KEY` no `.env`).
+  Desligando de vez, tire também o login do papel `card` (a migração não tira sozinha):
+  `docker compose exec -T postgres psql -U owner -d funil -c 'alter role card nologin'`.
 - **Voltar para uma versão do sistema anterior ao isolamento trava o Asaas das lojas** (ela não abre a chave cifrada
-  com a `ASAAS_SEAL_KEY`: Pix e cartão do Asaas param). Se precisar voltar, depois da volta cole de novo a chave de API
-  do Asaas de cada loja em Conexões → Asaas.
+  com a `ASAAS_SEAL_KEY`: Pix e cartão do Asaas param). Para voltar sem travar: primeiro desligue o isolamento (item
+  acima, ainda na versão atual), cole de novo a chave de API do Asaas de cada loja em Conexões → Asaas (com o
+  isolamento desligado ela é gravada no formato antigo) e só então volte a versão. Se já voltou, cole a chave de novo
+  em cada loja do mesmo jeito.
 - **Restaurar um backup** (seção 10) exige o mesmo `SECRET` **e** a mesma `ASAAS_SEAL_KEY`. Além dos erros de
   `CREATE POLICY ... TO card` já descritos (esperados), nada muda: o app recria o papel `card` com a
   `CARD_DB_PASSWORD` ao iniciar.
 - **Atualizar** é igual (seção 10): o `docker compose build --pull` monta também a imagem do `card`.
 
 ## 13. Problemas comuns
+
+- **Cartão isolado: o checkout mostra "Pagamento com cartão indisponível agora"**: confira, nesta ordem, o DNS do
+  `pagar.`, `docker compose ps` (`card` "healthy"), `docker compose logs card` e, se usa `CADDYFILE=Caddyfile.local`,
+  se ele tem no fim a linha `import card/*.caddy` (seção 12). Teste com
+  `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.<seu domínio>/form.js` (deve mostrar `200`).
 
 - **Pagamento com cartão sempre recusado com "Requisição recusada." (HTTP 403):** algo entre o navegador e o app está
   reescrevendo o **Host** (proxy da Cloudflare com regra de Host, outro proxy na frente, `header_up Host` no

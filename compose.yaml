@@ -88,6 +88,12 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Nenhuma capability (escuta na 3100) e nada de virar root por um binário setuid da imagem base.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
     mem_limit: 192m
     # Número e CVV em memória: sem swap além da RAM e sem core dump (como o app).
     memswap_limit: 192m
@@ -132,14 +138,15 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?defina DOMAIN no .env}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
-      # Site do cartão (deploy/Caddyfile.card) só com CARD_ORIGIN definida; sem ela, o Caddyfile importa /dev/null.
+      # Endereço do site do cartão (deploy/Caddyfile.card).
       CARD_ORIGIN: ${CARD_ORIGIN:-}
-      CARD_CADDYFILE: ${CARD_ORIGIN:+/etc/caddy/Caddyfile.card}
     volumes:
       # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
       # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
       - ./deploy/${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
-      - ./deploy/Caddyfile.card:/etc/caddy/Caddyfile.card:ro
+      # Site do cartão: com CARD_ORIGIN, vira card/site.caddy (o `import card/*.caddy` do Caddyfile pega); sem ela,
+      # card/site (o glob não pega e o Caddy sobe sem o site).
+      - ./deploy/Caddyfile.card:/etc/caddy/card/site${CARD_ORIGIN:+.caddy}:ro
       - caddy-data:/data
       - caddy-config:/config
     networks:
