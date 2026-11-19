@@ -12,6 +12,7 @@ import {
   installmentOptions,
   mapApiResponse,
   NETWORK_MESSAGE,
+  newAttemptKey,
   safeFieldNames,
   validateCardFields,
   type CardFields,
@@ -91,6 +92,21 @@ describe("attemptKey e attemptSig", () => {
     }
     expect(sig({ cardNumber: "4111111111111111" })).toBe(base); // máscara não muda a tentativa
     for (const secret of ["4111111111111111", "4111 1111", "123", "12/34"]) expect(base).not.toContain(secret);
+  });
+});
+
+describe("newAttemptKey", () => {
+  const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  test("usa crypto.randomUUID quando existe", () => {
+    expect(newAttemptKey({ randomUUID: () => "11111111-2222-4333-8444-555555555555", getRandomValues: crypto.getRandomValues.bind(crypto) })).toBe("11111111-2222-4333-8444-555555555555");
+  });
+  test("sem randomUUID (iOS < 15.4): UUID v4 a partir de getRandomValues, sem repetir", () => {
+    const c = { getRandomValues: crypto.getRandomValues.bind(crypto) } as Parameters<typeof newAttemptKey>[0];
+    const keys = new Set(Array.from({ length: 200 }, () => newAttemptKey(c)));
+    expect(keys.size).toBe(200);
+    for (const k of keys) expect(k).toMatch(UUID_V4);
+    const zeros = newAttemptKey({ getRandomValues: <T extends ArrayBufferView | null>(a: T) => a } as Parameters<typeof newAttemptKey>[0]);
+    expect(zeros).toBe("00000000-0000-4000-8000-000000000000");
   });
 });
 
@@ -572,6 +588,56 @@ describe("formulário no iframe", () => {
     const alert = t.doc.querySelector("[role=alert]") as unknown as HTMLElement;
     expect(alert.hidden).toBe(false);
     expect(alert.textContent).toBe(GENERIC);
+  });
+
+  test("alerta do Turnstile some no próximo result que não pede captcha", async () => {
+    const t = setup({ turnstileSiteKey: "site-key", responses: [Response.json({ captcha: true, message: "m" }, { status: 429 }), Response.json({ status: "declined" })] });
+    let opts: Record<string, unknown> = {};
+    (t.w as unknown as { turnstile: unknown }).turnstile = { render: (_el: unknown, o: Record<string, unknown>) => ((opts = o), "w1"), reset: () => {} };
+    t.fill();
+    t.pay("p1");
+    await t.next("funil-card:result");
+    (opts["error-callback"] as () => void)();
+    const alert = t.doc.querySelector("[role=alert]") as unknown as HTMLElement;
+    expect(alert.hidden).toBe(false);
+    t.pay("p2");
+    expect((await t.next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "declined" });
+    expect(alert.hidden).toBe(true);
+  });
+
+  describe("navegador sem AbortSignal.timeout (iOS 15)", () => {
+    const sig = AbortSignal as unknown as { timeout?: unknown };
+    const without = async (fn: () => Promise<void>) => {
+      const original = sig.timeout;
+      delete sig.timeout;
+      try {
+        await fn();
+      } finally {
+        sig.timeout = original;
+      }
+    };
+
+    test("o prazo continua valendo: estoura com 'Sem conexão…' e a mesma chave na próxima", () =>
+      without(async () => {
+        expect(sig.timeout).toBeUndefined();
+        const { fill, pay, next, calls } = setup({ payTimeoutMs: 5, responses: [new Promise<Response>(() => {}), Response.json({ status: "approved" })] });
+        fill();
+        pay("p1");
+        expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: NETWORK_MESSAGE });
+        pay("p2");
+        expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "approved" });
+        expect(calls.map((c) => c.body.idempotencyKey)).toEqual(["key-1", "key-1"]);
+      }));
+
+    test("pagamento normal segue funcionando", () =>
+      without(async () => {
+        const { fill, pay, next, calls } = setup({ responses: [Response.json({ status: "approved" })] });
+        fill();
+        pay("p1");
+        expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "approved" });
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
+      }));
   });
 
   test("config: parcelas com os rótulos do checkout; escondidas com 1x", () => {

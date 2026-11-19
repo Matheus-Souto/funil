@@ -28,6 +28,7 @@ import {
   maskExpiry,
   maskHolderName,
   NETWORK_MESSAGE,
+  newAttemptKey,
   serverFieldMessage,
   type CardBody,
   type CardFields,
@@ -49,10 +50,14 @@ export interface FormDeps {
   /** `window.parent`: o checkout da loja (o único `source` aceito e o único destino). */
   parent: { postMessage(msg: FrameMsg, targetOrigin: string): void };
   fetch: typeof fetch;
-  /** Gera a chave de idempotência (`crypto.randomUUID`). */
+  /** Gera a chave de idempotência (`newAttemptKey(crypto)`: randomUUID, ou getRandomValues antes do iOS 15.4). */
   newKey: () => string;
   now?: () => Date;
-  /** Prazo do POST /api/card (padrão 75 s, acima do prazo da cobrança no servidor). Estourar = queda de rede. */
+  /**
+   * Prazo do POST /api/card (padrão 75 s). Estourar conta como queda de rede. Não cobre todo pior caso do servidor
+   * (Turnstile + conferência no Asaas + cobrança de até 60 s): se o servidor ainda estiver processando, a nova
+   * tentativa reusa a mesma chave de idempotência e o servidor não cobra de novo (espera ou devolve o resultado).
+   */
   payTimeoutMs?: number;
 }
 
@@ -336,12 +341,20 @@ export function mountCardForm(deps: FormDeps): void {
     const last4 = body.card.number.slice(-4);
     let payload: string | null = JSON.stringify({ storeId: cfg.storeId, ...body });
     body = null;
-    const signal = AbortSignal.timeout(deps.payTimeoutMs ?? PAY_TIMEOUT_MS);
-    // O prazo vale mesmo se o fetch ignorar o sinal: a corrida termina no aborto.
-    const aborted = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
-    aborted.catch(() => {}); // o prazo pode estourar depois da resposta: rejeição esperada, sem ninguém ouvindo
     let res: Response;
     let json: unknown;
+    // Prazo com AbortController + setTimeout (AbortSignal.timeout e signal.reason não existem no iOS 15.0). Vale
+    // mesmo se o fetch ignorar o sinal: a corrida termina no aborto. O timer é limpo no `finally`.
+    const controller = new AbortController();
+    const signal = controller.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("prazo do pagamento"));
+      }, deps.payTimeoutMs ?? PAY_TIMEOUT_MS);
+    });
+    aborted.catch(() => {}); // sem ninguém ouvindo quando a resposta chega antes
     try {
       const call = deps.fetch("/api/card", {
         method: "POST",
@@ -364,6 +377,7 @@ export function mountCardForm(deps: FormDeps): void {
       return { status: "error", message: NETWORK_MESSAGE };
     } finally {
       payload = null;
+      clearTimeout(timer);
     }
     const out = mapApiResponse(res.status, json, last4, other);
     // Bilhete recusado (vencido ou não): o servidor parou antes de qualquer cobrança e do Turnstile, então a chave e o
@@ -387,6 +401,7 @@ export function mountCardForm(deps: FormDeps): void {
   }
 
   function sendResult(id: string, origin: string, out: ResultBody): void {
+    if (!out.captcha) alertBox.hidden = true; // aviso de Turnstile com erro só vale até o próximo resultado
     const msg = parseFrameMsg({ t: "funil-card:result", id, ...out }) ?? { t: "funil-card:result", id, status: "error", message: GENERIC_MESSAGE };
     parent.postMessage(msg, origin);
   }
@@ -452,5 +467,5 @@ export function mountCardForm(deps: FormDeps): void {
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined" && document.getElementById("cfg")) {
-  mountCardForm({ win: window, parent: window.parent, fetch: window.fetch.bind(window), newKey: () => crypto.randomUUID() });
+  mountCardForm({ win: window, parent: window.parent, fetch: window.fetch.bind(window), newKey: () => newAttemptKey(crypto) });
 }

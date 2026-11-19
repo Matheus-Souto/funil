@@ -86,10 +86,12 @@ body {
 }
 .box:focus-within {
   border-color: var(--color-brand-strong);
+  box-shadow: 0 0 0 3px rgba(11, 110, 79, 0.25); /* sem color-mix (Safari < 16.2) */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 25%, transparent);
 }
 .field[data-invalid="true"] .box {
   border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.14);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger) 14%, transparent);
 }
 .input {

@@ -57,6 +57,12 @@ describe("bun run card:build", () => {
     for (const banned of ["localStorage", "sessionStorage", "indexedDB", "document.cookie", "console.", "eval(", "new Function", '"*"', "XMLHttpRequest", "sendBeacon"]) {
       expect([banned, form.includes(banned)]).toEqual([banned, false]);
     }
+    // iOS 15.0 (Safari 15): nada que só chegou depois (AbortSignal.timeout 16, randomUUID/structuredClone/at/
+    // Object.hasOwn/findLast/AbortSignal.reason 15.4, lookbehind 16.4). randomUUID só atrás da checagem de existência.
+    for (const recent of ["AbortSignal.timeout", "structuredClone", ".at(", "Object.hasOwn", ".findLast", ".toSorted", ".reason", "(?<=", "(?<!"]) {
+      expect([recent, form.includes(recent)]).toEqual([recent, false]);
+    }
+    expect(form.match(/randomUUID/g)?.length ?? 0).toBeLessThanOrEqual(2);
     expect(form).not.toMatch(/\.setAttribute\(\s*["']style["']/);
     expect(form).not.toMatch(/\.innerHTML\s*=/);
   });
