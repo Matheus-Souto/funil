@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
-import { listAlerts } from "@/lib/alerts";
+import { listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { requirePanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
@@ -11,11 +11,13 @@ import { brl } from "@/lib/format";
 import { metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
+import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { BarList, Kpi, PageHead, deltaOf } from "../blocks";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { AckButton, CopyField } from "../ui";
+import { FailedDeliveries } from "../blocks";
 import { ackAlertAction } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +28,7 @@ const PERIODS: Array<[Period, string]> = [
   ["7d", "7 dias"],
   ["30d", "30 dias"],
 ];
-const COMPARE: Record<Period, string> = { hoje: "ontem", "7d": "7 dias anteriores", "30d": "30 dias anteriores" };
+const COMPARE: Record<Period, string> = { hoje: "ontem no mesmo horário", "7d": "7 dias anteriores", "30d": "30 dias anteriores" };
 const WEEKDAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "short" });
 const RANGE = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "numeric", month: "long" });
 /** "12 a 18 de novembro" / "20 de outubro a 18 de novembro". */
@@ -41,12 +43,12 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 const pct = (a: number, b: number) => (b === 0 ? "—" : `${Math.round((a * 1000) / b) / 10}%`.replace(".", ","));
 
-export default async function Overview({ searchParams }: { searchParams: Promise<{ periodo?: string }> }) {
+export default async function Overview({ searchParams }: { searchParams: Promise<{ periodo?: string | string[] }> }) {
   const panel = await requirePanelActor();
   const role = panel.actor.role;
   if (!hasPermission(role, "metrics.read")) redirect(hasPermission(role, "orders.read") ? "/admin/orders" : "/admin/offers");
   const call = { ...panel, origin: "panel" as const };
-  const q = (await searchParams).periodo;
+  const q = firstParam((await searchParams).periodo);
   const period: Period = q === "hoje" || q === "30d" ? q : "7d";
   const now = new Date();
   const cur = periodRange(period, now);
@@ -60,6 +62,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const b = await runAction(metricsBreakdown, call, cur);
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
+  const failedDeliveries = alerts?.failedDeliveries ?? (hasPermission(role, "orders.read") ? await runAction(listDeliveryFailures, call, {}) : []);
+  const canAck = hasPermission(role, "connections.write");
 
   const ticket = m.paid > 0 ? Math.round(m.revenueCents / m.paid) : 0;
   const prevTicket = prev.paid > 0 ? Math.round(prev.revenueCents / prev.paid) : 0;
@@ -121,28 +125,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 ) : null}
               </p>
             </div>
-            <AckButton onAck={ackAlertAction.bind(null, a.id)} />
+            {canAck ? <AckButton onAck={ackAlertAction.bind(null, a.id)} /> : null}
           </div>
         ))}
-        {alerts && alerts.failedDeliveries.length > 0 ? (
-          <div className={s.banner} data-tone="danger">
-            <PIcon name="mail" />
-            <div>
-              <b>
-                A entrega por e-mail falhou em {alerts.failedDeliveries.length} {alerts.failedDeliveries.length === 1 ? "pedido" : "pedidos"}.
-              </b>
-              <p>
-                O envio é re-tentado sozinho. Confira o SMTP em Conexões.{" "}
-                {alerts.failedDeliveries.slice(0, 5).map((f, i) => (
-                  <span key={f.orderId}>
-                    {i > 0 ? ", " : ""}
-                    <Link href={`/admin/orders/${f.orderId}`}>#{f.code}</Link>
-                  </span>
-                ))}
-              </p>
-            </div>
-          </div>
-        ) : null}
+        {failedDeliveries.length > 0 ? <FailedDeliveries items={failedDeliveries} /> : null}
       </div>
 
       <div className={s.stack}>

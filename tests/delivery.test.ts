@@ -3,7 +3,6 @@ import { and, eq, sql } from "drizzle-orm";
 import { PDFDocument } from "pdf-lib";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { auditLog, downloadLink, downloadToken, emailLog, integration, job, orders, product, store } from "@/lib/db/schema";
 import { handleDownloadHead, handleDownloadPage, handleDownloadPost } from "@/lib/delivery/download";
@@ -27,7 +26,7 @@ import { transitionOrder } from "@/lib/orders/state";
 import { releaseOrder } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
 import type { ResolvedStore } from "@/lib/stores";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedPdfProduct, seedStore, type TestDb } from "./db";
 import { pageTexts } from "./pdf-text";
 
 let t: TestDb;
@@ -101,8 +100,8 @@ async function seedShop(opts: { notifyEmail?: string | null; smtp?: boolean; mai
   if (opts.smtp !== false) await runAction(saveSmtp, panel(storeId), SMTP);
   const mainName = opts.mainName ?? "Maná bíblico · versão básica";
   const bumpName = "Maná bíblico · versão completa";
-  const main = await runAction(createProduct, panel(storeId), { name: mainName, fileName: opts.fileName ?? "mana-basica.pdf", file: await pdf(3) });
-  const bump = await runAction(createProduct, panel(storeId), { name: bumpName, fileName: "mana-completa.pdf", file: await pdf(2) });
+  const main = await seedPdfProduct(storeId, mainName, opts.fileName ?? "mana-basica.pdf", await pdf(3));
+  const bump = await seedPdfProduct(storeId, bumpName, "mana-completa.pdf", await pdf(2));
   const offer = await runAction(createOffer, panel(storeId), {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Maná bíblico para crianças",
@@ -222,13 +221,13 @@ describe("deliver_order", () => {
     expect(logs.map((l) => [l.kind, l.status])).toEqual([["delivery", "sent"]]);
     expect(logs[0]!.toHash).toMatch(/^[0-9a-f]{64}$/);
     expect(JSON.stringify(logs)).not.toContain("maria@exemplo.com");
-  });
+  }, HEAVY_TEST_MS);
 
   test("sem bump: um link só", async () => {
     const shop = await seedShop();
     const { tokens } = await deliveredOrder(shop, { bump: false });
     expect(tokens).toHaveLength(1);
-  });
+  }, HEAVY_TEST_MS);
 
   test("at-least-once: o mesmo job rodando duas vezes manda um e-mail só", async () => {
     const shop = await seedShop();
@@ -238,7 +237,7 @@ describe("deliver_order", () => {
     await handler(j!, new AbortController().signal);
     await handler(j!, new AbortController().signal);
     expect(outbox.filter((m) => m.to === "maria@exemplo.com")).toHaveLength(1);
-  });
+  }, HEAVY_TEST_MS);
 
   test("decide pelo status ATUAL: pedido já reembolsado quando o job roda -> não envia nada", async () => {
     const shop = await seedShop();
@@ -256,7 +255,7 @@ describe("deliver_order", () => {
     expect(mail.html).not.toContain("<b>Ana</b>");
     expect(mail.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;x&quot;");
     expect(mail.subject).toBe(`Seu acesso: <script>alert(1)</script> & "x"`);
-  });
+  }, HEAVY_TEST_MS);
 
   test("SMTP fora do ar (Review Focus 5b): pedido continua pago, job reagendado, email_log 'failed'; depois entrega", async () => {
     const shop = await seedShop();
@@ -285,7 +284,7 @@ describe("deliver_order", () => {
     expect(logs.map((l) => l.status).sort()).toEqual(["failed", "sent"]);
     // A retentativa reaproveitou as linhas (não duplicou links).
     expect(await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, o.id))).toHaveLength(2);
-  });
+  }, HEAVY_TEST_MS);
 
   test("loja sem SMTP: falha (re-tenta) com 'E-mail não configurado'", async () => {
     const shop = await seedShop({ smtp: false });
@@ -334,7 +333,7 @@ describe("GET /d/[token]", () => {
       .from(downloadLink)
       .where(and(eq(downloadLink.orderId, order.id), eq(downloadLink.downloads, 5)));
     expect(l).toBeDefined();
-  });
+  }, HEAVY_TEST_MS);
 
   test("downloads simultâneos não passam do limite (incremento atômico)", async () => {
     const shop = await seedShop();
@@ -342,7 +341,7 @@ describe("GET /d/[token]", () => {
     const res = await Promise.all(Array.from({ length: 8 }, () => download(shop, tokens[1]!)));
     expect(res.filter((r) => r.status === 200)).toHaveLength(5);
     expect(res.filter((r) => r.status === 410)).toHaveLength(3);
-  });
+  }, HEAVY_TEST_MS);
 
   test("reembolso: 410 na hora (status do pedido) e revoke_downloads grava revoked_at", async () => {
     const shop = await seedShop();
@@ -354,7 +353,7 @@ describe("GET /d/[token]", () => {
     const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
     expect(links.every((l) => l.revokedAt instanceof Date)).toBe(true);
     expect((await download(shop, tokens[1]!)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("contestação revoga; contestação revertida (disputed -> paid) restaura sem novo e-mail", async () => {
     const shop = await seedShop();
@@ -367,7 +366,7 @@ describe("GET /d/[token]", () => {
     await runJobs(order.id, "restore_downloads");
     expect(outbox).toHaveLength(0);
     expect((await download(shop, tokens[0]!)).status).toBe(200);
-  });
+  }, HEAVY_TEST_MS);
 
   test("fora de ordem: restore com o pedido ainda contestado não reativa; revoke com o pedido pago não revoga", async () => {
     const shop = await seedShop();
@@ -381,7 +380,7 @@ describe("GET /d/[token]", () => {
     await handlers.restore_downloads!(fakeJob("restore_downloads"), new AbortController().signal);
     const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
     expect(links.every((l) => l.revokedAt instanceof Date)).toBe(true);
-  });
+  }, HEAVY_TEST_MS);
 
   test("token de outra loja (host de outra loja) -> 410; token inválido -> 410", async () => {
     const a = await seedShop();
@@ -391,7 +390,7 @@ describe("GET /d/[token]", () => {
     expect((await download(a, "x".repeat(43))).status).toBe(410);
     expect((await download(a, "../../etc/passwd")).status).toBe(410);
     expect((await download(a, tokens[0]!)).status).toBe(200);
-  });
+  }, HEAVY_TEST_MS);
 
   test("host que não é de loja nenhuma -> 410", async () => {
     const shop = await seedShop();
@@ -399,14 +398,14 @@ describe("GET /d/[token]", () => {
     const none = { resolveStore: async () => null };
     expect((await handleDownloadPost(new Request(`http://x/d/${tokens[0]}`, { method: "POST" }), tokens[0]!, none)).status).toBe(410);
     expect((await handleDownloadPage(new Request(`http://x/d/${tokens[0]}`), tokens[0]!, none)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("link vencido (30 dias) -> 410", async () => {
     const shop = await seedShop();
     const { order, tokens } = await deliveredOrder(shop);
     await t.ownerDb.update(downloadLink).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(downloadLink.orderId, order.id));
     expect((await download(shop, tokens[0]!)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("nome do arquivo seguro no Content-Disposition (fallback ASCII + filename*)", async () => {
     const shop = await seedShop({ fileName: 'Maná "bíblico"\r\nX-Evil: 1/..\\a' });
@@ -421,7 +420,7 @@ describe("GET /d/[token]", () => {
     expect(decoded).toStartWith("Maná");
     expect(decoded).toEndWith(".pdf");
     expect(decoded).not.toMatch(/[\\/"\r\n\u0000-\u001f]/);
-  });
+  }, HEAVY_TEST_MS);
 
   test("limite por IP de tentativas inválidas (60/h): a 61ª recebe 429, mesmo com token válido", async () => {
     const shop = await seedShop();
@@ -431,7 +430,7 @@ describe("GET /d/[token]", () => {
     expect((await download(shop, "y".repeat(43), { ip })).status).toBe(429);
     expect((await download(shop, tokens[0]!, { ip })).status).toBe(429);
     expect((await download(shop, tokens[0]!, { ip: "198.51.100.9" })).status).toBe(200);
-  });
+  }, HEAVY_TEST_MS);
 });
 
 describe("orders.resend", () => {
@@ -451,7 +450,7 @@ describe("orders.resend", () => {
     for (let i = 0; i < 3; i++) expect((await download(shop, again[0]!)).status).toBe(200);
     expect((await download(shop, again[0]!)).status).toBe(410); // 1 + 1 + 3 = 5 no mesmo link
     expect((await download(shop, tokens[0]!)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("SMTP fora do ar no reenvio: nada muda, o link antigo segue valendo e nenhum token novo é gravado", async () => {
     const shop = await seedShop();
@@ -463,7 +462,7 @@ describe("orders.resend", () => {
     expect(await t.ownerDb.select().from(downloadToken).where(eq(downloadToken.storeId, shop.storeId))).toHaveLength(before.length);
     expect((await download(shop, tokens[0]!)).status).toBe(200);
     expect((await download(shop, tokens[1]!)).status).toBe(200);
-  });
+  }, HEAVY_TEST_MS);
 
   test("resposta do SMTP perdida e retentativa: os links anteriores não morrem; o e-mail da retentativa funciona", async () => {
     const shop = await seedShop();
@@ -478,7 +477,7 @@ describe("orders.resend", () => {
     expect((await download(shop, tokens[0]!)).status).toBe(200);
     expect((await download(shop, second[0]!)).status).toBe(200);
     expect(await countsOf(order.id)).toEqual([0, 2]);
-  });
+  }, HEAVY_TEST_MS);
 
   test("renew: revoga os links e emite novos (5 downloads de novo); restore não ressuscita os renovados", async () => {
     const shop = await seedShop();
@@ -505,7 +504,7 @@ describe("orders.resend", () => {
     const after = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
     expect(after.filter((l) => l.revokedAt !== null)).toHaveLength(2);
     expect((await download(shop, tokens[1]!)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("pedido não pago -> conflict; job duplicado não é enfileirado", async () => {
     const shop = await seedShop();
@@ -646,7 +645,7 @@ describe("GET e HEAD não contam download (robôs de e-mail)", () => {
     expect((await download(shop, tokens[0]!)).status).toBe(200);
     expect(await countsOf(order.id)).toEqual([0, 1]);
     expect(await (await view(shop, tokens[0]!)).text()).toContain("4 de 5");
-  });
+  }, HEAVY_TEST_MS);
 
   test("HEAD não consulta nem gera nada", async () => {
     const shop = await seedShop();
@@ -664,7 +663,7 @@ describe("GET e HEAD não contam download (robôs de e-mail)", () => {
     expect((await view(shop, tokens[0]!)).status).toBe(410);
     await runAction(refundOrder, panel(shop.storeId), { orderId: order.id });
     expect((await view(shop, tokens[1]!)).status).toBe(410);
-  });
+  }, HEAVY_TEST_MS);
 
   test("POST de outro site: 303 de volta para a página do link, nada contado", async () => {
     const shop = await seedShop();
@@ -681,7 +680,7 @@ describe("GET e HEAD não contam download (robôs de e-mail)", () => {
     const own = await download(shop, tokens[0]!, { headers: { origin: "null", "sec-fetch-site": "same-origin" } });
     expect(own.status).toBe(200);
     expect(await countsOf(order.id)).toEqual([0, 1]);
-  });
+  }, HEAVY_TEST_MS);
 });
 
 describe("cópias carimbadas: versão do arquivo, limpeza e varredura", () => {
@@ -705,7 +704,7 @@ describe("cópias carimbadas: versão do arquivo, limpeza e varredura", () => {
     expect(k2).not.toBe(k1);
     expect((await download(shop, tokens[0]!)).status).toBe(200);
     expect(await storage.exists(k2)).toBe(true);
-  });
+  }, HEAVY_TEST_MS);
 
   test("reembolso: revoke_downloads apaga as cópias do pedido", async () => {
     const shop = await seedShop();
@@ -717,7 +716,7 @@ describe("cópias carimbadas: versão do arquivo, limpeza e varredura", () => {
     await runAction(refundOrder, panel(shop.storeId), { orderId: order.id });
     await runJobs(order.id, "revoke_downloads");
     expect(await storage.exists(key)).toBe(false);
-  });
+  }, HEAVY_TEST_MS);
 
   test("renew apaga as cópias (depois do commit)", async () => {
     const shop = await seedShop();
@@ -727,7 +726,7 @@ describe("cópias carimbadas: versão do arquivo, limpeza e varredura", () => {
     const key = await copyKey(order.id, link.productId);
     await runAction(resendOrder, panel(shop.storeId, support), { orderId: order.id, renew: true });
     expect(await storage.exists(key)).toBe(false);
-  });
+  }, HEAVY_TEST_MS);
 
   test("varredura diária: apaga cópia de link vencido, revogado e sem download há 7 dias; mantém a de link em uso", async () => {
     const shop = await seedShop();

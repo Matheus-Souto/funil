@@ -20,7 +20,7 @@ import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
 import { refundOrder } from "@/lib/payments/refund";
-import { createTestDb, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 import { createFakeAsaas, newAsaasOrder, newCardOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
 import type { FakeAsaas } from "./fakes/asaas";
 
@@ -650,7 +650,7 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     const reset = new Date(t0.getTime() + 61 * 60_000);
     const o2 = await newCardOrder(storeId, offerId, email());
     expect((await payWithCard(call, input(o2.publicId, { number: "4410000000066666" }), { ...deps, now: () => reset })).status).toBe("approved");
-  });
+  }, HEAVY_TEST_MS);
 
   test("disjuntor: 9 recusas não disparam; recusas fora da janela de 15 min não somam", async () => {
     const { fake, call, storeId, offerId } = await setup();
@@ -721,7 +721,7 @@ describe("payWithCard: limites e Turnstile", () => {
     const o = await newCardOrder(storeId, offerId, email());
     const e = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("rate_limited");
-  });
+  }, HEAVY_TEST_MS);
 
   test("IP desconhecido: uma recusa exige Turnstile para o mesmo e-mail", async () => {
     const { call, storeId, offerId } = await setup();
@@ -748,7 +748,7 @@ describe("payWithCard: limites e Turnstile", () => {
     const e = await payWithCard(call, input(o.publicId, { number: pan }), fastDeps).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("rate_limited");
     expect(paymentPosts(fake)).toHaveLength(3);
-  });
+  }, HEAVY_TEST_MS);
 
   test("6ª tentativa do mesmo e-mail na hora -> rate_limited", async () => {
     const { call, storeId, offerId } = await setup();

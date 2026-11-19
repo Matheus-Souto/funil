@@ -2,9 +2,8 @@ import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { requirePanelActor } from "@/lib/auth/session";
 import { brl, dateTimeSP, shortWhenSP, splitUniqueAmount, validUntilSP } from "@/lib/format";
-import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL } from "@/lib/orders/labels";
+import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, pixManualExpiry } from "@/lib/orders/labels";
 import { allowedOrderActions, getOrderDetail, type OrderDetail } from "@/lib/orders/panel";
-import { MANUAL_RESERVE_AFTER_EXPIRY_MS } from "@/lib/payments/manual";
 import { Badge, PageHead, StatusBadge } from "../../../blocks";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
@@ -36,6 +35,8 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
   const allowed = allowedOrderActions(panel.actor.role, d);
   const manual = d.method === "pix_manual";
   const awaiting = manual && (d.status === "pending" || d.status === "expired");
+  // Vencido também quando ainda `pending` com a validade passada (a varredura não rodou): mesma conferência extra.
+  const late = pixManualExpiry(d);
   const amount = d.manualAmountCents ?? d.totalCents;
   const [same, diff] = splitUniqueAmount(d.totalCents, amount);
   const t = d.attribution.lastTouch ?? d.attribution.firstTouch ?? {};
@@ -61,7 +62,8 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             totalCents={d.totalCents}
             createdAt={d.createdAt.toISOString()}
             expiresAt={d.expiresAt?.toISOString() ?? null}
-            reservedUntil={d.status === "expired" && d.expiresAt ? new Date(d.expiresAt.getTime() + MANUAL_RESERVE_AFTER_EXPIRY_MS).toISOString() : null}
+            expired={late.expired}
+            reservedUntil={late.reservedUntil?.toISOString() ?? null}
             allowed={allowed}
           />
         }
@@ -125,8 +127,8 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                     <span>{d.pix?.key || "—"}</span>
                   </div>
                   <div className={s.row}>
-                    <span>{d.status === "expired" ? "Expirou" : "Expira"}</span>
-                    <span>{d.expiresAt ? (d.status === "expired" ? shortWhenSP(d.expiresAt) : validUntilSP(d.expiresAt)) : "—"}</span>
+                    <span>{late.expired ? "Expirou" : "Expira"}</span>
+                    <span>{d.expiresAt ? (late.expired ? shortWhenSP(d.expiresAt) : validUntilSP(d.expiresAt)) : "—"}</span>
                   </div>
                 </div>
               </div>

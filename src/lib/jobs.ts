@@ -72,13 +72,13 @@ async function recoverStuck(now: Date): Promise<void> {
 }
 
 /** Reivindica o próximo job vencido (tentativa já contada). Transação curta, FOR UPDATE SKIP LOCKED. */
-async function claim(now: Date): Promise<Job | undefined> {
+async function claim(now: Date, types?: readonly JobType[]): Promise<Job | undefined> {
   // `now` é uma leitura nova do relógio a cada claim: locked_at reflete o momento real da reivindicação.
   return db.transaction(async (tx) => {
     const next = tx
       .select({ id: job.id })
       .from(job)
-      .where(and(eq(job.status, "queued"), lte(job.runAt, now)))
+      .where(and(eq(job.status, "queued"), lte(job.runAt, now), types ? inArray(job.type, [...types]) : undefined))
       .orderBy(asc(job.runAt))
       .limit(1)
       .for("update", { skipLocked: true });
@@ -104,6 +104,8 @@ const realTimer: Timer = (ms, onTimeout) => {
 export interface RunOptions {
   timeoutMs?: number;
   timer?: Timer;
+  /** Só reivindica jobs destes tipos (os demais nem são tocados). Padrão: todos. */
+  types?: readonly JobType[];
 }
 
 /** Roda o handler com tempo-limite: estourou -> aborta o `signal` e rejeita (o handler pode seguir em segundo plano). */
@@ -143,7 +145,7 @@ export async function runDueJobs(
   await recoverStuck(clock());
   let ran = 0;
   while (ran < limit) {
-    const j = await claim(clock());
+    const j = await claim(clock(), opts.types);
     if (!j) break;
     ran++;
     const handler = handlers[j.type as JobType];

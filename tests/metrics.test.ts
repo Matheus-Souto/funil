@@ -120,11 +120,19 @@ describe("periodRange", () => {
     expect(periodRange("7d", now).to).toEqual(now);
   });
 
-  test("período anterior tem o mesmo tamanho e termina onde o atual começa", () => {
-    const now = new Date("2026-11-18T15:00:00Z");
-    const cur = periodRange("7d", now);
-    const prev = periodRange("7d", now, { previous: true });
-    expect(prev.to).toEqual(cur.from);
-    expect(prev.from.toISOString()).toBe("2026-11-05T03:00:00.000Z");
+  test("período anterior = o mesmo intervalo decorrido, deslocado (hoje 00:00–agora vs. ontem 00:00–mesma hora)", () => {
+    const now = new Date("2026-11-18T12:00:00Z"); // 09:00 em São Paulo
+    expect(periodRange("hoje", now, { previous: true })).toEqual({
+      from: new Date("2026-11-17T03:00:00.000Z"),
+      to: new Date("2026-11-17T12:00:00.000Z"),
+    });
+    expect(periodRange("7d", now, { previous: true })).toEqual({
+      from: new Date("2026-11-05T03:00:00.000Z"),
+      to: new Date("2026-11-11T12:00:00.000Z"),
+    });
+    expect(periodRange("30d", now, { previous: true })).toEqual({
+      from: new Date("2026-09-20T03:00:00.000Z"),
+      to: new Date("2026-10-19T12:00:00.000Z"),
+    });
   });
 });

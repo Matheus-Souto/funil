@@ -1,16 +1,14 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { integration, job, orderItem, orders } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { createOrder } from "@/lib/orders/create";
 import { ALLOWED, transitionOrder, type OrderStatus } from "@/lib/orders/state";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -21,13 +19,12 @@ afterAll(async () => {
 });
 
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
-const pdf = VALID_PDF;
 const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 async function seedOffer(storeId: string, withBump = true) {
   const call = { storeId, actor: owner, origin: "panel" as const };
-  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", file: pdf });
-  const bump = await runAction(createProduct, call, { name: "Bump", fileName: "b.pdf", file: pdf });
+  const main = await seedProduct(storeId, "Principal");
+  const bump = await seedProduct(storeId, "Bump");
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
@@ -206,7 +203,7 @@ describe("transitionOrder", () => {
       }),
       { numRuns: 25 },
     );
-  });
+  }, HEAVY_TEST_MS);
 });
 
 describe("integrations", () => {

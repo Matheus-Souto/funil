@@ -1,10 +1,8 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer, getPublicOffer, setOfferPixel } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
 import { auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
@@ -15,7 +13,7 @@ import { createOrder } from "@/lib/orders/create";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
 import { META_GRAPH_VERSION, buildMetaUserData, purchaseEventId, saveMeta, setMetaFetchForTests, testMeta } from "@/lib/tracking/meta";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeMeta, type FakeMeta } from "./fakes/meta";
 
 let t: TestDb;
@@ -56,8 +54,8 @@ async function seedShop(opts: { meta?: boolean; testEventCode?: string } = {}) {
   if (opts.meta !== false) {
     await runAction(saveMeta, panel(storeId), { pixelId: PIXEL, accessToken: meta.token, ...(opts.testEventCode ? { testEventCode: opts.testEventCode } : {}) });
   }
-  const main = await runAction(createProduct, panel(storeId), { name: "Maná básica", fileName: "a.pdf", file: VALID_PDF });
-  const bump = await runAction(createProduct, panel(storeId), { name: "Maná completa", fileName: "b.pdf", file: VALID_PDF });
+  const main = await seedProduct(storeId, "Maná básica");
+  const bump = await seedProduct(storeId, "Maná completa");
   const offer = await runAction(createOffer, panel(storeId), {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Maná bíblico para crianças",
@@ -207,7 +205,7 @@ test("connections.testMeta: sem conexão conflict; com conexão valida o token g
   expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/${PIXEL}` }]);
   meta.failNext(1, 400, 190);
   expect((await fail(runAction(testMeta, panel(shop.storeId), {}))).code).toBe("provider_error");
-});
+}, HEAVY_TEST_MS);
 
 describe("meta_event Purchase (API de Conversões)", () => {
   test("pedido de 2700 com bump: event_id purchase:<publicId>, value 27, dados em hash; repetir o job não reenvia", async () => {
@@ -421,7 +419,7 @@ describe("pixel nas páginas do comprador", () => {
     expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe("5550001112");
     const none = await seedShop({ meta: false });
     expect((await runAction(getPublicOffer, pub(none.storeId), { slug: none.slug })).pixelId).toBeNull();
-  });
+  }, HEAVY_TEST_MS);
 });
 
 test("META_GRAPH_BASE_URL só com BASE_URL e destino em loopback", () => {

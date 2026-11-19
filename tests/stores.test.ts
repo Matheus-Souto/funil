@@ -3,7 +3,7 @@ import { ActionError } from "@/lib/actions/core";
 import { verifyPassword } from "@/lib/auth/password";
 import { membership, store, users } from "@/lib/db/schema";
 import { createStoreWithOwner, resolveStore, setupFirstRun } from "@/lib/stores";
-import { createTestDb, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -125,12 +125,12 @@ describe("createStoreWithOwner (CLI)", () => {
     expect(b.userId).toBe(a.userId);
     expect(b.temporaryPassword).toBeNull();
     expect(await t.ownerDb.select().from(membership)).toHaveLength(2);
-  });
+  }, HEAVY_TEST_MS);
 
   test("slug inválido ou repetido → erro e nada é criado", async () => {
     expect(await code(createStoreWithOwner({ name: "X", slug: "Slug Ruim", ownerEmail: "x@exemplo.com" }))).toBe("invalid_input");
     await createStoreWithOwner({ name: "A", slug: "dup", ownerEmail: "a@exemplo.com" });
     expect(await code(createStoreWithOwner({ name: "B", slug: "dup", ownerEmail: "b@exemplo.com" }))).toBe("conflict");
     expect(await t.ownerDb.select().from(users)).toHaveLength(1);
-  });
+  }, HEAVY_TEST_MS);
 });

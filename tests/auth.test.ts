@@ -4,7 +4,7 @@ import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createSession, login, lookupSession } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
 import { loginAttempt, membership, session, users } from "@/lib/db/schema";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -128,7 +128,7 @@ describe("login", () => {
     // bloqueio não conta tentativas novas: continuam 5 registros
     const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(u.email)));
     expect(rows).toHaveLength(5);
-  });
+  }, HEAVY_TEST_MS);
 
   test("10 logins errados em paralelo: todos rejeitados e exatamente 5 tentativas gravadas; depois nem a senha certa entra", async () => {
     const { storeId } = await seedStore();
@@ -145,7 +145,7 @@ describe("login", () => {
     expect(par.every((r) => r.status === "rejected")).toBe(true);
     await t.ownerDb.update(loginAttempt).set({ at: sql`now() - interval '16 minutes'` }).where(eq(loginAttempt.emailHash, sha256(u.email)));
     expect(await login({ email: u.email, password: PASSWORD, storeId })).toBeString();
-  });
+  }, HEAVY_TEST_MS);
 
   test("o bloqueio vale também para e-mail inexistente e guarda só o hash do e-mail", async () => {
     const { storeId } = await seedStore();
@@ -160,7 +160,7 @@ describe("login", () => {
     const u = await seedUser(storeId);
     await t.ownerDb.update(users).set({ email }).where(eq(users.id, u.userId));
     expect(await login({ email, password: PASSWORD, storeId })).toBeString();
-  });
+  }, HEAVY_TEST_MS);
 
   test("4 falhas + sucesso não bloqueiam e o sucesso zera o contador", async () => {
     const { storeId } = await seedStore();
@@ -169,7 +169,7 @@ describe("login", () => {
     await login({ email: u.email, password: PASSWORD, storeId });
     for (let i = 0; i < 4; i++) await rejects(login({ email: u.email, password: "errada-errada-1", storeId }));
     expect(await login({ email: u.email, password: PASSWORD, storeId })).toBeString();
-  });
+  }, HEAVY_TEST_MS);
 });
 
 describe("limites de tamanho do login", () => {

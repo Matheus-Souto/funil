@@ -18,12 +18,13 @@ export const spDayKey = (d: Date): string => SP_KEY.format(d);
 
 /**
  * Período do painel: "hoje" = desde a meia-noite de São Paulo; "7d"/"30d" = os últimos N dias contando hoje.
- * `previous`: os N dias inteiros imediatamente antes (para a comparação "vs. período anterior").
+ * `previous`: o mesmo intervalo decorrido deslocado N dias para trás (comparação "vs. período anterior" justa).
  */
 export function periodRange(p: Period, now: Date = new Date(), opts: { previous?: boolean } = {}): { from: Date; to: Date } {
   const days = PERIOD_DAYS[p];
   const from = new Date(spMidnight(now).getTime() - (days - 1) * DAY_MS);
-  if (opts.previous) return { from: new Date(from.getTime() - days * DAY_MS), to: from };
+  // Mesmo intervalo decorrido, N dias antes: "hoje até 09:00" compara com "ontem até 09:00" (não com o dia inteiro).
+  if (opts.previous) return { from: new Date(from.getTime() - days * DAY_MS), to: new Date(now.getTime() - days * DAY_MS) };
   return { from, to: now };
 }
 

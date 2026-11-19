@@ -2,9 +2,12 @@ const SENSITIVE_KEY = /^(number|ccv|cvv|cardNumber|creditCard|expiryMonth|expiry
 // 13+ dígitos separados por qualquer espaço (inclui tab, NBSP, quebra de linha), ponto ou hífen. Corridas longas são removidas inteiras.
 const PAN = /\d(?:[\s.-]*\d){12,}/g;
 const MASK = "[redacted]";
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 function walk(v: unknown, seen: WeakSet<object>): unknown {
-  if (typeof v === "string") return v.replace(PAN, MASK);
+  // Um digest sha256 inteiro em hex (emailHash da auditoria, hashes de token) tem 13+ dígitos seguidos em ~11% dos casos:
+  // não é PAN e mutilá-lo quebra a auditoria. Só a string INTEIRA nesse formato é poupada.
+  if (typeof v === "string") return SHA256_HEX.test(v) ? v : v.replace(PAN, MASK);
   if (v === null || typeof v !== "object") return v;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
   if (seen.has(v)) return "[circular]";

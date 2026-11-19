@@ -1,10 +1,8 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { job, orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
@@ -12,7 +10,7 @@ import { createOrder } from "@/lib/orders/create";
 import { buildPixBrCode } from "@/lib/payments/brcode";
 import { transitionOrder } from "@/lib/orders/state";
 import { allocateManualAmount, isUniqueViolation, manualPixBrCode, releaseOrder, savePixManual } from "@/lib/payments/manual";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -24,12 +22,11 @@ afterAll(async () => {
 
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
 const support: Actor = { kind: "user", userId: "u2", role: "support" };
-const pdf = VALID_PDF;
 const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 async function seedOffer(storeId: string, priceCents = 990, pixMode: "manual" | "asaas" = "manual") {
   const call = { storeId, actor: owner, origin: "panel" as const };
-  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", file: pdf });
+  const main = await seedProduct(storeId, "Principal");
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",

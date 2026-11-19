@@ -5,6 +5,7 @@ import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { getOffer } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { storeBaseUrl } from "@/lib/delivery/links";
+import { firstParam } from "@/lib/panel-params";
 import { OfferEditor, type OfferData } from "./editor";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +14,7 @@ export const metadata = { title: "Oferta" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** /admin/offers/nova cria; /admin/offers/<id> edita (ou só mostra, para quem não tem offers.write). */
-export default async function OfferPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ criada?: string }> }) {
+export default async function OfferPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ criada?: string | string[] }> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
   const role = panel.actor.role;
@@ -59,7 +60,7 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
       brandColor={ident.store.brandColor}
       canWrite={hasPermission(role, "offers.write")}
       canPixel={hasPermission(role, "tracking.write")}
-      created={!isNew && (await searchParams).criada === "1"}
+      created={!isNew && firstParam((await searchParams).criada) === "1"}
     />
   );
 }

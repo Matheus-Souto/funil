@@ -92,3 +92,10 @@ test("log escreve JSON em stdout já redigido", () => {
   expect(row.data).toEqual({ card: "[redacted]", id: "p1" });
   expect(lines.join("")).not.toContain("4444");
 });
+
+test("hash sha256 em hex (ex.: emailHash da auditoria) não é mutilado por ter 13+ dígitos seguidos", () => {
+  const h = "c3f33f3d2f3c7750cc85d2911851444941e0672c8a9c085d4759a0220784ed9d";
+  expect(redact({ emailHash: h, note: `hash ${h}` })).toEqual({ emailHash: h, note: "hash c3f33f3d2f3c7750cc85d[redacted]e0672c8a9c085d4759a0220784ed9d" });
+  // PAN continua mascarado em qualquer outro texto, inclusive colado em letras.
+  expect(redact("a4111111111111111b")).toBe("a[redacted]b");
+});

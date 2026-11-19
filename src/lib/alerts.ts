@@ -83,33 +83,45 @@ export const listAlerts = defineAction({
       return { id: r.id, kind: r.kind, orderId: r.orderId, code, createdAt: r.createdAt, ...alertText(r.kind, r.detail as object, code) };
     });
 
-    // Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou: o worker ainda re-tenta, mas o vendedor vê.
-    const since = new Date(Date.now() - FAILED_DELIVERY_WINDOW_MS);
-    const latest = ctx.tx
-      .selectDistinctOn([emailLog.orderId], { orderId: emailLog.orderId, status: emailLog.status, at: emailLog.at, error: emailLog.error })
-      .from(emailLog)
-      .where(and(eq(emailLog.kind, "delivery"), gte(emailLog.at, since)))
-      .orderBy(emailLog.orderId, desc(emailLog.at))
-      .as("latest");
-    const failed = await ctx.tx
-      .select({ orderId: latest.orderId, at: latest.at, publicId: orders.publicId })
-      .from(latest)
-      .innerJoin(orders, eq(orders.id, latest.orderId))
-      .where(and(eq(latest.status, "failed"), eq(orders.status, "paid")))
-      .orderBy(desc(latest.at))
-      .limit(20);
-    return {
-      alerts,
-      failedDeliveries: failed.map((f) => ({ orderId: f.orderId!, code: orderCode(f.publicId), at: f.at })),
-    };
+    return { alerts, failedDeliveries: await deliveryFailures(ctx.tx) };
   },
+});
+
+/** Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou: o worker ainda re-tenta, mas o painel mostra. */
+async function deliveryFailures(tx: Tx): Promise<Array<{ orderId: string; code: string; at: Date }>> {
+  const since = new Date(Date.now() - FAILED_DELIVERY_WINDOW_MS);
+  const latest = tx
+    .selectDistinctOn([emailLog.orderId], { orderId: emailLog.orderId, status: emailLog.status, at: emailLog.at })
+    .from(emailLog)
+    .where(and(eq(emailLog.kind, "delivery"), gte(emailLog.at, since)))
+    .orderBy(emailLog.orderId, desc(emailLog.at))
+    .as("latest");
+  const failed = await tx
+    .select({ orderId: latest.orderId, at: latest.at, publicId: orders.publicId })
+    .from(latest)
+    .innerJoin(orders, eq(orders.id, latest.orderId))
+    .where(and(eq(latest.status, "failed"), eq(orders.status, "paid")))
+    .orderBy(desc(latest.at))
+    .limit(20);
+  return failed.map((f) => ({ orderId: f.orderId!, code: orderCode(f.publicId), at: f.at }));
+}
+
+/** Entregas com falha para quem atende pedidos (orders.read; ex.: support, que não vê os demais avisos da loja). */
+export const listDeliveryFailures = defineAction({
+  name: "orders.deliveryFailures",
+  description: "Pedidos pagos cujo último e-mail de acesso (7 dias) falhou.",
+  input: z.object({}),
+  permission: "orders.read",
+  audit: false,
+  run: (ctx) => deliveryFailures(ctx.tx),
 });
 
 export const ackAlert = defineAction({
   name: "alerts.ack",
   description: "Marca um aviso da loja como visto (some do painel).",
   input: z.object({ id: z.uuid() }),
-  permission: "connections.read",
+  // Confirmar some com o aviso para todos: só quem resolve as conexões da loja.
+  permission: "connections.write",
   async run(ctx, { id }) {
     const [row] = await ctx.tx
       .update(storeAlert)

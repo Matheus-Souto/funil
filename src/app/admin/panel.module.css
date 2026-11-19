@@ -281,6 +281,7 @@
 @media (max-width: 900px) {
   .shell {
     display: block;
+    background: none;
   }
   .sidebar {
     display: none;
@@ -518,7 +519,8 @@
 }
 .cardFlush {
   padding: 0;
-  overflow: hidden;
+  /* tabelas largas rolam dentro do cartão no celular, nunca a página */
+  overflow-x: auto;
 }
 .cardHead {
   display: flex;

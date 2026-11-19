@@ -20,7 +20,9 @@ export interface OrderActionsProps {
   totalCents: number;
   createdAt: string;
   expiresAt: string | null;
-  /** Até quando o valor único de um Pix manual expirado fica reservado (48 h depois da validade). */
+  /** Pix manual vencido (expirado, ou pendente com a validade passada). */
+  expired: boolean;
+  /** Até quando o valor único de um Pix manual vencido fica reservado (48 h depois da validade). */
   reservedUntil: string | null;
   allowed: { release: boolean; resend: boolean; refund: boolean };
 }
@@ -35,7 +37,7 @@ export function OrderActions(p: OrderActionsProps) {
     setChecks({ seen: false, noReceipt: false });
     setRenew(false);
   };
-  const expired = p.status === "expired";
+  const expired = p.expired;
   const created = dateTimeSP(new Date(p.createdAt));
   const reserved = p.reservedUntil ? dateTimeSP(new Date(p.reservedUntil)) : null;
   const any = p.allowed.release || p.allowed.resend || p.allowed.refund;

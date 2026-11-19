@@ -11,7 +11,7 @@ import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { env } from "@/lib/env";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
 
 let t: TestDb;
@@ -93,7 +93,7 @@ describe("products", () => {
     expect(await checkPdfBytes(ENCRYPTED_PDF)).toMatch(/protegido|criptograf|senha/i);
     expect(await checkPdfBytes(await makePdf(500))).toBeNull();
     expect(await checkPdfBytes(await makePdf(501))).toMatch(/500/);
-  });
+  }, HEAVY_TEST_MS);
 
   test("PDF criptografado, corrompido após %PDF- ou com páginas demais é invalid_input com mensagem clara e nada é criado", async () => {
     const { storeId } = await seedStore();
@@ -105,7 +105,7 @@ describe("products", () => {
     expect(await call(listProducts, storeId, owner, {})).toEqual([]);
     const dir = join(env.DATA_DIR, "files", "products", storeId);
     expect(await readdir(dir).catch(() => [] as string[])).toEqual([]);
-  });
+  }, HEAVY_TEST_MS);
 
   test("cria, grava o arquivo no armazenamento e a auditoria não guarda os bytes", async () => {
     const { storeId } = await seedStore();

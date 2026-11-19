@@ -1,18 +1,15 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { runDueJobs } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
-import { seedStore } from "./db";
+import { seedProduct, seedStore } from "./db";
 import { createFakeAsaas, type FakeAsaas } from "./fakes/asaas";
 
 export const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
-const pdf = VALID_PDF;
 export const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "public" }, origin: "public", tx });
 
 /** Loja com Asaas conectado (via ação, contra o fake) e uma oferta Pix automático. */
@@ -21,7 +18,7 @@ export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990, opts: { 
   const { storeId } = await seedStore();
   const call = { storeId, actor: owner, origin: "panel" as const };
   const saved = await runAction(saveAsaas, call, { env: "sandbox", apiKey: fake.apiKey });
-  const main = await runAction(createProduct, call, { name: "Principal", fileName: "a.pdf", file: pdf });
+  const main = await seedProduct(storeId, "Principal");
   const offer = await runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
@@ -65,10 +62,11 @@ export const newCardOrder = (storeId: string, offerId: string, email: string, cp
 
 /**
  * Roda os jobs `refund_order` vencidos com o handler registrado no módulo de handlers (como o worker faz).
- * Os demais tipos vencidos (sem handler aqui) são adiados; repete até a fila vencida esvaziar.
+ * Os demais tipos não são tocados; repete até não haver refund_order vencido.
  */
 export async function runRefundJobs(now: Date = new Date()): Promise<void> {
   const handler = getHandlers().refund_order;
   if (!handler) throw new Error("refund_order não está registrado em getHandlers()");
-  for (let i = 0; i < 100 && (await runDueJobs({ refund_order: handler }, 50, now)) > 0; i++);
+  // Só refund_order: os demais jobs acumulados no banco do arquivo (entregas, avisos...) não são reivindicados à toa.
+  for (let i = 0; i < 100 && (await runDueJobs({ refund_order: handler }, 50, now, { types: ["refund_order"] })) > 0; i++);
 }

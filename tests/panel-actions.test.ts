@@ -1,14 +1,16 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
-import { ackAlert, alertSeller, listAlerts } from "@/lib/alerts";
+import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
 import { auditLog, downloadLink, emailLog, job, payment, store, storeAlert } from "@/lib/db/schema";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
-import { allowedOrderActions, exportOrders, getOrderDetail, listOrders, maskCpf, orderCounts, ordersCsv } from "@/lib/orders/panel";
+import { pixManualExpiry } from "@/lib/orders/labels";
+import { allowedOrderActions, csvCell, exportOrders, getOrderDetail, listOrders, maskCpf, orderCounts, ordersCsv } from "@/lib/orders/panel";
+import { firstParam, parseOrderFilters } from "@/lib/panel-params";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { alertAsaasKeyRejected } from "@/lib/payments/asaas/webhook";
@@ -133,6 +135,11 @@ describe("orders.get", () => {
       ["delivery", "failed"],
       ["delivery", "sent"],
     ]);
+    // Sem connections.read (support): só "falha no envio", nunca o texto do SMTP.
+    expect(d.emails[0]!.error).toBe("falha no envio");
+    expect(JSON.stringify(d)).not.toContain("ECONNREFUSED");
+    const asOwner = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(asOwner.emails[0]!.error).toBe("ECONNREFUSED");
     expect(d.attribution).toMatchObject({ lastTouch: { utm_source: "ig" }, ref: "joao" });
     const release = d.timeline.find((e) => e.kind === "orders.release");
     expect(release).toMatchObject({ label: "Liberado manualmente", actorRole: "owner" });
@@ -201,13 +208,15 @@ describe("exportação CSV", () => {
     const rows = await runAction(exportOrders, panelCall(s.storeId, "admin"), {});
     const csv = ordersCsv(rows);
     const [header, line] = csv.trim().split("\r\n");
-    expect(header).toBe("data;status;método;produto(s);valor;nome;e-mail;telefone;utm_source;utm_campaign;ref");
+    expect(header).toBe('"data";"status";"método";"produto(s)";"valor";"nome";"e-mail";"telefone";"utm_source";"utm_campaign";"ref"');
     expect(csv).not.toContain("52998224725");
     expect(csv).not.toMatch(/cpf/i);
     expect(line).toContain("Maná básica + Maná completa");
     expect(line).toContain("27,00");
-    expect(line).toContain(";ig;stories;joao");
+    expect(line).toContain(';"ig";"stories";"joao"');
     expect(line).toContain("\"'=HYPERLINK(\"\"x\"\")\"");
+    // Todo campo entre aspas: nenhuma vírgula ou ponto e vírgula vira separador em nenhuma configuração do Excel.
+    expect(line!.split(";").every((f) => f.startsWith('"') && f.endsWith('"'))).toBe(true);
   });
 });
 
@@ -221,6 +230,44 @@ describe("parseBrl (preço digitado no painel)", () => {
     expect(parseBrl("0,05")).toBe(5);
     for (const bad of ["", "abc", "9,999", "1,2,3", "-5"]) expect(parseBrl(bad)).toBeNull();
     expect(centsToInput(1710)).toBe("17,10");
+  });
+});
+
+describe("csvCell (fórmulas neutralizadas com qualquer separador)", () => {
+  test("toda célula entre aspas; apóstrofo quando começa com =,+,-,@,tab,CR ou tem um gatilho logo depois de , ou ;", () => {
+    expect(csvCell("ig")).toBe('"ig"');
+    expect(csvCell("=1+1")).toBe(`"'=1+1"`);
+    expect(csvCell("-2")).toBe(`"'-2"`);
+    expect(csvCell("Ana,=HYPERLINK(\"x\")")).toBe(`"'Ana,=HYPERLINK(""x"")"`);
+    expect(csvCell("a; @SUM(A1)")).toBe(`"'a; @SUM(A1)"`);
+    expect(csvCell("Maná básica + Maná completa")).toBe('"Maná básica + Maná completa"');
+    expect(csvCell("27,00")).toBe('"27,00"');
+  });
+});
+
+describe("parâmetros repetidos na URL", () => {
+  test("pega o primeiro valor; status/método inválidos são ignorados; página inválida vira 1", () => {
+    expect(firstParam(["a", "b"])).toBe("a");
+    expect(firstParam("x")).toBe("x");
+    expect(firstParam(undefined)).toBeUndefined();
+    expect(parseOrderFilters({ q: ["ana", "bia"], status: ["paid", "pending"], method: ["pix_manual", "x"], pagina: ["2", "3"] })).toEqual({
+      q: "ana",
+      status: "paid",
+      method: "pix_manual",
+      page: 2,
+    });
+    expect(parseOrderFilters({ status: "nada", method: ["?"], pagina: "abc", q: "  " })).toEqual({ q: undefined, status: undefined, method: undefined, page: 1 });
+  });
+});
+
+describe("Pix manual vencido", () => {
+  const now = new Date("2026-11-18T12:00:00Z");
+  const past = new Date("2026-11-18T11:00:00Z");
+  test("expirado ou pendente com validade passada (ainda não varrido) conta como vencido, com reserva de 48 h", () => {
+    expect(pixManualExpiry({ method: "pix_manual", status: "expired", expiresAt: past }, now)).toEqual({ expired: true, reservedUntil: new Date("2026-11-20T11:00:00Z") });
+    expect(pixManualExpiry({ method: "pix_manual", status: "pending", expiresAt: past }, now)).toEqual({ expired: true, reservedUntil: new Date("2026-11-20T11:00:00Z") });
+    expect(pixManualExpiry({ method: "pix_manual", status: "pending", expiresAt: new Date("2026-11-18T13:00:00Z") }, now)).toEqual({ expired: false, reservedUntil: null });
+    expect(pixManualExpiry({ method: "pix_asaas", status: "expired", expiresAt: past }, now)).toEqual({ expired: false, reservedUntil: null });
   });
 });
 
@@ -308,6 +355,8 @@ describe("avisos da loja (store_alert)", () => {
     expect(cancelled.orderId).toBe(o.id);
     expect(cancelled.title).toContain("Estorno cancelado");
 
+    // "ok" exige connections.write: admin (só connections.read) não confirma.
+    expect(await fails(runAction(ackAlert, panelCall(s.storeId, "admin"), { id: cancelled.id }))).toBe("forbidden");
     await runAction(ackAlert, panelCall(s.storeId), { id: cancelled.id });
     expect((await runAction(listAlerts, panelCall(s.storeId), {})).alerts.map((a) => a.kind)).toEqual(["chave_asaas_invalida"]);
     expect(await fails(runAction(listAlerts, panelCall(s.storeId, "support"), {}))).toBe("forbidden");
@@ -324,8 +373,12 @@ describe("avisos da loja (store_alert)", () => {
     await t.ownerDb.insert(emailLog).values({ storeId: s.storeId, orderId: o.id, toHash: "x", kind: "delivery", status: "failed", error: "ECONNREFUSED" });
     const before = await runAction(listAlerts, panelCall(s.storeId), {});
     expect(before.failedDeliveries.map((f) => f.orderId)).toEqual([o.id]);
+    // Quem tem orders.read (support, sem connections.read) também vê as entregas com falha.
+    expect((await runAction(listDeliveryFailures, panelCall(s.storeId, "support"), {})).map((f) => f.orderId)).toEqual([o.id]);
+    expect(await fails(runAction(listDeliveryFailures, panelCall(s.storeId, "traffic"), {}))).toBe("forbidden");
     await t.ownerDb.insert(emailLog).values({ storeId: s.storeId, orderId: o.id, toHash: "x", kind: "delivery", status: "sent", at: new Date(Date.now() + 1000) });
     expect((await runAction(listAlerts, panelCall(s.storeId), {})).failedDeliveries).toEqual([]);
+    expect(await runAction(listDeliveryFailures, panelCall(s.storeId, "support"), {})).toEqual([]);
   });
 
   test("os caminhos que avisam o vendedor gravam o aviso do painel (ex.: chave do Asaas recusada)", async () => {

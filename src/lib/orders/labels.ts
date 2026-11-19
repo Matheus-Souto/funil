@@ -39,6 +39,25 @@ export function statusTone(status: string, method: string): "warning" | "success
   return "neutral";
 }
 
+/**
+ * Quarentena do valor único de um Pix manual vencido (48 h depois da validade): fonte única, usada também pela alocação
+ * em src/lib/payments/manual.ts.
+ */
+export const PIX_MANUAL_RESERVE_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Pix manual vencido: `expired`, ou ainda `pending` com a validade já passada (a varredura ainda não rodou). Nos dois
+ * casos o valor único só fica reservado até 48 h depois da validade; liberar pede conferência extra de data e hora.
+ */
+export function pixManualExpiry(
+  o: { method: string; status: string; expiresAt: Date | null },
+  now: Date = new Date(),
+): { expired: boolean; reservedUntil: Date | null } {
+  const late = o.status === "expired" || (o.status === "pending" && o.expiresAt !== null && o.expiresAt.getTime() <= now.getTime());
+  if (o.method !== "pix_manual" || !late || !o.expiresAt) return { expired: false, reservedUntil: null };
+  return { expired: true, reservedUntil: new Date(o.expiresAt.getTime() + PIX_MANUAL_RESERVE_MS) };
+}
+
 export type RefundState = "none" | "processing" | "awaiting_provider" | "stale";
 
 /**

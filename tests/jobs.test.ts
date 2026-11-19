@@ -1,16 +1,14 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { eq, inArray, sql } from "drizzle-orm";
 import { runAction } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { job, orders } from "@/lib/db/schema";
 import { enqueue, runDueJobs, scheduleOnce, type JobType } from "@/lib/jobs";
 import { createExpireOrdersHandler, expireOrdersHandler } from "@/lib/jobs/handlers";
 import { log } from "@/lib/log";
 import { createOrder } from "@/lib/orders/create";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -35,6 +33,19 @@ describe("runDueJobs", () => {
     expect(n).toBe(1);
     expect(seen).toEqual([{ orderId: "x" }]);
     expect(await runDueJobs({ notify_seller: async () => undefined }, 10, at(2))).toBe(0);
+  });
+
+  test("opção types: só reivindica os tipos pedidos; os demais nem são tocados (attempts e run_at intactos)", async () => {
+    await enq("meta_event", { orderId: "outro" }, null, at(-5));
+    const other = await newest("meta_event");
+    await enq("refund_order", { orderId: "r" }, null, at(-5));
+    const seen: unknown[] = [];
+    const n = await runDueJobs({ refund_order: async (j) => void seen.push(j.payload) }, 10, at(1), { types: ["refund_order"] });
+    expect(n).toBe(1);
+    expect(seen).toEqual([{ orderId: "r" }]);
+    const after = await row(other.id);
+    expect([after.status, after.attempts, after.runAt.getTime()]).toEqual(["queued", 0, at(-5).getTime()]);
+    await t.ownerDb.delete(job).where(eq(job.id, other.id));
   });
 
   test("não executa job com run_at no futuro", async () => {
@@ -246,10 +257,9 @@ describe("runDueJobs", () => {
 });
 
 describe("expire_orders", () => {
-  const pdf = VALID_PDF;
   async function seedOffer(storeId: string) {
     const call = { storeId, actor: { kind: "user", userId: "u", role: "owner" } as const, origin: "panel" as const };
-    const p = await runAction(createProduct, call, { name: "P", fileName: "p.pdf", file: pdf });
+    const p = await seedProduct(storeId, "P");
     return runAction(createOffer, call, { slug: "oferta", name: "O", productId: p.id, priceCents: 990, methods: ["pix"], pixMode: "manual" });
   }
   const mk = async (storeId: string, offerId: string, expiresAt: Date | null, status: string) => {

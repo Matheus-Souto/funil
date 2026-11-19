@@ -3,6 +3,7 @@
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
+import { hasPermission } from "@/lib/actions/permissions";
 import { auditLog, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
@@ -223,6 +224,7 @@ export const getOrderDetail = defineAction({
     timeline.sort((a, b) => b.at.getTime() - a.at.getTime());
 
     const snapshot = o.buyerName !== null;
+    const seesConnections = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.read");
     return {
       id: o.id,
       code: orderCode(o.publicId),
@@ -254,7 +256,8 @@ export const getOrderDetail = defineAction({
         return { id: p.id, provider: p.provider, providerId: p.providerId, status: p.status, amountCents: p.amountCents, flags };
       }),
       links,
-      emails,
+      // O texto do erro do SMTP (servidor, porta, motivo) só para quem vê as conexões; os demais veem que falhou.
+      emails: emails.map((e) => ({ ...e, error: e.error === null || seesConnections ? e.error : "falha no envio" })),
       refund: await refundState(ctx, o, pays),
       attribution: { firstTouch: o.firstTouch as Record<string, string> | null, lastTouch: o.lastTouch as Record<string, string> | null, ref: o.ref, hasFbc: o.fbc !== null },
       pix,
@@ -317,10 +320,14 @@ const SP = new Intl.DateTimeFormat("pt-BR", {
   hourCycle: "h23",
 });
 
-/** Célula CSV: neutraliza fórmula (=, +, -, @, tab, CR no início) e põe aspas quando precisa. */
-function cell(v: string): string {
-  const safe = /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
-  return /[;"\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+/**
+ * Célula CSV: SEMPRE entre aspas (vírgula e ponto e vírgula nunca viram separador, seja qual for a configuração do
+ * Excel) e com apóstrofo na frente quando pode virar fórmula: começa com =, +, -, @, tab ou CR, ou tem um desses logo
+ * depois de vírgula ou ponto e vírgula (se o arquivo for aberto partindo por vírgula, o pedaço viraria célula própria).
+ */
+export function csvCell(v: string): string {
+  const risky = /^[=+\-@\t\r]/.test(v) || /[,;]\s*[=+\-@\t\r]/.test(v);
+  return `"${(risky ? `'${v}` : v).replace(/"/g, '""')}"`;
 }
 
 /** CSV (separador `;`, CRLF, BOM fica na rota) no formato do Excel em português. */
@@ -340,8 +347,8 @@ export function ordersCsv(rows: Awaited<ReturnType<typeof exportOrders.run>>): s
       r.utmCampaign,
       r.ref,
     ]
-      .map((v) => cell(String(v)))
+      .map((v) => csvCell(String(v)))
       .join(";"),
   );
-  return [header.join(";"), ...lines].join("\r\n") + "\r\n";
+  return [header.map(csvCell).join(";"), ...lines].join("\r\n") + "\r\n";
 }

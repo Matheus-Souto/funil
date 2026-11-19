@@ -1,10 +1,8 @@
-import { VALID_PDF } from "./pdf-fixtures";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
-import { createProduct } from "@/lib/catalog/products";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
 import {
@@ -26,7 +24,7 @@ import { payWithCard } from "@/lib/payments/asaas/card";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { savePixManual } from "@/lib/payments/manual";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeAsaas, type FakeAsaas } from "./fakes/asaas";
 
 let t: TestDb;
@@ -86,8 +84,8 @@ async function seed(opts: SeedOpts = {}) {
     await runAction(saveAsaas, call, { env: "sandbox", apiKey: opts.asaas.apiKey });
   }
   if (opts.pixKey !== false) await runAction(savePixManual, call, { key: "contato@manakids.com.br", name: "Mana Kids", city: "Sao Paulo" });
-  const main = await runAction(createProduct, call, { name: "Maná básica", fileName: "a.pdf", file: VALID_PDF });
-  const extra = await runAction(createProduct, call, { name: "Maná completa", fileName: "b.pdf", file: VALID_PDF });
+  const main = await seedProduct(storeId, "Maná básica");
+  const extra = await seedProduct(storeId, "Maná completa");
   const slug = `o-${Math.random().toString(36).slice(2, 10)}`;
   const offer = await runAction(createOffer, call, {
     slug,

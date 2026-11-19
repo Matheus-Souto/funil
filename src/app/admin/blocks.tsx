@@ -65,6 +65,29 @@ export function BarList({ rows, empty }: { rows: Array<{ label: ReactNode; value
   );
 }
 
+/** Aviso de entregas por e-mail com falha (avisos da loja e lista de pedidos). */
+export function FailedDeliveries({ items }: { items: Array<{ orderId: string; code: string }> }) {
+  return (
+    <div className={s.banner} data-tone="danger">
+      <PIcon name="mail" />
+      <div>
+        <b>
+          A entrega por e-mail falhou em {items.length} {items.length === 1 ? "pedido" : "pedidos"}.
+        </b>
+        <p>
+          O envio é re-tentado sozinho; confira o SMTP em Conexões ou reenvie o acesso.{" "}
+          {items.slice(0, 5).map((f, i) => (
+            <span key={f.orderId}>
+              {i > 0 ? ", " : ""}
+              <Link href={`/admin/orders/${f.orderId}`}>#{f.code}</Link>
+            </span>
+          ))}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function PageHead({ title, sub, actions, back, badge }: { title: ReactNode; sub?: ReactNode; actions?: ReactNode; back?: { href: string; label: string }; badge?: ReactNode }) {
   return (
     <>

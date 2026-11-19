@@ -3,6 +3,7 @@ import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { orders, payment } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
+import { PIX_MANUAL_RESERVE_MS } from "@/lib/orders/labels";
 import { transitionOrder } from "@/lib/orders/state";
 import { validCpf } from "@/lib/validation/br";
 import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
@@ -17,7 +18,7 @@ export const ALLOCATION_ATTEMPTS = 3;
  * Quarentena do valor único: o valor de um Pix manual expirado fica reservado por 48 h depois da validade.
  * Quem paga o QR antigo depois de expirar não pode colidir com um pedido novo de mesmo valor (o vendedor liberaria o errado).
  */
-export const MANUAL_RESERVE_AFTER_EXPIRY_MS = 48 * 60 * 60 * 1000;
+export const MANUAL_RESERVE_AFTER_EXPIRY_MS = PIX_MANUAL_RESERVE_MS;
 
 export function isUniqueViolation(e: unknown): boolean {
   const c = (e as { code?: string; cause?: { code?: string } } | null) ?? {};

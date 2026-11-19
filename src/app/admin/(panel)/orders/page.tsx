@@ -4,10 +4,12 @@ import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { brl, shortWhenSP as shortWhen } from "@/lib/format";
-import { METHOD_LABEL, ORDER_METHODS, ORDER_STATUSES, STATUS_FILTER_LABEL, type OrderMethod, type OrderStatus } from "@/lib/orders/labels";
+import { METHOD_LABEL, ORDER_METHODS, STATUS_FILTER_LABEL, type OrderMethod, type OrderStatus } from "@/lib/orders/labels";
+import { listDeliveryFailures } from "@/lib/alerts";
 import { listOrders } from "@/lib/orders/panel";
+import { parseOrderFilters, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { PageHead, StatusBadge } from "../../blocks";
+import { FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
@@ -15,19 +17,16 @@ import { CopyButton } from "../../ui";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
 
-type Search = { status?: string; method?: string; q?: string; pagina?: string };
+type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param };
 
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Search> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
-  const sp = await searchParams;
-  const status = ORDER_STATUSES.includes(sp.status as OrderStatus) ? (sp.status as OrderStatus) : undefined;
-  const method = ORDER_METHODS.includes(sp.method as OrderMethod) ? (sp.method as OrderMethod) : undefined;
-  const q = sp.q?.trim().slice(0, 100) || undefined;
-  const page = Math.max(1, Math.min(10_000, Number.parseInt(sp.pagina ?? "1", 10) || 1));
+  const { status, method, q, page } = parseOrderFilters(await searchParams);
   const data = await runAction(listOrders, call, { status, method, q, page });
   const canExport = hasPermission(panel.actor.role, "orders.export");
 
+  const failed = await runAction(listDeliveryFailures, call, {});
   const qs = (over: Partial<Record<keyof Search, string | undefined>>) => {
     const p = new URLSearchParams();
     const merged = { status, method, q, ...over };
@@ -97,6 +96,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           ) : null
         }
       />
+      {failed.length > 0 ? (
+        <div className={s.alerts}>
+          <FailedDeliveries items={failed} />
+        </div>
+      ) : null}
       <form className={s.filters} method="get" role="search">
         {status ? <input type="hidden" name="status" value={status} /> : null}
         <label className={s.search}>
