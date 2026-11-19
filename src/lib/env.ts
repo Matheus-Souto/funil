@@ -20,6 +20,9 @@ function isCardOrigin(value: string): boolean {
   }
 }
 
+/** Hostname puro em minúsculas (um ou mais rótulos): vira parte das origens do checkout. */
+const PLATFORM_HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
 const schema = z.object({
   // `app` = o app Next; `card` = o serviço isolado do cartão (nunca recebe o SECRET; ver parseEnv).
   SERVICE: z.enum(["app", "card"]).default("app"),
@@ -31,14 +34,8 @@ const schema = z.object({
   CARD_DB_PASSWORD: z.string().min(1).optional(),
   MODE: z.enum(["single", "multi"]).default("single"),
   BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
-  // Só hostname (minúsculas, sem esquema, porta, caminho ou curinga), com ao menos dois rótulos: vira parte das origens do checkout.
-  PLATFORM_DOMAIN: z
-    .string()
-    .regex(
-      /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/,
-      "deve ser só o hostname, em minúsculas, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
-    )
-    .optional(),
+  // Validada como hostname só com MODE=multi (ver parseEnv); no single é ignorada.
+  PLATFORM_DOMAIN: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1),
   // Papel dono: só migrações, CLI store-create e testes (ver requireOwnerUrl em db/client.ts). Em produção o
   // entrypoint da imagem a remove do ambiente do servidor.
@@ -137,6 +134,11 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   }
   if (parsed.data.MODE === "multi" && parsed.data.PLATFORM_DOMAIN === undefined) {
     throw new Error("Variáveis de ambiente inválidas: PLATFORM_DOMAIN é obrigatória com MODE=multi");
+  }
+  if (parsed.data.MODE === "multi" && !PLATFORM_HOSTNAME.test(parsed.data.PLATFORM_DOMAIN!)) {
+    throw new Error(
+      "Variáveis de ambiente inválidas: PLATFORM_DOMAIN deve ser só o hostname, em minúsculas, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
+    );
   }
   if ((parsed.data.TURNSTILE_SITE_KEY === undefined) !== (parsed.data.TURNSTILE_SECRET === undefined)) {
     throw new Error("Variáveis de ambiente inválidas: TURNSTILE_SITE_KEY e TURNSTILE_SECRET devem ser definidas juntas ou nenhuma");

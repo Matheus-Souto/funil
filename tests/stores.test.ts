@@ -193,6 +193,8 @@ describe("storeCheckoutOrigins", () => {
     expect(await storeCheckoutOrigins(await mk("evil.com/", null), o)).toEqual([]);
     expect(await storeCheckoutOrigins(await mk("evil.com?", null), o)).toEqual([]);
     expect(await storeCheckoutOrigins(await mk("a@evil.com", null), o)).toEqual([]);
+    expect(await storeCheckoutOrigins(await mk("a.b", null), o)).toEqual([]);
+    expect(await storeCheckoutOrigins(await mk("sub.dom", "dono.com"), o)).toEqual(["https://dono.com"]);
     expect(await storeCheckoutOrigins(await mk("ok1", "x.com:444"), o)).toEqual(["https://ok1.plataforma.com"]);
     expect(await storeCheckoutOrigins(await mk("ok2", "evil.com/a"), o)).toEqual(["https://ok2.plataforma.com"]);
     expect(await storeCheckoutOrigins(await mk("ok3", "*"), o)).toEqual(["https://ok3.plataforma.com"]);

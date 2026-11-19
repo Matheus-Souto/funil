@@ -214,15 +214,15 @@ export async function storeCheckoutOrigins(
   const base = new URL(opts.baseUrl ?? env.BASE_URL);
   if (opts.mode === "single") return [base.origin];
   const origins: string[] = [];
-  const add = (scheme: "http" | "https", host: string, port = "") => {
-    const o = originFor(scheme, host, port);
+  const add = (scheme: "http" | "https", host: string, port = "", label?: string) => {
+    const o = label !== undefined && (label.includes(".") || !label) ? null : originFor(scheme, host, port);
     if (o) origins.push(o);
     else log.warn("origens do checkout: host da loja descartado por formato inválido", { storeId });
   };
   if (row.domain) add("https", row.domain.toLowerCase());
   if (opts.platformDomain) {
     const dev = base.protocol === "http:" && isLoopbackUrl(base.origin);
-    add(dev ? "http" : "https", `${row.slug}.${opts.platformDomain.toLowerCase()}`, dev ? base.port : "");
+    add(dev ? "http" : "https", `${row.slug}.${opts.platformDomain.toLowerCase()}`, dev ? base.port : "", row.slug);
   }
   return origins;
 }

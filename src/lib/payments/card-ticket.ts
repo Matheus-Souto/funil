@@ -8,9 +8,9 @@ export const CARD_TICKET_TTL_MS = 30 * 60 * 1000;
 const FUTURE_SLACK_S = 60;
 const MAX_TOKEN_LEN = 2048;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Mesmo formato do `publicId` dos pedidos (`randomToken` em base64url), com teto de 64. */
 /** HMAC-SHA256 em base64url sem padding: 32 bytes = 43 caracteres. Só a forma canônica vale (assinatura não maleável). */
 const SIGNATURE = /^[A-Za-z0-9_-]{43}$/;
+/** Mesmo formato do `publicId` dos pedidos (`randomToken` em base64url), com teto de 64. */
 const PUBLIC_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export interface CardTicket {
