@@ -117,10 +117,15 @@ Com o cartão isolado (`CARD_ISOLATED=1`), confere também a página do iframe d
 - o inventário de scripts: só `/form.js` do domínio do cartão, nenhum de terceiro (o Turnstile, quando configurado,
   roda no checkout, não no iframe) e nenhum script inline executável (a configuração vai num
   `<script type="application/json">`, que não executa);
-- o sha256 do conteúdo do `/form.js` baixado, que entra no inventário: o mesmo caminho com outro conteúdo (skimmer
-  servido por um Caddy ou host comprometido) avisa com `inventario_mudou`. Cada atualização que mude o formulário
-  também avisa uma vez: confira que a mudança veio da atualização. Se o `/form.js` não responder, a página não é
+- o sha256 do conteúdo do `/form.js` baixado, que entra no inventário e é comparado com o sha256 do build da mesma
+  revisão (o `bun run card:build` grava `dist/card/form.js.sha256`; a imagem do app o leva como
+  `/app/card-form.sha256`). Diferente do build avisa com `inventario_mudou` já na primeira conferência (skimmer
+  servido por um Caddy ou host comprometido, ou `card` e app de versões diferentes). Sem o arquivo (desenvolvimento),
+  vale só o histórico: o mesmo caminho com outro conteúdo avisa uma vez. Se o `/form.js` não responder, a página não é
   conferida nessa semana (só log).
+- toda mudança no resultado do `/form` (CSP, inventário ou sha256) também vai para o log do app como **erro**
+  ("a página do cartão mudou", com a loja e os códigos): no `MODE=multi` o aviso do painel vai ao vendedor, mas quem
+  pode agir é o operador do servidor. Monitore os erros do log do app (`docker compose logs app`).
 
 O resultado (um hash do cabeçalho normalizado e do inventário, e os códigos de problema) fica em `page_check`. Quando
 muda, o vendedor recebe um aviso no painel e por e-mail (`monitor_pagina_pagamento`, com a página, `/c`, `/o` ou

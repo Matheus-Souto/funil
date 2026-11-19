@@ -8,7 +8,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { Window } from "happy-dom";
 import { and, eq } from "drizzle-orm";
@@ -38,6 +38,8 @@ describe("bun run card:build", () => {
     expect(read("form.css")).toBe(readFileSync(join(ROOT, "src", "card-service", "form", "form.css"), "utf8"));
     const ignored = spawnSync("git", ["check-ignore", "-q", "dist/card/server.js"], { cwd: ROOT });
     expect(ignored.status).toBe(0);
+    // sha256 do form.js desta revisão: a imagem do app o leva para o monitor 11.6.1 comparar com o servido.
+    expect(read("form.js.sha256")).toBe(`${createHash("sha256").update(readFileSync(join(OUT, "form.js"))).digest("hex")}\n`);
   });
 
   test("server.js não leva nodemailer, pdf-lib, next nem react", () => {

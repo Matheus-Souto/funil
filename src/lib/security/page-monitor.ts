@@ -6,8 +6,13 @@
 // avisa o vendedor (store_alert + e-mail) quando o resultado muda. Com o cartão isolado (CARD_ISOLATED=1), confere
 // também a página do iframe no domínio do cartão (CARD_ORIGIN/form/<loja>, page "/form") contra `cardFormCsp` e o
 // inventário do serviço (só /form.js; o Turnstile fica no checkout), com o sha256 do conteúdo do /form.js (troca do
-// conteúdo no mesmo caminho também avisa). HTTP fora de transação; sem dados de comprador.
+// conteúdo no mesmo caminho também avisa) comparado ao sha256 gravado pelo build da mesma revisão
+// (`card-form.sha256` ao lado do app; sem ele, em dev, vale só o histórico). Toda mudança na conferência do /form também
+// sai em `log.error`: no `multi`, o vendedor avisado não é quem opera o servidor. HTTP fora de transação; sem dados de
+// comprador.
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { desc, eq, sql } from "drizzle-orm";
 import { alertSeller } from "@/lib/alerts";
 import { db, withStore } from "@/lib/db/client";
@@ -25,6 +30,20 @@ const FETCH_TIMEOUT_MS = 15_000;
 const MAX_HTML = 2 * 1024 * 1024;
 const NONCE_PLACEHOLDER = "nonce-*";
 const TURNSTILE = "https://challenges.cloudflare.com";
+/**
+ * sha256 do form.js desta revisão: o `card:build` grava `dist/card/form.js.sha256` e a imagem do app o copia para o
+ * diretório de trabalho (/app, deploy/Dockerfile). Mesma origem do código que o container `card` serve.
+ */
+export const CARD_FORM_SHA256_FILE = "card-form.sha256";
+
+async function builtFormJsSha256(): Promise<string | null> {
+  try {
+    const v = (await readFile(join(process.cwd(), CARD_FORM_SHA256_FILE), "utf8")).trim().toLowerCase();
+    return /^[0-9a-f]{64}$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Origens de script autorizadas nas páginas do comprador (inventário em docs/seguranca-pagamento.md). */
 function authorizedScript(url: URL, pageOrigin: string, turnstile: boolean): boolean {
@@ -110,12 +129,14 @@ export function inspectBuyerPage(
  * `cardFormCsp(origens da loja)`; scripts: só `/form.js` do próprio domínio (nenhum de terceiro, nem o Turnstile); nenhum
  * inline executável (a configuração vai em `application/json`). O hash guarda a política com as origens da loja
  * trocadas por um marcador quando ela confere: mudar o domínio da loja não vira aviso. `formJsSha256` (sha256 do
- * conteúdo baixado do /form.js) entra no inventário: conteúdo trocado no mesmo caminho muda o hash e avisa.
+ * conteúdo baixado do /form.js) entra no inventário: conteúdo trocado no mesmo caminho muda o hash e avisa. Com
+ * `expectedFormJsSha256` (o do build desta revisão), conteúdo diferente já é problema (`inventario_mudou`), mesmo na
+ * primeira conferência.
  */
 export function inspectCardFormPage(
   html: string,
   cspHeader: string | null,
-  opts: { origins: string[]; pageUrl: string; formJsSha256?: string },
+  opts: { origins: string[]; pageUrl: string; formJsSha256?: string; expectedFormJsSha256?: string | null },
 ): { problems: string[]; inventory: string[]; hash: string; csp: string | null } {
   const problems = new Set<string>();
   const pageUrl = new URL(opts.pageUrl);
@@ -141,6 +162,7 @@ export function inspectCardFormPage(
     const entry = same ? `self:${url.pathname}` : `${url.origin}${url.pathname}`;
     inventory.add(formJs && opts.formJsSha256 ? `${entry} sha256:${opts.formJsSha256}` : entry);
     if (!formJs) problems.add("script_nao_autorizado");
+    else if (opts.expectedFormJsSha256 && opts.formJsSha256 !== opts.expectedFormJsSha256) problems.add("inventario_mudou");
   }
   const list = [...inventory].sort();
   const hashed = csp === expected ? cardFormCsp(["<loja>"]) : csp;
@@ -170,7 +192,7 @@ async function fetchPage(doFetch: typeof fetch, page: Page, url: string, signal:
 
 /** Grava o resultado e avisa o vendedor quando ele muda (1ª conferência: só se já vier com problema). */
 async function record(storeId: string, page: Page, r: { problems: string[]; inventory: string[]; hash: string }): Promise<void> {
-  await withStore(storeId, async (tx) => {
+  const changed = await withStore(storeId, async (tx) => {
     const [prev] = await tx.select().from(pageCheck).where(eq(pageCheck.page, page)).for("update");
     const ok = r.problems.length === 0;
     const changed = prev ? prev.hash !== r.hash || prev.ok !== ok : !ok;
@@ -178,21 +200,29 @@ async function record(storeId: string, page: Page, r: { problems: string[]; inve
     if (prev) await tx.update(pageCheck).set(values).where(eq(pageCheck.id, prev.id));
     else await tx.insert(pageCheck).values({ storeId, page, ...values });
     if (changed) await alertSeller(tx, storeId, "monitor_pagina_pagamento", { page, code: r.problems[0] ?? "inventario_mudou" });
+    return changed;
   });
-  if (r.problems.length > 0) log.warn("monitor da página de pagamento: problema encontrado", { storeId, page, problems: r.problems });
+  // Página do cartão: o operador do servidor precisa saber (no `multi`, o aviso acima vai só ao vendedor). Só códigos.
+  if (changed && page === "/form") {
+    log.error("monitor da página de pagamento: a página do cartão mudou", { storeId, page, problems: r.problems });
+  } else if (r.problems.length > 0) log.warn("monitor da página de pagamento: problema encontrado", { storeId, page, problems: r.problems });
 }
 
 /**
  * Handler do job global `pci_page_monitor`. `fetch` e `storeIds` (só estas lojas) existem para os testes; `card`
  * (origem do serviço de cartão; `null` = não conferir o iframe) vem do ambiente (CARD_ISOLATED=1 e CARD_ORIGIN). Falha
  * de rede ou resposta não 200 não avisam (não é mudança de página) e não mudam o estado guardado; o job segue para as
- * demais lojas e falha no fim se alguma loja deu erro inesperado (o worker re-tenta).
+ * demais lojas e falha no fim se alguma loja deu erro inesperado (o worker re-tenta). `expectedFormJsSha256` (testes)
+ * substitui a leitura do `card-form.sha256` do build.
  */
-export function createPciPageMonitorHandler(deps: { fetch?: typeof fetch; storeIds?: string[]; card?: { origin: string } | null } = {}): JobHandler {
+export function createPciPageMonitorHandler(
+  deps: { fetch?: typeof fetch; storeIds?: string[]; card?: { origin: string } | null; expectedFormJsSha256?: () => Promise<string | null> } = {},
+): JobHandler {
   return async (_j, signal) => {
     const doFetch = deps.fetch ?? fetch;
     const turnstile = Boolean(env.TURNSTILE_SITE_KEY);
     const card = deps.card !== undefined ? deps.card : env.CARD_ISOLATED && env.CARD_ORIGIN ? { origin: env.CARD_ORIGIN } : null;
+    const expectedFormJsSha256 = card ? await (deps.expectedFormJsSha256 ?? builtFormJsSha256)() : null;
     const stores = await db.select({ id: store.id, slug: store.slug, domain: store.domain }).from(store);
     let failed = 0;
     for (const s of stores) {
@@ -227,7 +257,7 @@ export function createPciPageMonitorHandler(deps: { fetch?: typeof fetch; storeI
           if (got && js) {
             const origins = await storeCheckoutOrigins(s.id);
             const formJsSha256 = createHash("sha256").update(js.html).digest("hex");
-            await record(s.id, "/form", inspectCardFormPage(got.html, got.csp, { origins, pageUrl: url, formJsSha256 }));
+            await record(s.id, "/form", inspectCardFormPage(got.html, got.csp, { origins, pageUrl: url, formJsSha256, expectedFormJsSha256 }));
           }
         }
       } catch (e) {

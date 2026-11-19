@@ -247,6 +247,10 @@ test("Dockerfile: estágio card só com dist/card (sem node_modules nem .next), 
   expect(card).toMatch(/HEALTHCHECK[\s\S]*fetch\('http:\/\/127\.0\.0\.1:3100\/healthz'\)/);
   // O build usa o script do projeto (iife do formulário, CSS ao lado do server.js).
   expect(dockerfile).toMatch(/^RUN bun run card:build$/m);
+  // A imagem do app leva só o sha256 do form.js da mesma revisão (monitor 11.6.1), nada mais do serviço de cartão.
+  const runtime = stages.at(-1)!.replace(/^#.*\n/gm, "");
+  expect(runtime).toMatch(/^COPY --from=card-build \/src\/dist\/card\/form\.js\.sha256 \.\/card-form\.sha256$/m);
+  expect([...runtime.matchAll(/^COPY --from=card-build (.*)$/gm)]).toHaveLength(1);
 });
 
 describe("Caddyfiles: HSTS em todo site servido", () => {

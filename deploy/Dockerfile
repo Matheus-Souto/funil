@@ -4,7 +4,8 @@
 #   deps       -> Node 22 + Bun com as dependências instaladas (`bun install`);
 #   build      -> `next build` (saída standalone) e as CLIs (migrate, store:create) empacotadas para Node com `bun build`;
 #   card-build -> `bun run card:build`: o serviço de cartão isolado num arquivo só (dist/card/server.js, sem
-#                 node_modules) e o formulário do iframe (form.js, form.css);
+#                 node_modules), o formulário do iframe (form.js, form.css) e o sha256 do form.js (vai também para a
+#                 imagem do app: o monitor 11.6.1 confere o /form.js servido contra ele);
 #   card       -> imagem do serviço de cartão (`target: card` no compose): Node 22 slim, SÓ dist/card, tini, não-root;
 #   runtime    -> imagem do app (o último estágio: o padrão sem `--target`): Node 22 slim, SEM Bun, servidor standalone +
 #                 CLIs empacotadas. Usuário não-root (`node`).
@@ -74,6 +75,8 @@ COPY --from=build /src/.next/standalone ./
 COPY --from=build /src/.next/static ./.next/static
 COPY --from=build /src/public ./public
 COPY --from=build /cli ./cli
+# sha256 do form.js desta mesma revisão (`card:build`): o monitor 11.6.1 exige que o /form.js servido pelo `card` bata.
+COPY --from=card-build /src/dist/card/form.js.sha256 ./card-form.sha256
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint
 COPY deploy/store-create.sh /usr/local/bin/store-create
 RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/store-create \

