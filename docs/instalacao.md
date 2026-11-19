@@ -384,14 +384,17 @@ gerenciador de senhas, nunca com os backups:
 1. DNS do `pagar.` criado e respondendo (`ping pagar.checkout.minhaloja.com.br` mostra o IP do servidor).
 2. As seis linhas acima no `.env`, de uma vez. A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`: é aí que o app
    passa a cifrar a chave do Asaas com ela (avisos abaixo).
-3. **Se usa `CADDYFILE=Caddyfile.local`** (Cloudflare com proxy, lista fixa de lojas): a sua cópia é anterior ao
-   cartão isolado. Acrescente no fim do `deploy/Caddyfile.local` a linha
+3. **Se usa `CADDYFILE=Caddyfile.local`** (Cloudflare com proxy, lista fixa de lojas): se a sua cópia ainda não
+   termina com a linha abaixo (cópias feitas antes do cartão isolado não têm), acrescente no fim do
+   `deploy/Caddyfile.local`:
 
    ```
    import card/*.caddy
    ```
 
-   Sem ela, o Caddy não serve o `pagar.` (o checkout mostra "Pagamento com cartão indisponível agora").
+   Uma vez só: confira antes com `grep -c 'import card/' deploy/Caddyfile.local` (deve mostrar `0` para acrescentar;
+   `1` = já está). Sem a linha, o Caddy não serve o `pagar.` (o checkout mostra "Pagamento com cartão indisponível
+   agora"); com ela duas vezes, o Caddy não sobe (problemas comuns, seção 13).
 4. `docker compose up -d --build`. O app reinicia, a migração dá login ao papel `card` com a `CARD_DB_PASSWORD` e a
    chave do Asaas de cada loja passa a ser cifrada com a `ASAAS_SEAL_KEY` (log: "conexões Asaas re-seladas"). O
    `card` pode aparecer `unhealthy` por alguns segundos, até o app terminar a migração.
@@ -439,6 +442,10 @@ capabilities, 192 MB de memória e sem core dump.
   `pagar.`, `docker compose ps` (`card` "healthy"), `docker compose logs card` e, se usa `CADDYFILE=Caddyfile.local`,
   se ele tem no fim a linha `import card/*.caddy` (seção 12). Teste com
   `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.<seu domínio>/form.js` (deve mostrar `200`).
+- **O Caddy não sobe e o log diz `ambiguous site definition: https://pagar.<seu domínio>`** (checkout e painel fora do
+  ar): o site do cartão foi importado duas vezes, quase sempre porque o `deploy/Caddyfile.local` tem a linha
+  `import card/*.caddy` repetida (ela já vem nas cópias feitas a partir desta versão). Deixe uma só
+  (`grep -n 'import card/' deploy/Caddyfile.local`) e rode `docker compose up -d caddy`.
 
 - **Pagamento com cartão sempre recusado com "Requisição recusada." (HTTP 403):** algo entre o navegador e o app está
   reescrevendo o **Host** (proxy da Cloudflare com regra de Host, outro proxy na frente, `header_up Host` no

@@ -11,7 +11,9 @@
 #     que o Node já está fechando.
 # O tempo para ler o cabeçalho é do servidor :443 inteiro (compartilhado com o app); o card já corta em 10 s
 # (headersTimeout) e limita 256 conexões.
-# Não edite este arquivo (vem do git). Num deploy/Caddyfile.local, acrescente no fim a linha `import card/*.caddy`.
+# Não edite este arquivo (vem do git). Num deploy/Caddyfile.local que ainda não termina com a linha
+# `import card/*.caddy` (cópia anterior ao cartão isolado), acrescente-a no fim, uma vez só: repetida, o Caddy recusa
+# subir com "ambiguous site definition".
 {$CARD_ORIGIN} {
 	# HSTS (1 ano), como nos outros sites. Sem o cabeçalho Server (versão do proxy não interessa a ninguém).
 	header {
