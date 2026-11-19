@@ -36,8 +36,9 @@ Medido no smoke de deploy (`tests/smoke.sh`) com um PDF de 46 MB (perto do limit
 | Servidor Next (Node) ocioso, recém-iniciado | ~150 MB |
 | Worker de PDF (um por vez para o app inteiro: carimbo e validação do upload dividem a mesma fila) | heap limitado a 192 MB |
 | Buffers do PDF fora do heap do Worker (entrada de até 50 MB + saída carimbada) | ~100 MB |
-| Pico medido dos processos no fluxo completo (upload + carimbo de 46 MB) | ~310 MB |
-| Pico do container contando o cache de arquivos do Linux (liberável) | 400 a 600 MB |
+| Pico medido dos processos no fluxo completo (upload + carimbo de 46 MB; 3 execuções) | 310 a 415 MB |
+| Pico do container contando o cache de arquivos do Linux (liberável; 3 execuções) | 405 a 600 MB |
+| Depois do fluxo, ocioso (sem o cache) | 220 a 290 MB |
 
 Um PDF que precise de mais do que o teto do Worker falha sozinho (o dono vê "Não conseguimos processar este PDF") sem
 derrubar o app. Um segundo PDF espera na fila (até 20; acima disso "tente em instantes"), nunca roda em paralelo.
