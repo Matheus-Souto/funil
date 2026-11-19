@@ -1,17 +1,52 @@
 // Smoke de deploy: o fluxo mínimo de uma instalação nova, pela imagem Docker atrás do Caddy (HTTPS), como o dono e um
-// comprador fariam: setup -> conexões (Pix manual, SMTP) -> produto com upload do PDF (validação no Worker de PDF)
-// -> oferta -> checkout Pix manual -> dono libera -> e-mail -> download do PDF carimbado (Worker de PDF de novo).
+// comprador fariam: setup -> conexões (Pix manual, SMTP) -> produto com upload de um PDF de ~48 MB (perto do teto de
+// 50 MB; validação no Worker de PDF) -> oferta -> checkout Pix manual -> dono libera -> e-mail -> download do PDF
+// carimbado (Worker de PDF de novo). O tests/smoke.sh mede o pico de memória do container depois deste fluxo.
 // Orquestrado por tests/smoke.sh (BASE_URL do Caddy, MAILPIT_URL do Mailpit do smoke, SMOKE_OUT da execução).
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { test, expect, type Page } from "@playwright/test";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFName, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState } from "pdf-lib";
 
 const MAILPIT = `${process.env.MAILPIT_URL}/api/v1`;
 const OUT = process.env.SMOKE_OUT ?? ".";
 const OWNER = { email: "dono@exemplo.com", password: "senha-longa-123" };
 const BUYER = `comprador.${Date.now()}@exemplo.com`;
 const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
+const MAX_PDF_BYTES = 52_428_800; // teto do upload (src/lib/catalog/products.ts)
+const BIG_PAGES = 140;
+
+/** PDF de e-book ilustrado: uma imagem por página (gradiente com ruído, comprime como ilustração). ~0,34 MB/página. */
+async function illustratedPdf(pages: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const w = 900;
+  const h = 1200;
+  for (let p = 0; p < pages; p++) {
+    const px = new Uint8Array(w * h * 3);
+    let seed = p * 7919 + 1;
+    for (let i = 0; i < w * h; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      const n = seed % 64;
+      px[i * 3] = ((i % w) / 4 + n) & 255;
+      px[i * 3 + 1] = (Math.floor(i / w) / 5 + n) & 255;
+      px[i * 3 + 2] = (p * 9 + n) & 255;
+    }
+    const img = doc.context.stream(deflateSync(px), {
+      Type: "XObject",
+      Subtype: "Image",
+      Width: w,
+      Height: h,
+      ColorSpace: "DeviceRGB",
+      BitsPerComponent: 8,
+      Filter: "FlateDecode",
+    });
+    const page = doc.addPage([595, 842]);
+    const name = page.node.newXObject("Im", doc.context.register(img));
+    page.pushOperators(pushGraphicsState(), concatTransformationMatrix(495, 0, 0, 660, 50, 120), drawObject(PDFName.of(name.asString().slice(1))), popGraphicsState());
+  }
+  return doc.save();
+}
 
 test("instalação nova: setup, produto, oferta, Pix manual liberado e download do PDF carimbado", async ({ browser, request, baseURL }) => {
   const owner: Page = await browser.newPage();
@@ -44,14 +79,18 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   await owner.getByRole("dialog", { name: "Salvar o SMTP da loja?" }).getByRole("button", { name: "Testar e salvar" }).click();
   await expect(smtp.getByText("SMTP testado e salvo.")).toBeVisible();
 
-  // Produto: PDF enviado pela rota de upload e validado no Worker de PDF (pdf-lib resolvido dentro da imagem).
-  const doc = await PDFDocument.create();
-  doc.addPage([200, 200]);
+  // Produto: PDF de ~48 MB (perto do teto) enviado pela rota de upload e validado no Worker de PDF (pdf-lib resolvido
+  // dentro da imagem; heap do Worker limitado a 192 MB).
+  const big = await illustratedPdf(BIG_PAGES);
+  expect(big.byteLength).toBeGreaterThan(40 * 1024 * 1024);
+  expect(big.byteLength).toBeLessThan(MAX_PDF_BYTES);
+  const bigPath = join(OUT, "guia-grande.pdf");
+  writeFileSync(bigPath, big);
   await owner.goto("/admin/products");
   await owner.getByLabel("Nome do produto").fill("Guia do deploy");
-  await owner.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "guia.pdf", mimeType: "application/pdf", buffer: Buffer.from(await doc.save()) });
+  await owner.getByLabel("Arquivo PDF do produto").setInputFiles(bigPath);
   await owner.getByRole("button", { name: "Criar produto" }).click();
-  await expect(owner.getByText("Produto “Guia do deploy” criado.")).toBeVisible();
+  await expect(owner.getByText("Produto “Guia do deploy” criado.")).toBeVisible({ timeout: 60_000 });
 
   // Oferta com Pix manual (padrão do editor).
   await owner.goto("/admin/offers/nova");
@@ -97,11 +136,11 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   // Download pelo botão (POST que conta): PDF carimbado no Worker de PDF dentro do container.
   await buyer.goto(link!);
   await expect(buyer.getByRole("heading", { name: "Seu PDF está pronto" })).toBeVisible();
-  const [dl] = await Promise.all([buyer.waitForEvent("download"), buyer.getByRole("button", { name: "Baixar PDF" }).click()]);
+  const [dl] = await Promise.all([buyer.waitForEvent("download", { timeout: 60_000 }), buyer.getByRole("button", { name: "Baixar PDF" }).click()]);
   const saved = readFileSync((await dl.path())!);
   expect(saved.subarray(0, 5).toString("latin1")).toBe("%PDF-");
-  expect((await PDFDocument.load(saved)).getPageCount()).toBe(1);
-  expect(saved.byteLength).toBeGreaterThan(Buffer.from(await doc.save()).byteLength); // carimbo acrescenta conteúdo
+  expect((await PDFDocument.load(saved, { updateMetadata: false })).getPageCount()).toBe(BIG_PAGES);
+  expect(saved.byteLength).toBeGreaterThan(big.byteLength); // carimbo acrescenta conteúdo
 
   // O smoke baixa de novo depois de recriar o container (volume /data e migração repetida).
   writeFileSync(join(OUT, "download-link.txt"), link!);

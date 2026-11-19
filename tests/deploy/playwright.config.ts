@@ -6,6 +6,8 @@ export default defineConfig({
   testDir: ".",
   testMatch: "flow.spec.ts",
   retries: 0,
+  // O fluxo gera, envia e carimba um PDF de ~46 MB: mais que os 30 s padrão por teste.
+  timeout: 240_000,
   workers: 1,
   reporter: [["list"]],
   outputDir: process.env.SMOKE_OUT ? `${process.env.SMOKE_OUT}/playwright` : "../../.verify/smoke/playwright",

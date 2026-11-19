@@ -3,9 +3,11 @@
 # mais um Mailpit só do smoke) com DOMAIN=localhost (HTTPS pela CA interna do Caddy), e confere:
 #   1. /api/health pelo Caddy; Postgres e app sem portas publicadas; app como usuário não-root;
 #   2. o Caddy preserva o Host e manda X-Forwarded-Proto (POST de cartão da mesma origem passa do 403);
-#   3. fluxo mínimo pelo navegador (tests/deploy/flow.spec.ts): setup -> produto -> oferta -> Pix manual -> liberar
-#      -> e-mail -> download (Worker de PDF dentro do container);
-#   4. memória ociosa do app (docker stats) abaixo do teto de 512 MB; tamanho da imagem;
+#   3. fluxo mínimo pelo navegador (tests/deploy/flow.spec.ts): setup -> produto com PDF de ~46 MB -> oferta -> Pix
+#      manual -> liberar -> e-mail -> download carimbado (Worker de PDF dentro do container);
+#   4. memória: pico do container no fluxo (cgroup memory.peak) abaixo de 700 MiB e nenhum OOM kill (teto 768 MB);
+#      ociosa (docker stats) abaixo de 512 MiB; tamanho da imagem;
+#   4b. o servidor (tini e node) roda sem OWNER_DATABASE_URL; a CLI store-create via `docker compose exec` funciona;
 #   5. recriar o container do app: migrações rodam de novo no banco já migrado e o PDF continua no volume /data.
 # Projeto compose com nome único e portas livres em 127.0.0.1: não toca no compose.dev.yaml nem em outros containers.
 # Sempre termina com `docker compose down -v` (volumes do smoke apagados). Métricas em <saída>/metrics.json.
@@ -47,6 +49,7 @@ cleanup() {
   dc logs --no-color > "$OUT/compose.log" 2>&1 || true
   dc down -v --remove-orphans > "$OUT/down.log" 2>&1 || true
   rm -f "$ENVF" # segredos aleatórios deste smoke
+  rm -f "$OUT/guia-grande.pdf" "$OUT/again.pdf" # PDFs de ~46 MB
   if [ "$rc" -eq 0 ]; then echo "smoke de deploy: OK em $(( $(date +%s) - T0 ))s ($OUT)"; else echo "smoke de deploy: FALHOU (logs em $OUT)"; fi
 }
 trap cleanup EXIT
@@ -86,20 +89,43 @@ code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'content-type: applica
 [ "$code" = "403" ] || fail "POST de cartão de outra origem deveria ser 403, veio $code"
 
 step "fluxo pelo navegador"
+# Amostrador dentro do container: maior memória anônima (heap do Next + Worker de PDF + buffers, sem o cache de
+# arquivos) a cada 100 ms durante o fluxo. O total com cache vem exato do memory.peak abaixo.
+dc exec -d app sh -c 'm=0; while [ ! -f /tmp/anon-stop ]; do a=$(sed -n "s/^anon //p" /sys/fs/cgroup/memory.stat); if [ "$a" -gt "$m" ]; then m=$a; echo "$m" > /tmp/anon-peak; fi; sleep 0.1; done'
 TF=$(date +%s)
 BASE_URL="$BASE" MAILPIT_URL="http://127.0.0.1:$MAIL_PORT" SMOKE_OUT="$OUT" \
   bunx playwright test --config tests/deploy/playwright.config.ts
 FLOW_S=$(( $(date +%s) - TF ))
 
-step "memória ociosa do app"
+step "memória do app: pico no fluxo (upload e carimbo de ~46 MB) e ociosa"
+# cgroup v2 do próprio container: memory.peak = maior uso desde a criação (exato, sem amostragem; inclui o cache de
+# arquivos, que conta para o teto); memory.events oom_kill = processos mortos por falta de memória.
+PEAK_BYTES=$(dc exec -T app cat /sys/fs/cgroup/memory.peak) || fail "sem /sys/fs/cgroup/memory.peak (precisa de cgroup v2, kernel 5.19+)"
+PEAK_MIB=$(( PEAK_BYTES / 1048576 ))
+OOM_KILLS=$(dc exec -T app sh -c "sed -n 's/^oom_kill //p' /sys/fs/cgroup/memory.events")
+dc exec -T app touch /tmp/anon-stop
+ANON_PEAK_MIB=$(( $(dc exec -T app cat /tmp/anon-peak) / 1048576 ))
+LIMIT_MIB=$(( $(dc exec -T app cat /sys/fs/cgroup/memory.max) / 1048576 ))
+echo "    pico: ${PEAK_MIB} MiB de ${LIMIT_MIB} MiB (só memória dos processos, amostrada: ${ANON_PEAK_MIB} MiB); oom_kill: $OOM_KILLS"
+[ "$OOM_KILLS" = "0" ] || fail "OOM kill no container do app durante o fluxo"
+[ "$PEAK_MIB" -lt 700 ] || fail "pico de ${PEAK_MIB} MiB (margem mínima de ~10% abaixo do teto de 768 MB)"
 APP_CID=$(dc ps -q app)
 MEM=$(docker stats --no-stream --format '{{.MemUsage}}' "$APP_CID")
 MEM_MIB=$(printf '%s' "$MEM" | node -e '
   const [used] = require("fs").readFileSync(0, "utf8").split("/");
   const m = /([\d.]+)\s*([KMG]i?B)/.exec(used); const f = { KiB: 1 / 1024, KB: 1 / 1024, MiB: 1, MB: 1, GiB: 1024, GB: 1024 };
   console.log(Math.round(Number(m[1]) * f[m[2]]));')
-echo "    app: $MEM"
-[ "$MEM_MIB" -lt 512 ] || fail "app ocioso com ${MEM_MIB} MiB (teto 512)"
+echo "    ociosa: $MEM"
+[ "$MEM_MIB" -lt 512 ] || fail "app ocioso com ${MEM_MIB} MiB"
+
+step "servidor sem o papel dono; CLI store-create com ele"
+# Ambiente dos processos do servidor (tini = PID 1, e node); o `sh` do exec herda o ambiente do container e fica de fora.
+[ "$(dc exec -T app cat /proc/1/comm)" = "tini" ] || fail "PID 1 do app deveria ser o tini"
+leaks=$(dc exec -T app sh -c 'n=0; for p in /proc/[0-9]*; do case "$(cat $p/comm 2>/dev/null)" in tini|node) if tr "\0" "\n" < $p/environ | grep -q "^OWNER_DATABASE_URL="; then n=$((n+1)); fi;; esac; done; echo $n')
+[ "$leaks" = "0" ] || fail "OWNER_DATABASE_URL no ambiente de $leaks processo(s) do servidor"
+dc exec -T -e MODE=multi -e PLATFORM_DOMAIN=lojas.localhost app \
+  store-create --name "Loja CLI" --slug loja-cli --owner-email cli@exemplo.com | grep -q "Loja criada: loja-cli" \
+  || fail "store-create via docker compose exec"
 
 step "recriar o app: migração repetida e /data persistente"
 dc up -d --wait --wait-timeout 180 --force-recreate --no-deps app
@@ -111,6 +137,7 @@ code=$(curl -sk -o "$OUT/again.pdf" -w '%{http_code}' -X POST -H "origin: $BASE"
 TOTAL_S=$(( $(date +%s) - T0 ))
 cat > "$OUT/metrics.json" <<JSON
 { "imageBytes": $IMAGE_BYTES, "imageMB": $(( IMAGE_BYTES / 1000000 )), "idleMemMiB": $MEM_MIB, "idleMem": "$MEM",
+  "peakMemMiB": $PEAK_MIB, "peakAnonMiB": $ANON_PEAK_MIB, "memLimitMiB": $LIMIT_MIB, "oomKills": $OOM_KILLS,
   "buildSec": $BUILD_S, "upSec": $UP_S, "flowSec": $FLOW_S, "totalSec": $TOTAL_S }
 JSON
 cat "$OUT/metrics.json"
