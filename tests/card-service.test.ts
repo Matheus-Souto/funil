@@ -4,7 +4,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -130,6 +130,36 @@ function captureOutput() {
   };
 }
 
+/**
+ * POST cru por socket com `Transfer-Encoding: chunked` (sem Content-Length), em pedaços de `chunk` bytes.
+ * Devolve o status e o bloco de cabeçalhos da resposta (o servidor pode fechar antes de o corpo terminar).
+ */
+function chunkedPost(port: number, path: string, headers: Record<string, string>, body: string, chunk: number) {
+  return new Promise<{ status: number; headers: string }>((resolve, reject) => {
+    const sock = connect(port, "127.0.0.1");
+    let got = "";
+    sock.on("data", (d) => (got += d.toString("latin1")));
+    sock.on("error", (e: NodeJS.ErrnoException) => {
+      // O servidor pode fechar ao estourar o teto enquanto ainda escrevemos: vale o que já chegou.
+      if (got.includes("\r\n\r\n")) return;
+      if (e.code !== "EPIPE" && e.code !== "ECONNRESET") reject(e);
+    });
+    sock.on("close", () => {
+      const end = got.indexOf("\r\n\r\n");
+      if (end < 0) return reject(new Error(`resposta incompleta: ${JSON.stringify(got.slice(0, 200))}`));
+      const head = got.slice(0, end);
+      resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(head)?.[1]), headers: head });
+    });
+    const lines = Object.entries({ host: `127.0.0.1:${port}`, ...headers, "transfer-encoding": "chunked", connection: "close" });
+    sock.write(`POST ${path} HTTP/1.1\r\n${lines.map(([k, v]) => `${k}: ${v}`).join("\r\n")}\r\n\r\n`);
+    for (let i = 0; i < body.length; i += chunk) {
+      const part = body.slice(i, i + chunk);
+      sock.write(`${Buffer.byteLength(part).toString(16)}\r\n${part}\r\n`);
+    }
+    sock.write("0\r\n\r\n");
+  });
+}
+
 const directives = (csp: string) => csp.split(";").map((d) => d.trim());
 
 describe("POST /api/card: bilhete", () => {
@@ -182,6 +212,7 @@ describe("POST /api/card: origem, tipo, HTTPS e tamanho (antes de qualquer traba
     for (const origin of ["https://evil.example", APP_ORIGIN, "null", `${CARD_ORIGIN}/`, "http://127.0.0.1:3101"]) {
       const res = await post(base, body, { origin });
       expect(res.status).toBe(403);
+      expect(res.headers.get("connection")).toBe("close");
       expect((await res.json()).error).toBe("forbidden_origin");
     }
     const noOrigin = await fetch(`${base}/api/card`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -196,6 +227,7 @@ describe("POST /api/card: origem, tipo, HTTPS e tamanho (antes de qualquer traba
     for (const type of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x"]) {
       const res = await post(base, body, { "content-type": type });
       expect(res.status).toBe(403);
+      expect(res.headers.get("connection")).toBe("close");
       expect((await res.json()).error).toBe("forbidden_origin");
     }
     const blob = await fetch(`${base}/api/card`, { method: "POST", headers: { origin: CARD_ORIGIN }, body: new Blob([body]) });
@@ -209,6 +241,30 @@ describe("POST /api/card: origem, tipo, HTTPS e tamanho (antes de qualquer traba
     const res = await post(base, cardBody(o.approve, ticketFor(shop.storeId, o.approve), { pad: "x".repeat(17 * 1024) }));
     expect(res.status).toBe(413);
     expect((await res.json()).error).toBe("too_large");
+    expect(payCalls).toBe(before);
+  });
+
+  test("corpo chunked sem Content-Length: 16 KiB exatos passam do teto; 1 byte a mais -> 413 (contagem em streaming)", async () => {
+    const base = await start();
+    const before = payCalls;
+    const port = new URL(base).port;
+    /** JSON com bilhete inválido e `pad` até `size` bytes (chega ao bilhete se o corpo couber no teto). */
+    const bodyOf = (size: number) => {
+      const head = '{"ticket":"x","pad":"';
+      return `${head}${"x".repeat(size - head.length - 2)}"}`;
+    };
+    for (const [size, status] of [
+      [16 * 1024, 403],
+      [16 * 1024 + 1, 413],
+      [64 * 1024, 413],
+    ] as const) {
+      const body = bodyOf(size);
+      expect(Buffer.byteLength(body)).toBe(size);
+      const raw = await chunkedPost(Number(port), "/api/card", { "content-type": "application/json", origin: CARD_ORIGIN }, body, 1000);
+      expect([size, raw.status]).toEqual([size, status]);
+      expect(raw.headers).not.toMatch(/^content-length: 1[0-9]{4,}/im);
+      if (status === 413) expect(raw.headers).toMatch(/^connection: close/im);
+    }
     expect(payCalls).toBe(before);
   });
 
@@ -228,6 +284,7 @@ describe("POST /api/card: origem, tipo, HTTPS e tamanho (antes de qualquer traba
     const body = { ticket: "x" };
     const plain = await post(proxied, body, { origin: httpsOrigin });
     expect(plain.status).toBe(403);
+    expect(plain.headers.get("connection")).toBe("close");
     expect((await plain.json()).error).toBe("https_required");
     const http = await post(proxied, body, { origin: httpsOrigin, "x-forwarded-proto": "http" });
     expect((await http.json()).error).toBe("https_required");
@@ -285,7 +342,7 @@ describe("POST /api/card: cobrança com o payWithCard real (papel card)", () => 
     expect(text).not.toContain(HOLDER);
   });
 
-  test("nenhuma linha de log contém o número do cartão (aprovação, recusa e erro inesperado)", async () => {
+  test("nenhuma linha de log contém o número nem o nome impresso do cartão (aprovação, recusa e erro inesperado)", async () => {
     const base = await start();
     const boom = await start({
       payWithCard: (async (_c: { storeId: string }, i: CardPaymentInput) => {
@@ -309,9 +366,33 @@ describe("POST /api/card: cobrança com o payWithCard real (papel card)", () => 
       error: "internal",
       message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.",
     });
-    expect(cap.text()).toContain("[redacted]");
-    for (const secret of [APPROVE, DECLINE, "44444444", "51840197"]) expect(cap.text()).not.toContain(secret);
+    // O erro inesperado é registrado só com nome e código: nada do texto livre (que pode trazer dados do comprador).
+    expect(cap.text()).toContain("checkout cartão: erro inesperado");
+    expect(cap.text()).toContain('"errorName":"Error"');
+    for (const secret of [APPROVE, DECLINE, "44444444", "51840197", HOLDER, "falhou com"]) expect(cap.text()).not.toContain(secret);
   }, HEAVY_TEST_MS);
+
+  test("erro fora da cobrança (catch externo) -> 500 sem corpo; o log só tem nome e código do erro", async () => {
+    const base = await start({
+      origins: async () => {
+        throw Object.assign(new TypeError(`falhou com ${APPROVE} ${HOLDER}`), { code: "E_TESTE" });
+      },
+    });
+    const cap = captureOutput();
+    let res: Response;
+    try {
+      res = await fetch(`${base}/form/${shop.storeId}`);
+    } finally {
+      cap.restore();
+    }
+    expect(res!.status).toBe(500);
+    expect(await res!.text()).toBe("");
+    expect(res!.headers.get("content-security-policy")).toBeNull();
+    expect(cap.text()).toContain("serviço de cartão: erro inesperado");
+    expect(cap.text()).toContain('"errorName":"TypeError"');
+    expect(cap.text()).toContain('"errorCode":"E_TESTE"');
+    for (const secret of [APPROVE, "44444444", HOLDER, "falhou com"]) expect(cap.text()).not.toContain(secret);
+  });
 });
 
 describe("GET /form/<storeId>", () => {
@@ -438,6 +519,16 @@ describe("arquivos do formulário, /healthz e rotas fora da lista", () => {
     }
   });
 
+  test("timeouts e teto de conexões: cabeçalhos 10 s, requisição 75 s (cobrança de 60 s), keep-alive 5 s, 256 conexões", () => {
+    const server = createCardServer({ cardOrigin: CARD_ORIGIN, ticketKey: KEY, trustProxy: 0 });
+    expect({
+      headersTimeout: server.headersTimeout,
+      requestTimeout: server.requestTimeout,
+      keepAliveTimeout: server.keepAliveTimeout,
+      maxConnections: server.maxConnections,
+    }).toEqual({ headersTimeout: 10_000, requestTimeout: 75_000, keepAliveTimeout: 5_000, maxConnections: 256 });
+  });
+
   test("/healthz -> 200 ok com o banco respondendo", async () => {
     const base = await start();
     const res = await fetch(`${base}/healthz`);
@@ -511,6 +602,15 @@ describe("main.ts: subida do serviço", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("SECRET não pode ser passado ao serviço de cartão");
     expect(r.out).not.toContain("x".repeat(40));
+  }, HEAVY_TEST_MS);
+
+  test("TRUST_PROXY=0 com CARD_ORIGIN https: não sobe (exit 1), antes de tocar o banco", async () => {
+    const r = await boot(cardEnv({ CARD_ORIGIN: "https://pagar.example.com", TRUST_PROXY: "0", DATABASE_URL: "postgres://card:x@127.0.0.1:1/nada" }));
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "TRUST_PROXY=0 com CARD_ORIGIN https: todo pagamento seria recusado; defina TRUST_PROXY (atrás do Caddy: 1)",
+    );
+    expect(r.out).not.toContain("ASAAS_SEAL_KEY");
   }, HEAVY_TEST_MS);
 
   test("SERVICE=app: não sobe (exit 1)", async () => {

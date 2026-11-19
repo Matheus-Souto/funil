@@ -1260,7 +1260,7 @@ describe("rota POST /api/checkout/card", () => {
         resolveStore: async () => store,
         nodeEnv: "test",
         payWithCard: async (_c, i) => {
-          throw new Error(`falhou com ${i.card.number}`);
+          throw new Error(`falhou com ${i.card.number} ${i.card.holderName}`);
         },
       });
     } finally {
@@ -1271,7 +1271,9 @@ describe("rota POST /api/checkout/card", () => {
       error: "internal",
       message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.",
     });
-    expect(cap.text()).toContain("[redacted]");
+    // Só nome e código do erro vão para o log: nem o PAN nem o nome impresso (texto livre do erro).
+    expect(cap.text()).toContain("checkout cartão: erro inesperado");
     expect(cap.text()).not.toContain("44444444");
+    expect(cap.text()).not.toContain(HOLDER);
   });
 });

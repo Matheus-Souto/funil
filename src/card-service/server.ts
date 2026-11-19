@@ -14,7 +14,7 @@ import { dbHealthy } from "@/lib/db/client";
 import { isLoopbackUrl } from "@/lib/env";
 import { log } from "@/lib/log";
 import { payWithCard as defaultPayWithCard, type CardPaymentInput } from "@/lib/payments/asaas/card";
-import { cardErrorResponse, clientIpFrom, isHttps } from "@/lib/payments/asaas/card-http";
+import { cardErrorResponse, clientIpFrom, errorTag, isHttps } from "@/lib/payments/asaas/card-http";
 import { verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
 import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardFormCsp, cardFormHtml } from "./page";
@@ -34,6 +34,20 @@ export interface CardServerOptions {
 }
 
 const MAX_BODY = 16 * 1024;
+/**
+ * Timeouts e teto de conexões. O Node só confere os timeouts a cada `connectionsCheckingInterval` (padrão 30 s): com
+ * 1 s, um corpo lento recebe 408 perto do prazo. `requestTimeout` conta até o fim do corpo (não corta a resposta) e
+ * cobre a cobrança de 60 s com folga; `keepAliveTimeout` igual ao padrão do Node.
+ */
+export const SERVER_LIMITS = {
+  headersTimeout: 10_000,
+  requestTimeout: 75_000,
+  keepAliveTimeout: 5_000,
+  maxConnections: 256,
+  connectionsCheckingInterval: 1_000,
+} as const;
+/** Recusas antes de ler o corpo: a conexão fecha (o corpo não lido não fica preso nela). */
+const CLOSE = { connection: "close" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FORM_PATH = /^\/form\/([^/]+)$/;
 /** Os únicos arquivos servidos: caminho da URL -> nome fixo no `assetsDir` e tipo. */
@@ -111,13 +125,13 @@ export function createCardServer(opts: CardServerOptions): Server {
     // Antes de qualquer trabalho: POST de outro site (ou do app) nunca chega ao bilhete nem ao pagamento.
     const type = (headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     if (type !== "application/json" || headers.get("origin") !== opts.cardOrigin) {
-      return json(res, 403, { error: "forbidden_origin", message: "Requisição recusada." });
+      return json(res, 403, { error: "forbidden_origin", message: "Requisição recusada." }, CLOSE);
     }
     if (!plainLoopback && !isHttps(headers, opts.trustProxy)) {
-      return json(res, 403, { error: "https_required", message: "Use uma conexão segura (HTTPS) para pagar com cartão." });
+      return json(res, 403, { error: "https_required", message: "Use uma conexão segura (HTTPS) para pagar com cartão." }, CLOSE);
     }
     const raw = await readBody(req, MAX_BODY);
-    if (raw === null) return json(res, 413, { error: "too_large", message: "Requisição grande demais" }, { connection: "close" });
+    if (raw === null) return json(res, 413, { error: "too_large", message: "Requisição grande demais" }, CLOSE);
     let body: unknown;
     try {
       body = JSON.parse(raw.toString("utf8"));
@@ -177,15 +191,17 @@ export function createCardServer(opts: CardServerOptions): Server {
     return send(res, 404);
   }
 
-  const server = createServer((req, res) => {
+  const server = createServer({ connectionsCheckingInterval: SERVER_LIMITS.connectionsCheckingInterval }, (req, res) => {
     handle(req, res).catch((e: unknown) => {
-      // Nunca o corpo da requisição; `log` ainda aplica a máscara de cartão.
-      log.error("serviço de cartão: erro inesperado", { error: e });
+      // Só nome e código: nunca o corpo da requisição nem o texto livre do erro.
+      log.error("serviço de cartão: erro inesperado", errorTag(e));
       if (!res.headersSent) send(res, 500);
       else res.destroy();
     });
   });
-  server.requestTimeout = 15_000;
-  server.headersTimeout = 10_000;
+  server.headersTimeout = SERVER_LIMITS.headersTimeout;
+  server.requestTimeout = SERVER_LIMITS.requestTimeout;
+  server.keepAliveTimeout = SERVER_LIMITS.keepAliveTimeout;
+  server.maxConnections = SERVER_LIMITS.maxConnections;
   return server;
 }

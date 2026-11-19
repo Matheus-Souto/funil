@@ -27,6 +27,10 @@ async function main(): Promise<void> {
   if (parsed.SERVICE !== "card") fail("SERVICE=card é obrigatória no serviço de cartão");
   // parseEnv já exige as duas com SERVICE=card; a checagem aqui só estreita o tipo.
   if (!parsed.CARD_ORIGIN || !parsed.CARD_TICKET_KEY) fail("CARD_ORIGIN e CARD_TICKET_KEY são obrigatórias com SERVICE=card");
+  // Com origem https, o servidor só aceita o POST com X-Forwarded-Proto de um proxy confiável: sem proxy, nenhum.
+  if (parsed.CARD_ORIGIN.startsWith("https:") && parsed.TRUST_PROXY === 0) {
+    fail("TRUST_PROXY=0 com CARD_ORIGIN https: todo pagamento seria recusado; defina TRUST_PROXY (atrás do Caddy: 1)");
+  }
 
   // Chave trocada, removida ou rollback trancaria o Asaas de todas as lojas sem aviso (mesma regra do app).
   let unreadable = 0;
