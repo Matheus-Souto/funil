@@ -133,3 +133,32 @@ test("propriedade: PAN dentro de 64 caracteres hex/dígitos (formato de sha256) 
     }),
   );
 });
+
+test("propriedade: UUID sob chave de id (id, orderId, storeId) nunca é corrompido pela máscara", () => {
+  fc.assert(
+    fc.property(fc.uuid({ version: 4 }), fc.constantFrom("id", "orderId", "storeId", "offerId"), (u, key) => {
+      fc.pre(/[a-f]/.test(u));
+      expect(redact({ [key]: u })).toEqual({ [key]: u });
+      expect(redact({ input: { [key]: u } })).toEqual({ input: { [key]: u } });
+    }),
+    { numRuns: 2000 },
+  );
+  // Caso real que a máscara corrompia (16 dígitos entre hífens no meio).
+  const u = "9c6b9d0f-8741-4c47-9973-942362319cfc";
+  expect(redact({ orderId: u })).toEqual({ orderId: u });
+});
+
+test("UUID só é poupado sob chave de id, inteiro, no formato e com letra hex; PAN em formato de UUID é mascarado", () => {
+  const u = "9c6b9d0f-8741-4c47-9973-942362319cfc";
+  // Fora de chave de id: texto comum, máscara como sempre.
+  for (const key of ["note", "msg", "valid", "paid"]) expect(String((redact({ [key]: u }) as Rec)[key])).toContain("[redacted]");
+  expect(redact(`pedido ${u}`)).toContain("[redacted]");
+  // Sob chave de id, mas não é UUID inteiro, ou só dígitos: mascarado.
+  for (const v of ["41111111-1111-4111-8111-111111111111", `${u} 4111111111111111`, "4111111111111111", "4111-1111-1111-1111"]) {
+    for (const key of ["id", "orderId"]) {
+      const out = String((redact({ [key]: v }) as Rec)[key]);
+      expect(out).toContain("[redacted]");
+      expect(out).not.toMatch(/4111[\s.-]*1111[\s.-]*1111[\s.-]*1111/);
+    }
+  }
+});

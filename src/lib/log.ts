@@ -4,6 +4,11 @@ const PAN = /\d(?:[\s.-]*\d){12,}/g;
 const MASK = "[redacted]";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const HASH_KEY = /hash$/i;
+// UUID (RFC 9562: versão 1-8, variante 8-b) com ao menos uma letra hex: um id aleatório só de dígitos tem chance
+// ~1e-6; um "UUID" só de dígitos é tratado como texto comum. Chave de id: `id` ou terminada em `Id` (orderId, storeId).
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ID_KEY = /^(id|.*Id)$/;
+const HAS_HEX_LETTER = /[a-f]/i;
 
 const QUERY_FAILED = "falha na consulta ao banco";
 
@@ -52,6 +57,10 @@ function walk(v: unknown, seen: WeakSet<object>): unknown {
     // SÓ sob uma chave *Hash, com o valor inteiro no formato. Formato sozinho não basta (PAN repetido também tem 64
     // caracteres hex); em qualquer outra chave o valor é texto comum e passa pela máscara.
     else if (HASH_KEY.test(k) && typeof val === "string" && SHA256_HEX.test(val)) out[k] = val;
+    // UUID de id (orderId, storeId...): ~2% dos UUIDs aleatórios têm 13+ dígitos entre hífens e a máscara os
+    // corrompia (auditoria sem `input.orderId` legível, logs com ids quebrados). Poupado SÓ sob chave de id, com o valor
+    // inteiro no formato e ao menos uma letra hex; em texto livre ou outra chave continua mascarado.
+    else if (ID_KEY.test(k) && typeof val === "string" && UUID.test(val) && HAS_HEX_LETTER.test(val)) out[k] = val;
     else out[k] = walk(val, seen);
   }
   return out;
