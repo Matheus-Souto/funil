@@ -37,12 +37,15 @@ export interface CardServerOptions {
 const MAX_BODY = 16 * 1024;
 /**
  * Timeouts e teto de conexões. O Node só confere os timeouts a cada `connectionsCheckingInterval` (padrão 30 s): com
- * 1 s, um corpo lento recebe 408 perto do prazo. `requestTimeout` conta até o fim do corpo (não corta a resposta) e
- * cobre a cobrança de 60 s com folga; `keepAliveTimeout` igual ao padrão do Node.
+ * 1 s, um corpo lento recebe 408 perto do prazo. `requestTimeout` conta só até o fim do corpo (medido: não corta a
+ * resposta, então a cobrança de até 60 s segue depois dele); 15 s bastam para um corpo de 16 KB e soltam logo a
+ * conexão de quem manda o corpo devagar (256 corpos lentos derrubavam o cartão de todas as lojas). O Caddy, na frente,
+ * também lê o corpo inteiro antes de repassar (`request_buffers` no Caddyfile.card). `keepAliveTimeout` igual ao
+ * padrão do Node.
  */
 export const SERVER_LIMITS = {
   headersTimeout: 10_000,
-  requestTimeout: 75_000,
+  requestTimeout: 15_000,
   keepAliveTimeout: 5_000,
   maxConnections: 256,
   connectionsCheckingInterval: 1_000,

@@ -190,6 +190,8 @@ describe("Caddy: domínio do cartão só para o card, e nada do card fora dele",
     const body = sites[0]!.body;
     expect(body).toMatch(/reverse_proxy card:3100\b/);
     expect(body).toMatch(/keepalive 4s/);
+    // O Caddy lê o corpo inteiro antes de repassar: corpo lento (1 byte a cada 2 s) não prende conexão no card.
+    expect(body).toMatch(/reverse_proxy card:3100 \{[^}]*\brequest_buffers 64KB\b/);
     expect(body).toMatch(/-Server\b/);
     expect(body).not.toContain("app:3000");
     // Só as rotas do serviço; o resto (inclusive /healthz) não sai do Caddy.

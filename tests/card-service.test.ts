@@ -576,14 +576,14 @@ describe("arquivos do formulário, /healthz e rotas fora da lista", () => {
     }
   });
 
-  test("timeouts e teto de conexões: cabeçalhos 10 s, requisição 75 s (cobrança de 60 s), keep-alive 5 s, 256 conexões", () => {
+  test("timeouts e teto de conexões: cabeçalhos 10 s, corpo em 15 s (corpo lento não prende conexão), keep-alive 5 s, 256 conexões", () => {
     const server = createCardServer({ cardOrigin: CARD_ORIGIN, ticketKey: KEY, trustProxy: 0 });
     expect({
       headersTimeout: server.headersTimeout,
       requestTimeout: server.requestTimeout,
       keepAliveTimeout: server.keepAliveTimeout,
       maxConnections: server.maxConnections,
-    }).toEqual({ headersTimeout: 10_000, requestTimeout: 75_000, keepAliveTimeout: 5_000, maxConnections: 256 });
+    }).toEqual({ headersTimeout: 10_000, requestTimeout: 15_000, keepAliveTimeout: 5_000, maxConnections: 256 });
   });
 
   test("/healthz -> 200 ok com o banco respondendo", async () => {

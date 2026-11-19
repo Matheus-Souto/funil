@@ -101,7 +101,8 @@ services:
       core:
         soft: 0
         hard: 0
-    # Uma cobrança em curso leva até ~75 s (requestTimeout do serviço); o SIGTERM espera ela terminar.
+    # Uma cobrança em curso leva até ~75 s (Turnstile, conferência no Asaas e cobrança de até 60 s, depois do corpo);
+    # o SIGTERM espera ela terminar.
     stop_grace_period: 90s
     expose:
       - "3100"

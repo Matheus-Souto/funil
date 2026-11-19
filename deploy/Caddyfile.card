@@ -27,6 +27,9 @@
 	@card path /form/* /form.js /form.css /api/card
 	handle @card {
 		reverse_proxy card:3100 {
+			# Lê o corpo inteiro (até 64 KB) antes de abrir a conexão com o card: corpo enviado devagar fica preso no
+			# Caddy, não nas 256 conexões do serviço.
+			request_buffers 64KB
 			transport http {
 				keepalive 4s
 			}
