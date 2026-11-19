@@ -16,6 +16,8 @@ Pré-requisito: instalação no ar (`docs/instalacao.md`), com `https://checkout
 
 - [ ] **Asaas** em produção, com a URL e o token do webhook colados no Asaas e os eventos marcados
       (`docs/instalacao.md`, seção 6).
+- [ ] **Cartão isolado** ligado (`docs/instalacao.md`, seção 12), se for vender com cartão: o formulário do cartão
+      passa a ser o iframe do domínio `pagar.`, e as compras de teste abaixo já passam por ele.
 - [ ] **Pix manual** (sua chave Pix), se for usar.
 - [ ] **E-mail (SMTP)** testado e salvo (seção 7).
 - [ ] **Meta** com o **mesmo Pixel ID** usado na Cakto (não crie pixel novo: o aprendizado das campanhas fica no
@@ -29,7 +31,8 @@ Crie uma oferta de teste de valor baixo (ex.: R$ 5,00) apontando para um produto
 
 - [ ] **Pix manual real**: pague o valor único mostrado, confira no extrato do banco e libere pelo painel.
 - [ ] **Pix pelo Asaas**: pague e confira que o pedido vira pago sozinho (sem você liberar).
-- [ ] **Cartão pelo Asaas**: uma compra aprovada.
+- [ ] **Cartão pelo Asaas**: uma compra aprovada (com o cartão isolado, o formulário do cartão aparece dentro do
+      checkout, vindo de `pagar.`).
 
 Em cada compra confira:
 

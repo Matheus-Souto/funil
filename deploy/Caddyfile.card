@@ -1,0 +1,37 @@
+# Site do serviço de cartão isolado (COMPOSE_PROFILES=card, CARD_ISOLATED=1; docs/instalacao.md, "Cartão isolado").
+# Importado pelo deploy/Caddyfile e pelo deploy/Caddyfile.multi só quando CARD_ORIGIN está definida no .env (o compose
+# passa CARD_CADDYFILE para o Caddy; sem ela, o import lê /dev/null e nada muda). O endereço é a própria origem
+# (https://pagar.<domínio>): o Caddy emite o certificado e serve só esse host.
+#
+# Regras (tests/deploy-config.test.ts):
+#   - este domínio vai SÓ para o container `card`; nenhum outro site manda nada para ele, e ele nunca para o app;
+#   - só as rotas do serviço passam (/form/<loja>, /form.js, /form.css, /api/card); o resto, inclusive /healthz, é 404
+#     no próprio Caddy;
+#   - keepalive com o card abaixo dos 5 s do servidor dele (keepAliveTimeout): o Caddy nunca reaproveita uma conexão
+#     que o Node já está fechando.
+# O tempo para ler o cabeçalho é do servidor :443 inteiro (compartilhado com o app); o card já corta em 10 s
+# (headersTimeout) e limita 256 conexões.
+# Não edite este arquivo (vem do git): para personalizar, copie o Caddyfile para deploy/Caddyfile.local e mantenha o
+# `import` do fim.
+{$CARD_ORIGIN} {
+	# HSTS (1 ano), como nos outros sites. Sem o cabeçalho Server (versão do proxy não interessa a ninguém).
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# Corpo do POST /api/card tem teto de 16 KB no serviço; aqui, uma folga.
+	request_body {
+		max_size 64KB
+	}
+	@card path /form/* /form.js /form.css /api/card
+	handle @card {
+		reverse_proxy card:3100 {
+			transport http {
+				keepalive 4s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}

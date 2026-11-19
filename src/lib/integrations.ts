@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
-import { asaasSealer, createAsaasSealer, createSealer, open, seal, type Sealer } from "@/lib/crypto";
+import { createAsaasSealer, createSealer, type Sealer } from "@/lib/crypto";
 import { env, requireSecret } from "@/lib/env";
 import { log } from "@/lib/log";
 
@@ -9,20 +9,22 @@ export type IntegrationKind = "pix_manual" | "asaas" | "smtp" | "meta";
 export type IntegrationConfig = Record<string, unknown>;
 
 /**
- * Abre e sela segredos de conexão conforme o tipo. `asaas` usa a chave própria (`a1.`, ASAAS_SEAL_KEY) quando ela
- * existe, para o serviço de cartão abri-la sem o SECRET; as demais (SMTP, Meta...) sempre usam o SECRET (`v1.`) e
- * nunca abrem com a chave do Asaas. Um `v1.` de `asaas` (gravado antes da chave) continua abrindo com o SECRET.
+ * Abre e sela segredos de conexão conforme o tipo. `asaas` é gravado com a chave própria (`a1.`, ASAAS_SEAL_KEY) só
+ * com o isolamento ligado (CARD_ISOLATED=1), para o serviço de cartão abri-la sem o SECRET; com ele desligado, segue
+ * em `v1.` (uma imagem anterior ao isolamento continua abrindo). As demais (SMTP, Meta...) sempre usam o SECRET (`v1.`)
+ * e nunca abrem com a chave do Asaas. Abrir: `a1.` com a chave (se ela existir), `v1.` com o SECRET.
  */
 export interface IntegrationSecrets {
   open(kind: string, sealed: string): string;
   seal(kind: string, plain: string): string;
-  /** `true` quando há ASAAS_SEAL_KEY: `asaas` é gravado em `a1.`. */
+  /** `true` quando `asaas` é gravado em `a1.` (há ASAAS_SEAL_KEY e a selagem própria está ligada). */
   readonly asaasOwnKey: boolean;
 }
 
-function secretsFrom(v1: () => Sealer, a1: (() => Sealer) | null): IntegrationSecrets {
+function secretsFrom(v1: () => Sealer, a1: (() => Sealer) | null, sealAsaas: boolean): IntegrationSecrets {
+  const sealA1 = sealAsaas ? a1 : null;
   return {
-    asaasOwnKey: a1 !== null,
+    asaasOwnKey: sealA1 !== null,
     open(kind, sealed) {
       if (sealed.startsWith("a1.")) {
         if (kind !== "asaas") throw new Error(`Valor selado inválido: a chave do Asaas não abre a conexão ${kind}`);
@@ -33,7 +35,7 @@ function secretsFrom(v1: () => Sealer, a1: (() => Sealer) | null): IntegrationSe
       throw new Error("Valor selado inválido");
     },
     seal(kind, plain) {
-      return kind === "asaas" && a1 !== null ? a1().seal(plain) : v1().seal(plain);
+      return kind === "asaas" && sealA1 !== null ? sealA1().seal(plain) : v1().seal(plain);
     },
   };
 }
@@ -43,19 +45,31 @@ function once<T>(make: () => T): () => T {
   return () => (v ??= make());
 }
 
-/** Versão pura (sem ler o ambiente): `secret` ausente = processo sem SECRET (serviço de cartão), e `v1.` lança. */
-export function createIntegrationSecrets(keys: { secret?: string; asaasKey?: string }): IntegrationSecrets {
+/**
+ * Versão pura (sem ler o ambiente): `secret` ausente = processo sem SECRET (serviço de cartão), e `v1.` lança.
+ * `sealAsaas` (padrão `true`): grava `asaas` em `a1.` quando há `asaasKey`; `false` grava em `v1.` e só abre `a1.`.
+ */
+export function createIntegrationSecrets(keys: { secret?: string; asaasKey?: string; sealAsaas?: boolean }): IntegrationSecrets {
   const asaasKey = keys.asaasKey;
   return secretsFrom(
     once(() => createSealer(requireSecret({ SECRET: keys.secret }))),
     asaasKey === undefined ? null : once(() => createAsaasSealer(asaasKey)),
+    keys.sealAsaas ?? true,
   );
+}
+
+/**
+ * Regra do processo a partir do ambiente: `asaas` em `a1.` só com CARD_ISOLATED=1 (a mesma condição da re-selagem
+ * no boot). Assim, definir a ASAAS_SEAL_KEY antes de ligar o isolamento não tranca a loja num rollback de imagem.
+ */
+export function integrationSecretsFor(e: { SECRET?: string; ASAAS_SEAL_KEY?: string; CARD_ISOLATED: boolean }): IntegrationSecrets {
+  return createIntegrationSecrets({ secret: e.SECRET, asaasKey: e.ASAAS_SEAL_KEY, sealAsaas: e.CARD_ISOLATED });
 }
 
 let processSecrets: IntegrationSecrets | undefined;
 /** As chaves do ambiente do processo, lidas no primeiro uso (o import nunca falha). */
 const defaultSecrets = (): IntegrationSecrets =>
-  (processSecrets ??= secretsFrom(() => ({ seal, open }), env.ASAAS_SEAL_KEY === undefined ? null : asaasSealer));
+  (processSecrets ??= integrationSecretsFor(env));
 
 /** Abre o segredo de uma conexão com as chaves do processo (ver `IntegrationSecrets`). */
 export const openIntegrationSecret = (kind: string, sealed: string): string => defaultSecrets().open(kind, sealed);
@@ -94,7 +108,7 @@ export async function readIntegration(
 
 /**
  * Grava (upsert) a conexão. `secret` omitido mantém o segredo atual; `null` apaga; texto é selado conforme o tipo
- * (`asaas` em `a1.` com ASAAS_SEAL_KEY; o resto em `v1.` com o SECRET).
+ * (`asaas` em `a1.` com ASAAS_SEAL_KEY e CARD_ISOLATED=1; o resto, e `asaas` com o isolamento desligado, em `v1.`).
  */
 export async function saveIntegration(
   tx: Tx,

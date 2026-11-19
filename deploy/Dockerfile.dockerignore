@@ -5,6 +5,7 @@
 .superpowers
 .verify
 .next
+dist
 .env
 .env.*
 !.env.example

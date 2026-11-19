@@ -10,3 +10,5 @@ data/
 next-env.d.ts
 *.tsbuildinfo
 deploy/Caddyfile.local
+# Gerado pelo `next dev` na raiz.
+AGENTS.md

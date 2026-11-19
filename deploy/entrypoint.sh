@@ -1,6 +1,7 @@
 #!/bin/sh
 # Entrada da imagem: `start` (padrão) migra o banco com o papel DONO (OWNER_DATABASE_URL) e inicia o app, que usa o
-# papel `app` (DATABASE_URL, sujeito a RLS). As migrações são idempotentes e serializadas por trava no banco: rodam a
+# papel `app` (DATABASE_URL, sujeito a RLS). Com CARD_DB_PASSWORD (cartão isolado), a migração dá login ao papel `card`
+# com essa senha (o serviço de cartão entra com ele); sem ela, o papel existe sem login. As migrações são idempotentes e serializadas por trava no banco: rodam a
 # cada início do container. Qualquer outro comando é executado como veio (ex.: `docker compose run --rm app sh`).
 set -eu
 
@@ -19,7 +20,7 @@ fail() {
 # Senha forte: 16+ caracteres e nunca os valores de desenvolvimento. Gere com `openssl rand -hex 24`.
 check_password() { # <nome> <valor>
   case "$2" in
-    app | owner) fail "$1 com valor de desenvolvimento; gere uma senha com: openssl rand -hex 24" ;;
+    app | owner | card) fail "$1 com valor de desenvolvimento; gere uma senha com: openssl rand -hex 24" ;;
   esac
   [ "${#2}" -ge 16 ] || fail "$1 precisa ter 16 caracteres ou mais (openssl rand -hex 24)"
 }
@@ -28,6 +29,7 @@ check_password() { # <nome> <valor>
 [ -n "${DATABASE_URL:-}" ] || fail "defina DATABASE_URL (papel app)"
 [ -n "${APP_DB_PASSWORD:-}" ] || fail "defina APP_DB_PASSWORD (senha do papel app)"
 check_password APP_DB_PASSWORD "$APP_DB_PASSWORD"
+if [ -n "${CARD_DB_PASSWORD:-}" ]; then check_password CARD_DB_PASSWORD "$CARD_DB_PASSWORD"; fi
 # Senha do papel dono = POSTGRES_PASSWORD do compose (postgres://owner:<senha>@...).
 owner_password="${OWNER_DATABASE_URL#*://}"
 owner_password="${owner_password%%@*}"
@@ -56,4 +58,6 @@ node /app/cli/src/lib/db/migrate.mjs
 # ambiente do container, com ela). O tini vira o PID 1 depois do unset (repassa sinais e recolhe processos órfãos) e
 # por isso também não guarda a URL no próprio ambiente.
 unset OWNER_DATABASE_URL
+# A senha do papel `card` só serve à migração: o app nunca entra como `card`.
+unset CARD_DB_PASSWORD
 exec tini -- node /app/server.js

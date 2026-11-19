@@ -3,7 +3,15 @@ import { and, eq } from "drizzle-orm";
 import { withStore } from "@/lib/db/client";
 import { integration } from "@/lib/db/schema";
 import { env, parseEnv, requireSecret } from "@/lib/env";
-import { createIntegrationSecrets, getIntegration, type IntegrationSecrets, openIntegrationSecret, resealAsaasSecrets, saveIntegration } from "@/lib/integrations";
+import {
+  createIntegrationSecrets,
+  getIntegration,
+  integrationSecretsFor,
+  type IntegrationSecrets,
+  openIntegrationSecret,
+  resealAsaasSecrets,
+  saveIntegration,
+} from "@/lib/integrations";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 const ASAAS_KEY = "k".repeat(40);
@@ -59,6 +67,34 @@ describe("createIntegrationSecrets: regra de selagem por tipo", () => {
     expect(() => inCard.open("asaas", createIntegrationSecrets({ secret: SECRET }).seal("asaas", "x"))).toThrow("SECRET não definido");
     // Gravar algo que não seja asaas também exige o SECRET.
     expect(() => inCard.seal("smtp", "x")).toThrow("SECRET não definido");
+  });
+});
+
+describe("integrationSecretsFor: a1 só com CARD_ISOLATED=1 (rollback para a imagem anterior continua abrindo a conexão)", () => {
+  const base = { BASE_URL: "https://loja.example.com", DATABASE_URL: "postgres://app:x@localhost/funil", SECRET, ASAAS_SEAL_KEY: ASAAS_KEY };
+
+  test("com a ASAAS_SEAL_KEY definida e CARD_ISOLATED=0: asaas grava em v1, mas um a1 já gravado continua abrindo", () => {
+    const off = integrationSecretsFor(parseEnv(base));
+    const sealed = off.seal("asaas", "chave-asaas");
+    expect(sealed.startsWith("v1.")).toBe(true);
+    expect(off.open("asaas", sealed)).toBe("chave-asaas");
+    expect(off.asaasOwnKey).toBe(false);
+    const a1 = createIntegrationSecrets({ secret: SECRET, asaasKey: ASAAS_KEY }).seal("asaas", "da-epoca-isolada");
+    expect(off.open("asaas", a1)).toBe("da-epoca-isolada");
+  });
+
+  test("com CARD_ISOLATED=1: asaas grava em a1 (o serviço de cartão abre sem o SECRET)", () => {
+    const on = integrationSecretsFor(parseEnv({ ...base, CARD_ISOLATED: "1", CARD_ORIGIN: "https://pagar.example.com", CARD_TICKET_KEY: "t".repeat(40) }));
+    const sealed = on.seal("asaas", "chave-asaas");
+    expect(sealed.startsWith("a1.")).toBe(true);
+    expect(on.asaasOwnKey).toBe(true);
+    expect(createIntegrationSecrets({ asaasKey: ASAAS_KEY }).open("asaas", sealed)).toBe("chave-asaas");
+  });
+
+  test("sem a selagem própria, a re-selagem não mexe em nada", () => {
+    const off = createIntegrationSecrets({ secret: SECRET, asaasKey: ASAAS_KEY, sealAsaas: false });
+    expect(off.asaasOwnKey).toBe(false);
+    expect(off.seal("asaas", "x").startsWith("v1.")).toBe(true);
   });
 });
 

@@ -28,9 +28,28 @@ const PRODUCTION = [
   "APP_DB_PASSWORD",
   "TRUST_PROXY",
   "SETUP_TOKEN",
+  // Cartão isolado: o app emite o bilhete (CARD_TICKET_KEY), re-sela a conexão Asaas (ASAAS_SEAL_KEY) e a migração cria
+  // o papel `card` com login (CARD_DB_PASSWORD).
+  "CARD_ISOLATED",
+  "CARD_ORIGIN",
+  "CARD_TICKET_KEY",
+  "ASAAS_SEAL_KEY",
+  "CARD_DB_PASSWORD",
 ];
-// Cartão isolado (SERVICE=card / CARD_ISOLATED=1): o compose passa a levá-las na Task 9 do plano de isolamento.
-const CARD_ISOLATION = ["SERVICE", "CARD_ISOLATED", "CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY", "CARD_DB_PASSWORD"];
+// O serviço de cartão (compose: `card`, profile `card`) recebe exatamente estas, e nada do dono, do SMTP ou do SECRET.
+const CARD_SERVICE = [
+  "SERVICE",
+  "MODE",
+  "BASE_URL",
+  "PLATFORM_DOMAIN",
+  "DATABASE_URL",
+  "CARD_ORIGIN",
+  "CARD_TICKET_KEY",
+  "ASAAS_SEAL_KEY",
+  "TRUST_PROXY",
+  "TURNSTILE_SITE_KEY",
+  "TURNSTILE_SECRET",
+];
 // CARD_PORT: o serviço escuta sempre na 3100 em produção; outra porta só no teste do bundle em Node (CARD_PORT=0).
 const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL", "CARD_PORT"];
 
@@ -39,7 +58,14 @@ type Compose = {
     string,
     {
       image?: string;
+      build?: { context?: string; dockerfile?: string; target?: string };
+      profiles?: string[];
       environment?: Record<string, string>;
+      volumes?: unknown[];
+      networks?: string[] | Record<string, unknown>;
+      depends_on?: Record<string, { condition?: string }>;
+      read_only?: boolean;
+      tmpfs?: string[];
       ports?: unknown[];
       mem_limit?: string;
       stop_grace_period?: string;
@@ -51,7 +77,7 @@ type Compose = {
 const compose = YAML.parse(read("compose.yaml")) as Compose;
 
 test("toda variável do env.ts está classificada (produção ou só smoke)", () => {
-  expect([...PRODUCTION, ...CARD_ISOLATION, ...TEST_ONLY].sort()).toEqual([...ENV_KEYS].sort());
+  expect([...new Set([...PRODUCTION, ...CARD_SERVICE, ...TEST_ONLY])].sort()).toEqual([...ENV_KEYS].sort());
 });
 
 test("toda variável do env.ts aparece no .env.example", () => {
@@ -93,8 +119,109 @@ test("compose.yaml: app sem core dump (o processo que recebe o cartão nunca gra
   expect(compose.services.app!.environment!.SETUP_TOKEN).toBe("${SETUP_TOKEN:-}");
 });
 
-describe("Caddyfiles: HSTS em todo site servido", () => {
+describe("compose.yaml: serviço de cartão isolado (profile card)", () => {
+  const card = compose.services.card!;
+  const networksOf = (name: string) => {
+    const n = compose.services[name]!.networks;
+    return n === undefined ? ["default"] : Array.isArray(n) ? n : Object.keys(n);
+  };
+
+  test("só sobe com COMPOSE_PROFILES=card; imagem do estágio card do mesmo Dockerfile", () => {
+    expect(card.profiles).toEqual(["card"]);
+    expect(card.build).toMatchObject({ context: ".", dockerfile: "deploy/Dockerfile", target: "card" });
+  });
+
+  test("ambiente mínimo: nada do dono, do SECRET, do SMTP nem da senha do papel app; banco com o papel card", () => {
+    const envKeys = Object.keys(card.environment!);
+    expect([...envKeys].sort()).toEqual([...CARD_SERVICE].sort());
+    for (const k of envKeys) expect(k).not.toMatch(/^(SECRET|OWNER_DATABASE_URL|APP_DB_PASSWORD|CARD_DB_PASSWORD|SMTP|META)/);
+    expect(card.environment!.SERVICE).toBe("card");
+    expect(card.environment!.TRUST_PROXY).toBe("${TRUST_PROXY:-1}");
+    expect(card.environment!.DATABASE_URL).toContain("postgres://card:${CARD_DB_PASSWORD}@postgres:5432/funil");
+    expect(card.environment!.DATABASE_URL).not.toMatch(/owner|app:/);
+  });
+
+  test("sem volume nem porta publicada; raiz só leitura com /tmp em memória", () => {
+    expect(card.volumes).toBeUndefined();
+    expect(card.ports).toBeUndefined();
+    expect(card.read_only).toBe(true);
+    expect(card.tmpfs).toEqual(["/tmp"]);
+  });
+
+  test("teto de 192 MB sem swap extra, sem core dump e parada que espera a cobrança em curso (até 75 s)", () => {
+    expect(card.mem_limit).toBe("192m");
+    expect(card.memswap_limit).toBe(card.mem_limit);
+    expect(card.ulimits?.core).toEqual({ soft: 0, hard: 0 });
+    expect(card.stop_grace_period).toBe("90s");
+    expect(card.depends_on).toEqual({ postgres: { condition: "service_healthy" } });
+  });
+
+  test("rede própria: o card só alcança Postgres e Caddy (nunca o app)", () => {
+    expect(networksOf("card")).toEqual(["card"]);
+    const onCard = Object.keys(compose.services).filter((n) => networksOf(n).includes("card"));
+    expect(onCard.sort()).toEqual(["caddy", "card", "postgres"]);
+    expect(networksOf("app")).not.toContain("card");
+  });
+
+  test("o app recebe as variáveis do cartão isolado (desligado por padrão)", () => {
+    const appEnv = compose.services.app!.environment!;
+    expect(appEnv.CARD_ISOLATED).toBe("${CARD_ISOLATED:-0}");
+    for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY", "CARD_DB_PASSWORD"]) expect(appEnv[k]).toBe(`\${${k}:-}`);
+  });
+});
+
+/** Blocos de site do Caddyfile: linha na coluna 0 terminando em "{" até o "}" na coluna 0 (cabeça, corpo). */
+const caddySites = (text: string) =>
+  [...text.matchAll(/^(\S.*)\{\n([\s\S]*?)^\}/gm)].filter(([, head]) => head!.trim() !== "").map(([, head, body]) => ({ head: head!.trim(), body: body! }));
+
+describe("Caddy: domínio do cartão só para o card, e nada do card fora dele", () => {
+  test("Caddyfile.card: um site, o CARD_ORIGIN, só para card:3100 (keepalive abaixo dos 5 s do serviço), sem app", () => {
+    const sites = caddySites(read("deploy/Caddyfile.card"));
+    expect(sites.map((s) => s.head)).toEqual(["{$CARD_ORIGIN}"]);
+    const body = sites[0]!.body;
+    expect(body).toMatch(/reverse_proxy card:3100\b/);
+    expect(body).toMatch(/keepalive 4s/);
+    expect(body).toMatch(/-Server\b/);
+    expect(body).not.toContain("app:3000");
+    // Só as rotas do serviço; o resto (inclusive /healthz) não sai do Caddy.
+    expect(body).toMatch(/@card path \/form\/\* \/form\.js \/form\.css \/api\/card\n/);
+  });
+
   for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi"]) {
+    test(`${file}: importa o site do cartão só quando o compose o liga; nenhum site seu manda para o card`, () => {
+      const text = read(file);
+      expect(text).toMatch(/^import \{\$CARD_CADDYFILE:\/dev\/null\}$/m);
+      for (const s of caddySites(text)) expect(s.body, s.head).not.toContain("card:3100");
+    });
+  }
+
+  test("compose: Caddyfile.card montado e ligado só com CARD_ORIGIN definido", () => {
+    const caddy = compose.services.caddy!;
+    expect(caddy.volumes).toContain("./deploy/Caddyfile.card:/etc/caddy/Caddyfile.card:ro");
+    expect(caddy.environment!.CARD_CADDYFILE).toBe("${CARD_ORIGIN:+/etc/caddy/Caddyfile.card}");
+    expect(caddy.environment!.CARD_ORIGIN).toBe("${CARD_ORIGIN:-}");
+  });
+});
+
+test("Dockerfile: estágio card só com dist/card (sem node_modules nem .next), tini, não-root e healthcheck com GET", () => {
+  const dockerfile = read("deploy/Dockerfile");
+  const stages = dockerfile.split(/^(?=FROM )/m);
+  // O app (compose sem `target`) continua sendo o último estágio.
+  expect(stages.at(-1)).toMatch(/^FROM \S+ AS runtime$/m);
+  const card = stages.find((s) => /^FROM \S+ AS card$/m.test(s))?.replace(/^#.*\n/gm, "");
+  expect(card).toBeDefined();
+  const copies = [...card!.matchAll(/^COPY (.*)$/gm)].map((m) => m[1]);
+  expect(copies).toEqual(["--from=card-build /src/dist/card ./"]);
+  expect(card).not.toMatch(/node_modules|\.next/);
+  expect(card).toMatch(/^USER node$/m);
+  expect(card).toMatch(/tini/);
+  expect(card).toMatch(/HEALTHCHECK[\s\S]*fetch\('http:\/\/127\.0\.0\.1:3100\/healthz'\)/);
+  // O build usa o script do projeto (iife do formulário, CSS ao lado do server.js).
+  expect(dockerfile).toMatch(/^RUN bun run card:build$/m);
+});
+
+describe("Caddyfiles: HSTS em todo site servido", () => {
+  for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi", "deploy/Caddyfile.card"]) {
     test(file, () => {
       const text = read(file);
       // Blocos de site: linha na coluna 0 terminando em "{" (ex.: "{$DOMAIN} {", "*.{$PLATFORM_DOMAIN} {") até o "}" na coluna 0.
@@ -159,6 +286,8 @@ describe("deploy/entrypoint.sh: senhas fracas do Postgres recusadas antes de mig
     });
 
   test.each([
+    ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: "card" }],
+    ["CARD_DB_PASSWORD", { CARD_DB_PASSWORD: "curta123" }],
     ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "app" }],
     ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "curta123" }],
     ["POSTGRES_PASSWORD", { OWNER_DATABASE_URL: "postgres://owner:owner@postgres:5432/funil" }],

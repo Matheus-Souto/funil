@@ -244,13 +244,14 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
       };
     }
     case "monitor_pagina_pagamento": {
-      const page = typeof p.page === "string" && (p.page === "/c" || p.page === "/o") ? p.page : null;
+      const page = p.page === "/c" || p.page === "/o" || p.page === "/form" ? p.page : null;
+      const where = page === "/o" ? "do pedido" : page === "/form" ? "do formulário do cartão" : "do checkout";
       const code = safeId(p.code);
       return {
         subject: "A página de pagamento da sua loja mudou",
         heading: "Mudança na página de pagamento",
         paragraphs: [
-          `A verificação semanal encontrou na página ${page === "/o" ? "do pedido" : "do checkout"} um cabeçalho de segurança ou scripts diferentes do esperado${code ? ` (${code})` : ""}.`,
+          `A verificação semanal encontrou na página ${where} um cabeçalho de segurança ou scripts diferentes do esperado${code ? ` (${code})` : ""}.`,
           "Se você não atualizou o sistema nem mudou a configuração, trate como incidente: confira o servidor antes de continuar vendendo com cartão (docs/seguranca-pagamento.md).",
         ],
       };

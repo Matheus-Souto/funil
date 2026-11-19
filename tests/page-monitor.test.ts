@@ -2,10 +2,13 @@
 // /c e /o no próprio domínio e avisa o vendedor quando muda. Fetch falso, sem rede.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
+import { cardFormCsp, cardFormHtml } from "@/card-service/page";
+import { alertText } from "@/lib/alerts";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { job, offer, orders, pageCheck, storeAlert } from "@/lib/db/schema";
 import { buyerCsp } from "@/proxy";
-import { createPciPageMonitorHandler, inspectBuyerPage, PCI_MONITOR_EVERY_MS } from "@/lib/security/page-monitor";
+import { createPciPageMonitorHandler, inspectBuyerPage, inspectCardFormPage, PCI_MONITOR_EVERY_MS } from "@/lib/security/page-monitor";
+import { storeCheckoutOrigins } from "@/lib/stores";
 import { createTestDb, type TestDb } from "./db";
 import { seedOrder, seedPanelStore } from "./panel-helpers";
 
@@ -46,6 +49,57 @@ describe("inspectBuyerPage", () => {
     expect(inspectBuyerPage(goodHtml(NONCE, "<script>alert(1)</script>"), goodCsp(), { turnstile: false }).problems).toContain("script_sem_nonce");
     // Turnstile configurado: a política esperada muda junto.
     expect(inspectBuyerPage(goodHtml(), goodCsp(), { turnstile: true }).problems).toContain("csp_diferente");
+    // Cartão isolado: o checkout embute o iframe (frame-src do domínio do cartão); sem ele, a política é outra.
+    const withFrame = buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: "https://pagar.example.com" });
+    expect(inspectBuyerPage(goodHtml(), withFrame, { turnstile: false, cardOrigin: "https://pagar.example.com" }).problems).toEqual([]);
+    expect(inspectBuyerPage(goodHtml(), goodCsp(), { turnstile: false, cardOrigin: "https://pagar.example.com" }).problems).toContain("csp_diferente");
+  });
+});
+
+const CARD = "https://pagar.example.com";
+const STORE = "00000000-0000-4000-8000-000000000001";
+const ORIGINS = ["https://loja.example.com"];
+const formPage = (origins = ORIGINS, extra = "", turnstile = false) => ({
+  html: cardFormHtml({ storeId: STORE, allowedOrigins: origins, ...(turnstile ? { turnstileSiteKey: "0x4AAA" } : {}) }).replace("</body>", `${extra}</body>`),
+  csp: cardFormCsp(origins, { turnstile }),
+});
+const inspectForm = (p: { html: string; csp: string | null }, origins = ORIGINS, turnstile = false) =>
+  inspectCardFormPage(p.html, p.csp, { origins, turnstile, pageUrl: `${CARD}/form/${STORE}` });
+
+describe("inspectCardFormPage (página do iframe do cartão)", () => {
+  test("página como o serviço de cartão gera: sem problemas; só /form.js no inventário (o JSON de configuração não executa)", () => {
+    const r = inspectForm(formPage());
+    expect(r.problems).toEqual([]);
+    expect(r.inventory).toEqual(["self:/form.js"]);
+    // As origens da loja mudam o frame-ancestors, não o resultado guardado: trocar o domínio da loja não é alerta.
+    const other = inspectForm(formPage(["https://outra.example.com"]), ["https://outra.example.com"]);
+    expect(other.problems).toEqual([]);
+    expect(other.hash).toBe(r.hash);
+  });
+
+  test("script de outro host, outro script do próprio domínio ou inline executável: problema", () => {
+    const evil = inspectForm(formPage(ORIGINS, `<script src="https://evil.example/skimmer.js"></script>`));
+    expect(evil.problems).toContain("script_nao_autorizado");
+    expect(evil.inventory).toContain("https://evil.example/skimmer.js");
+    expect(inspectForm(formPage(ORIGINS, `<script src="/outro.js"></script>`)).problems).toContain("script_nao_autorizado");
+    expect(inspectForm(formPage(ORIGINS, "<script>alert(1)</script>")).problems).toContain("script_inline");
+    // Turnstile só quando a loja usa.
+    const ts = `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>`;
+    expect(inspectForm(formPage(ORIGINS, ts)).problems).toContain("script_nao_autorizado");
+    expect(inspectForm(formPage(ORIGINS, ts, true), ORIGINS, true).problems).toEqual([]);
+  });
+
+  test("CSP ausente ou diferente da cardFormCsp (inclusive frame-ancestors de outra loja): problema", () => {
+    expect(inspectForm({ ...formPage(), csp: null }).problems).toContain("csp_ausente");
+    expect(inspectForm({ ...formPage(), csp: cardFormCsp(["https://intrusa.example"], { turnstile: false }) }).problems).toContain("csp_diferente");
+    expect(inspectForm({ ...formPage(), csp: formPage().csp.replace("script-src 'self'", "script-src *") }).problems).toContain("csp_diferente");
+    expect(inspectForm(formPage(), ORIGINS, true).problems).toContain("csp_diferente");
+  });
+
+  test("aviso do painel e do e-mail dizem que é o formulário do cartão", () => {
+    const t = alertText("monitor_pagina_pagamento", { page: "/form", code: "script_nao_autorizado" }, null);
+    expect(t.title).toContain("(/form)");
+    expect(t.body).toContain("formulário do cartão");
   });
 });
 
@@ -58,14 +112,16 @@ async function seedShop() {
 /** Fetch falso: devolve a página configurada para cada caminho. */
 function fakeSite(pages: Record<string, { html: string; csp: string | null; status?: number }>) {
   const calls: string[] = [];
+  const urls: string[] = [];
   const fetchFn = (async (input: string | URL | Request) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     calls.push(url.pathname);
+    urls.push(url.href);
     const key = Object.keys(pages).find((k) => url.pathname.startsWith(k));
     const p = key ? pages[key]! : { html: "não encontrado", csp: null, status: 404 };
     return new Response(p.html, { status: p.status ?? 200, headers: { "content-type": "text/html", ...(p.csp ? { "content-security-policy": p.csp } : {}) } });
   }) as typeof fetch;
-  return { fetchFn, calls };
+  return { fetchFn, calls, urls };
 }
 
 describe("job pci_page_monitor", () => {
@@ -115,5 +171,33 @@ describe("job pci_page_monitor", () => {
     await createPciPageMonitorHandler({ fetch: gone.fetchFn, storeIds: [shop.storeId] })({} as never, new AbortController().signal);
     expect(await t.ownerDb.select().from(pageCheck).where(eq(pageCheck.storeId, shop.storeId))).toHaveLength(0);
     expect(await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).toHaveLength(0);
+  });
+
+  test("CARD_ISOLATED: confere também a página do iframe no domínio do cartão; script de outro host avisa com page /form", async () => {
+    const shop = await seedShop();
+    const origins = await storeCheckoutOrigins(shop.storeId);
+    const good = cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins });
+    const csp = cardFormCsp(origins, { turnstile: false });
+    const run = (f: typeof fetch) =>
+      createPciPageMonitorHandler({ fetch: f, storeIds: [shop.storeId], card: { origin: CARD } })({} as never, new AbortController().signal);
+
+    // Com o iframe, a CSP do checkout ganha frame-src para o domínio do cartão (src/proxy.ts): é a esperada.
+    const checkoutCsp = buyerCsp(NONCE, { dev: false, turnstile: false, cardOrigin: CARD });
+    const ok = fakeSite({ "/c/": { html: goodHtml(), csp: checkoutCsp }, "/form/": { html: good, csp } });
+    await run(ok.fetchFn);
+    expect(ok.urls).toContain(`${CARD}/form/${shop.storeId}`);
+    const [form] = await t.ownerDb.select().from(pageCheck).where(eq(pageCheck.storeId, shop.storeId)).then((rows) => rows.filter((r) => r.page === "/form"));
+    expect(form).toMatchObject({ ok: true, inventory: ["self:/form.js"] });
+    expect(await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).toHaveLength(0);
+
+    const bad = fakeSite({
+      "/c/": { html: goodHtml(), csp: checkoutCsp },
+      "/form/": { html: good.replace("</body>", `<script src="https://cdn.terceiro.example/x.js"></script></body>`), csp },
+    });
+    await run(bad.fetchFn);
+    const alerts = await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId));
+    expect(alerts.map((a) => [a.kind, a.detail])).toEqual([["monitor_pagina_pagamento", { code: "script_nao_autorizado", page: "/form" }]]);
+    const notices = (await t.ownerDb.select().from(job).where(eq(job.type, "notify_seller"))).filter((j) => j.storeId === shop.storeId);
+    expect(notices.map((n) => (n.payload as { page?: string }).page)).toEqual(["/form"]);
   });
 });

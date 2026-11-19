@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
-import { env, requireSecret } from "@/lib/env";
+import { requireSecret } from "@/lib/env";
 
 const VERSION = "v1";
 const INFO = "funil:seal:v1";
@@ -37,7 +37,7 @@ export function createSealer(secret: string, opts: { info?: string; version?: st
   };
 }
 
-/** Sealer `a1` da conexão Asaas a partir de uma chave (pura; ver `asaasSealer` para a do ambiente). */
+/** Sealer `a1` da conexão Asaas a partir de uma chave (a do ambiente: `integrationSecretsFor` em integrations.ts). */
 export const createAsaasSealer = (key: string): Sealer => createSealer(key, { info: ASAAS_INFO, version: ASAAS_VERSION });
 
 let sealer: Sealer | undefined;
@@ -45,15 +45,6 @@ const defaultSealer = () => (sealer ??= createSealer(requireSecret()));
 
 export const seal = (plain: string): string => defaultSealer().seal(plain);
 export const open = (sealed: string): string => defaultSealer().open(sealed);
-
-let asaas: Sealer | undefined;
-/** Sealer `a1` com a `ASAAS_SEAL_KEY` do ambiente. Lança se ela não estiver definida. */
-export function asaasSealer(): Sealer {
-  if (asaas) return asaas;
-  const key = env.ASAAS_SEAL_KEY;
-  if (key === undefined) throw new Error("ASAAS_SEAL_KEY não definida: o segredo da conexão Asaas em a1 precisa dela");
-  return (asaas = createAsaasSealer(key));
-}
 
 export const randomToken = (bytes = 32): string => randomBytes(bytes).toString("base64url");
 
