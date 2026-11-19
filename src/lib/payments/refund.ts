@@ -224,7 +224,11 @@ export const refundOrderJob: JobHandler = async (j) => {
     }
     const remaining = state === "partial" ? pre.totalCents - refundedCents(refundItems(fresh)) : undefined;
     // Marca antes do POST: numa retentativa, os itens de refunds[] depois de `before` são deste pedido de estorno.
-    const posted: RefundMarker = { at: new Date().toISOString(), before: refundItems(fresh).length };
+    const posted: RefundMarker = {
+      at: new Date().toISOString(),
+      before: refundItems(fresh).length,
+      ...(installment ? { scope: "installment" as const } : {}),
+    };
     await patchRaw(storeId, pay.id, { refundPost: posted });
     try {
       if (installment) await client.refundInstallment(installment);

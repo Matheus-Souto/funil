@@ -15,7 +15,12 @@ export interface RefundMarker {
   at: string;
   before: number;
   acceptedAt?: string;
+  /** "installment": gravada pelo job ao pedir o estorno do parcelamento inteiro (nunca por estorno visto no Asaas). */
+  scope?: "installment";
 }
+
+/** Prazo do nosso estorno do parcelamento: depois disso, parcelas que não voltaram contam como estorno parcial. */
+export const INSTALLMENT_REFUND_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type RefundState = "none" | "requested" | "done" | "partial" | "cancelled";
 
@@ -47,11 +52,16 @@ export function refundedCents(items: RefundItem[]): number {
 }
 
 export function refundMarkerOf(raw: unknown, requestedAt: Date | null): RefundMarker | null {
-  const m = (raw as { refundPost?: { at?: unknown; before?: unknown; acceptedAt?: unknown } } | null)?.refundPost;
+  const m = (raw as { refundPost?: { at?: unknown; before?: unknown; acceptedAt?: unknown; scope?: unknown } } | null)?.refundPost;
   if (!m || typeof m.at !== "string" || typeof m.before !== "number" || !requestedAt) return null;
   const at = new Date(m.at);
   if (Number.isNaN(at.getTime()) || at.getTime() < requestedAt.getTime()) return null;
-  return { at: m.at, before: m.before, ...(typeof m.acceptedAt === "string" ? { acceptedAt: m.acceptedAt } : {}) };
+  return {
+    at: m.at,
+    before: m.before,
+    ...(typeof m.acceptedAt === "string" ? { acceptedAt: m.acceptedAt } : {}),
+    ...(m.scope === "installment" ? { scope: "installment" as const } : {}),
+  };
 }
 
 /**
@@ -99,18 +109,26 @@ export function installmentParcels(list: { id?: unknown; status?: unknown; value
  * `markerFor(id)`: a marca do pedido de estorno gravada na linha daquela parcela (para detectar `cancelled`).
  * - `done`: todas as parcelas `done`;
  * - `requested`: alguma em andamento (o estorno do parcelamento ainda está correndo: sem aviso de parcial), ou há
- *   marca de um pedido de estorno NOSSO do parcelamento inteiro e só parte das parcelas voltou até agora (o Asaas
- *   conclui as parcelas em momentos diferentes; esse meio-tempo não é estorno parcial);
+ *   marca do job (`scope: "installment"`, nosso pedido de estorno do parcelamento inteiro) com menos de
+ *   `INSTALLMENT_REFUND_WINDOW_MS` e só parte das parcelas voltou até agora (o Asaas conclui as parcelas em momentos
+ *   diferentes; esse meio-tempo não é estorno parcial). Marca de estorno visto no painel do Asaas não conta;
  * - `partial`: alguma `done` ou com estorno parcial, nada em andamento e sem pedido nosso;
  * - `cancelled`: o estorno pedido agora terminou sem nada devolvido;
  * - `none`: nada em andamento nem devolvido. Sem parcelas (resposta vazia): `none` (nunca conclui às cegas).
  */
-export function classifyInstallmentRefund(parcels: InstallmentParcel[], markerFor: (id: string) => RefundMarker | null): RefundState {
+export function classifyInstallmentRefund(
+  parcels: InstallmentParcel[],
+  markerFor: (id: string) => RefundMarker | null,
+  now: Date = new Date(),
+): RefundState {
   if (parcels.length === 0) return "none";
   const states = parcels.map((p) => classifyRefund(p.status, p.refunds, markerFor(p.id), p.cents));
   if (states.every((x) => x === "done")) return "done";
   if (states.includes("requested")) return "requested";
-  const ours = parcels.some((p) => markerFor(p.id) !== null);
+  const ours = parcels.some((p) => {
+    const m = markerFor(p.id);
+    return m?.scope === "installment" && now.getTime() - new Date(m.at).getTime() < INSTALLMENT_REFUND_WINDOW_MS;
+  });
   if (states.some((x) => x === "done" || x === "partial")) return ours ? "requested" : "partial";
   if (states.includes("cancelled")) return "cancelled";
   return "none";

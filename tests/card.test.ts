@@ -964,20 +964,44 @@ describe("parcelado: estorno de uma parcela só (painel do Asaas) não estorna a
     expect(s.fake.calls.some((c) => c.path === "/payments" && c.query.get("installment"))).toBe(false);
 
     s.fake.refundExternally(parcels[1]!);
-    for (const status of [400, 404, 503]) {
+    // Transitório (5xx): 500, o Asaas reenvia; nada decidido.
+    s.fake.clearFailures();
+    s.fake.fail("GET /payments?installment=", 503, "indisponível");
+    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(0);
+    // Permanente (4xx) ou listagem incompleta, repetidos: 200 sempre (sem loop que pausaria a fila de webhooks),
+    // pedido segue pago e o vendedor é avisado uma vez.
+    for (const status of [400, 404]) {
       s.fake.clearFailures();
       s.fake.fail("GET /payments?installment=", status, "erro");
-      expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+      for (let i = 0; i < 3; i++) expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
     }
-    // Listagem incompleta (uma parcela some): também não decide.
     s.fake.clearFailures();
     s.fake.payments.get(parcels[2]!)!.deleted = true;
-    expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(500);
+    for (let i = 0; i < 3; i++) expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
     expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
-    expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(0);
+    const partial = await alerts(s.storeId, o.id, "estorno_parcial");
+    expect(partial).toHaveLength(1);
+    expect(partial[0]!.payload).toMatchObject({ refundedCents: 333 });
+    // Listagem volta: o parcial conferido tem o mesmo valor, sem aviso novo.
     s.fake.payments.get(parcels[2]!)!.deleted = false;
     expect((await hook(s.storeId, s.webhookToken, parcels[1]!)).status).toBe(200);
     expect(await alerts(s.storeId, o.id, "estorno_parcial")).toHaveLength(1);
+    expect((await orderRow(s.storeId, o.id)).status).toBe("paid");
+  });
+
+  test("estorno de parcela no painel do Asaas visto em andamento antes de concluir: o parcial ainda avisa o vendedor", async () => {
+    const s = await paidInThree();
+    // O Asaas mostra o estorno da parcela 2 em andamento (o webhook grava a marca de estorno em andamento) ...
+    s.fake.setStatus(s.parcels[1]!, "REFUND_IN_PROGRESS");
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[1]!, "PAYMENT_REFUND_IN_PROGRESS")).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    // ... e depois conclui só essa parcela: é estorno parcial (a marca não é de um estorno nosso do parcelamento).
+    s.fake.setStatus(s.parcels[1]!, "CONFIRMED");
+    s.fake.refundExternally(s.parcels[1]!);
+    expect((await hook(s.storeId, s.webhookToken, s.parcels[1]!)).status).toBe(200);
+    expect((await orderRow(s.storeId, s.o.id)).status).toBe("paid");
+    expect(await alerts(s.storeId, s.o.id, "estorno_parcial")).toHaveLength(1);
   });
 
   test("nosso estorno do parcelamento com parcelas voltando em momentos diferentes: sem aviso de parcial, job não desiste", async () => {

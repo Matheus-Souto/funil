@@ -523,6 +523,14 @@ describe("estorno em andamento e parcial (webhook e job)", () => {
     expect(classifyInstallmentRefund(of(parcel("a", "REFUNDED"), parcel("b", "CONFIRMED", [["PENDING", 3.33]]), parcel("c", "CONFIRMED")), none)).toBe("requested");
     expect(classifyInstallmentRefund(of(parcel("a", "CONFIRMED"), parcel("b", "CONFIRMED")), none)).toBe("none");
     expect(classifyInstallmentRefund(of(parcel("a", "CONFIRMED", [["CANCELLED", 3.33]]), parcel("b", "CONFIRMED")), (id) => (id === "a" ? { at: "x", before: 0 } : null))).toBe("cancelled");
+    // Meio-tempo: com marca do job (scope installment, dentro do prazo) é "requested"; marca sem scope (estorno visto no
+    // painel do Asaas) ou vencida, "partial".
+    const mid = of(parcel("a", "CONFIRMED"), parcel("b", "REFUNDED"), parcel("c", "CONFIRMED"));
+    const now = new Date("2026-11-19T12:00:00Z");
+    const ours = { at: "2026-11-19T10:00:00Z", before: 0, acceptedAt: "2026-11-19T10:00:01Z", scope: "installment" as const };
+    expect(classifyInstallmentRefund(mid, (id) => (id === "a" ? ours : null), now)).toBe("requested");
+    expect(classifyInstallmentRefund(mid, (id) => (id === "a" ? { ...ours, scope: undefined } : null), now)).toBe("partial");
+    expect(classifyInstallmentRefund(mid, (id) => (id === "a" ? ours : null), new Date("2026-11-27T12:00:00Z"))).toBe("partial");
     // Sem parcelas (lista vazia ou de outro parcelamento / apagadas): nunca conclui às cegas.
     expect(classifyInstallmentRefund([], none)).toBe("none");
     expect(installmentParcels([{ ...parcel("x", "REFUNDED"), installment: "ins_2" }, { ...parcel("y", "REFUNDED"), deleted: true }], "ins_1")).toEqual([]);

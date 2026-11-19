@@ -83,6 +83,10 @@ export const applyAsaasPayment = defineAction({
       )
       .max(24)
       .optional(),
+    /** Parcelado com estorno à vista, mas a listagem das parcelas falhou de vez (4xx) ou veio incompleta. */
+    parcelsUnavailable: z.boolean().optional(),
+    /** Valor desta cobrança (centavos); numa parcela, o valor da parcela. */
+    chargeCents: z.number().int().min(0).optional(),
   }),
   permission: "system",
   auditInput: (i) => ({
@@ -92,6 +96,8 @@ export const applyAsaasPayment = defineAction({
     installment: i.installment ?? null,
     refunds: i.refunds ?? [],
     parcels: i.parcels?.map((x) => ({ id: x.id, status: x.status, cents: x.cents, refunds: x.refunds })) ?? null,
+    parcelsUnavailable: i.parcelsUnavailable ?? false,
+    chargeCents: i.chargeCents ?? null,
   }),
   async run(ctx, input) {
     let p = input;
@@ -187,6 +193,13 @@ export const applyAsaasPayment = defineAction({
     // Parcelado: os itens e o valor devolvido são os da parcela que o pedido conhece / do parcelamento inteiro.
     const knownItems = parcels ? (parcels.find((x) => x.id === known?.providerId)?.refunds ?? []) : (p.refunds ?? []);
     const back = parcels ? installmentRefundedCents(parcels) : refundedCents(p.refunds ?? []);
+    if (installment !== null && p.parcelsUnavailable) {
+      // Estorno numa parcela, sem como conferir o parcelamento: não decide (o pedido segue como está) e avisa o
+      // vendedor uma vez por valor; "Reembolsar" no painel conclui pelo job, que re-tenta com espera crescente.
+      const own = mapAsaasStatus(p.status) === "refunded" ? (p.chargeCents ?? 0) : refundedCents(p.refunds ?? []);
+      if (o.status === "paid" && known && own > 0) await notePartialRefund(ctx, o.id, known, own);
+      return { applied: false, reason: "parcelas_indisponiveis" };
+    }
     if (o.status === "paid" && known && refund === "requested") await noteRefundInFlight(ctx, o, known, knownItems);
     if (o.status === "paid" && known && refund === "partial") await notePartialRefund(ctx, o.id, known, back);
     if (parcelOnly) return { applied: false, reason: refund === "requested" ? "estorno_parcelado_em_andamento" : "estorno_parcial_parcelado" };
@@ -278,36 +291,29 @@ export const noteUnreachableAsaasPayment = defineAction({
 /** Status do Asaas de cobrança com estorno pedido, em andamento ou concluído. */
 const REFUND_STATUSES = new Set(["REFUNDED", "REFUND_REQUESTED", "REFUND_IN_PROGRESS"]);
 
-/** Erro do Asaas tratado como transitório (webhook 500 / job re-tenta), sem repassar texto do Asaas. */
-const transientAsaasError = (message: string) =>
-  new ActionError("provider_error", message, { status: 0, errorCodes: [] } satisfies { status: number; errorCodes: string[] });
+/** Código do erro de listagem de parcelas vazia/incompleta (status 0: transitório para o job, que re-tenta). */
+const PARCELS_INCOMPLETE = "parcelas_incompletas";
 
 /**
  * Todas as parcelas de um parcelamento (HTTP: fora de transação). A listagem precisa trazer exatamente
  * `installmentCount` parcelas (sem `count` válido, busca o parcelamento): vazia ou incompleta lança erro transitório
- * (decidir estorno com parte das parcelas poderia concluir cedo demais ou nunca). `permanentIsTransient`: 4xx da
- * listagem também vira transitório (no webhook, para o evento não ser descartado como cobrança inalcançável).
+ * (decidir estorno com parte das parcelas poderia concluir cedo demais ou nunca).
  */
-export async function fetchInstallmentParcels(
-  client: AsaasClient,
-  installment: string,
-  count?: number,
-  o: { permanentIsTransient?: boolean } = {},
-): Promise<InstallmentParcel[]> {
+export async function fetchInstallmentParcels(client: AsaasClient, installment: string, count?: number): Promise<InstallmentParcel[]> {
   const expected = count !== undefined && Number.isInteger(count) && count > 0 ? count : Number((await client.getInstallment(installment)).installmentCount);
-  let list: AsaasPayment[];
-  try {
-    list = await client.listInstallmentPayments(installment);
-  } catch (e) {
-    if (o.permanentIsTransient && permanentAsaasError(e) !== null) throw transientAsaasError("Não foi possível listar as parcelas no Asaas");
-    throw e;
-  }
-  const parcels = installmentParcels(list, installment);
+  const parcels = installmentParcels(await client.listInstallmentPayments(installment), installment);
   if (!Number.isInteger(expected) || expected < 1 || parcels.length !== expected) {
     log.warn("Asaas: listagem de parcelas incompleta; estorno não decidido agora", { installment, expected, got: parcels.length });
-    throw transientAsaasError("Parcelas do parcelamento incompletas no Asaas");
+    throw new ActionError("provider_error", "Parcelas do parcelamento incompletas no Asaas", { status: 0, errorCodes: [PARCELS_INCOMPLETE] });
   }
   return parcels;
+}
+
+/** A listagem de parcelas não vai se resolver reenviando o webhook (4xx permanente ou listagem incompleta)? */
+function parcelsUnavailableError(e: unknown): boolean {
+  if (permanentAsaasError(e) !== null) return true;
+  const codes = (e instanceof ActionError ? (e.details as { errorCodes?: unknown } | undefined)?.errorCodes : undefined) ?? [];
+  return Array.isArray(codes) && codes.includes(PARCELS_INCOMPLETE);
 }
 
 /** Evento que a limpeza da troca de conta gera (DELETE da cobrança aberta): nunca indica pagamento. */
@@ -371,6 +377,8 @@ export type AsaasPaymentInput = {
   installment: string | null;
   refunds: RefundItem[];
   parcels?: InstallmentParcel[];
+  parcelsUnavailable?: boolean;
+  chargeCents: number;
 };
 
 /**
@@ -381,14 +389,22 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
   let valueCents = reaisToCents(Number(fresh.value));
   let installment: string | null = null;
   let parcels: InstallmentParcel[] | undefined;
+  let parcelsUnavailable = false;
   if (typeof fresh.installment === "string" && fresh.installment) {
     installment = fresh.installment;
     const inst = await client.getInstallment(installment);
     valueCents = reaisToCents(Number(inst.value));
     // Todas as parcelas, só quando a parcela mostra estorno: a confirmação de pagamento nunca depende desta listagem.
-    // Falha aqui (inclusive 4xx) é transitória: o webhook responde 500 e o Asaas reenvia; nunca decide estorno às cegas.
+    // Rede, 429, 5xx e chave recusada: o erro sobe (webhook 500, o Asaas reenvia). 4xx permanente ou listagem
+    // incompleta não se resolvem reenviando: segue sem decidir o estorno (`parcelsUnavailable`), sem loop de 500 que
+    // pausaria a fila de webhooks da loja.
     if (REFUND_STATUSES.has(String(fresh.status)) || refundItems(fresh).length > 0) {
-      parcels = await fetchInstallmentParcels(client, installment, Number(inst.installmentCount), { permanentIsTransient: true });
+      try {
+        parcels = await fetchInstallmentParcels(client, installment, Number(inst.installmentCount));
+      } catch (e) {
+        if (!parcelsUnavailableError(e)) throw e;
+        parcelsUnavailable = true;
+      }
     }
   }
   return {
@@ -399,6 +415,8 @@ export async function asaasPaymentInput(client: AsaasClient, fresh: AsaasPayment
     installment,
     refunds: refundItems(fresh),
     ...(parcels ? { parcels } : {}),
+    ...(parcelsUnavailable ? { parcelsUnavailable } : {}),
+    chargeCents: Math.max(0, reaisToCents(Number(fresh.value) || 0)),
   };
 }
 
