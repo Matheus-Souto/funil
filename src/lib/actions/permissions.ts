@@ -37,7 +37,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: ALL,
   admin: ALL.filter((p) => p !== "team.manage" && p !== "connections.write"),
   support: ["orders.read", "orders.resend", "products.read", "offers.read"],
-  // tracking.write: Pixel/API de Conversões da loja e pixel próprio das ofertas (spec: tráfego configura o pixel).
+  // tracking.write: pixel próprio das ofertas (validado contra o token salvo pelo dono) e teste da conexão Meta.
+  // Token/Pixel da loja (connections.saveMeta) exige connections.write: só o dono.
   traffic: ["metrics.read", "offers.read", "products.read", "connections.read", "tracking.write"],
 };
 

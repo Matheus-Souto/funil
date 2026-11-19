@@ -35,6 +35,7 @@ afterEach(freshMeta);
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
 const traffic: Actor = { kind: "user", userId: "u3", role: "traffic" };
+const admin: Actor = { kind: "user", userId: "u5", role: "admin" };
 const support: Actor = { kind: "user", userId: "u4", role: "support" };
 const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
 const pub = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
@@ -166,14 +167,18 @@ describe("connections.saveMeta", () => {
     expect((await fail(runAction(saveMeta, panel(shop.storeId), { pixelId: "12ab/../x", accessToken: meta.token }))).code).toBe("invalid_input");
   });
 
-  test("sensível: MCP/IA pedem aprovação; suporte não pode; tráfego pode (tracking.write)", async () => {
+  test("sensível e só do dono (connections.write): MCP/IA pedem aprovação; tráfego, admin e suporte não trocam token/Pixel", async () => {
     const shop = await seedShop({ meta: false });
     const input = { pixelId: PIXEL, accessToken: meta.token };
     expect((await fail(runAction(saveMeta, { ...panel(shop.storeId), origin: "mcp" }, input))).code).toBe("approval_required");
     expect((await fail(runAction(saveMeta, panel(shop.storeId, support), input))).code).toBe("forbidden");
+    expect((await fail(runAction(saveMeta, panel(shop.storeId, traffic), input))).code).toBe("forbidden");
+    expect((await fail(runAction(saveMeta, panel(shop.storeId, admin), input))).code).toBe("forbidden");
+    expect((await fail(runAction(saveMeta, panel(shop.storeId, traffic), { pixelId: "999999999" }))).code).toBe("forbidden");
     expect((await fail(runAction(testMeta, panel(shop.storeId, support), {}))).code).toBe("forbidden");
     expect(meta.requests).toHaveLength(0);
-    expect((await runAction(saveMeta, panel(shop.storeId, traffic), input)).hasAccessToken).toBe(true);
+    expect((await runAction(saveMeta, panel(shop.storeId), input)).hasAccessToken).toBe(true);
+    // Testar a conexão (não muda nada) segue com tracking.write.
     expect(await runAction(testMeta, panel(shop.storeId, traffic), {})).toEqual({ ok: true });
   });
 
@@ -399,6 +404,15 @@ describe("offers.setPixel (pixel próprio da oferta)", () => {
     expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/5550001112` }]);
     expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
     expect((await fail(runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "abc" }))).code).toBe("invalid_input");
+  });
+
+  test("sem token salvo pelo dono: Pixel novo na oferta é recusado (não há como validar); limpar continua valendo", async () => {
+    const shop = await seedShop({ meta: false });
+    const e = await fail(runAction(setOfferPixel, panel(shop.storeId, traffic), { id: shop.offerId, pixelId: "5550001112" }));
+    expect(e.code).toBe("conflict");
+    expect(meta.requests).toHaveLength(0);
+    expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBeNull();
+    expect(await runAction(setOfferPixel, panel(shop.storeId, traffic), { id: shop.offerId, pixelId: null })).toEqual({ id: shop.offerId, pixelId: null });
   });
 
   test("offers.create/update não aceitam mais pixelId (só offers.setPixel)", async () => {

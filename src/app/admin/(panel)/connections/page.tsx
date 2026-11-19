@@ -14,7 +14,8 @@ export default async function ConnectionsPage() {
   const st = await runAction(connectionsStatus, { ...panel, origin: "panel" }, {});
   const role = panel.actor.role;
   const canWrite = hasPermission(role, "connections.write");
-  const canMeta = hasPermission(role, "tracking.write");
+  // Pixel/token da loja: só o dono (connections.write); o tráfego só testa a conexão.
+  const canTestMeta = hasPermission(role, "tracking.write");
   const { userEmail } = await getPanelIdentity(panel);
   return (
     <>
@@ -26,7 +27,7 @@ export default async function ConnectionsPage() {
         </div>
         <div className={s.stack}>
           <AsaasCard data={st.asaas} canWrite={canWrite} />
-          <MetaCard data={st.meta} canWrite={canMeta} />
+          <MetaCard data={st.meta} canWrite={canWrite} canTest={canTestMeta} />
         </div>
       </div>
     </>

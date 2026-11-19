@@ -96,7 +96,8 @@ export const createOffer = defineAction({
 /**
  * Pixel próprio da oferta (sobrescreve o da conexão Meta da loja); `null` volta ao pixel da loja. Fica fora de
  * offers.create/update: exige `tracking.write` (dono, admin, tráfego) e é sensível (MCP/IA pedem aprovação). Um pixel
- * novo é validado no `prepare` com o token guardado da loja (mesmo teste do saveMeta; fora de transação).
+ * novo é validado no `prepare` com o token guardado pelo dono (mesmo teste do saveMeta; fora de transação); sem token
+ * guardado, é recusado.
  */
 export const setOfferPixel = defineAction({
   name: "offers.setPixel",

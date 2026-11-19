@@ -480,7 +480,16 @@ export function SmtpCard({
 
 // ---- Meta -------------------------------------------------------------------------------------------------------
 
-export function MetaCard({ data, canWrite }: { data: { pixelId: string; testEventCode: string | null; accessToken: "configured" | null } | null; canWrite: boolean }) {
+/** `canWrite`: trocar Pixel/token da loja (connections.write, só o dono). `canTest`: só testar a conexão (tracking.write). */
+export function MetaCard({
+  data,
+  canWrite,
+  canTest = false,
+}: {
+  data: { pixelId: string; testEventCode: string | null; accessToken: "configured" | null } | null;
+  canWrite: boolean;
+  canTest?: boolean;
+}) {
   const [f, setF] = useState({ pixelId: data?.pixelId ?? "", token: "", testCode: data?.testEventCode ?? "" });
   const [confirm, setConfirm] = useState(false);
   const run = useActionRunner();
@@ -549,6 +558,17 @@ export function MetaCard({ data, canWrite }: { data: { pixelId: string; testEven
             <span className={s.mono}>{data.pixelId}</span>
           </Row>
           <Row k="Token">{data.accessToken ? <Configured /> : "—"}</Row>
+          <p className={s.muted} style={{ margin: 0 }}>
+            Só o dono da loja troca o Pixel e o token da loja.
+          </p>
+          {canTest && data.accessToken ? (
+            <div className={s.headActions}>
+              <button type="button" className={s.btn} disabled={test.pending} onClick={() => test.run(() => testMetaAction(), { refresh: false })}>
+                {test.pending ? "Testando…" : "Testar"}
+              </button>
+              <Live msg={test.msg} />
+            </div>
+          ) : null}
         </div>
       ) : (
         <p className={s.muted}>Ainda não conectado.</p>

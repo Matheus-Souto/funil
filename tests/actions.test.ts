@@ -8,6 +8,8 @@ import { withStore } from "@/lib/db/client";
 import { ActionError, defineAction, runAction, type Actor } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { listActions } from "@/lib/actions/registry";
+import "@/lib/catalog/offers";
+import "@/lib/tracking/meta";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -168,12 +170,17 @@ test("matriz de papéis", () => {
   expect(hasPermission("support", "orders.refund")).toBe(false);
   expect(hasPermission("traffic", "metrics.read")).toBe(true);
   expect(hasPermission("traffic", "orders.read")).toBe(false);
-  // Pixel/Meta (Task 13): dono, admin e tráfego configuram; suporte não.
+  // Pixel próprio da oferta e teste da conexão Meta (tracking.write): dono, admin e tráfego; suporte não.
+  // Token/Pixel da LOJA (connections.saveMeta) exige connections.write: só o dono (o tráfego não redireciona a CAPI).
   expect(hasPermission("owner", "tracking.write")).toBe(true);
   expect(hasPermission("admin", "tracking.write")).toBe(true);
   expect(hasPermission("traffic", "tracking.write")).toBe(true);
   expect(hasPermission("support", "tracking.write")).toBe(false);
   expect(hasPermission("traffic", "connections.write")).toBe(false);
+  const byName = new Map(listActions().map((a) => [a.name, a]));
+  expect(byName.get("connections.saveMeta")).toMatchObject({ permission: "connections.write", sensitive: true });
+  expect(byName.get("offers.setPixel")).toMatchObject({ permission: "tracking.write", sensitive: true });
+  expect(byName.get("connections.testMeta")).toMatchObject({ permission: "tracking.write" });
 });
 
 test("rejeição pré-run de usuário audita só as chaves, nunca valores", async () => {

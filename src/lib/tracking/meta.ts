@@ -200,12 +200,18 @@ async function checkToken(pixelId: string, token: string, storeId: string): Prom
 }
 
 /**
- * Pixel novo de uma oferta (offers.setPixel): validado com o token guardado da loja, se houver (sem token, a loja só
- * tem o Pixel no navegador e não há o que testar). Fora de transação.
+ * Pixel novo de uma oferta (offers.setPixel): validado com o token guardado PELO DONO da loja (saveMeta exige
+ * connections.write). Sem token guardado não há como saber se o Pixel é da loja: recusado. Fora de transação.
  */
 export async function validatePixelWithStoredToken(storeId: string, pixelId: string): Promise<void> {
   const token = (await withStore(storeId, (tx) => getIntegration(tx, storeId, "meta")))?.secret ?? null;
-  if (token) await checkToken(pixelId, token, storeId);
+  if (!token) {
+    throw new ActionError(
+      "conflict",
+      "Para usar um Pixel próprio na oferta, o dono da loja precisa conectar o Meta (Pixel ID e token da API de Conversões) em Conexões.",
+    );
+  }
+  await checkToken(pixelId, token, storeId);
 }
 
 const pixelIdInput = z.string().trim().regex(PIXEL_ID_RE, "Pixel ID: só números (5 a 20)");
@@ -228,8 +234,9 @@ export const saveMeta = defineAction({
       .regex(/^[A-Za-z0-9_-]{1,64}$/, "Código de teste inválido")
       .optional(),
   }),
-  permission: "tracking.write",
-  // Quem controla o token controla o que a loja manda ao Meta: MCP/IA precisam de aprovação.
+  // Quem controla o token e o Pixel da loja controla para onde vão os dados dos compradores (API de Conversões e Pixel
+  // na página do cartão): só o dono (connections.write); MCP/IA precisam de aprovação.
+  permission: "connections.write",
   sensitive: true,
   auditInput: (i) => ({ pixelId: i.pixelId, testEventCode: i.testEventCode ?? null, accessToken: i.accessToken ? "[novo]" : "[mantido]" }),
   async prepare(call, input) {
