@@ -33,7 +33,8 @@ export async function setupAction(form: FormData): Promise<void> {
     field(form, "email").length > MAX_EMAIL_LENGTH ||
     field(form, "password").length > MAX_PASSWORD_LENGTH ||
     field(form, "name").length > 100 ||
-    field(form, "storeName").length > 100
+    field(form, "storeName").length > 100 ||
+    field(form, "setupToken").length > 200
   ) {
     redirect("/admin/setup?erro=dados");
   }
@@ -44,11 +45,12 @@ export async function setupAction(form: FormData): Promise<void> {
       name: field(form, "name"),
       email: field(form, "email"),
       password: field(form, "password"),
+      setupToken: field(form, "setupToken"),
     });
     await setSessionCookie(await createSession(userId, storeId));
   } catch (e) {
     if (!(e instanceof ActionError)) throw e;
-    target = e.code === "invalid_input" ? "/admin/setup?erro=dados" : "/admin/login";
+    target = e.code === "invalid_input" ? "/admin/setup?erro=dados" : e.code === "forbidden" ? "/admin/setup?erro=codigo" : "/admin/login";
   }
   redirect(target);
 }

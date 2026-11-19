@@ -154,9 +154,16 @@ Para ver o que está acontecendo: `docker compose logs -f app` (ou `caddy`).
 
 ## 5. Primeiro acesso
 
-- **Uma loja (`MODE=single`):** abra `https://checkout.minhaloja.com.br/admin`. Na primeira vez aparece a
-  configuração inicial (`/admin/setup`): nome da loja, seu nome, e-mail e senha (mínimo 10 caracteres). Depois disso
-  a tela de setup some para sempre e o acesso é por `/admin/login`.
+- **Uma loja (`MODE=single`):** pegue o **código de configuração** no log do app:
+
+  ```sh
+  docker compose logs app | grep "configuração inicial"
+  ```
+
+  (ou defina o seu em `SETUP_TOKEN` no `.env` antes de subir). Abra `https://checkout.minhaloja.com.br/admin`. Na
+  primeira vez aparece a configuração inicial (`/admin/setup`): código de configuração, nome da loja, seu nome, e-mail
+  e senha (mínimo 10 caracteres). O código impede que um robô (que descobre domínios novos pelos certificados HTTPS
+  emitidos) crie a loja antes de você. Depois disso a tela de setup some para sempre e o acesso é por `/admin/login`.
 - **Várias lojas (`MODE=multi`):** veja a seção 11.
 
 ## 6. Asaas (produção)

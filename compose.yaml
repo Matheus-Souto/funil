@@ -29,6 +29,8 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-1}
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      # Código do primeiro acesso (/admin/setup). Vazio: o entrypoint gera um, guarda no volume e mostra no log.
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
     volumes:
       - app-data:/data
     # Orçamento de memória em docs/instalacao.md: Next + 1 Worker de PDF (heap até 192 MB) + buffers de um PDF de 50 MB.

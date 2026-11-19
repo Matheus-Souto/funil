@@ -2,7 +2,7 @@ import { count, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError } from "@/lib/actions/core";
 import { hashPassword } from "@/lib/auth/password";
-import { randomToken } from "@/lib/crypto";
+import { randomToken, timingSafeEqualStr } from "@/lib/crypto";
 import { db, ownerDb } from "@/lib/db/client";
 import { membership, store, users } from "@/lib/db/schema";
 import { env } from "@/lib/env";
@@ -71,12 +71,22 @@ export async function needsSetup(mode: "single" | "multi" = env.MODE): Promise<b
   return n === 0;
 }
 
-/** Primeira execução (MODE=single, zero usuários): cria a loja e o dono. Segunda chamada → `conflict`. */
+/**
+ * Primeira execução (MODE=single, zero usuários): cria a loja e o dono. Segunda chamada → `conflict`.
+ * Exige o `SETUP_TOKEN` do servidor (comparação em tempo constante): o certificado do domínio aparece nos logs de
+ * Certificate Transparency em segundos, e sem o código um robô viraria dono da loja antes do dono de verdade.
+ */
 export async function setupFirstRun(
-  raw: { storeName: string; email: string; password: string; name: string },
+  raw: { storeName: string; email: string; password: string; name: string; setupToken: string },
   mode: "single" | "multi" = env.MODE,
+  expectedToken: string | null = env.SETUP_TOKEN ?? null,
 ): Promise<{ storeId: string; userId: string }> {
   if (mode !== "single") throw new ActionError("forbidden", "Setup inicial só no modo single");
+  if (!expectedToken) {
+    throw new ActionError("forbidden", "Setup desligado: defina SETUP_TOKEN no servidor (a imagem Docker gera um e mostra no log)");
+  }
+  const tokenOk = timingSafeEqualStr(typeof raw.setupToken === "string" ? raw.setupToken.trim() : "", expectedToken);
+  if (!tokenOk) throw new ActionError("forbidden", "Código de configuração inválido");
   const parsed = setupInput.safeParse(raw);
   if (!parsed.success) {
     throw new ActionError(

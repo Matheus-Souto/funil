@@ -48,12 +48,26 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
             Você será o dono da loja. Depois disso, o painel guia os próximos passos.
           </p>
           <form action={setupAction}>
-            {erro ? (
+            {erro === "codigo" ? (
+              <div className={s.banner} data-tone="danger" role="alert">
+                <PIcon name="circle-alert" />
+                <div>Código de configuração inválido. Copie de novo do log do servidor.</div>
+              </div>
+            ) : erro ? (
               <div className={s.banner} data-tone="danger" role="alert">
                 <PIcon name="circle-alert" />
                 <div>Confira os dados. A senha precisa ter no mínimo 10 caracteres.</div>
               </div>
             ) : null}
+            <div className={s.field}>
+              <label className={s.field}>
+                <span className={s.label}>Código de configuração</span>
+                <input className={`${s.input} ${s.mono}`} name="setupToken" autoComplete="off" spellCheck={false} required maxLength={200} />
+              </label>
+              <span className={s.hint}>
+                Está no log do servidor: <code>docker compose logs app | grep configuração</code>. Protege este primeiro acesso.
+              </span>
+            </div>
             <label className={s.field}>
               <span className={s.label}>Nome da loja</span>
               <input className={s.input} name="storeName" required maxLength={100} />

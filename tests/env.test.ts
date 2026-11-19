@@ -113,3 +113,9 @@ test("isLoopbackUrl: 127.0.0.1, localhost e ::1 (com ou sem colchetes)", async (
   for (const u of ["http://127.0.0.1:1", "http://localhost", "http://[::1]:3000", "::1", "127.0.0.1", "localhost:4010"]) expect(isLoopbackUrl(u)).toBe(true);
   for (const u of ["http://x", "https://api.asaas.com", "http://127.0.0.1.evil.com", "lixo", ""]) expect(isLoopbackUrl(u)).toBe(false);
 });
+
+test("SETUP_TOKEN: opcional para o app; se definido, 16+ caracteres", () => {
+  expect(parseEnv(base).SETUP_TOKEN).toBeUndefined();
+  expect(parseEnv({ ...base, SETUP_TOKEN: "a".repeat(16) }).SETUP_TOKEN).toBe("a".repeat(16));
+  expect(() => parseEnv({ ...base, SETUP_TOKEN: "curto" })).toThrow(/SETUP_TOKEN/);
+});

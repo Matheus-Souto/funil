@@ -32,6 +32,21 @@ owner_password="${owner_password#*:}"
 check_password POSTGRES_PASSWORD "$owner_password"
 unset owner_password
 
+# Código do primeiro acesso (/admin/setup, modo single). O certificado do domínio aparece nos logs de Certificate
+# Transparency em segundos; sem o código, um robô viraria dono da loja antes do dono de verdade. Sem SETUP_TOKEN no
+# .env: gera um (48 hex), guarda no volume (o mesmo nas próximas subidas) e imprime aqui (docker compose logs app).
+if [ -n "${SETUP_TOKEN:-}" ]; then
+  echo "entrypoint: código de configuração inicial: definido no .env (SETUP_TOKEN)"
+else
+  token_file="${DATA_DIR:-/data}/.setup-token"
+  if [ ! -s "$token_file" ]; then
+    (umask 077 && od -An -N24 -tx1 /dev/urandom | tr -d ' \n' > "$token_file") || fail "não foi possível gravar $token_file"
+  fi
+  SETUP_TOKEN="$(cat "$token_file")"
+  export SETUP_TOKEN
+  echo "entrypoint: código de configuração inicial (/admin/setup): $SETUP_TOKEN"
+fi
+
 cd /app
 node /app/cli/src/lib/db/migrate.mjs
 # O servidor roda SEM o papel dono: a URL sai do ambiente antes do exec (as CLIs via `docker compose exec` recebem o

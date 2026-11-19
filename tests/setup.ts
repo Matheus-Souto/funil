@@ -12,6 +12,7 @@ const testEnv: Record<string, string> = {
   DATABASE_URL: "postgres://app:app@localhost:5433/funil",
   OWNER_DATABASE_URL: "postgres://owner:owner@localhost:5433/funil",
   SECRET: "test-secret-test-secret-test-secret-0123",
+  SETUP_TOKEN: "setup-token-de-teste-0123456789",
 };
 for (const [k, v] of Object.entries(testEnv)) process.env[k] ??= v;
 // Arquivos de teste vão para um diretório temporário, nunca para ./data.

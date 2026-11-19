@@ -26,6 +26,9 @@ const schema = z.object({
   TURNSTILE_SECRET: z.string().min(1).optional(),
   ASAAS_BASE_URL: z.string().min(1).optional(),
   APP_DB_PASSWORD: z.string().min(1).optional(),
+  // Código exigido em /admin/setup (primeiro acesso do modo single). Na imagem Docker, o entrypoint gera um se faltar
+  // e o imprime no log; em desenvolvimento e testes vem do ambiente. Sem ele, o setup pela tela fica desligado.
+  SETUP_TOKEN: z.string().min(16, "deve ter no mínimo 16 caracteres (openssl rand -hex 24)").optional(),
   // Quantos proxies reversos confiáveis ficam na frente do app (0 = nenhum). Define de onde sai o IP do cliente.
   // Obrigatória em produção, salvo BASE_URL em loopback (ver parseEnv).
   TRUST_PROXY: z.enum(["0", "1", "2", "3", "4", "5"]).default("0").transform(Number),

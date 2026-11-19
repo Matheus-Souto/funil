@@ -17,7 +17,8 @@ beforeEach(async () => {
   await t.ownerDb.delete(store);
 });
 
-const setup = { storeName: "Minha Loja", email: "Dona@Exemplo.com", password: "senha-longa-123", name: "Dona" };
+const TOKEN = process.env.SETUP_TOKEN!;
+const setup = { storeName: "Minha Loja", email: "Dona@Exemplo.com", password: "senha-longa-123", name: "Dona", setupToken: TOKEN };
 const code = async (p: Promise<unknown>) => ((await p.then(() => null, (e: unknown) => e)) as ActionError).code;
 
 describe("setupFirstRun", () => {
@@ -47,6 +48,19 @@ describe("setupFirstRun", () => {
     for (const r of results) if (r.status === "rejected") expect((r.reason as ActionError).code).toBe("conflict");
     expect(await t.ownerDb.select().from(users)).toHaveLength(1);
     expect(await t.ownerDb.select().from(store)).toHaveLength(1);
+  });
+
+  test("exige o SETUP_TOKEN: errado, vazio ou não configurado no servidor → forbidden, nada é criado", async () => {
+    expect(TOKEN.length).toBeGreaterThanOrEqual(16);
+    expect(await code(setupFirstRun({ ...setup, setupToken: `${TOKEN}x` }, "single"))).toBe("forbidden");
+    expect(await code(setupFirstRun({ ...setup, setupToken: TOKEN.slice(0, -1) }, "single"))).toBe("forbidden");
+    expect(await code(setupFirstRun({ ...setup, setupToken: "" }, "single"))).toBe("forbidden");
+    const notConfigured = await setupFirstRun(setup, "single", null).catch((e: unknown) => e as ActionError);
+    expect((notConfigured as ActionError).code).toBe("forbidden");
+    expect((notConfigured as ActionError).message).toContain("SETUP_TOKEN");
+    expect(await t.ownerDb.select().from(users)).toHaveLength(0);
+    expect(await t.ownerDb.select().from(store)).toHaveLength(0);
+    expect((await setupFirstRun(setup, "single")).userId).toBeString();
   });
 
   test("fora do modo single → forbidden; senha curta → invalid_input", async () => {
