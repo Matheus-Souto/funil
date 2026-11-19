@@ -31,7 +31,8 @@ const PRODUCTION = [
 ];
 // Cartão isolado (SERVICE=card / CARD_ISOLATED=1): o compose passa a levá-las na Task 9 do plano de isolamento.
 const CARD_ISOLATION = ["SERVICE", "CARD_ISOLATED", "CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY", "CARD_DB_PASSWORD"];
-const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL"];
+// CARD_PORT: o serviço escuta sempre na 3100 em produção; outra porta só no teste do bundle em Node (CARD_PORT=0).
+const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL", "CARD_PORT"];
 
 type Compose = {
   services: Record<

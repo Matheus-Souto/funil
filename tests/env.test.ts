@@ -150,6 +150,13 @@ test("SERVICE=card: aceita as variáveis do serviço, sem SECRET", () => {
   expect(e.CARD_DB_PASSWORD).toBe("card");
 });
 
+test("CARD_PORT: padrão 3100; 0 (porta livre) e outras portas válidas; fora da faixa ou não numérica falha", () => {
+  expect(parseEnv(cardBase).CARD_PORT).toBe(3100);
+  expect(parseEnv({ ...cardBase, CARD_PORT: "0" }).CARD_PORT).toBe(0);
+  expect(parseEnv({ ...cardBase, CARD_PORT: "8080" }).CARD_PORT).toBe(8080);
+  for (const bad of ["65536", "-1", "abc", "3100x"]) expect(() => parseEnv({ ...cardBase, CARD_PORT: bad })).toThrow(/CARD_PORT/);
+});
+
 test("SERVICE=card com SECRET definido falha", () => {
   expect(() => parseEnv({ ...cardBase, SECRET: base.SECRET })).toThrow("SECRET não pode ser passado ao serviço de cartão");
 });

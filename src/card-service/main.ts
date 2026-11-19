@@ -1,6 +1,8 @@
 // Entrada do serviço de cartão isolado (SERVICE=card): confere o ambiente e a ASAAS_SEAL_KEY, escuta em
-// 0.0.0.0:3100 e, no SIGTERM/SIGINT, fecha o servidor e o pool do banco. Empacotado com `bun build --target=node`;
-// roda em Node (sem API do Bun). Os arquivos do formulário (`form.js`, `form.css`) ficam ao lado do bundle.
+// 0.0.0.0:3100 (CARD_PORT; 0 = porta livre, só testes) e, no SIGTERM/SIGINT, fecha o servidor e o pool do banco.
+// Empacotado com `bun build --target=node`; roda em Node (sem API do Bun). Os arquivos do formulário (`form.js`,
+// `form.css`) ficam ao lado do bundle (`bun run card:build` gera os três em dist/card).
+import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { closeDb } from "@/lib/db/client";
@@ -9,7 +11,6 @@ import { checkAsaasSealKey } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createCardServer } from "./server";
 
-const PORT = 3100;
 const HOST = "0.0.0.0";
 
 function fail(message: string): never {
@@ -51,7 +52,7 @@ async function main(): Promise<void> {
     turnstileSiteKey: parsed.TURNSTILE_SITE_KEY,
     assetsDir: dirname(fileURLToPath(import.meta.url)),
   });
-  server.listen(PORT, HOST, () => log.info("serviço de cartão no ar", { port: PORT }));
+  server.listen(parsed.CARD_PORT, HOST, () => log.info("serviço de cartão no ar", { port: (server.address() as AddressInfo).port }));
 
   let stopping = false;
   const stop = (signal: string) => {

@@ -32,6 +32,13 @@ const schema = z.object({
   CARD_TICKET_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
   ASAAS_SEAL_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
   CARD_DB_PASSWORD: z.string().min(1).optional(),
+  // Porta do serviço de cartão (SERVICE=card). 0 = porta livre escolhida pelo sistema (testes do bundle em Node).
+  CARD_PORT: z
+    .string()
+    .regex(/^\d{1,5}$/, "deve ser um número de porta (0 a 65535)")
+    .default("3100")
+    .transform(Number)
+    .refine((n) => n <= 65535, "deve ser um número de porta (0 a 65535)"),
   MODE: z.enum(["single", "multi"]).default("single"),
   BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
   // Validada como hostname só com MODE=multi (ver parseEnv); no single é ignorada.
