@@ -131,3 +131,78 @@ describe("parseFrameMsg", () => {
     expect(parseParentMsg({ t: `${P}ready` })).toBeNull();
   });
 });
+
+describe("endurecimento", () => {
+  test("__proto__ como chave própria é inerte", () => {
+    expect(parseFrameMsg(JSON.parse('{"__proto__":{"t":"funil-card:ready"}}'))).toBeNull();
+    expect(parseParentMsg(JSON.parse(`{"__proto__":{"t":"${P}validate","id":"x"}}`))).toBeNull();
+    const out = parseFrameMsg(JSON.parse(`{"t":"${P}ready","__proto__":{"x":1}}`));
+    expect(out).toEqual({ t: `${P}ready` });
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.keys(out as object)).toEqual(["t"]);
+  });
+
+  test("NaN e Infinity em config e height", () => {
+    for (const n of [NaN, Infinity, -Infinity]) {
+      expect(parseParentMsg({ t: `${P}config`, totalCents: n, maxInstallments: 1 })).toBeNull();
+      expect(parseParentMsg({ t: `${P}config`, totalCents: 100, maxInstallments: n })).toBeNull();
+      expect(parseFrameMsg({ t: `${P}height`, px: n })).toBeNull();
+    }
+  });
+
+  test("-0 vira 0", () => {
+    const out = parseFrameMsg({ t: `${P}height`, px: -0 });
+    expect(Object.is((out as { px: number }).px, 0)).toBe(true);
+  });
+
+  test("array esparso em fields", () => {
+    const sparse = ["a", , "b"];
+    expect(parseFrameMsg({ t: `${P}validated`, id: "x", ok: true, fields: sparse })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: "x", status: "error", fields: [["a", , "b"]] })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: "x", status: "error", fields: [["a"], , ["b"]] })).toBeNull();
+  });
+
+  test("new String como id e status não string", () => {
+    expect(parseParentMsg({ t: `${P}validate`, id: new String("x") })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: new String("x"), status: "approved" })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: "x", status: 1 })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: "x", status: null })).toBeNull();
+    expect(parseFrameMsg({ t: `${P}result`, id: "x", status: new String("approved") })).toBeNull();
+  });
+
+  test("Object.prototype poluído não preenche campos nem o tipo", () => {
+    const proto = Object.prototype as Record<string, unknown>;
+    try {
+      proto.status = "approved";
+      proto.id = "x";
+      proto.t = `${P}result`;
+      expect(parseFrameMsg({ t: `${P}result`, id: "x" })).toBeNull();
+      expect(parseFrameMsg({})).toBeNull();
+      expect(parseParentMsg({})).toBeNull();
+      proto.px = 10;
+      expect(parseFrameMsg({ t: `${P}height` })).toBeNull();
+      proto.message = "herdado";
+      expect(parseFrameMsg({ t: `${P}result`, id: "x", status: "error" })).toEqual({
+        t: `${P}result`,
+        id: "x",
+        status: "error",
+      });
+    } finally {
+      for (const k of ["status", "id", "t", "px", "message"]) delete proto[k];
+    }
+  });
+
+  test("getter instável é lido uma vez só", () => {
+    let n = 0;
+    const msg = {
+      t: `${P}result`,
+      id: "x",
+      status: "error",
+      get message() {
+        return n++ === 0 ? "ok" : "a".repeat(999);
+      },
+    };
+    expect(parseFrameMsg(msg)).toEqual({ t: `${P}result`, id: "x", status: "error", message: "ok" });
+    expect(n).toBe(1);
+  });
+});
