@@ -44,7 +44,7 @@ const asCardIn = <T>(storeId: string, fn: (tx: postgres.TransactionSql) => Promi
   }) as Promise<T>;
 
 const PERMISSION_DENIED = /permission denied/;
-const ORDER_GUARD = /papel card só marca como pago/;
+const ORDER_GUARD = /papel card só marca como pago um pedido de cartão/;
 
 /** Loja com Asaas e um pedido de cartão pendente (preparo com o papel `app`). */
 async function pendingOrder() {
@@ -142,6 +142,22 @@ describe("papel card: atributos e o que fica de fora", () => {
       ["paid", true],
       ["paid", true],
     ]);
+  });
+
+  test("pedidos: o card só toca pedido de cartão (pending -> paid em pix_asaas e pix_manual é recusado)", async () => {
+    for (const method of ["pix_asaas", "pix_manual"]) {
+      const { shop, order } = await pendingOrder();
+      await t.ownerDb.update(orders).set({ method }).where(eq(orders.id, order.id));
+      await expect(
+        asCardIn(shop.storeId, (tx) => tx`update orders set status = 'paid', paid_at = coalesce(paid_at, now()) where id = ${order.id}`),
+      ).rejects.toThrow(ORDER_GUARD);
+      expect((await t.ownerDb.select().from(orders).where(eq(orders.id, order.id)))[0]!.status).toBe("pending");
+    }
+  });
+
+  test("orders_card_guard roda com search_path fixo (pg_catalog, pg_temp)", async () => {
+    const [f] = await t.ownerDb.execute<{ cfg: string[] | null }>(sql`select proconfig as cfg from pg_proc where proname = 'orders_card_guard'`);
+    expect(f!.cfg).toEqual(["search_path=pg_catalog, pg_temp"]);
   });
 
   test("pedidos: o papel app não passa pela trava do card (paid -> refunded)", async () => {
