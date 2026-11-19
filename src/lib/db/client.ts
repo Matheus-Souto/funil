@@ -33,8 +33,19 @@ function lazy(get: () => Db): Db {
 
 /** Conexão do papel `app` (sujeita a RLS). Abre sob demanda. */
 export const db: Db = lazy(() => (appHandle ??= createDb(env.DATABASE_URL)).db);
+/**
+ * URL do papel dono. Só CLIs (migrate, store-create) e testes a usam: o servidor em produção roda SEM ela (o
+ * entrypoint da imagem a remove do ambiente antes de iniciar o app).
+ */
+export function requireOwnerUrl(e: { OWNER_DATABASE_URL?: string } = env): string {
+  if (!e.OWNER_DATABASE_URL) {
+    throw new Error("OWNER_DATABASE_URL não definida: o papel dono só é usado por migrações e pela CLI store-create");
+  }
+  return e.OWNER_DATABASE_URL;
+}
+
 /** Conexão do papel dono (migrations, criação de loja). Nunca usar em ações de loja. */
-export const ownerDb: Db = lazy(() => (ownerHandle ??= createDb(env.OWNER_DATABASE_URL)).db);
+export const ownerDb: Db = lazy(() => (ownerHandle ??= createDb(requireOwnerUrl())).db);
 
 /** Só para testes: aponta `db`/`ownerDb` para outro banco. Sem argumentos, volta ao padrão. */
 export async function setDbForTests(urls?: { appUrl: string; ownerUrl: string }): Promise<void> {

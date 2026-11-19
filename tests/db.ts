@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import postgres from "postgres";
-import { db, ownerDb, setDbForTests, type Db } from "@/lib/db/client";
+import { db, ownerDb, requireOwnerUrl, setDbForTests, type Db } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
 import { product, store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
@@ -31,9 +31,10 @@ export interface TestDb {
 export async function createTestDb(): Promise<TestDb> {
   const name = `test_${randomBytes(6).toString("hex")}`;
   const appPassword = env.APP_DB_PASSWORD ?? "app";
-  const adminUrl = withDatabase(env.OWNER_DATABASE_URL, undefined, undefined, "postgres");
-  const ownerUrl = withDatabase(env.OWNER_DATABASE_URL, undefined, undefined, name);
-  const appUrl = withDatabase(env.OWNER_DATABASE_URL, "app", appPassword, name);
+  const owner = requireOwnerUrl();
+  const adminUrl = withDatabase(owner, undefined, undefined, "postgres");
+  const ownerUrl = withDatabase(owner, undefined, undefined, name);
+  const appUrl = withDatabase(owner, "app", appPassword, name);
 
   const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
   try {

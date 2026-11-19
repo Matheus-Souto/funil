@@ -6,7 +6,9 @@
 #   runtime -> Node 22 slim, SEM Bun: servidor standalone + CLIs empacotadas. Usuário não-root (`node`).
 # Por que sem Bun no runtime: o binário do Bun tem ~107 MB; as duas CLIs empacotadas para Node têm < 1 MB e rodam
 # no mesmo Node do app (o app já roda em Node em produção). Ver docs/instalacao.md.
-ARG NODE_IMAGE=node:22-slim
+# Versões fixadas por versão menor (recebem correções com `docker compose build --pull`). Atualize mensalmente: veja
+# docs/instalacao.md ("Atualizar").
+ARG NODE_IMAGE=node:22.23-slim
 ARG BUN_IMAGE=oven/bun:1.4.4
 
 FROM ${BUN_IMAGE} AS bun
@@ -27,6 +29,11 @@ RUN bun build src/lib/db/migrate.ts scripts/store-create.ts --target=node --form
  && cp -r drizzle /cli/drizzle
 
 FROM ${NODE_IMAGE} AS runtime
+# tini: PID 1 pequeno (repassa SIGTERM ao Node e recolhe órfãos). Iniciado pelo entrypoint DEPOIS de remover
+# OWNER_DATABASE_URL do ambiente (o `init: true` do compose seria um PID 1 com o ambiente completo do container).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \

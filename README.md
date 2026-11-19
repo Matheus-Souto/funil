@@ -37,7 +37,7 @@ Requisitos: [Bun](https://bun.sh) 1.4, Node 22 e Docker.
 ```sh
 bun install
 docker compose -f compose.dev.yaml up -d --wait   # Postgres em localhost:5433 e Mailpit em localhost:8025
-cp .env.example .env                              # preencha SECRET e BASE_URL=http://localhost:3000
+cp .env.example .env                              # SECRET=$(openssl rand -hex 32) e BASE_URL=http://localhost:3000
 bun run migrate
 bun run dev                                       # http://localhost:3000/admin
 ```

@@ -1,3 +1,4 @@
+import { requireOwnerUrl } from "@/lib/db/client";
 import { parseEnv } from "@/lib/env";
 
 const base = {
@@ -17,7 +18,17 @@ test("parseEnv aplica padrões e aceita opcionais", () => {
 });
 
 test("parseEnv lista as variáveis faltando", () => {
-  expect(() => parseEnv({})).toThrow(/BASE_URL.*DATABASE_URL.*OWNER_DATABASE_URL.*SECRET/s);
+  expect(() => parseEnv({})).toThrow(/BASE_URL.*DATABASE_URL.*SECRET/s);
+});
+
+test("OWNER_DATABASE_URL é opcional para o app (o servidor de produção roda sem o papel dono)", () => {
+  expect(parseEnv({ ...base, OWNER_DATABASE_URL: undefined, NODE_ENV: "production", TRUST_PROXY: "1" }).OWNER_DATABASE_URL).toBeUndefined();
+  expect(() => requireOwnerUrl({})).toThrow("OWNER_DATABASE_URL não definida");
+  expect(requireOwnerUrl({ OWNER_DATABASE_URL: base.OWNER_DATABASE_URL })).toBe(base.OWNER_DATABASE_URL);
+});
+
+test("um só comando para gerar o SECRET em todas as mensagens: openssl rand -hex 32", () => {
+  expect(() => parseEnv({ ...base, SECRET: "troque-por-um-segredo-aleatorio-de-32-ou-mais-caracteres" })).toThrow("openssl rand -hex 32");
 });
 
 test("SECRET precisa de 32 caracteres", () => {

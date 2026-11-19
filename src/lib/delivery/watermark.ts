@@ -1,18 +1,16 @@
 // PDF personalizado: rodapé "Licenciado para <nome> — <email>" em todas as páginas (o carimbo em si está em
 // src/lib/pdf/core.ts e roda isolado num Worker, src/lib/pdf/sandbox.ts). O resultado fica em cache no storage em
 // `wm/<orderId>/<productId>/<versão do arquivo>.pdf`: trocar o arquivo do produto gera cópias novas. A geração é feita
-// pelo job de entrega (depois do e-mail), pela página do link e, se faltar, no download. Uma geração por vez no
-// processo, até 20 esperando (acima disso `PdfBusyError`); falha de geração fica em quarentena por 10 min por item.
+// pelo job de entrega (depois do e-mail), pela página do link e, se faltar, no download. Usa a fila única de PDF do
+// processo (`pdfLimiter`: 1 Worker por vez, até 20 esperando; acima disso `PdfBusyError`); falha de geração fica em quarentena por 10 min por item.
 import * as PdfLib from "pdf-lib";
 import { sha256 } from "@/lib/crypto";
 import { pdfCore } from "@/lib/pdf/core";
-import { PdfBusyError, watermarkInSandbox, watermarkLimiter } from "@/lib/pdf/sandbox";
+import { PdfBusyError, pdfLimiter, watermarkInSandbox } from "@/lib/pdf/sandbox";
 import { storage } from "@/lib/storage";
 
 export const WATERMARK_FONT_SIZE = 7;
 export const WATERMARK_MARGIN = 12;
-export const WATERMARK_CONCURRENCY = 1;
-export const WATERMARK_MAX_QUEUE = 20;
 export const FAILURE_QUARANTINE_MS = 10 * 60 * 1000;
 const NAME_MAX = 80;
 const EMAIL_MAX = 254;
@@ -93,7 +91,7 @@ export async function ensureWatermarkedPdf(req: WatermarkRequest): Promise<strin
   if (until !== undefined && until > clock()) throw new WatermarkFailedError("falhou há pouco; nova tentativa em alguns minutos");
   const running = inflight.get(key);
   if (running) return running;
-  const p = watermarkLimiter
+  const p = pdfLimiter
     .run(async () => {
       if (await storage.exists(key)) return key;
       const original = await storage.get(req.fileKey);

@@ -11,7 +11,12 @@
 import { Worker } from "node:worker_threads";
 import { pdfCore, type PdfInspection } from "./core";
 
-export const PDF_WORKER_HEAP_MB = 384;
+// Orçamento de memória (container do app com 768 MB, ver docs/instalacao.md): processo do Next + UM Worker por vez
+// (heap até 192 MB) + os buffers do PDF (até 50 MB de entrada e a saída) fora do heap do Worker.
+export const PDF_WORKER_HEAP_MB = 192;
+/** Um Worker de PDF por vez no processo inteiro (carimbo e inspeção do upload dividem a mesma vaga). */
+export const PDF_CONCURRENCY = 1;
+export const PDF_MAX_QUEUE = 20;
 export const PDF_TASK_TIMEOUT_MS = 60_000;
 
 export class PdfBusyError extends Error {
@@ -111,10 +116,12 @@ function runInWorker(msg: { op: string; pdf: Uint8Array; text?: string }, opts: 
   });
 }
 
-/** Carimbo: 1 por vez no processo, até 20 esperando. */
-export const watermarkLimiter = createLimiter(1, 20);
-/** Inspeção do upload (só o dono envia): 1 por vez, até 10 esperando. */
-export const inspectLimiter = createLimiter(1, 10);
+/**
+ * Fila ÚNICA de todo processamento de PDF (carimbo e inspeção do upload): 1 Worker por vez, até 20 esperando (acima
+ * disso `PdfBusyError` na hora). Dois limitadores separados permitiam 2 Workers simultâneos, o que estoura o teto de
+ * memória do container e derruba todas as lojas de uma vez.
+ */
+export const pdfLimiter = createLimiter(PDF_CONCURRENCY, PDF_MAX_QUEUE);
 
 export async function watermarkInSandbox(pdf: Uint8Array, text: string, opts: SandboxOptions = {}): Promise<Uint8Array> {
   const r = await runInWorker({ op: "watermark", pdf, text }, opts);
@@ -122,5 +129,5 @@ export async function watermarkInSandbox(pdf: Uint8Array, text: string, opts: Sa
 }
 
 export async function inspectInSandbox(pdf: Uint8Array, opts: SandboxOptions = {}): Promise<PdfInspection> {
-  return inspectLimiter.run(async () => (await runInWorker({ op: "inspect", pdf }, opts)).result as PdfInspection);
+  return pdfLimiter.run(async () => (await runInWorker({ op: "inspect", pdf }, opts)).result as PdfInspection);
 }

@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, test } from "bun:test";
 import { YAML } from "bun";
 import { ENV_KEYS } from "@/lib/env";
 
@@ -29,7 +30,9 @@ const PRODUCTION = [
 ];
 const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL"];
 
-type Compose = { services: Record<string, { environment?: Record<string, string>; ports?: unknown[]; mem_limit?: string }> };
+type Compose = {
+  services: Record<string, { image?: string; environment?: Record<string, string>; ports?: unknown[]; mem_limit?: string; stop_grace_period?: string }>;
+};
 const compose = YAML.parse(read("compose.yaml")) as Compose;
 
 test("toda variável do env.ts está classificada (produção ou só smoke)", () => {
@@ -57,12 +60,23 @@ test("compose.yaml: o app recebe as variáveis de produção e nunca as do smoke
   expect(appEnv.OWNER_DATABASE_URL).toMatch(/^postgres:\/\/owner:/);
 });
 
-test("compose.yaml: só o Caddy publica portas; app com teto de 512 MB", () => {
+test("compose.yaml: só o Caddy publica portas; app com teto de 768 MB e parada graciosa", () => {
   const published = Object.entries(compose.services)
     .filter(([, s]) => (s.ports ?? []).length > 0)
     .map(([name]) => name);
   expect(published).toEqual(["caddy"]);
-  expect(compose.services.app!.mem_limit).toBe("512m");
+  // Orçamento (docs/instalacao.md): Next + 1 Worker de PDF (heap 192 MB) + buffers de um PDF de 50 MB.
+  expect(compose.services.app!.mem_limit).toBe("768m");
+  expect(compose.services.app!.stop_grace_period).toBe("30s");
+});
+
+test("imagens base fixadas por versão menor (atualização: docker compose pull && docker compose build --pull)", () => {
+  expect(compose.services.postgres!.image).toMatch(/^postgres:17\.\d+$/);
+  expect(compose.services.caddy!.image).toMatch(/^caddy:2\.\d+$/);
+  const dockerfile = read("deploy/Dockerfile");
+  expect(dockerfile).toMatch(/^ARG NODE_IMAGE=node:22\.\d+-slim$/m);
+  expect(dockerfile).toMatch(/^ARG BUN_IMAGE=oven\/bun:\d+\.\d+\.\d+$/m);
+  expect(read("deploy/caddy-dns.Dockerfile")).toMatch(/^FROM caddy:2\.\d+-builder AS builder$/m);
 });
 
 test("CLI de migração empacotada para Node: importar não executa a migração; rodar direto sim", () => {
@@ -89,4 +103,36 @@ test("CLI de migração empacotada para Node: importar não executa a migração
   expect(imported.stderr).toBe("");
   expect(imported.status).toBe(0);
   expect(imported.stdout.trim()).toBe("function");
+});
+
+describe("deploy/entrypoint.sh: senhas fracas do Postgres recusadas antes de migrar", () => {
+  const strong = "0123456789abcdef0123456789abcdef";
+  const run = (over: Record<string, string>) =>
+    spawnSync("sh", [join(root, "deploy/entrypoint.sh"), "start"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OWNER_DATABASE_URL: `postgres://owner:${strong}@postgres:5432/funil`,
+        DATABASE_URL: `postgres://app:${strong}x@postgres:5432/funil`,
+        APP_DB_PASSWORD: `${strong}x`,
+        ...over,
+      } as NodeJS.ProcessEnv,
+    });
+
+  test.each([
+    ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "app" }],
+    ["APP_DB_PASSWORD", { APP_DB_PASSWORD: "curta123" }],
+    ["POSTGRES_PASSWORD", { OWNER_DATABASE_URL: "postgres://owner:owner@postgres:5432/funil" }],
+    ["POSTGRES_PASSWORD", { OWNER_DATABASE_URL: "postgres://owner:curta123@postgres:5432/funil" }],
+  ])("%s fraca: sai com erro antes de migrar", (name, over) => {
+    const r = run(over);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`entrypoint: ${name}`);
+  });
+
+  test("senhas fortes passam das conferências (fora da imagem, para no diretório /app)", () => {
+    const r = run({});
+    expect(r.stderr).not.toContain("entrypoint:");
+    expect(r.stderr).toMatch(/\/app/);
+  });
 });

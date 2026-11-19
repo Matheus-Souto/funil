@@ -14,11 +14,13 @@ const schema = z.object({
   BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
   PLATFORM_DOMAIN: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1),
-  OWNER_DATABASE_URL: z.string().min(1),
+  // Papel dono: só migrações, CLI store-create e testes (ver requireOwnerUrl em db/client.ts). Em produção o
+  // entrypoint da imagem a remove do ambiente do servidor.
+  OWNER_DATABASE_URL: z.string().min(1).optional(),
   SECRET: z
     .string()
     .min(32, "deve ter no mínimo 32 caracteres")
-    .refine((v) => !v.toLowerCase().includes("troque"), "é um valor de exemplo; gere um segredo próprio (openssl rand -base64 48)"),
+    .refine((v) => !v.toLowerCase().includes("troque"), "é um valor de exemplo; gere um segredo próprio (openssl rand -hex 32)"),
   DATA_DIR: z.string().min(1).default("./data"),
   TURNSTILE_SITE_KEY: z.string().min(1).optional(),
   TURNSTILE_SECRET: z.string().min(1).optional(),

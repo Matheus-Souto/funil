@@ -18,7 +18,7 @@ services:
       MODE: ${MODE:-single}
       BASE_URL: ${BASE_URL:-https://${DOMAIN:?defina DOMAIN no .env}}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
-      SECRET: ${SECRET:?defina SECRET no .env (openssl rand -base64 48)}
+      SECRET: ${SECRET:?defina SECRET no .env (openssl rand -hex 32)}
       # Papel `app` (sem BYPASSRLS, não dono das tabelas): usado pelo app em execução.
       DATABASE_URL: postgres://app:${APP_DB_PASSWORD:?defina APP_DB_PASSWORD no .env (openssl rand -hex 24)}@postgres:5432/funil
       # Papel dono (superusuário do Postgres): migrações no início do container e criação de lojas.
@@ -31,12 +31,15 @@ services:
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
     volumes:
       - app-data:/data
-    mem_limit: 512m
+    # Orçamento de memória em docs/instalacao.md: Next + 1 Worker de PDF (heap até 192 MB) + buffers de um PDF de 50 MB.
+    mem_limit: 768m
+    stop_grace_period: 30s
     expose:
       - "3000"
 
   postgres:
-    image: postgres:17
+    # Versões fixadas por versão menor; atualizar: docker compose pull && docker compose build --pull (docs/instalacao.md).
+    image: postgres:17.12
     restart: unless-stopped
     environment:
       POSTGRES_USER: owner
@@ -51,7 +54,7 @@ services:
       retries: 30
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11
     restart: unless-stopped
     depends_on:
       app:
@@ -64,7 +67,8 @@ services:
       DOMAIN: ${DOMAIN:?defina DOMAIN no .env}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
     volumes:
-      # MODE=multi com subdomínios: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
+      # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
+      # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
       - ./deploy/${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config

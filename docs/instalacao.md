@@ -9,8 +9,8 @@ visitas e cuida do HTTPS sozinho). Tudo definido em `compose.yaml`. Só o Caddy 
 
 ## 1. O servidor
 
-- **Mínimo:** 1 vCPU, 1 GB de RAM, 20 GB de disco, Ubuntu 24.04. O app tem teto de 512 MB de memória (ocioso usa
-  cerca de 150 MB).
+- **Mínimo:** 1 vCPU, 1 GB de RAM, 20 GB de disco, Ubuntu 24.04. O app tem teto de 768 MB de memória (orçamento
+  abaixo); o Postgres e o Caddy usam pouco (dezenas de MB) com uma loja.
 - Crie **2 GB de swap** (a primeira montagem da imagem, `next build`, passa de 1 GB de RAM):
 
   ```sh
@@ -26,6 +26,21 @@ visitas e cuida do HTTPS sozinho). Tudo definido em `compose.yaml`. Só o Caddy 
   ```
 
 - Firewall: libere só SSH (22), HTTP (80) e HTTPS (443, TCP e UDP).
+
+### Orçamento de memória do app (teto de 768 MB)
+
+Medido no smoke de deploy (`tests/smoke.sh`) com um PDF de 46 MB (perto do limite de 50 MB do upload):
+
+| Parte | Memória |
+|---|---|
+| Servidor Next (Node) ocioso, recém-iniciado | ~150 MB |
+| Worker de PDF (um por vez para o app inteiro: carimbo e validação do upload dividem a mesma fila) | heap limitado a 192 MB |
+| Buffers do PDF fora do heap do Worker (entrada de até 50 MB + saída carimbada) | ~100 MB |
+| Pico medido dos processos no fluxo completo (upload + carimbo de 46 MB) | ~310 MB |
+| Pico do container contando o cache de arquivos do Linux (liberável) | 400 a 600 MB |
+
+Um PDF que precise de mais do que o teto do Worker falha sozinho (o dono vê "Não conseguimos processar este PDF") sem
+derrubar o app. Um segundo PDF espera na fila (até 20; acima disso "tente em instantes"), nunca roda em paralelo.
 
 ## 2. DNS: `checkout.minhaloja.com.br`
 
@@ -53,7 +68,15 @@ Se quiser o proxy **ligado**, faça tudo isto (senão o cartão e os limites ant
    pagamento com cartão confere se a origem do navegador bate com o Host; com o Host reescrito, todo cartão volta
    **403**.
 3. IP do comprador: o Caddy passa a ver o IP da Cloudflare. Ensine o Caddy a confiar só na Cloudflare e conte dois
-   proxies. No `deploy/Caddyfile`, acrescente no topo (lista atual em <https://www.cloudflare.com/ips/>):
+   proxies. Não edite o `deploy/Caddyfile` (ele vem do git e o `git pull` das atualizações conflitaria): copie para
+   um arquivo seu, fora do git, e aponte o compose para ele:
+
+   ```sh
+   cp deploy/Caddyfile deploy/Caddyfile.local     # deploy/Caddyfile.local está no .gitignore
+   echo 'CADDYFILE=Caddyfile.local' >> .env
+   ```
+
+   No `deploy/Caddyfile.local`, acrescente no topo (lista atual em <https://www.cloudflare.com/ips/>):
 
    ```
    {
@@ -81,12 +104,15 @@ Preencha no `.env` (o arquivo explica cada linha):
 | `DOMAIN` | `checkout.minhaloja.com.br` |
 | `BASE_URL` | deixe vazia (vira `https://checkout.minhaloja.com.br`) |
 | `MODE` | `single` (uma loja) |
-| `SECRET` | resultado de `openssl rand -hex 32` |
+| `SECRET` | resultado de `openssl rand -hex 32` (sempre este comando) |
 | `POSTGRES_PASSWORD` | resultado de `openssl rand -hex 24` |
 | `APP_DB_PASSWORD` | outro resultado de `openssl rand -hex 24` |
 
-- Gere cada valor com o comando e cole sem aspas e sem espaços.
-- **Guarde o `.env` junto com os backups.** Sem o mesmo `SECRET`, as chaves salvas (Asaas, SMTP, Meta) não abrem mais.
+- Gere cada valor com o comando e cole sem aspas e sem espaços. A imagem recusa senhas do banco com menos de 16
+  caracteres.
+- **Guarde o `SECRET` (e uma cópia do `.env`) num gerenciador de senhas ou cofre, NUNCA junto com os backups.** Sem o
+  mesmo `SECRET`, as chaves salvas (Asaas, SMTP, Meta) não abrem mais; e quem tiver um backup do banco **mais** o
+  `SECRET` consegue abrir todas essas chaves (cobrar e estornar pelo Asaas da loja, mandar e-mail como a loja).
 - `POSTGRES_PASSWORD` só vale na primeira subida (quando o banco é criado).
 
 ## 4. Subir
@@ -97,7 +123,8 @@ docker compose ps         # app "healthy", caddy e postgres "running"/"healthy"
 ```
 
 A primeira vez demora alguns minutos (monta a imagem). A cada início, o app aplica as migrações do banco sozinho
-(com o papel dono do Postgres) e depois passa a rodar com o papel `app`, que só enxerga os dados da própria loja.
+(com o papel dono do Postgres) e depois passa a rodar com o papel `app`, que só enxerga os dados da própria loja; o
+servidor em execução nem recebe a senha do papel dono.
 
 Abra `https://checkout.minhaloja.com.br/api/health`: deve aparecer `{"ok":true}`.
 
@@ -184,41 +211,61 @@ aparecerem por origem.
 
 ## 10. Backups e atualizações
 
-**Backup** (faça antes de toda atualização e regularmente, ex.: todo dia por cron). Guarde fora do servidor, junto com
-uma cópia do `.env`:
+**Backup** (faça antes de toda atualização e regularmente, ex.: todo dia por cron). Os arquivos saem **cifrados** com
+o [age](https://age-encryption.org) e vão para fora do servidor. O backup tem dados de compradores e as chaves da loja
+(cifradas com o `SECRET`): **backup + `SECRET` = acesso a todas as chaves salvas**. Por isso o `SECRET`/`.env` fica no
+gerenciador de senhas e nunca na mesma pasta, disco ou conta de nuvem dos backups.
+
+Uma vez só, no seu computador (não no servidor): `age-keygen -o chave-backup.txt`. Guarde `chave-backup.txt` no
+gerenciador de senhas (sem ela os backups não abrem) e copie só a linha `public key: age1...` para o servidor.
 
 ```sh
+sudo apt-get install -y age
 cd ~/funil
-docker compose exec -T postgres pg_dump -U owner -d funil -Fc > backup-$(date +%F).dump
-docker run --rm -v funil_app-data:/data -v "$PWD":/backup alpine tar czf /backup/arquivos-$(date +%F).tgz -C /data .
+CHAVE=age1...   # a chave PÚBLICA
+docker compose exec -T postgres pg_dump -U owner -d funil -Fc | age -r "$CHAVE" > banco-$(date +%F).dump.age
+docker run --rm -v funil_app-data:/data alpine tar cz -C /data . | age -r "$CHAVE" > arquivos-$(date +%F).tgz.age
 ```
 
-O primeiro arquivo é o banco; o segundo, os PDFs dos produtos (pasta `DATA_DIR`, volume `funil_app-data`).
+O primeiro arquivo é o banco; o segundo, os PDFs dos produtos (pasta `DATA_DIR`, volume `funil_app-data`). Copie os
+dois para fora do servidor (ex.: `rclone` para um bucket) e apague as cópias antigas do servidor.
 
-**Restaurar** num servidor novo (mesmo `.env`): suba só o banco, restaure e depois suba o resto:
+**Restaurar** num servidor novo, com o mesmo `SECRET` (tirado do gerenciador de senhas) e a chave privada do age:
 
 ```sh
+age -d -i chave-backup.txt banco-AAAA-MM-DD.dump.age > banco.dump
+age -d -i chave-backup.txt arquivos-AAAA-MM-DD.tgz.age > arquivos.tgz
 docker compose up -d postgres
-docker compose exec -T postgres pg_restore -U owner -d funil --clean --if-exists < backup-AAAA-MM-DD.dump
-docker run --rm -v funil_app-data:/data -v "$PWD":/backup alpine tar xzf /backup/arquivos-AAAA-MM-DD.tgz -C /data
+docker compose exec -T postgres pg_restore -U owner -d funil --clean --if-exists --no-privileges < banco.dump
+docker run --rm -v funil_app-data:/data -v "$PWD":/backup alpine tar xzf /backup/arquivos.tgz -C /data
 docker run --rm -v funil_app-data:/data alpine chown -R 1000:1000 /data
 docker compose up -d --build
+rm banco.dump arquivos.tgz
 ```
 
-**Atualizar:**
+`--no-privileges` pula as permissões do papel `app` gravadas no dump (sem ele, o `pg_restore` mostra erros de
+`GRANT ... TO app` quando o papel ainda não existe no servidor novo; são esperados e inofensivos). O app recria o
+papel `app` e as permissões sozinho ao iniciar (migração).
+
+**Atualizar** (faça o backup antes). Uma vez por mês, mesmo sem versão nova do projeto, para receber as correções de
+segurança das imagens base (Node, Postgres e Caddy ficam fixados por versão menor, ex.: `postgres:17.12`; o `pull`
+traz as correções dessa versão):
 
 ```sh
 cd ~/funil
 git pull
-docker compose up -d --build
+docker compose pull
+docker compose build --pull
+docker compose up -d
 ```
 
 As migrações do banco rodam sozinhas no início do app. Confira `docker compose logs app` (deve aparecer
-`migrate: ok`) e o `/api/health`.
+`migrate: ok`) e o `/api/health`. Mudanças de versão menor das imagens (ex.: `postgres:17.13`) chegam pelo `git pull`.
 
 ## 11. Várias lojas (`MODE=multi`)
 
-Cada loja fica em `<slug>.PLATFORM_DOMAIN` (ou num domínio próprio cadastrado na loja).
+Cada loja fica em `<slug>.PLATFORM_DOMAIN`. Uma loja também pode ter domínio próprio (`store-create ... --domain
+loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes listados no Caddyfile (item 3).
 
 1. No `.env`: `MODE=multi`, `PLATFORM_DOMAIN=plataforma.com.br` e `DOMAIN=plataforma.com.br` (ou outro nome do
    painel).
@@ -228,10 +275,12 @@ Cada loja fica em `<slug>.PLATFORM_DOMAIN` (ou num domínio próprio cadastrado 
    docker compose exec app store-create --name "Minha Loja" --slug minhaloja --owner-email dono@exemplo.com
    ```
 
-3. HTTPS dos subdomínios. Duas opções:
-   - **Lista fixa (sem plugin):** em `deploy/Caddyfile`, troque a primeira linha por
-     `{$DOMAIN}, minhaloja.plataforma.com.br, outraloja.plataforma.com.br {` e reinicie o Caddy
-     (`docker compose restart caddy`). Cada nome precisa de um registro DNS apontando para o servidor.
+3. HTTPS dos subdomínios e domínios próprios. Duas opções:
+   - **Lista fixa (sem plugin):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (fora do git), ponha
+     `CADDYFILE=Caddyfile.local` no `.env` e, no `Caddyfile.local`, troque a primeira linha por
+     `{$DOMAIN}, minhaloja.plataforma.com.br, outraloja.plataforma.com.br, loja.com.br {` (subdomínios e domínios
+     próprios das lojas). Depois `docker compose up -d caddy`. Cada nome precisa de um registro DNS apontando para o
+     servidor; o Caddy emite um certificado para cada um.
    - **Curinga `*.plataforma.com.br` (opcional, desafio DNS):** o certificado curinga exige um Caddy com o plugin do
      seu DNS. Com Cloudflare: monte a imagem de `deploy/caddy-dns.Dockerfile`, crie um token da Cloudflare com
      permissão *Zone → DNS → Edit*, e num `compose.override.yaml`:
@@ -246,25 +295,28 @@ Cada loja fica em `<slug>.PLATFORM_DOMAIN` (ou num domínio próprio cadastrado 
      ```
 
      No `.env`: `CADDYFILE=Caddyfile.multi` e `CLOUDFLARE_API_TOKEN=...`; no DNS, um registro `*` (curinga) apontando
-     para o servidor. Depois `docker compose up -d --build`.
+     para o servidor. Depois `docker compose up -d --build`. Domínios próprios de lojas entram como blocos extras numa
+     cópia `deploy/Caddyfile.local` do `Caddyfile.multi` (`loja.com.br { reverse_proxy app:3000 }`).
 4. No modo multi, o SMTP de cada loja só aceita servidores públicos nas portas 587, 465, 2525 ou 25.
 
 ## 12. Problemas comuns
 
 - **Pagamento com cartão sempre recusado com "Requisição recusada." (HTTP 403):** algo entre o navegador e o app está
   reescrevendo o **Host** (proxy da Cloudflare com regra de Host, outro proxy na frente, `header_up Host` no
-  Caddyfile). O Host tem que chegar igual ao endereço do checkout. Volte o Caddyfile ao original e veja a seção 2.
+  Caddyfile). O Host tem que chegar igual ao endereço do checkout. Compare seu `Caddyfile.local` com o
+  `deploy/Caddyfile` original e veja a seção 2.
 - **"Use uma conexão segura (HTTPS) para pagar com cartão":** o app não está recebendo o `X-Forwarded-Proto: https`
   do Caddy. Confira `TRUST_PROXY` (1 com o Caddy do compose; 2 com a Cloudflare ligada, seção 2).
 - **Comprador vê "Confira o número de WhatsApp" no Pix do Asaas ou no cartão:** o Asaas recusou o celular. Ele exige
   celular brasileiro válido com DDD (11 dígitos, ex.: 11987654321). Peça ao comprador para corrigir; não é erro de
   configuração.
-- **"Chave recusada" ao conectar o Asaas ou o Meta, com a chave certa:** quase sempre caractere a mais na cópia
-  (espaço, quebra de linha, aspas, caractere invisível vindo de WhatsApp, Word ou bloco de notas). Copie de novo
-  direto do site do Asaas / Meta e cole no painel. Confira também se escolheu **produção** com chave de produção (a de
-  sandbox começa diferente e só vale no sandbox).
-- **O app não sobe e o log diz `APP_DB_PASSWORD`:** gere com `openssl rand -hex 24` (a imagem recusa senhas curtas e
-  os valores de desenvolvimento).
+- **O painel não aceita a chave do Asaas ou o token do Meta, mesmo sendo a certa:** quase sempre caractere a mais na
+  cópia (espaço, quebra de linha, aspas, caractere invisível vindo de WhatsApp, Word ou bloco de notas). Copie de
+  novo direto do site do Asaas / Meta e cole no painel. No Asaas, confira também se o ambiente escolhido (**produção**
+  ou sandbox) é o da chave: a chave de um não vale no outro.
+- **O app não sobe e o log diz `APP_DB_PASSWORD` ou `POSTGRES_PASSWORD`:** gere com `openssl rand -hex 24` (a imagem
+  recusa senhas com menos de 16 caracteres e os valores de desenvolvimento). Trocar `POSTGRES_PASSWORD` depois da
+  primeira subida exige trocar também a senha no banco (`ALTER ROLE owner PASSWORD '...'`).
 - **O log diz "Variáveis de ambiente inválidas":** a mensagem lista o nome da variável. Corrija no `.env` e rode
   `docker compose up -d` de novo.
 - **Certificado HTTPS não sai:** o DNS ainda não aponta para o servidor, as portas 80/443 estão fechadas no firewall
@@ -274,11 +326,14 @@ Cada loja fica em `<slug>.PLATFORM_DOMAIN` (ou num domínio próprio cadastrado 
 
 ## Sobre a imagem
 
-- `deploy/Dockerfile`: monta com Bun (instalação e `next build`) e roda só com **Node 22** (`node:22-slim`), como o
-  usuário não-root `node`. O Bun não vai para a imagem final: as duas linhas de comando que rodam no servidor
+- `deploy/Dockerfile`: monta com Bun (instalação e `next build`) e roda só com **Node 22** (`node:22.23-slim`), como o
+  usuário não-root `node`, com o `tini` como PID 1 (repassa o sinal de parada; o compose dá 30 s para encerrar). O Bun não vai para a imagem final: as duas linhas de comando que rodam no servidor
   (migrações e `store-create`) são empacotadas para Node no build (menos de 1 MB, contra ~107 MB do binário do Bun).
 - `deploy/entrypoint.sh`: aplica as migrações com `OWNER_DATABASE_URL` (papel dono, superusuário do Postgres: algumas
   migrações copiam dados entre lojas e precisam passar por cima do isolamento por loja) e inicia o servidor com
-  `DATABASE_URL` (papel `app`, sujeito ao isolamento). As migrações podem rodar quantas vezes for: a cada início.
+  `DATABASE_URL` (papel `app`, sujeito ao isolamento), já sem `OWNER_DATABASE_URL` no ambiente. As migrações podem
+  rodar quantas vezes for (a cada início) e são serializadas por uma trava no banco (dois containers subindo juntos
+  não aplicam a mesma migration duas vezes).
 - Verificação: `tests/smoke.sh` monta a imagem, sobe a pilha inteira com `DOMAIN=localhost` e faz uma compra de ponta
-  a ponta (setup, produto, oferta, Pix manual, liberação, e-mail e download do PDF).
+  a ponta (setup, produto com PDF de 46 MB, oferta, Pix manual, liberação, e-mail e download do PDF carimbado),
+  medindo o pico de memória do container.

@@ -40,8 +40,9 @@ Copiadas pelo `output: "standalone"` do Next para `/app/node_modules` da imagem:
 | @img/sharp-libvips-linux-x64 | 1.3.4 | LGPL-3.0-or-later (biblioteca compartilhada, sem modificação; usada pelo Next para otimizar imagens) |
 | @img/colour | 1.1.0 | MIT |
 
-Imagens base do Docker: `node:22-slim` (Node.js, MIT; Debian, várias licenças livres), `postgres:17` (PostgreSQL
-License), `caddy:2` (Apache-2.0). O build usa `oven/bun` (MIT), que não vai para a imagem final.
+Imagens base do Docker: `node:22.23-slim` (Node.js, MIT; Debian, várias licenças livres), com o pacote `tini` do
+Debian (MIT), `postgres:17.12` (PostgreSQL License), `caddy:2.11` (Apache-2.0). O build usa `oven/bun:1.4.4` (MIT),
+que não vai para a imagem final.
 
 ## Ferramentas de desenvolvimento (não vão para a imagem)
 

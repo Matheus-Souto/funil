@@ -3,8 +3,8 @@
 # tem). Passo a passo em docs/instalacao.md ("Várias lojas"). Exemplo com Cloudflare: imagem de deploy/caddy-dns.Dockerfile
 # e CLOUDFLARE_API_TOKEN (permissão Zone:DNS:Edit) no ambiente do serviço caddy.
 #
-# Sem desafio DNS: apague o bloco do curinga e liste cada loja no primeiro bloco, separadas por vírgula
-# (ex.: {$DOMAIN}, loja1.plataforma.com.br, loja2.plataforma.com.br); cada nome recebe o próprio certificado por HTTP.
+# Não edite este arquivo (vem do git): para personalizar, copie para deploy/Caddyfile.local (fora do git) e use
+# CADDYFILE=Caddyfile.local. Sem desafio DNS, use a lista fixa de lojas descrita em docs/instalacao.md ("Várias lojas").
 {$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy app:3000

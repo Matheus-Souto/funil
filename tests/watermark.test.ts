@@ -3,8 +3,6 @@ import { PDFDocument, StandardFonts, degrees } from "pdf-lib";
 import { storage } from "@/lib/storage";
 import {
   FAILURE_QUARANTINE_MS,
-  WATERMARK_CONCURRENCY,
-  WATERMARK_MAX_QUEUE,
   WatermarkFailedError,
   deleteWatermarks,
   ensureWatermarkedPdf,
@@ -15,7 +13,7 @@ import {
   watermarkText,
   type WatermarkRequest,
 } from "@/lib/delivery/watermark";
-import { PdfBusyError, inspectInSandbox, watermarkInSandbox, watermarkLimiter } from "@/lib/pdf/sandbox";
+import { PDF_CONCURRENCY, PDF_MAX_QUEUE, PDF_WORKER_HEAP_MB, PdfBusyError, inspectInSandbox, pdfLimiter, watermarkInSandbox } from "@/lib/pdf/sandbox";
 import { pageOperators, pageTexts } from "./pdf-text";
 
 async function makeDoc(pages: number, opts: { rotate?: number; size?: [number, number] } = {}): Promise<Uint8Array> {
@@ -136,7 +134,7 @@ describe("ensureWatermarkedPdf (cache em storage, fila e quarentena)", () => {
     expect(await storage.exists(other)).toBe(false);
   });
 
-  test(`uma geração por vez; até ${WATERMARK_MAX_QUEUE} esperando; acima disso PdfBusyError na hora`, async () => {
+  test(`uma geração por vez; até ${PDF_MAX_QUEUE} esperando; acima disso PdfBusyError na hora`, async () => {
     const fileKey = await putProduct();
     let running = 0;
     let peak = 0;
@@ -152,17 +150,46 @@ describe("ensureWatermarkedPdf (cache em storage, fila e quarentena)", () => {
     const until = async (cond: () => boolean) => {
       while (!cond()) await tick();
     };
-    const total = 1 + WATERMARK_MAX_QUEUE;
+    const total = 1 + PDF_MAX_QUEUE;
     const all = Array.from({ length: total }, () => ensureWatermarkedPdf(req(fileKey)));
-    await until(() => gates.length === WATERMARK_CONCURRENCY && watermarkLimiter.queued === WATERMARK_MAX_QUEUE);
+    await until(() => gates.length === PDF_CONCURRENCY && pdfLimiter.queued === PDF_MAX_QUEUE);
     await expect(ensureWatermarkedPdf(req(fileKey))).rejects.toBeInstanceOf(PdfBusyError);
-    expect(running).toBe(WATERMARK_CONCURRENCY);
+    expect(running).toBe(PDF_CONCURRENCY);
     for (let released = 0; released < total; released++) {
       await until(() => gates.length > 0);
       gates.shift()!();
     }
     await Promise.all(all);
-    expect(peak).toBe(WATERMARK_CONCURRENCY);
+    expect(peak).toBe(PDF_CONCURRENCY);
+  });
+
+  // Teto do container (compose.yaml, 768 MB): um único Worker de PDF por vez no processo, seja carimbo ou inspeção do
+  // upload; com dois limitadores separados, um upload grande e um carimbo somavam 2 Workers e podiam matar o container.
+  test("fila única: a inspeção do upload espera o carimbo em andamento; Worker com teto de 192 MB", async () => {
+    expect(PDF_WORKER_HEAP_MB).toBe(192);
+    expect(PDF_CONCURRENCY).toBe(1);
+    const fileKey = await putProduct();
+    const gates: Array<() => void> = [];
+    setWatermarkerForTests(async (pdf) => {
+      await new Promise<void>((resolve) => gates.push(resolve));
+      return pdf;
+    });
+    const tick = () => new Promise<void>((r) => setImmediate(r));
+    const until = async (cond: () => boolean) => {
+      while (!cond()) await tick();
+    };
+    const wm = ensureWatermarkedPdf(req(fileKey));
+    await until(() => gates.length === 1);
+    let inspected = false;
+    const insp = inspectInSandbox(await makeDoc(1)).then((r) => {
+      inspected = true;
+      return r;
+    });
+    await until(() => pdfLimiter.queued === 1);
+    expect(inspected).toBe(false);
+    gates.shift()!();
+    await wm;
+    expect(await insp).toEqual({ pages: 1 });
   });
 
   test("falha de geração fica em quarentena por 10 min por item (não tenta de novo antes)", async () => {

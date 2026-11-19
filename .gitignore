@@ -8,3 +8,4 @@ data/
 .superpowers/
 next-env.d.ts
 *.tsbuildinfo
+deploy/Caddyfile.local
