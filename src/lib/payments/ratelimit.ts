@@ -1,11 +1,10 @@
 // Limites contra teste de cartão. IP e e-mail ficam no Postgres (`rate_limit`, sem RLS, global entre lojas);
 // a impressão digital do cartão fica SÓ em memória (Map com expiração) e nunca é persistida nem logada.
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import { and, eq, gt, lt, sql } from "drizzle-orm";
 import { db, type Db, type Tx } from "@/lib/db/client";
 import { rateLimit } from "@/lib/db/schema";
-import { requireSecret } from "@/lib/env";
 
 /** Janela fixa alinhada ao relógio. */
 function windowStart(now: Date, windowSec: number): Date {
@@ -93,9 +92,15 @@ function maybeCleanup(now: Date): void {
 const MAX_ENTRIES = 100_000;
 const fingerprints = new Map<string, { count: number; resetAt: number }>();
 
-/** HMAC-SHA256(SECRET, número só com dígitos): não reversível sem o SECRET. */
+/**
+ * Chave do HMAC, aleatória por processo: o mapa só vive na memória deste processo (some a cada reinício), então
+ * não há o que compartilhar, e o serviço de cartão não depende de segredo do app.
+ */
+const FINGERPRINT_KEY = randomBytes(32);
+
+/** HMAC-SHA256(chave do processo, número só com dígitos): não reversível sem a chave, que nunca sai da memória. */
 function fingerprint(number: string): string {
-  return createHmac("sha256", requireSecret()).update(number.replace(/\D/g, "")).digest("base64url");
+  return createHmac("sha256", FINGERPRINT_KEY).update(number.replace(/\D/g, "")).digest("base64url");
 }
 
 /** Conta uma tentativa do cartão e devolve se ainda está dentro do limite (janela de `windowSec` a partir da 1ª). */
