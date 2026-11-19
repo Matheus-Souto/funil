@@ -33,8 +33,8 @@ describe("acceptFrameMessage", () => {
   });
 });
 
-test("frameFieldNames: só nomes conhecidos (inclui o CPF do comprador), sem repetir", () => {
-  expect(frameFieldNames([["cardNumber"], ["cpf"], ["__proto__"], ["customer.phone"], ["cardNumber"], ["cep", "x"]])).toEqual(["cardNumber", "cpf", "cep"]);
+test("frameFieldNames: só nomes conhecidos (inclui os do comprador), sem repetir", () => {
+  expect(frameFieldNames([["cardNumber"], ["cpf"], ["__proto__"], ["customer.phone"], ["phone"], ["cardNumber"], ["cep", "x"]])).toEqual(["cardNumber", "cpf", "phone", "cep"]);
   expect(frameFieldNames(["holderCpf", "toString", "installments"])).toEqual(["holderCpf", "installments"]);
 });
 
@@ -114,9 +114,33 @@ describe("controlador do iframe", () => {
   test("ready dentro do prazo cancela o timer de indisponível", () => {
     const h = harness();
     h.ctrl.start();
+    const readyTimer = h.timers.find((x) => x.ms === FRAME_READY_TIMEOUT_MS)!;
+    expect(readyTimer.live).toBe(true);
     h.send({ t: "funil-card:ready" });
+    expect(readyTimer.live).toBe(false);
     h.fire(FRAME_READY_TIMEOUT_MS);
     expect(h.ctrl.status).toBe("ready");
+    expect(h.statuses).toEqual(["ready"]);
+  });
+
+  test("iframe recarregado (novo ready) com pay pendente: o pendente termina já (null), sem esperar o prazo", async () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    h.ctrl.start();
+    h.send({ t: "funil-card:ready" });
+    const p = h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725" });
+    const payTimer = h.timers.at(-1)!;
+    h.send({ t: "funil-card:ready" });
+    expect(await p).toBeNull();
+    expect(payTimer.live).toBe(false);
+    expect(h.posted.filter((m) => m.t === "funil-card:config")).toHaveLength(2); // o formulário novo recebe o total
+    // A resposta do formulário antigo, se viesse, já não casa com nada.
+    const q = h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725" });
+    let settled = false;
+    void q.then(() => (settled = true));
+    h.send({ t: "funil-card:result", id: "id-1", status: "approved" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
   });
 
   test("mensagem de outra origem ou de outro frame é ignorada (inclusive ready)", () => {
@@ -149,8 +173,15 @@ describe("controlador do iframe", () => {
     h.send({ t: "funil-card:validated", id: "id-2", ok: true, fields: [] }); // tipo errado
     h.send({ t: "funil-card:result", id: "id-2", status: "declined", last4: "1111" });
     expect(await p).toEqual({ t: "funil-card:result", id: "id-2", status: "declined", last4: "1111" });
-    // a mesma resposta de novo: já não há pendência
+    // a mesma resposta de novo: já não há pendência, e ela não responde o próximo pay
+    const p2 = h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725" });
+    let settled = false;
+    void p2.then(() => (settled = true));
     h.send({ t: "funil-card:result", id: "id-2", status: "approved" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    h.send({ t: "funil-card:result", id: "id-3", status: "approved" });
+    expect(await p2).toEqual({ t: "funil-card:result", id: "id-3", status: "approved" });
   });
 
   test("sem resposta no prazo: validate e pay resolvem null e a resposta atrasada é ignorada", async () => {
@@ -168,7 +199,15 @@ describe("controlador do iframe", () => {
     pTimer.live = false;
     pTimer.fn();
     expect(await p).toBeNull();
+    // a resposta atrasada não vale para o pay seguinte
+    const p3 = h.ctrl.pay({ orderPublicId: "pub", ticket: "tk", buyerCpf: "52998224725" });
+    let settled = false;
+    void p3.then(() => (settled = true));
     h.send({ t: "funil-card:result", id: "id-2", status: "approved" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    h.send({ t: "funil-card:result", id: "id-3", status: "declined", last4: "4444" });
+    expect((await p3)?.status).toBe("declined");
   });
 
   test("dispose: pendências resolvem null e nada mais é aceito", async () => {
@@ -188,8 +227,9 @@ describe("controlador do iframe", () => {
 const T0 = 1_800_000_000_000;
 type PayArgs = { orderPublicId: string; ticket: string };
 
-function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameResult | null)[]; renew?: { ok: true; ticket: string } | { ok: false; message: string } }) {
-  const calls = { start: 0, renew: [] as string[], pay: [] as PayArgs[] };
+type Renewal = { ok: true; ticket: string } | { ok: false; message: string; definitive: boolean };
+function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameResult | null)[]; renew?: Renewal }) {
+  const calls = { start: 0, renew: [] as string[], renewTickets: [] as string[], pay: [] as PayArgs[] };
   const results = [...opts.results];
   return {
     calls,
@@ -202,8 +242,9 @@ function flow(opts: { order?: CardOrder | null; now?: number; results: (FrameRes
           calls.start++;
           return { ok: true as const, publicId: "pub-new", cardTicket: "ticket-new" };
         },
-        renew: async (publicId) => {
+        renew: async ({ publicId, ticket }) => {
           calls.renew.push(publicId);
+          calls.renewTickets.push(ticket);
           return opts.renew ?? { ok: true as const, ticket: "ticket-renewed" };
         },
         pay: async (a) => {
@@ -259,6 +300,7 @@ describe("payWithFrame", () => {
     const r = await f.run();
     expect(f.calls.start).toBe(0);
     expect(f.calls.renew).toEqual(["pub-old"]);
+    expect(f.calls.renewTickets).toEqual(["ticket-old"]); // a renovação apresenta o bilhete anterior
     expect(f.calls.pay).toEqual([{ orderPublicId: "pub-old", ticket: "ticket-renewed" }]);
     expect(r.order).toEqual({ publicId: "pub-old", sig: "sig-1", ticket: "ticket-renewed", ticketAt: T0 });
   });
@@ -287,21 +329,40 @@ describe("payWithFrame", () => {
     const f = flow({ results: [result({ status: "error", ticketExpired: true }), result({ status: "error", ticketExpired: true })] });
     const r = await f.run();
     expect(f.calls.pay).toHaveLength(2);
-    expect(r.outcome).toEqual({ kind: "failed", message: "Não foi possível processar o pagamento. Tente de novo em instantes.", cpf: false });
+    expect(r.outcome).toEqual({ kind: "failed", message: "Não foi possível processar o pagamento. Tente de novo em instantes.", marks: [] });
   });
 
-  test("renovação falha: mensagem genérica, sem novo pay; pedido esquecido para a próxima tentativa", async () => {
-    const f = flow({ results: [result({ status: "error", ticketExpired: true })], renew: { ok: false, message: "Não foi possível continuar agora. Tente de novo em instantes." } });
+  test("renovação recusada de vez (pedido não pendente, bilhete recusado): mensagem genérica, sem novo pay, pedido esquecido", async () => {
+    const msg = "Não foi possível continuar agora. Tente de novo em instantes.";
+    const f = flow({ results: [result({ status: "error", ticketExpired: true })], renew: { ok: false, message: msg, definitive: true } });
     const r = await f.run();
     expect(f.calls.pay).toHaveLength(1);
-    expect(r.outcome).toEqual({ kind: "failed", message: "Não foi possível continuar agora. Tente de novo em instantes.", cpf: false });
+    expect(r.outcome).toEqual({ kind: "failed", message: msg, marks: [] });
     expect(r.order).toBeNull();
     const old = { publicId: "pub-old", sig: "sig-1", ticket: "t", ticketAt: T0 - TICKET_RENEW_AFTER_MS - 1 };
-    const g = flow({ order: old, results: [], renew: { ok: false, message: "Não foi possível continuar agora. Tente de novo em instantes." } });
+    const g = flow({ order: old, results: [], renew: { ok: false, message: msg, definitive: true } });
     const r2 = await g.run();
     expect(g.calls.pay).toEqual([]);
     expect(r2.outcome.kind).toBe("failed");
     expect(r2.order).toBeNull();
+  });
+
+  test("renovação com erro passageiro: mensagem genérica, sem novo pay, e o pedido fica para a próxima tentativa", async () => {
+    const msg = "Não foi possível continuar agora. Tente de novo em instantes.";
+    const f = flow({ results: [result({ status: "error", ticketExpired: true })], renew: { ok: false, message: msg, definitive: false } });
+    const r = await f.run();
+    expect(f.calls.pay).toHaveLength(1);
+    expect(r.outcome).toEqual({ kind: "failed", message: msg, marks: [] });
+    expect(r.order).toEqual({ publicId: "pub-new", sig: "sig-1", ticket: "ticket-new", ticketAt: T0 });
+    const old = { publicId: "pub-old", sig: "sig-1", ticket: "t", ticketAt: T0 - TICKET_RENEW_AFTER_MS - 1 };
+    const r2 = await flow({ order: old, results: [], renew: { ok: false, message: msg, definitive: false } }).run();
+    expect(r2.order).toEqual(old);
+  });
+
+  test("celular recusado pelo servidor: marca o WhatsApp no app e esquece o pedido (o corrigido cria outro)", async () => {
+    const r = await flow({ results: [result({ status: "error", message: "Confira o campo marcado para continuar.", fields: [["phone"]] })] }).run();
+    expect(r.outcome).toEqual({ kind: "failed", message: "Confira o campo marcado para continuar.", marks: ["phone"] });
+    expect(r.order).toBeNull();
   });
 
   test("recusa: tela de recusa com os 4 últimos; pedido fica para a nova tentativa", async () => {
@@ -312,16 +373,17 @@ describe("payWithFrame", () => {
 
   test("erros: mensagem do iframe; CPF do comprador marcado quando vem `cpf`; captcha fica no iframe", async () => {
     const withCpf = await flow({ results: [result({ status: "error", message: "Confira os 2 campos marcados para continuar.", fields: [["cpf"], ["cep"], ["evil"]] })] }).run();
-    expect(withCpf.outcome).toEqual({ kind: "failed", message: "Confira os 2 campos marcados para continuar.", cpf: true });
+    expect(withCpf.outcome).toEqual({ kind: "failed", message: "Confira os 2 campos marcados para continuar.", marks: ["cpf"] });
+    expect(withCpf.order?.publicId).toBe("pub-new"); // CPF recusado: o corrigido muda a assinatura de qualquer forma
     const unavailable = await flow({ results: [result({ status: "unavailable", message: "Pagamento com cartão indisponível no momento" })] }).run();
-    expect(unavailable.outcome).toEqual({ kind: "failed", message: "Pagamento com cartão indisponível no momento", cpf: false });
+    expect(unavailable.outcome).toEqual({ kind: "failed", message: "Pagamento com cartão indisponível no momento", marks: [] });
     const captcha = await flow({ results: [result({ status: "error", captcha: true, message: "Muitas tentativas." })] }).run();
-    expect(captcha.outcome).toEqual({ kind: "failed", message: "Muitas tentativas.", cpf: false });
+    expect(captcha.outcome).toEqual({ kind: "failed", message: "Muitas tentativas.", marks: [] });
   });
 
   test("iframe não respondeu: mensagem genérica e o pedido fica", async () => {
     const r = await flow({ results: [null] }).run();
-    expect(r.outcome).toEqual({ kind: "failed", message: "Não foi possível processar o pagamento. Tente de novo em instantes.", cpf: false });
+    expect(r.outcome).toEqual({ kind: "failed", message: "Não foi possível processar o pagamento. Tente de novo em instantes.", marks: [] });
     expect(r.order?.publicId).toBe("pub-new");
   });
 

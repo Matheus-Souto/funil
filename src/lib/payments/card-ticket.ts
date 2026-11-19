@@ -42,30 +42,51 @@ export type CardTicketCheck = ({ ok: true } & CardTicket) | { ok: false; expired
  * futuro dão `expired: false`: nada além disso é revelado.
  */
 export function verifyCardTicketDetailed(token: string, key: string, now: Date = new Date()): CardTicketCheck {
-  const no = { ok: false, expired: false } as const;
-  if (!key || typeof token !== "string" || token.length > MAX_TOKEN_LEN) return no;
+  const r = inspect(token, key, now);
+  if (r === null) return { ok: false, expired: false };
+  if (r.e <= r.nowS) return { ok: false, expired: true };
+  return { ok: true, ...r.ticket };
+}
+
+/** Quanto tempo depois de vencido um bilhete ainda serve para pedir outro (renovação no checkout). */
+export const CARD_TICKET_RENEW_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Conteúdo de um bilhete íntegro, válido ou vencido há no máximo `CARD_TICKET_RENEW_WINDOW_MS`: só para a renovação
+ * (quem pede bilhete novo prova que já tinha um do mesmo pedido). Nunca serve para cobrar: o serviço usa
+ * `verifyCardTicketDetailed`.
+ */
+export function verifyCardTicketForRenewal(token: string, key: string, now: Date = new Date()): CardTicket | null {
+  const r = inspect(token, key, now);
+  if (r === null) return null;
+  if (r.e <= r.nowS - CARD_TICKET_RENEW_WINDOW_MS / 1000) return null;
+  return r.ticket;
+}
+
+/** Assinatura, forma canônica e conteúdo conferidos; `null` para qualquer defeito. Não olha o vencimento passado. */
+function inspect(token: string, key: string, now: Date): { ticket: CardTicket; e: number; nowS: number } | null {
+  if (!key || typeof token !== "string" || token.length > MAX_TOKEN_LEN) return null;
   const parts = token.split(".");
-  if (parts.length !== 2) return no;
+  if (parts.length !== 2) return null;
   const [payload, sig] = parts as [string, string];
-  if (!payload || !SIGNATURE.test(sig)) return no;
+  if (!payload || !SIGNATURE.test(sig)) return null;
   const given = Buffer.from(sig, "base64url");
   const expected = sign(payload, key);
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return no;
-  if (given.toString("base64url") !== sig) return no; // bits baixos do último caractere
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  if (given.toString("base64url") !== sig) return null; // bits baixos do último caractere
   let body: unknown;
   try {
     body = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
   } catch {
-    return no;
+    return null;
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return no;
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const { s, o, p, e } = body as Record<string, unknown>;
-  if (typeof s !== "string" || !UUID.test(s) || typeof o !== "string" || !UUID.test(o)) return no;
-  if (typeof p !== "string" || !PUBLIC_ID.test(p)) return no;
-  if (typeof e !== "number" || !Number.isInteger(e)) return no;
+  if (typeof s !== "string" || !UUID.test(s) || typeof o !== "string" || !UUID.test(o)) return null;
+  if (typeof p !== "string" || !PUBLIC_ID.test(p)) return null;
+  if (typeof e !== "number" || !Number.isInteger(e)) return null;
   const nowS = Math.floor(now.getTime() / 1000);
-  if (!Number.isFinite(nowS)) return no;
-  if (e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return no;
-  if (e <= nowS) return { ok: false, expired: true };
-  return { ok: true, storeId: s, orderId: o, publicId: p };
+  if (!Number.isFinite(nowS)) return null;
+  if (e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return null;
+  return { ticket: { storeId: s, orderId: o, publicId: p }, e, nowS };
 }

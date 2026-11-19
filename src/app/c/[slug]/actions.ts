@@ -65,20 +65,26 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
 }
 
 /**
- * Bilhete novo do mesmo pedido de cartão (CARD_ISOLATED=1): o anterior venceu ou está perto de vencer. Só para pedido
- * `card_asaas` pendente da loja do host; a regra fica em `checkout.renewCardTicket`.
+ * Bilhete novo do mesmo pedido de cartão (CARD_ISOLATED=1): o anterior venceu ou está perto de vencer. Exige o bilhete
+ * anterior; só para pedido `card_asaas` pendente da loja do host (regra em `renewCardTicket` / `checkout.renewCardTicket`).
+ * `definitive`: o pedido não serve mais (outro estado, outro tipo, bilhete recusado) e o checkout cria outro; erro
+ * passageiro (`false`) mantém o pedido para a próxima tentativa.
  */
-export async function renewCardTicketAction(input: { publicId: string }): Promise<{ ok: true; ticket: string } | { ok: false; message: string }> {
-  if (!env.CARD_ISOLATED || !env.CARD_TICKET_KEY) return { ok: false, message: GENERIC };
+export async function renewCardTicketAction(input: {
+  publicId: string;
+  ticket: string;
+}): Promise<{ ok: true; ticket: string } | { ok: false; message: string; definitive: boolean }> {
+  if (!env.CARD_ISOLATED || !env.CARD_TICKET_KEY) return { ok: false, message: GENERIC, definitive: false };
   const h = await headers();
   const store = await resolveStore(h.get("host") ?? "");
-  if (!store) return { ok: false, message: "Loja não encontrada" };
-  const publicId = input !== null && typeof input === "object" ? (input as { publicId?: unknown }).publicId : undefined;
+  if (!store) return { ok: false, message: GENERIC, definitive: false };
+  const body = input !== null && typeof input === "object" ? (input as { publicId?: unknown; ticket?: unknown }) : {};
   try {
-    return { ok: true, ticket: await renewCardTicket({ storeId: store.id }, { publicId }, env.CARD_TICKET_KEY) };
+    return { ok: true, ticket: await renewCardTicket({ storeId: store.id }, { publicId: body.publicId, ticket: body.ticket }, env.CARD_TICKET_KEY) };
   } catch (e) {
-    if (!(e instanceof ActionError)) log.error("checkout: erro inesperado ao renovar o bilhete do cartão", { error: e });
-    return { ok: false, message: GENERIC };
+    if (e instanceof ActionError) return { ok: false, message: GENERIC, definitive: e.code !== "provider_error" && e.code !== "rate_limited" };
+    log.error("checkout: erro inesperado ao renovar o bilhete do cartão", { error: e });
+    return { ok: false, message: GENERIC, definitive: false };
   }
 }
 

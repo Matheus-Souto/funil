@@ -1,7 +1,14 @@
 // Bilhete assinado do pedido (app emite, serviço de cartão confere). Sem banco: a chave vem por parâmetro.
 import { describe, expect, test } from "bun:test";
 import { createHmac, randomUUID } from "node:crypto";
-import { CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket, verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
+import {
+  CARD_TICKET_RENEW_WINDOW_MS,
+  CARD_TICKET_TTL_MS,
+  issueCardTicket,
+  verifyCardTicket,
+  verifyCardTicketDetailed,
+  verifyCardTicketForRenewal,
+} from "@/lib/payments/card-ticket";
 
 const KEY = "k".repeat(48);
 const NOW = new Date("2026-11-19T12:00:00Z");
@@ -138,5 +145,24 @@ describe("bilhete do pedido: motivo da recusa (verifyCardTicketDetailed)", () =>
     expect(verifyCardTicketDetailed(old, "outra-chave-".repeat(4), NOW)).toEqual({ ok: false, expired: false });
     expect(verifyCardTicketDetailed(old, KEY, new Date(Number.NaN))).toEqual({ ok: false, expired: false });
     expect(verifyCardTicketDetailed(42 as unknown as string, KEY, NOW)).toEqual({ ok: false, expired: false });
+  });
+});
+
+describe("bilhete do pedido: renovação (verifyCardTicketForRenewal)", () => {
+  test("válido ou vencido há até 24 h devolve o conteúdo; depois disso, forjado, outra chave ou malformado: null", () => {
+    const x = t();
+    const tk = issueCardTicket(x, KEY, NOW);
+    expect(CARD_TICKET_RENEW_WINDOW_MS).toBe(24 * 60 * 60 * 1000);
+    expect(verifyCardTicketForRenewal(tk, KEY, NOW)).toEqual(x);
+    const expiredAt = NOW.getTime() + CARD_TICKET_TTL_MS;
+    expect(verifyCardTicket(tk, KEY, new Date(expiredAt + 1000))).toBeNull();
+    expect(verifyCardTicketForRenewal(tk, KEY, new Date(expiredAt + 1000))).toEqual(x);
+    expect(verifyCardTicketForRenewal(tk, KEY, new Date(expiredAt + CARD_TICKET_RENEW_WINDOW_MS - 1000))).toEqual(x);
+    expect(verifyCardTicketForRenewal(tk, KEY, new Date(expiredAt + CARD_TICKET_RENEW_WINDOW_MS + 1000))).toBeNull();
+    expect(verifyCardTicketForRenewal(tk, "z".repeat(48), NOW)).toBeNull();
+    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 600 }, "outra-chave-".repeat(4)), KEY, NOW)).toBeNull();
+    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: "a b", e: exp(NOW) }), KEY, NOW)).toBeNull();
+    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 86_400 }), KEY, NOW)).toBeNull(); // longe demais no futuro
+    expect(verifyCardTicketForRenewal("", KEY, NOW)).toBeNull();
   });
 });

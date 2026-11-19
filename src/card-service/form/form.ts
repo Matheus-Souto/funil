@@ -4,8 +4,8 @@
 // - Mensagens: só aceita `event.origin` em `cfg.allowedOrigins` E `event.source === window.parent`; responde só à
 //   origem que mandou. `ready` e `height` vão a cada origem permitida (o navegador descarta as que não batem).
 // - `pay`: um por vez (o que chega durante outro recebe erro genérico); id repetido é ignorado. Depois de um
-//   `result`, `pay` para OUTRO pedido só passa se o comprador mexeu no iframe desde então: um pai comprometido não
-//   reusa sozinho o cartão que ficou nos campos. POST relativo /api/card (mesma origem), com prazo; leva o `storeId`
+//   `result` em que o servidor pode ter cobrado (`mayHaveCharged`), `pay` para OUTRO pedido só passa se o comprador
+//   mexeu no iframe desde então: um pai comprometido não reusa sozinho o cartão que ficou nos campos. POST relativo /api/card (mesma origem), com prazo; leva o `storeId`
 //   da página, que o servidor confere com a loja do bilhete.
 //
 // DADOS DO CARTÃO: número, validade e CVV só existem nos inputs e, durante o POST, em variáveis locais que são soltas
@@ -16,6 +16,7 @@ import {
   attemptKey,
   attemptSig,
   buildCardBody,
+  FIELD_NAMES,
   fieldErrors,
   fieldsMessage,
   GENERIC_MESSAGE,
@@ -27,6 +28,7 @@ import {
   maskCvv,
   maskExpiry,
   maskHolderName,
+  mayHaveCharged,
   NETWORK_MESSAGE,
   newAttemptKey,
   serverFieldMessage,
@@ -252,7 +254,7 @@ export function mountCardForm(deps: FormDeps): void {
   let turnstileWidget: string | undefined;
   let turnstileLoading = false;
   let turnstileFailed = false;
-  /** Pedido do último `result` de um `pay` processado, e se o comprador editou algum campo desde então. */
+  /** Pedido do último `result` que pode ter cobrado, e se o comprador editou algum campo desde então. */
   let lastOrder: string | null = null;
   let editedSinceResult = false;
   form.addEventListener("input", () => (editedSinceResult = true));
@@ -326,14 +328,15 @@ export function mountCardForm(deps: FormDeps): void {
   }
 
   // ---- pagamento ----
-  async function pay(msg: { orderPublicId: string; ticket: string; buyerCpf: string }): Promise<ResultBody> {
-    if (cfg.storeId === null) return { status: "error", message: GENERIC_MESSAGE };
+  /** Resultado do `pay` e se o servidor pode ter cobrado (só então o cartão fica travado para outro pedido). */
+  async function pay(msg: { orderPublicId: string; ticket: string; buyerCpf: string }): Promise<{ out: ResultBody; charged: boolean }> {
+    if (cfg.storeId === null) return { out: { status: "error", message: GENERIC_MESSAGE }, charged: false };
     const v = readFields();
     const other = holderOther.checked;
     const local = showErrors(fieldErrors(v, other, now()));
     if (local.length > 0) {
       (f[local[0]!].control as HTMLElement).focus();
-      return { status: "error", message: fieldsMessage(local.length), fields: local.map((n) => [n]) };
+      return { out: { status: "error", message: fieldsMessage(local.length), fields: local.map((n) => [n]) }, charged: false };
     }
     attempt = attemptKey(attempt, attemptSig(msg.orderPublicId, v, other, installments), deps.newKey);
     const sentToken = turnstileToken;
@@ -374,7 +377,7 @@ export function mountCardForm(deps: FormDeps): void {
     } catch {
       // Sem resposta (rede caiu ou estourou o prazo): a mesma chave fica para a próxima tentativa com os mesmos dados
       // (se a cobrança chegou ao Asaas, não cobra de novo).
-      return { status: "error", message: NETWORK_MESSAGE };
+      return { out: { status: "error", message: NETWORK_MESSAGE }, charged: false };
     } finally {
       payload = null;
       clearTimeout(timer);
@@ -391,13 +394,13 @@ export function mountCardForm(deps: FormDeps): void {
     }
     if (out.fields) {
       const errors: Partial<Record<FieldName, string>> = {};
-      // `cpf` (titular = comprador) é campo do app: o app marca o dele; aqui só os campos do iframe.
-      for (const [n] of out.fields) if (n !== "cpf") errors[n as FieldName] = serverFieldMessage(n as FieldName);
+      // Campos do comprador (`cpf`, `phone`...) são do app, que marca os dele; aqui só os campos do iframe.
+      for (const [n] of out.fields) if ((FIELD_NAMES as readonly string[]).includes(n!)) errors[n as FieldName] = serverFieldMessage(n as FieldName);
       const names = showErrors(errors);
       if (names[0]) (f[names[0]].control as HTMLElement).focus();
     }
     if (out.captcha) showTurnstile();
-    return out;
+    return { out, charged: mayHaveCharged(res.status, out) };
   }
 
   function sendResult(id: string, origin: string, out: ResultBody): void {
@@ -425,6 +428,7 @@ export function mountCardForm(deps: FormDeps): void {
       }
       case "funil-card:validate": {
         const names = showErrors(fieldErrors(readFields(), holderOther.checked, now()));
+        if (names[0]) (f[names[0]].control as HTMLElement).focus();
         parent.postMessage({ t: "funil-card:validated", id: msg.id, ok: names.length === 0, fields: names }, origin);
         return;
       }
@@ -440,11 +444,16 @@ export function mountCardForm(deps: FormDeps): void {
         }
         busy = true;
         pay(msg)
-          .catch((): ResultBody => ({ status: "error", message: GENERIC_MESSAGE }))
-          .then((out) => {
+          // Falha inesperada: não se sabe se chegou a cobrar; trava como se tivesse.
+          .catch(() => ({ out: { status: "error", message: GENERIC_MESSAGE } as ResultBody, charged: true }))
+          .then(({ out, charged }) => {
             busy = false;
-            lastOrder = msg.orderPublicId;
-            editedSinceResult = false;
+            // Só depois de uma resposta que pode ter cobrado: erro de campo, bilhete, rede ou `unavailable` não travam
+            // (o comprador corrige o WhatsApp, o app cria outro pedido e o cartão nos campos segue valendo).
+            if (charged) {
+              lastOrder = msg.orderPublicId;
+              editedSinceResult = false;
+            }
             sendResult(msg.id, origin, out);
           });
         return;

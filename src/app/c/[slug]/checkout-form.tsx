@@ -12,6 +12,7 @@
 // `method="post"` para a própria página sem query, e o botão fica desabilitado até o componente hidratar.
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { CARD_GENERIC_MESSAGE, fieldsMessage } from "@/lib/card-frame/protocol";
 import { brl } from "@/lib/format";
 import { cardExpiryValid, normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 import s from "../../(design)/buyer.module.css";
@@ -22,6 +23,7 @@ import {
   FRAME_UNAVAILABLE_MESSAGE,
   createCardFrameController,
   frameFieldNames,
+  newFrameMsgId,
   payWithFrame,
   type CardFrameController,
   type CardOrder,
@@ -279,7 +281,7 @@ export function CheckoutForm(props: {
           const t = window.setTimeout(fn, ms);
           return () => window.clearTimeout(t);
         },
-        newId: () => crypto.randomUUID(),
+        newId: newFrameMsgId,
         onStatus: setFrameStatus,
         onHeight: (px) => {
           iframe.style.height = `${px}px`;
@@ -302,8 +304,8 @@ export function CheckoutForm(props: {
         if (frameCtrl.current === ctrl) frameCtrl.current = null;
       };
     },
-    // `frameKey`: "Tentar outro cartão" remonta o iframe (formulário limpo; o iframe exige gesto do comprador para
-    // pagar outro pedido com o cartão que ficou nos campos).
+    // `frameKey`: "Tentar outro cartão" remonta o iframe (formulário limpo). Hoje a tela de recusa já desmonta o
+    // formulário (e o iframe com ele); a chave garante a remontagem se isso mudar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [frameOrigin, frameSrc, frameKey],
   );
@@ -343,9 +345,12 @@ export function CheckoutForm(props: {
     setErrors(e);
     const keys = FIELD_ORDER.filter((k) => e[k]);
     const n = keys.length;
-    setFormError(message ?? (n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`));
+    setFormError(message ?? fieldsMessage(n));
     if (keys[0]) document.getElementById(keys[0])?.focus();
   }
+
+  /** Assinatura dos dados pessoais e do bump: muda -> pedido novo (nova tentativa de cartão reaproveita o pedido). */
+  const orderSig = () => JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
 
   const customerPayload = (m: Method) => ({
     name: v.name.trim(),
@@ -383,7 +388,7 @@ export function CheckoutForm(props: {
 
   async function payCard() {
     checkoutTracking.onAddPaymentInfo("card", total);
-    const sig = JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
+    const sig = orderSig();
     let publicId = order.current?.sig === sig ? order.current.publicId : null;
     if (!publicId) {
       const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId });
@@ -446,7 +451,7 @@ export function CheckoutForm(props: {
       if (Object.keys(e).length > 0) return showErrors(e, body.message === "Dados de pagamento inválidos" ? undefined : body.message);
     }
     if (body.captcha) setCaptcha(true);
-    setFormError(body.message ?? "Não foi possível processar o pagamento. Tente de novo em instantes.");
+    setFormError(body.message ?? CARD_GENERIC_MESSAGE);
   }
 
   /** CARD_ISOLATED: pedido (novo ou reaproveitado) + `pay` ao iframe; dados do cartão nunca passam por aqui. */
@@ -458,14 +463,14 @@ export function CheckoutForm(props: {
       return;
     }
     checkoutTracking.onAddPaymentInfo("card", total);
-    const sig = JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
+    const sig = orderSig();
     const buyerCpf = onlyDigits(v.cpf);
     const { outcome, order: next } = await payWithFrame({
       order: cardOrder.current,
       sig,
       now: () => Date.now(),
       start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId }),
-      renew: (publicId) => renewCardTicketAction({ publicId }),
+      renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });
     cardOrder.current = next;
@@ -480,9 +485,13 @@ export function CheckoutForm(props: {
       window.scrollTo({ top: 0 });
       return;
     }
-    if (outcome.cpf) {
-      setErrors({ cpf: "Confira este campo." });
-      document.getElementById("cpf")?.focus();
+    if (outcome.marks.length > 0) {
+      // Campos do comprador recusados pelo servidor, com as mensagens do fluxo de hoje.
+      const e: Partial<Record<FieldKey, string>> = {};
+      for (const k of outcome.marks) e[k] = k === "phone" ? "Confira o número de WhatsApp." : "Confira este campo.";
+      setErrors(e);
+      const first = FIELD_ORDER.find((k) => e[k]);
+      if (first) document.getElementById(first)?.focus();
     }
     setFormError(outcome.message);
   }
@@ -505,7 +514,7 @@ export function CheckoutForm(props: {
       const n = Object.keys(e).length + (checked.ok ? 0 : Math.max(1, frameFieldNames(checked.fields).length));
       if (n > 0) {
         setBusy(false);
-        return showErrors(e, n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`);
+        return showErrors(e, fieldsMessage(n));
       }
     } else if (Object.keys(e).length > 0) return showErrors(e);
     setErrors({});
@@ -646,7 +655,10 @@ export function CheckoutForm(props: {
               </p>
             ) : null}
 
-            {cardFrame ? <div ref={frameBox} className={s.cardFrameBox} hidden={method !== "card" || frameStatus === "unavailable"} /> : null}
+            {cardFrame ? (
+              // Carregando: esqueleto do tamanho aproximado do bloco (CSS), sem texto; `aria-busy` até o `ready`.
+              <div ref={frameBox} className={s.cardFrameBox} aria-busy={frameStatus === "loading"} hidden={method !== "card" || frameStatus === "unavailable"} />
+            ) : null}
             {/* Com o iframe, a nota "Os dados do cartão não ficam salvos." vem dentro dele. */}
             {method === "card" && isolated && frameStatus === "unavailable" ? (
               <p className={s.alert} role="alert">

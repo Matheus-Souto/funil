@@ -9,7 +9,19 @@
 // - `payWithFrame`: o fluxo do "Pagar" depois da validação (pedido novo ou reaproveitado, bilhete, `pay`, renovação
 //   única do bilhete vencido) e o desfecho para a tela.
 // Nada aqui vê dados do cartão: eles ficam no iframe; o app só manda o bilhete do pedido e o CPF do comprador.
-import { parseFrameMsg, type FrameMsg, type ParentMsg } from "@/lib/card-frame/protocol";
+import {
+  BUYER_FIELDS,
+  CARD_GENERIC_MESSAGE,
+  RESULT_FIELDS,
+  parseFrameMsg,
+  randomUuid,
+  type BuyerField,
+  type FrameMsg,
+  type ParentMsg,
+  type ResultField,
+} from "@/lib/card-frame/protocol";
+
+export { CARD_GENERIC_MESSAGE };
 
 /** Sem `ready` neste prazo, o cartão fica indisponível (DNS do `pagar.` faltando, serviço fora). */
 export const FRAME_READY_TIMEOUT_MS = 10_000;
@@ -21,8 +33,9 @@ export const FRAME_PAY_TIMEOUT_MS = 90_000;
 export const TICKET_RENEW_AFTER_MS = 25 * 60 * 1000;
 
 export const FRAME_UNAVAILABLE_MESSAGE = "Pagamento com cartão indisponível agora. Tente de novo em instantes ou pague com Pix.";
-/** Mensagem genérica do pagamento com cartão (a mesma do checkout de hoje). */
-export const CARD_GENERIC_MESSAGE = "Não foi possível processar o pagamento. Tente de novo em instantes.";
+
+/** Id de mensagem (UUID; sem `crypto.randomUUID` antes do iOS 15.4). */
+export const newFrameMsgId = (): string => randomUuid(crypto);
 
 export type FrameStatus = "loading" | "ready" | "unavailable";
 export type FrameValidated = Extract<FrameMsg, { t: "funil-card:validated" }>;
@@ -35,9 +48,9 @@ export function acceptFrameMessage(ev: { origin: string; source: unknown; data: 
   return parseFrameMsg(ev.data);
 }
 
-/** Nomes de campo que o app aceita do iframe: os do formulário do cartão mais `cpf` (o CPF do comprador, no app). */
-export const FRAME_FIELD_NAMES = ["cardNumber", "holderName", "expiry", "cvv", "holderCpf", "cep", "addressNumber", "installments", "cpf"] as const;
-export type FrameFieldName = (typeof FRAME_FIELD_NAMES)[number];
+/** Nomes de campo que o app aceita do iframe: os do formulário do cartão mais os do comprador (lista em protocol.ts). */
+export const FRAME_FIELD_NAMES = RESULT_FIELDS;
+export type FrameFieldName = ResultField;
 
 /** Filtra `fields` (lista simples ou grupos do `result`) para os nomes conhecidos, sem repetir, na ordem recebida. */
 export function frameFieldNames(fields: readonly (string | readonly string[])[]): FrameFieldName[] {
@@ -109,6 +122,13 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
     sentConfig = key;
     d.post({ t: "funil-card:config", totalCents: config.totalCents, maxInstallments: config.maxInstallments });
   };
+  const settleAll = () => {
+    for (const p of pending.values()) {
+      p.cancel();
+      p.resolve(null);
+    }
+    pending.clear();
+  };
   const wait = (kind: Pending["kind"], msg: Extract<ParentMsg, { id: string }>, ms: number): Promise<FrameMsg | null> => {
     if (disposed || status !== "ready") return Promise.resolve(null);
     return new Promise((resolve) => {
@@ -142,9 +162,11 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       if (!msg) return;
       switch (msg.t) {
         case "funil-card:ready":
-          // Também num recarregamento do iframe (ou um `ready` atrasado depois do prazo): o formulário novo precisa do total.
+          // Também num recarregamento do iframe (ou um `ready` atrasado depois do prazo): o formulário novo precisa do
+          // total, e o que estava pendente no formulário anterior nunca vai ser respondido (encerra já, sem esperar o prazo).
           cancelReady?.();
           cancelReady = null;
+          settleAll();
           setStatus("ready");
           sendConfig(true);
           return;
@@ -173,11 +195,7 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       disposed = true;
       cancelReady?.();
       cancelReady = null;
-      for (const p of pending.values()) {
-        p.cancel();
-        p.resolve(null);
-      }
-      pending.clear();
+      settleAll();
     },
   };
 }
@@ -196,48 +214,53 @@ export interface CardOrder {
 
 export type StartFailure = { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean };
 type StartLike = { ok: true; publicId: string; cardTicket?: string } | StartFailure;
-type Renewal = { ok: true; ticket: string } | { ok: false; message: string };
+/** `definitive`: o pedido não serve mais (outro estado/tipo, bilhete recusado); senão foi erro passageiro. */
+type Renewal = { ok: true; ticket: string } | { ok: false; message: string; definitive: boolean };
 
 export type PayOutcome =
   | { kind: "start_error"; result: StartFailure }
   | { kind: "go"; publicId: string }
   | { kind: "declined"; last4: string }
-  /** `cpf`: o servidor recusou o CPF do comprador (titular = comprador): o app marca o campo dele. */
-  | { kind: "failed"; message: string; cpf: boolean };
+  /** `marks`: campos do comprador (no app) que o servidor recusou (ex.: celular que o Asaas não aceita). */
+  | { kind: "failed"; message: string; marks: BuyerField[] };
 
-const failed = (message: string, cpf = false): PayOutcome => ({ kind: "failed", message, cpf });
+const failed = (message: string, marks: BuyerField[] = []): PayOutcome => ({ kind: "failed", message, marks });
 
 function outcomeOf(r: FrameResult | null, publicId: string): PayOutcome {
   if (r === null) return failed(CARD_GENERIC_MESSAGE);
   if (r.status === "approved" || r.status === "unknown") return { kind: "go", publicId };
   if (r.status === "declined") return { kind: "declined", last4: r.last4 ?? "" };
-  return failed(r.message ?? CARD_GENERIC_MESSAGE, frameFieldNames(r.fields ?? []).includes("cpf"));
+  const marks = frameFieldNames(r.fields ?? []).filter((n): n is BuyerField => (BUYER_FIELDS as readonly string[]).includes(n));
+  return failed(r.message ?? CARD_GENERIC_MESSAGE, marks);
 }
 
 /**
  * Cria (ou reaproveita) o pedido, paga pelo iframe e diz o desfecho. Devolve também o pedido a guardar para a próxima
  * tentativa (`null` = esquecer: a próxima cria outro).
  * - Pedido reaproveitado com bilhete de mais de 25 min: bilhete novo antes do `pay`.
- * - `ticketExpired`: bilhete novo e o `pay` de novo uma única vez, mesmo pedido. Renovação recusada: mensagem genérica.
+ * - `ticketExpired`: bilhete novo e o `pay` de novo uma única vez, mesmo pedido. Renovação recusada: mensagem genérica;
+ *   o pedido só é esquecido se a recusa for definitiva.
+ * - Celular recusado pelo servidor: o pedido é esquecido (como no fluxo antigo), e o corrigido gera outro.
  */
 export async function payWithFrame(d: {
   order: CardOrder | null;
   sig: string;
   now: () => number;
   start: () => Promise<StartLike>;
-  renew: (publicId: string) => Promise<Renewal>;
+  renew: (o: { publicId: string; ticket: string }) => Promise<Renewal>;
   pay: (args: { orderPublicId: string; ticket: string }) => Promise<FrameResult | null>;
 }): Promise<{ outcome: PayOutcome; order: CardOrder | null }> {
   let order = d.order !== null && d.order.sig === d.sig ? d.order : null;
-  const renew = async (o: CardOrder): Promise<CardOrder | string> => {
-    const r = await d.renew(o.publicId);
-    return r.ok ? { ...o, ticket: r.ticket, ticketAt: d.now() } : r.message;
+  const renew = async (o: CardOrder): Promise<{ order: CardOrder } | { outcome: PayOutcome; order: CardOrder | null }> => {
+    const r = await d.renew({ publicId: o.publicId, ticket: o.ticket });
+    if (r.ok) return { order: { ...o, ticket: r.ticket, ticketAt: d.now() } };
+    return { outcome: failed(r.message), order: r.definitive ? null : o };
   };
 
   if (order !== null && d.now() - order.ticketAt > TICKET_RENEW_AFTER_MS) {
     const r = await renew(order);
-    if (typeof r === "string") return { outcome: failed(r), order: null };
-    order = r;
+    if ("outcome" in r) return r;
+    order = r.order;
   }
   if (order === null) {
     const r = await d.start();
@@ -249,10 +272,11 @@ export async function payWithFrame(d: {
   let res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket });
   if (res?.status === "error" && res.ticketExpired === true) {
     const r = await renew(order);
-    if (typeof r === "string") return { outcome: failed(r), order: null };
-    order = r;
+    if ("outcome" in r) return r;
+    order = r.order;
     res = await d.pay({ orderPublicId: order.publicId, ticket: order.ticket });
     if (res?.status === "error" && res.ticketExpired === true) return { outcome: failed(CARD_GENERIC_MESSAGE), order };
   }
-  return { outcome: outcomeOf(res, order.publicId), order };
+  const outcome = outcomeOf(res, order.publicId);
+  return { outcome, order: outcome.kind === "failed" && outcome.marks.includes("phone") ? null : order };
 }

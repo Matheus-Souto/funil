@@ -4,6 +4,37 @@
 
 export const CARD_MSG_PREFIX = "funil-card:";
 
+// ---- nomes de campo e textos comuns ao iframe e ao checkout (uma lista só para os dois lados) ----
+
+/** Campos do formulário do iframe, na ordem da tela (os únicos nomes em `validated.fields`). */
+export const CARD_FORM_FIELDS = ["cardNumber", "holderName", "expiry", "cvv", "holderCpf", "cep", "addressNumber", "installments"] as const;
+export type CardFormField = (typeof CARD_FORM_FIELDS)[number];
+/** Campos do checkout (app) que o servidor pode recusar no pagamento: o iframe só repassa o nome, o app marca. */
+export const BUYER_FIELDS = ["name", "email", "phone", "cpf"] as const;
+export type BuyerField = (typeof BUYER_FIELDS)[number];
+/** Os únicos nomes aceitos em `result.fields` (dos dois lados). */
+export const RESULT_FIELDS = [...CARD_FORM_FIELDS, ...BUYER_FIELDS] as const;
+export type ResultField = (typeof RESULT_FIELDS)[number];
+
+/** Mensagem genérica do pagamento com cartão (a mesma do checkout de hoje). */
+export const CARD_GENERIC_MESSAGE = "Não foi possível processar o pagamento. Tente de novo em instantes.";
+/** Mensagem geral do checkout para N campos marcados. */
+export const fieldsMessage = (n: number): string =>
+  n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`;
+
+/**
+ * UUID v4 (chave de idempotência e id de mensagem). `crypto.randomUUID` só existe a partir do Safari 15.4: antes disso,
+ * monta o UUID com `getRandomValues` (Safari 11+), igualmente aleatório.
+ */
+export function randomUuid(c: { randomUUID?: () => string; getRandomValues<T extends ArrayBufferView | null>(a: T): T }): string {
+  if (typeof c.randomUUID === "function") return c.randomUUID();
+  const b = c.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 export type ResultStatus = "approved" | "declined" | "unknown" | "unavailable" | "error";
 
 export type ParentMsg =

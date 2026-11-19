@@ -1,7 +1,15 @@
 // Lógica pura do formulário do cartão no iframe: validação, máscaras, chave de idempotência, corpo do POST /api/card,
 // parcelas e a tradução da resposta do servidor para o `result` do protocolo. Sem DOM e sem imports do servidor: vai
 // no bundle do navegador (form.js). Rótulos e mensagens são os do checkout de hoje (src/app/c/[slug]/checkout-form.tsx).
-import type { FrameMsg, ResultStatus } from "@/lib/card-frame/protocol";
+import {
+  CARD_FORM_FIELDS,
+  CARD_GENERIC_MESSAGE,
+  RESULT_FIELDS,
+  fieldsMessage as protocolFieldsMessage,
+  randomUuid,
+  type FrameMsg,
+  type ResultStatus,
+} from "@/lib/card-frame/protocol";
 import { brl } from "@/lib/format";
 import { cardExpiryValid, onlyDigits, validCpf } from "@/lib/validation/br";
 import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
@@ -17,18 +25,18 @@ export interface CardFields {
   addressNumber: string;
 }
 
-/** Campos do formulário do iframe, na ordem da tela (os únicos nomes em `validated.fields`). */
-export const FIELD_NAMES = ["cardNumber", "holderName", "expiry", "cvv", "holderCpf", "cep", "addressNumber", "installments"] as const;
+/** Campos do formulário do iframe, na ordem da tela (lista única em protocol.ts). */
+export const FIELD_NAMES = CARD_FORM_FIELDS;
 export type FieldName = (typeof FIELD_NAMES)[number];
 /**
- * Os únicos nomes que saem em `result.fields`: os do iframe mais `cpf`, o CPF do comprador (campo do app). Com
- * "titular é outra pessoa" desligado, o CPF do titular é o do comprador, e o erro dele é marcado no app.
+ * Os únicos nomes que saem em `result.fields`: os do iframe mais os do comprador (campos do app: `name`, `email`,
+ * `phone`, `cpf`). Com "titular é outra pessoa" desligado, o CPF do titular é o do comprador e sai como `cpf`.
  */
-export const RESULT_FIELD_NAMES = [...FIELD_NAMES, "cpf"] as const;
+export const RESULT_FIELD_NAMES = RESULT_FIELDS;
 export type ResultFieldName = (typeof RESULT_FIELD_NAMES)[number];
 
 export const NETWORK_MESSAGE = "Sem conexão. Confira a internet e toque em pagar de novo.";
-export const GENERIC_MESSAGE = "Não foi possível processar o pagamento. Tente de novo em instantes.";
+export const GENERIC_MESSAGE = CARD_GENERIC_MESSAGE;
 /** Mensagem genérica do servidor para erro de campos: o checkout troca pela contagem de campos marcados. */
 const SERVER_FIELDS_MESSAGE = "Dados de pagamento inválidos";
 const MAX_MESSAGE = 300; // teto do protocolo (parseFrameMsg)
@@ -78,8 +86,7 @@ export function validateCardFields(v: CardFields, holderOther: boolean, now: Dat
 }
 
 /** Mensagem geral do checkout para N campos marcados. */
-export const fieldsMessage = (n: number): string =>
-  n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`;
+export const fieldsMessage = protocolFieldsMessage;
 
 /** Filtra para os nomes conhecidos de `result.fields`, sem repetir, na ordem recebida. */
 export function safeFieldNames(names: readonly unknown[]): ResultFieldName[] {
@@ -91,7 +98,12 @@ export function safeFieldNames(names: readonly unknown[]): ResultFieldName[] {
 }
 
 /** Caminho de erro do servidor (zod / payWithCard) -> campo do formulário do iframe (`holder.cpf`: ver `fieldFromPath`). */
-const PATHS: Record<string, FieldName> = {
+const PATHS: Record<string, ResultFieldName> = {
+  // Dados do comprador recusados pelo servidor (ex.: celular que o Asaas não aceita): campos do app, que os marca.
+  "customer.name": "name",
+  "customer.email": "email",
+  "customer.phone": "phone",
+  "customer.cpf": "cpf",
   "card.number": "cardNumber",
   "card.holderName": "holderName",
   "card.expiryMonth": "expiry",
@@ -219,15 +231,19 @@ export function mapApiResponse(httpStatus: number, body: unknown, last4: string,
   return { status: "error", ...captcha, message: message ?? GENERIC_MESSAGE };
 }
 
+/** Chave de idempotência (UUID v4; sem `randomUUID` antes do iOS 15.4). Implementação única em protocol.ts. */
+export const newAttemptKey = randomUuid;
+
 /**
- * Chave de idempotência (UUID v4). `crypto.randomUUID` só existe a partir do Safari 15.4: antes disso, monta o UUID
- * com `getRandomValues` (Safari 11+), igualmente aleatório.
+ * O servidor pode ter cobrado nesta resposta? Só então o iframe trava o cartão que ficou nos campos para outro pedido
+ * (o comprador precisa mexer no iframe). Não cobram: nada enviado (`httpStatus` null: validação local ou sem
+ * resposta da rede), erro de campo (400), bilhete (403), limite/captcha (429) e `unavailable` (o Asaas recusou sem
+ * processar). Cobram ou podem ter cobrado: `approved`, `declined`, `unknown`, qualquer outra resposta 200 e erro
+ * inesperado do servidor (5xx).
  */
-export function newAttemptKey(c: { randomUUID?: () => string; getRandomValues<T extends ArrayBufferView | null>(a: T): T }): string {
-  if (typeof c.randomUUID === "function") return c.randomUUID();
-  const b = c.getRandomValues(new Uint8Array(16));
-  b[6] = (b[6]! & 0x0f) | 0x40;
-  b[8] = (b[8]! & 0x3f) | 0x80;
-  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+export function mayHaveCharged(httpStatus: number | null, out: ResultBody): boolean {
+  if (httpStatus === null) return false;
+  if (httpStatus === 400 || httpStatus === 403 || httpStatus === 429) return false;
+  if (httpStatus === 200) return out.status !== "unavailable";
+  return true;
 }

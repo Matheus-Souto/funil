@@ -11,13 +11,15 @@ import {
   fieldErrors,
   installmentOptions,
   mapApiResponse,
+  mayHaveCharged,
   NETWORK_MESSAGE,
   newAttemptKey,
   safeFieldNames,
   validateCardFields,
   type CardFields,
 } from "@/card-service/form/logic";
-import type { FrameMsg } from "@/lib/card-frame/protocol";
+import { createCardFrameController, payWithFrame, type CardOrder } from "@/app/c/[slug]/card-frame";
+import type { FrameMsg, ParentMsg } from "@/lib/card-frame/protocol";
 
 const NOW = new Date("2026-11-19T12:00:00-03:00");
 const ok: CardFields = {
@@ -156,7 +158,7 @@ describe("safeFieldNames e mapApiResponse", () => {
     expect(mapApiResponse(200, { status: "hacked" }, "1111", true).status).toBe("error");
   });
 
-  test("400 com campos: holder.cpf -> holderCpf, card.number -> cardNumber, desconhecidos caem fora", () => {
+  test("400 com campos: holder.cpf -> holderCpf, card.number -> cardNumber, customer.phone -> phone, desconhecidos caem fora", () => {
     const r = mapApiResponse(
       400,
       { error: "invalid_input", message: "Dados de pagamento inválidos", fields: [["holder", "cpf"], ["card", "number"], ["card", "expiryMonth"], ["card", "expiryYear"], ["holder", "postalCode"], ["holder", "addressNumber"], ["installments"], ["customer", "phone"], ["card", "ccv"], ["card", "holderName"]] },
@@ -165,8 +167,8 @@ describe("safeFieldNames e mapApiResponse", () => {
     );
     expect(r).toEqual({
       status: "error",
-      message: "Confira os 8 campos marcados para continuar.",
-      fields: [["holderCpf"], ["cardNumber"], ["expiry"], ["cep"], ["addressNumber"], ["installments"], ["cvv"], ["holderName"]],
+      message: "Confira os 9 campos marcados para continuar.",
+      fields: [["holderCpf"], ["cardNumber"], ["expiry"], ["cep"], ["addressNumber"], ["installments"], ["phone"], ["cvv"], ["holderName"]],
     });
     expect(mapApiResponse(400, { message: "Dados de pagamento inválidos", fields: [["card", "number"]] }, "1111", true).message).toBe("Confira o campo marcado para continuar.");
     expect(mapApiResponse(400, { message: "Parcelas inválidas", fields: [["installments"]] }, "1111", true).message).toBe("Parcelas inválidas");
@@ -177,6 +179,28 @@ describe("safeFieldNames e mapApiResponse", () => {
     const body = { message: "Dados de pagamento inválidos", fields: [["holder", "cpf"], ["holder", "postalCode"]] };
     expect(mapApiResponse(400, body, "1111", false)).toEqual({ status: "error", message: "Confira os 2 campos marcados para continuar.", fields: [["cpf"], ["cep"]] });
     expect(mapApiResponse(400, body, "1111", true).fields).toEqual([["holderCpf"], ["cep"]]);
+  });
+
+  test("dados do comprador recusados pelo servidor saem com o nome do campo do app", () => {
+    const body = (path: string[], message = "Confira o número de WhatsApp") => ({ error: "invalid_input", message, fields: [path] });
+    expect(mapApiResponse(400, body(["customer", "phone"]), "1111", false)).toEqual({ status: "error", message: "Confira o número de WhatsApp", fields: [["phone"]] });
+    expect(mapApiResponse(400, body(["customer", "cpf"], "CPF inválido"), "1111", true).fields).toEqual([["cpf"]]);
+    expect(mapApiResponse(400, body(["customer", "name"], "x"), "1111", true).fields).toEqual([["name"]]);
+    expect(mapApiResponse(400, body(["customer", "email"], "x"), "1111", true).fields).toEqual([["email"]]);
+    expect(mapApiResponse(400, body(["customer", "address"], "x"), "1111", true).fields).toBeUndefined();
+  });
+
+  test("mayHaveCharged: só trava o cartão quando o servidor pode ter cobrado", () => {
+    const e = { status: "error" as const, message: "x" };
+    expect(mayHaveCharged(null, e)).toBe(false); // nada enviado / sem resposta da rede
+    expect(mayHaveCharged(400, e)).toBe(false);
+    expect(mayHaveCharged(403, { ...e, ticketExpired: true })).toBe(false);
+    expect(mayHaveCharged(429, { ...e, captcha: true })).toBe(false);
+    expect(mayHaveCharged(200, { status: "unavailable", message: "x" })).toBe(false);
+    for (const status of ["approved", "declined", "unknown"] as const) expect(mayHaveCharged(200, { status })).toBe(true);
+    expect(mayHaveCharged(200, e)).toBe(true); // 200 com status estranho: conservador
+    expect(mayHaveCharged(500, e)).toBe(true);
+    expect(mayHaveCharged(502, e)).toBe(true);
   });
 
   test("403 de bilhete: erro com ticketExpired; 429: captcha; outros: mensagem do servidor ou a genérica", () => {
@@ -428,6 +452,101 @@ describe("formulário no iframe", () => {
     expect((await next("funil-card:result")).msg).toMatchObject({ id: "p4", status: "approved" });
     expect(calls).toHaveLength(3);
     expect(calls[2]!.body.orderPublicId).toBe("ped-2");
+  });
+
+  test("resposta que não cobrou (400 de campo, rede, unavailable) não trava o cartão para outro pedido", async () => {
+    const { fill, pay, next, calls } = setup({
+      responses: [
+        Response.json({ error: "invalid_input", message: "Confira o número de WhatsApp", fields: [["customer", "phone"]] }, { status: 400 }),
+        new Error("rede"),
+        Response.json({ status: "unavailable", message: "Pagamento com cartão indisponível no momento" }),
+        Response.json({ status: "approved" }),
+      ],
+    });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p1", status: "error", fields: [["phone"]] });
+    pay("p2", { orderPublicId: "ped-2" });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "error", message: NETWORK_MESSAGE });
+    pay("p3", { orderPublicId: "ped-3" });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p3", status: "unavailable" });
+    pay("p4", { orderPublicId: "ped-4" });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p4", status: "approved" });
+    expect(calls.map((c) => c.body.orderPublicId)).toEqual(["ped-1", "ped-2", "ped-3", "ped-4"]);
+  });
+
+  test("telefone recusado no campo do app: nada é marcado no iframe", async () => {
+    const { fill, pay, next, doc } = setup({
+      responses: [Response.json({ error: "invalid_input", message: "Confira o número de WhatsApp", fields: [["customer", "phone"]] }, { status: 400 })],
+    });
+    fill();
+    pay("p1");
+    await next("funil-card:result");
+    expect(doc.querySelectorAll("[data-invalid]")).toHaveLength(0);
+  });
+
+  test("validate com erros foca o primeiro campo inválido do iframe", async () => {
+    const { fill, send, next, doc } = setup();
+    fill({ cardNumber: "", expiry: "" });
+    (doc.getElementById("cvv") as unknown as HTMLInputElement).focus();
+    send({ t: "funil-card:validate", id: "v1" });
+    expect((await next("funil-card:validated")).msg).toMatchObject({ ok: false, fields: ["cardNumber", "expiry"] });
+    expect(doc.activeElement?.id).toBe("cardNumber");
+  });
+
+  test("ponta a ponta (controlador do app + iframe): telefone recusado, corrigido, pedido novo paga sem mexer no cartão", async () => {
+    const { fill, send, posted, calls, parent } = setup({
+      responses: [
+        Response.json({ error: "invalid_input", message: "Confira o número de WhatsApp", fields: [["customer", "phone"]] }, { status: 400 }),
+        Response.json({ status: "approved" }),
+      ],
+    });
+    // O controlador do app fala com o formulário montado: o que ele posta vira `message` no iframe (vindo do pai), e
+    // o que o iframe posta ao pai é entregue ao controlador com a origem do cartão e a janela do iframe.
+    const CARD = "https://pagar.example";
+    const frameWin = { iframe: true };
+    let seq = 0;
+    const ctrl = createCardFrameController({
+      origin: CARD,
+      getWindow: () => frameWin,
+      post: (m: ParentMsg) => send(m, SHOP, parent),
+      setTimer: () => () => {}, // prazos não entram aqui: o iframe sempre responde
+      newId: () => `m-${++seq}`,
+      onStatus: () => {},
+      onHeight: () => {},
+    });
+    // Daqui em diante, cada mensagem do iframe ao pai chega também ao controlador (como o `message` do navegador).
+    const original = parent.postMessage;
+    parent.postMessage = (msg: FrameMsg, origin: string) => {
+      original(msg, origin);
+      queueMicrotask(() => ctrl.handle({ origin: CARD, source: frameWin, data: msg }));
+    };
+    try {
+      ctrl.start();
+      // O `ready` da montagem saiu antes do gancho: entrega o que já foi postado.
+      for (const p of [...posted]) ctrl.handle({ origin: CARD, source: frameWin, data: p.msg });
+      expect(ctrl.status).toBe("ready");
+      fill();
+      let created = 0;
+      const run = (order: CardOrder | null, sig: string) =>
+        payWithFrame({
+          order,
+          sig,
+          now: () => 0,
+          start: async () => ({ ok: true as const, publicId: `ped-${++created}`, cardTicket: `bilhete-${created}` }),
+          renew: async () => ({ ok: false as const, message: "x", definitive: true }),
+          pay: (a) => ctrl.pay({ ...a, buyerCpf: "52998224725" }),
+        });
+      const first = await run(null, "telefone-errado");
+      expect(first.outcome).toEqual({ kind: "failed", message: "Confira o número de WhatsApp", marks: ["phone"] });
+      expect(first.order).toBeNull();
+      // O comprador corrige o WhatsApp no app (nenhum gesto no iframe): pedido novo, o mesmo cartão paga.
+      const second = await run(first.order, "telefone-certo");
+      expect(second.outcome).toEqual({ kind: "go", publicId: "ped-2" });
+      expect(calls.map((c) => c.body.orderPublicId)).toEqual(["ped-1", "ped-2"]);
+    } finally {
+      ctrl.dispose();
+    }
   });
 
   test("página sem storeId no cfg: não envia o cartão", async () => {

@@ -1123,6 +1123,31 @@ describe("rota POST /api/checkout/card", () => {
       body,
     });
 
+  test("CARD_ISOLATED=1: 404 sem ler o corpo, sem loja e sem cobrança (nenhum cartão entra no app)", async () => {
+    let resolved = 0;
+    let paid = 0;
+    const opts = {
+      nodeEnv: "test",
+      cardIsolated: true,
+      resolveStore: async () => {
+        resolved++;
+        return store;
+      },
+      payWithCard: async () => {
+        paid++;
+        return { status: "approved" as const };
+      },
+    };
+    const r = req(JSON.stringify(input("p")));
+    const res = await handleCardCheckout(r, opts);
+    expect(res.status).toBe(404);
+    expect(r.bodyUsed).toBe(false);
+    expect(resolved).toBe(0);
+    expect(paid).toBe(0);
+    // Desligada (como hoje): a mesma requisição paga.
+    expect((await handleCardCheckout(req(JSON.stringify(input("p"))), { ...opts, cardIsolated: false })).status).toBe(200);
+  });
+
   test("POST entre sites: Content-Type e Origin (ou Sec-Fetch-Site) exigidos, 403 antes de qualquer trabalho", async () => {
     let resolved = 0;
     let paid = 0;

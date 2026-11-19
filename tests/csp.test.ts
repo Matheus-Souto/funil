@@ -19,8 +19,16 @@ test("buyerCsp: nonce, Meta só nos destinos necessários, sem frames de fora", 
 test("buyerCsp: com cardOrigin, o iframe do cartão entra em frame-src; sem ele, igual ao de hoje", () => {
   const base = { dev: false, turnstile: false };
   expect(buyerCsp("n", { ...base, cardOrigin: "https://pagar.loja.test" })).toContain("frame-src https://pagar.loja.test");
-  expect(buyerCsp("n", { ...base, cardOrigin: undefined })).toBe(buyerCsp("n", base));
-  expect(buyerCsp("n", base)).not.toContain("frame-src");
+  // Política de antes da Task 8, literal: sem cardOrigin nada muda (com e sem Turnstile).
+  const before =
+    "script-src 'self' 'nonce-n' https://connect.facebook.net; connect-src 'self' https://www.facebook.com https://connect.facebook.net; " +
+    "img-src 'self' data: https://www.facebook.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+  const beforeTurnstile =
+    "script-src 'self' 'nonce-n' https://connect.facebook.net https://challenges.cloudflare.com; connect-src 'self' https://www.facebook.com https://connect.facebook.net; " +
+    "img-src 'self' data: https://www.facebook.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+  expect(buyerCsp("n", base)).toBe(before);
+  expect(buyerCsp("n", { ...base, cardOrigin: undefined })).toBe(before);
+  expect(buyerCsp("n", { dev: false, turnstile: true })).toBe(beforeTurnstile);
   const both = buyerCsp("n", { dev: false, turnstile: true, cardOrigin: "https://pagar.loja.test" });
   expect(both).toContain("frame-src https://challenges.cloudflare.com https://pagar.loja.test");
   expect(both.match(/frame-src/g)).toHaveLength(1);

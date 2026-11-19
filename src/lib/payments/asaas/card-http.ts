@@ -35,6 +35,8 @@ export interface CardHttpOptions {
   payWithCard?: (call: { storeId: string }, input: CardPaymentInput) => Promise<CardResult>;
   nodeEnv?: string;
   trustProxy?: number;
+  /** CARD_ISOLATED=1: o cartão é do serviço isolado; esta rota não existe (404 sem ler o corpo). */
+  cardIsolated?: boolean;
 }
 
 function normalizeIp(v: string | undefined): string | null {
@@ -99,6 +101,8 @@ function sameOriginJson(headers: Headers, trustProxy: number): boolean {
 }
 
 export async function handleCardCheckout(req: Request, opts: CardHttpOptions = {}): Promise<Response> {
+  // Com o cartão isolado, nenhum dado de cartão entra no app (nem de uma aba antiga do checkout): nada é lido.
+  if (opts.cardIsolated ?? env.CARD_ISOLATED) return json(404, { error: "not_found", message: "Não encontrado" });
   const nodeEnv = opts.nodeEnv ?? process.env.NODE_ENV;
   const trustProxy = opts.trustProxy ?? env.TRUST_PROXY;
   // Antes de qualquer trabalho (loja, corpo, repetição idempotente): POST de outro site nunca chega ao pagamento.

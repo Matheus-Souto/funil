@@ -20,7 +20,7 @@ import {
   renewCardTicket,
   startCheckout,
 } from "@/lib/checkout";
-import { CARD_TICKET_TTL_MS, verifyCardTicket } from "@/lib/payments/card-ticket";
+import { CARD_TICKET_RENEW_WINDOW_MS, CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket } from "@/lib/payments/card-ticket";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard } from "@/lib/payments/asaas/card";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
@@ -617,29 +617,51 @@ describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
     expect(card).toEqual({ publicId: card.publicId, method: "card_asaas" });
   });
 
-  test("renewCardTicket: pedido de cartão pendente da loja ganha bilhete novo do mesmo pedido", async () => {
+  test("renewCardTicket: com o bilhete anterior (mesmo vencido), pedido de cartão pendente ganha bilhete novo do mesmo pedido", async () => {
     const s = await seed({ asaas: createFakeAsaas() });
     const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
     const later = new Date(Date.now() + CARD_TICKET_TTL_MS + 60_000); // o primeiro já venceu
     expect(verifyCardTicket(card.cardTicket!, KEY, later)).toBeNull();
-    const ticket = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId }, KEY, later);
+    const ticket = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY, later);
     const o = await orderBy(s.storeId, card.publicId);
     expect(verifyCardTicket(ticket, KEY, later)).toEqual({ storeId: s.storeId, orderId: o.id, publicId: card.publicId });
+  });
+
+  test("renewCardTicket: sem bilhete, bilhete de outro pedido, forjado ou vencido há mais de 24 h -> recusa", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const b = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId }, KEY))).code).toBe("invalid_input");
+    // Bilhete do pedido B para renovar o A.
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: b.cardTicket }, KEY))).code).toBe("forbidden");
+    // Assinado com outra chave (forjado).
+    const forged = issueCardTicket({ storeId: s.storeId, orderId: (await orderBy(s.storeId, a.publicId)).id, publicId: a.publicId }, "f".repeat(64));
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: forged }, KEY))).code).toBe("forbidden");
+    // Íntegro, mesmo publicId, mas orderId de outro pedido (só possível com a chave): recusado pelo pedido.
+    const mixed = issueCardTicket({ storeId: s.storeId, orderId: (await orderBy(s.storeId, b.publicId)).id, publicId: a.publicId }, KEY);
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: mixed }, KEY))).code).toBe("forbidden");
+    const tooLate = new Date(Date.now() + CARD_TICKET_TTL_MS + CARD_TICKET_RENEW_WINDOW_MS + 60_000);
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: a.publicId, ticket: a.cardTicket }, KEY, tooLate))).code).toBe("forbidden");
   });
 
   test("renewCardTicket: pedido de outra loja, pago ou de Pix -> falha", async () => {
     const s = await seed({ asaas: createFakeAsaas() });
     const other = await seed({ asaas: createFakeAsaas() });
     const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
-    expect((await fail(renewCardTicket({ storeId: other.storeId }, { publicId: card.publicId }, KEY))).code).toBe("not_found");
+    // Bilhete da loja A apresentado no host da loja B: recusado antes do pedido.
+    expect((await fail(renewCardTicket({ storeId: other.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY))).code).toBe("forbidden");
+    // Bilhete "da loja B" para o pedido da A (só com a chave): o pedido não aparece pela RLS.
+    const crossStore = issueCardTicket({ storeId: other.storeId, orderId: (await orderBy(s.storeId, card.publicId)).id, publicId: card.publicId }, KEY);
+    expect((await fail(renewCardTicket({ storeId: other.storeId }, { publicId: card.publicId, ticket: crossStore }, KEY))).code).toBe("not_found");
 
+    // Pix: nunca tem bilhete; com um bilhete íntegro do pedido Pix (só com a chave), a ação recusa pelo método.
     const pix = await startCheckout({ storeId: s.storeId }, startInput(s.slug), { cardTicketKey: KEY });
-    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: pix.publicId }, KEY))).code).toBe("conflict");
+    const pixTicket = issueCardTicket({ storeId: s.storeId, orderId: (await orderBy(s.storeId, pix.publicId)).id, publicId: pix.publicId }, KEY);
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: pix.publicId, ticket: pixTicket }, KEY))).code).toBe("conflict");
 
     await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.publicId, card.publicId));
-    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId }, KEY))).code).toBe("conflict");
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY))).code).toBe("conflict");
 
-    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "nao-existe" }, KEY))).code).toBe("not_found");
-    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "../x y" }, KEY))).code).toBe("invalid_input");
+    expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "../x y", ticket: card.cardTicket }, KEY))).code).toBe("invalid_input");
   });
 });
