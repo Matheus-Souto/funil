@@ -3,7 +3,10 @@
 // - Monta os campos (mesmos rótulos e máscaras do checkout) só com DOM: nada de innerHTML, estilo inline, eval.
 // - Mensagens: só aceita `event.origin` em `cfg.allowedOrigins` E `event.source === window.parent`; responde só à
 //   origem que mandou. `ready` e `height` vão a cada origem permitida (o navegador descarta as que não batem).
-// - `pay`: um por vez; id repetido (em andamento ou já respondido) é ignorado. POST relativo /api/card (mesma origem).
+// - `pay`: um por vez (o que chega durante outro recebe erro genérico); id repetido é ignorado. Depois de um
+//   `result`, `pay` para OUTRO pedido só passa se o comprador mexeu no iframe desde então: um pai comprometido não
+//   reusa sozinho o cartão que ficou nos campos. POST relativo /api/card (mesma origem), com prazo; leva o `storeId`
+//   da página, que o servidor confere com a loja do bilhete.
 //
 // DADOS DO CARTÃO: número, validade e CVV só existem nos inputs e, durante o POST, em variáveis locais que são soltas
 // logo após a resposta. Nunca vão para postMessage, console, storage, URL ou atributo `name`; os inputs não têm
@@ -36,7 +39,7 @@ const TURNSTILE_SRC = "https://challenges.cloudflare.com/turnstile/v0/api.js?ren
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 interface TurnstileApi {
-  render(el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void; "expired-callback"?: () => void }): string | undefined | null;
+  render(el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void; "expired-callback"?: () => void; "error-callback"?: () => void }): string | undefined | null;
   reset(widgetId?: string): void;
 }
 
@@ -49,23 +52,31 @@ export interface FormDeps {
   /** Gera a chave de idempotência (`crypto.randomUUID`). */
   newKey: () => string;
   now?: () => Date;
+  /** Prazo do POST /api/card (padrão 75 s, acima do prazo da cobrança no servidor). Estourar = queda de rede. */
+  payTimeoutMs?: number;
 }
+
+export const PAY_TIMEOUT_MS = 75_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 interface Cfg {
   allowedOrigins: string[];
   turnstileSiteKey: string | null;
+  /** Loja da página (`/form/<storeId>`), em minúsculas; sem ela, o iframe não envia o cartão. */
+  storeId: string | null;
 }
 
 function readCfg(doc: Document): Cfg {
   try {
-    const raw = JSON.parse(doc.getElementById("cfg")?.textContent ?? "") as { allowedOrigins?: unknown; turnstileSiteKey?: unknown };
+    const raw = JSON.parse(doc.getElementById("cfg")?.textContent ?? "") as { allowedOrigins?: unknown; turnstileSiteKey?: unknown; storeId?: unknown };
     const origins = Array.isArray(raw.allowedOrigins)
       ? raw.allowedOrigins.filter((o): o is string => typeof o === "string" && /^https?:\/\/[^/*\s]+$/.test(o))
       : [];
     const site = typeof raw.turnstileSiteKey === "string" && raw.turnstileSiteKey.length > 0 ? raw.turnstileSiteKey : null;
-    return { allowedOrigins: origins, turnstileSiteKey: site };
+    const storeId = typeof raw.storeId === "string" && UUID.test(raw.storeId) ? raw.storeId : null;
+    return { allowedOrigins: origins, turnstileSiteKey: site, storeId };
   } catch {
-    return { allowedOrigins: [], turnstileSiteKey: null };
+    return { allowedOrigins: [], turnstileSiteKey: null, storeId: null };
   }
 }
 
@@ -208,6 +219,8 @@ export function mountCardForm(deps: FormDeps): void {
 
   const turnstileBox = el(doc, "div", { class: "turnstile" });
   turnstileBox.hidden = true;
+  const alertBox = el(doc, "p", { class: "alert", role: "alert" });
+  alertBox.hidden = true;
 
   const form = el(
     doc,
@@ -222,7 +235,7 @@ export function mountCardForm(deps: FormDeps): void {
     f.installments.wrap,
   );
   form.addEventListener("submit", (e) => e.preventDefault());
-  root.replaceChildren(form, el(doc, "p", { class: "lockNote" }, icon(doc, "lock", "lockIcon", 15), "Os dados do cartão não ficam salvos."), turnstileBox);
+  root.replaceChildren(form, el(doc, "p", { class: "lockNote" }, icon(doc, "lock", "lockIcon", 15), "Os dados do cartão não ficam salvos."), turnstileBox, alertBox);
 
   // ---- estado ----
   let installments = 1;
@@ -233,6 +246,11 @@ export function mountCardForm(deps: FormDeps): void {
   let turnstileToken: string | undefined;
   let turnstileWidget: string | undefined;
   let turnstileLoading = false;
+  let turnstileFailed = false;
+  /** Pedido do último `result` de um `pay` processado, e se o comprador editou algum campo desde então. */
+  let lastOrder: string | null = null;
+  let editedSinceResult = false;
+  form.addEventListener("input", () => (editedSinceResult = true));
 
   select.addEventListener("change", () => {
     installments = Number(select.value) || 1;
@@ -270,6 +288,7 @@ export function mountCardForm(deps: FormDeps): void {
     const siteKey = cfg.turnstileSiteKey;
     if (!siteKey) return;
     turnstileBox.hidden = false;
+    alertBox.hidden = true;
     const api = turnstile();
     if (api) {
       if (turnstileWidget === undefined) {
@@ -278,7 +297,18 @@ export function mountCardForm(deps: FormDeps): void {
             sitekey: siteKey,
             callback: (t) => (turnstileToken = t),
             "expired-callback": () => (turnstileToken = undefined),
+            "error-callback": () => {
+              // Desafio não carregou ou falhou: some a caixa e fica a mensagem genérica (o próximo captcha tenta de novo).
+              turnstileToken = undefined;
+              turnstileFailed = true;
+              turnstileBox.hidden = true;
+              alertBox.textContent = GENERIC_MESSAGE;
+              alertBox.hidden = false;
+            },
           }) ?? undefined;
+      } else if (turnstileFailed) {
+        turnstileFailed = false;
+        api.reset(turnstileWidget);
       }
       return;
     }
@@ -292,6 +322,7 @@ export function mountCardForm(deps: FormDeps): void {
 
   // ---- pagamento ----
   async function pay(msg: { orderPublicId: string; ticket: string; buyerCpf: string }): Promise<ResultBody> {
+    if (cfg.storeId === null) return { status: "error", message: GENERIC_MESSAGE };
     const v = readFields();
     const other = holderOther.checked;
     const local = showErrors(fieldErrors(v, other, now()));
@@ -303,32 +334,47 @@ export function mountCardForm(deps: FormDeps): void {
     const sentToken = turnstileToken;
     let body: CardBody | null = buildCardBody(v, other, msg.buyerCpf, installments, msg.ticket, msg.orderPublicId, attempt.key, sentToken);
     const last4 = body.card.number.slice(-4);
-    let payload: string | null = JSON.stringify(body);
+    let payload: string | null = JSON.stringify({ storeId: cfg.storeId, ...body });
     body = null;
+    const signal = AbortSignal.timeout(deps.payTimeoutMs ?? PAY_TIMEOUT_MS);
+    // O prazo vale mesmo se o fetch ignorar o sinal: a corrida termina no aborto.
+    const aborted = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    aborted.catch(() => {}); // o prazo pode estourar depois da resposta: rejeição esperada, sem ninguém ouvindo
     let res: Response;
+    let json: unknown;
     try {
-      res = await deps.fetch("/api/card", {
+      const call = deps.fetch("/api/card", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: payload,
         credentials: "same-origin",
         cache: "no-store",
         referrerPolicy: "no-referrer",
+        signal,
+      });
+      payload = null;
+      res = await Promise.race([call, aborted]);
+      json = await Promise.race([res.json(), aborted]).catch((e: unknown) => {
+        if (signal.aborted) throw e;
+        return {};
       });
     } catch {
-      // Sem resposta: a mesma chave fica para a próxima tentativa com os mesmos dados (se a cobrança chegou ao
-      // Asaas, não cobra de novo).
+      // Sem resposta (rede caiu ou estourou o prazo): a mesma chave fica para a próxima tentativa com os mesmos dados
+      // (se a cobrança chegou ao Asaas, não cobra de novo).
       return { status: "error", message: NETWORK_MESSAGE };
     } finally {
       payload = null;
     }
-    attempt = null;
-    if (sentToken !== undefined) {
-      turnstileToken = undefined; // o token vale uma vez
-      if (turnstileWidget !== undefined) turnstile()?.reset(turnstileWidget);
-    }
-    const json: unknown = await res.json().catch(() => ({}));
     const out = mapApiResponse(res.status, json, last4);
+    // Bilhete recusado (vencido ou não): o servidor parou antes de qualquer cobrança e do Turnstile, então a chave e o
+    // token continuam valendo para a tentativa com o bilhete novo.
+    if (out.ticketExpired === undefined) {
+      attempt = null;
+      if (sentToken !== undefined) {
+        turnstileToken = undefined; // o token vale uma vez
+        if (turnstileWidget !== undefined) turnstile()?.reset(turnstileWidget);
+      }
+    }
     if (out.fields) {
       const errors: Partial<Record<FieldName, string>> = {};
       for (const [n] of out.fields) errors[n as FieldName] = serverFieldMessage(n as FieldName);
@@ -369,13 +415,22 @@ export function mountCardForm(deps: FormDeps): void {
         return;
       }
       case "funil-card:pay": {
-        if (busy || seenPays.has(msg.id)) return;
+        if (seenPays.has(msg.id)) return;
+        // Outro em andamento: responde (o app não fica esperando) e não guarda o id, que pode voltar depois.
+        if (busy) return sendResult(msg.id, origin, { status: "error", message: GENERIC_MESSAGE });
         seenPays.add(msg.id);
+        if (lastOrder !== null && msg.orderPublicId !== lastOrder && !editedSinceResult) {
+          // Outro pedido com o cartão que ficou nos campos, sem gesto do comprador no iframe: pede para conferir.
+          showErrors({ cardNumber: serverFieldMessage("cardNumber") });
+          return sendResult(msg.id, origin, { status: "error", message: fieldsMessage(1), fields: [["cardNumber"]] });
+        }
         busy = true;
         pay(msg)
           .catch((): ResultBody => ({ status: "error", message: GENERIC_MESSAGE }))
           .then((out) => {
             busy = false;
+            lastOrder = msg.orderPublicId;
+            editedSinceResult = false;
             sendResult(msg.id, origin, out);
           });
         return;

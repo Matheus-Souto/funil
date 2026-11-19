@@ -20,6 +20,8 @@ export function cardFormCsp(origins: string[], opts: { turnstile: boolean }): st
 }
 
 export interface CardFormConfig {
+  /** Loja da página (do caminho `/form/<storeId>`): o iframe a manda no POST e o servidor a confere com o bilhete. */
+  storeId: string;
   allowedOrigins: string[];
   turnstileSiteKey?: string;
 }
@@ -30,7 +32,7 @@ function scriptJson(v: unknown): string {
 }
 
 export function cardFormHtml(cfg: CardFormConfig): string {
-  const json = scriptJson({ allowedOrigins: cfg.allowedOrigins, turnstileSiteKey: cfg.turnstileSiteKey ?? null });
+  const json = scriptJson({ allowedOrigins: cfg.allowedOrigins, turnstileSiteKey: cfg.turnstileSiteKey ?? null, storeId: cfg.storeId });
   return `<!doctype html>
 <html lang="pt-BR">
 <head>

@@ -1,7 +1,8 @@
 // Servidor HTTP do serviço de cartão isolado (node:http, sem framework). Rotas, e nada mais:
 //   GET  /form/<storeId>  página do iframe (CSP estrita, frame-ancestors = origens do checkout da loja)
 //   GET  /form.js, /form.css  artefatos do formulário (dois nomes fixos dentro de `assetsDir`; nunca caminho da URL)
-//   POST /api/card        cobrança: Content-Type, Origin e HTTPS antes de tudo; corpo com teto; bilhete do pedido
+//   POST /api/card        cobrança: Content-Type, Origin e HTTPS antes de tudo; corpo com teto; bilhete do pedido,
+//                         da mesma loja da página do iframe (`storeId` no corpo)
 //   GET  /healthz         200 "ok" quando o banco responde
 // Qualquer outra rota ou método: 404 sem corpo.
 //
@@ -141,10 +142,12 @@ export function createCardServer(opts: CardServerOptions): Server {
     if (body === null || typeof body !== "object" || Array.isArray(body)) {
       return json(res, 400, { error: "invalid_input", message: "JSON inválido" });
     }
-    const { ticket, ...fields } = body as Record<string, unknown>;
+    const { ticket, storeId, ...fields } = body as Record<string, unknown>;
     const check = verifyCardTicketDetailed(typeof ticket === "string" ? ticket : "", opts.ticketKey);
     if (!check.ok) return json(res, 403, { error: "ticket", ticketExpired: check.expired });
     if (fields.orderPublicId !== check.publicId) return json(res, 403, { error: "ticket", ticketExpired: false });
+    // A página do iframe é de uma loja (frame-ancestors = origens dela); o bilhete precisa ser de um pedido dessa loja.
+    if (storeId !== check.storeId) return json(res, 403, { error: "forbidden_store", message: "Requisição recusada." });
     try {
       // O IP vem do servidor e sobrescreve qualquer `clientIp` enviado no corpo; a loja vem do bilhete.
       const input = { ...fields, clientIp: clientIpFrom(headers, opts.trustProxy) } as unknown as CardPaymentInput;
@@ -155,11 +158,13 @@ export function createCardServer(opts: CardServerOptions): Server {
     }
   }
 
-  async function form(storeId: string, res: ServerResponse): Promise<void> {
-    if (!UUID.test(storeId)) return send(res, 404);
+  async function form(rawId: string, res: ServerResponse): Promise<void> {
+    if (!UUID.test(rawId)) return send(res, 404);
+    // Forma canônica (minúsculas, como no bilhete): o iframe a devolve no POST e o servidor compara por igualdade.
+    const storeId = rawId.toLowerCase();
     const origins = await originsOf(storeId);
     if (origins.length === 0) return send(res, 404);
-    send(res, 200, cardFormHtml({ allowedOrigins: origins, turnstileSiteKey: opts.turnstileSiteKey }), {
+    send(res, 200, cardFormHtml({ storeId, allowedOrigins: origins, turnstileSiteKey: opts.turnstileSiteKey }), {
       "content-type": "text/html; charset=utf-8",
       "content-security-policy": cardFormCsp(origins, { turnstile: Boolean(opts.turnstileSiteKey) }),
       "referrer-policy": "no-referrer",

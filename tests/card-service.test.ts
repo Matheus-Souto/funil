@@ -87,8 +87,10 @@ async function start(over: Partial<CardServerOptions> = {}): Promise<string> {
 const ticketFor = (storeId: string, order: Order, now = new Date()) =>
   issueCardTicket({ storeId, orderId: order.id, publicId: order.publicId }, KEY, now);
 
+/** Corpo como o iframe de `/form/<storeId>` manda; `storeId` padrão: a loja `shop`. */
 function cardBody(order: Order, ticket: string, over: Record<string, unknown> = {}) {
   return {
+    storeId: shop.storeId,
     ticket,
     orderPublicId: order.publicId,
     idempotencyKey: randomUUID(),
@@ -196,9 +198,22 @@ describe("POST /api/card: bilhete", () => {
     expect(payCalls).toBe(before);
   });
 
+  test("loja da página do iframe diferente da loja do bilhete (ou ausente) -> 403 sem chamar payWithCard", async () => {
+    const base = await start();
+    const before = payCalls;
+    const ticket = ticketFor(shop.storeId, o.approve);
+    for (const storeId of [other.storeId, undefined, "", 42, shop.storeId.toUpperCase()]) {
+      const res = await post(base, cardBody(o.approve, ticket, { storeId }));
+      expect([storeId, res.status]).toEqual([storeId, 403]);
+      expect(await res.json()).toEqual({ error: "forbidden_store", message: "Requisição recusada." });
+    }
+    expect(payCalls).toBe(before);
+    expect(await orderStatus(o.approve.id)).toBe("pending");
+  });
+
   test("bilhete com a loja errada para o publicId: a cobrança roda na loja do bilhete e não acha o pedido (404)", async () => {
     const base = await start();
-    const res = await post(base, cardBody(o.crossed, issueCardTicket({ storeId: other.storeId, orderId: o.crossed.id, publicId: o.crossed.publicId }, KEY)));
+    const res = await post(base, cardBody(o.crossed, issueCardTicket({ storeId: other.storeId, orderId: o.crossed.id, publicId: o.crossed.publicId }, KEY), { storeId: other.storeId }));
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found", message: "Pedido não encontrado" });
     expect(await orderStatus(o.crossed.id)).toBe("pending");
@@ -450,7 +465,10 @@ describe("GET /form/<storeId>", () => {
     expect(html).toContain('<link rel="stylesheet" href="/form.css">');
     expect(html).toContain('<script src="/form.js" defer></script>');
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(html)!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: [APP_ORIGIN], turnstileSiteKey: null });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: [APP_ORIGIN], turnstileSiteKey: null, storeId: shop.storeId });
+    const upper = await (await fetch(`${base}/form/${shop.storeId.toUpperCase()}`)).text();
+    const cfgUpper = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(upper)!;
+    expect((JSON.parse(cfgUpper[1]!) as { storeId: string }).storeId).toBe(shop.storeId);
   });
 
   test("origens injetadas (multi): frame-ancestors tem exatamente essas; com Turnstile, a CSP o libera", async () => {
@@ -462,7 +480,7 @@ describe("GET /form/<storeId>", () => {
     expect(directives(csp).find((d) => d.startsWith("frame-ancestors "))).toBe(`frame-ancestors ${origins.join(" ")}`);
     expect(csp).toBe(cardFormCsp(origins, { turnstile: true }));
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(await res.text())!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: origins, turnstileSiteKey: "0x4AAAsite" });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: origins, turnstileSiteKey: "0x4AAAsite", storeId: shop.storeId });
     expect((await fetch(`${base}/form/${other.storeId}`)).status).toBe(404);
   });
 
@@ -517,11 +535,12 @@ describe("page.ts", () => {
 
   test("a configuração no JSON não fecha o <script> (chave com </script> e caracteres de linha)", () => {
     const evil = "</script><script>alert(1)</script>\u2028&";
-    const html = cardFormHtml({ allowedOrigins: ["https://a.example"], turnstileSiteKey: evil });
+    const sid = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
+    const html = cardFormHtml({ storeId: sid, allowedOrigins: ["https://a.example"], turnstileSiteKey: evil });
     expect(html.match(/<\/script>/gi)!.length).toBe(2);
     expect(html).not.toContain("<script>alert");
     const cfg = /<script type="application\/json" id="cfg">([\s\S]*?)<\/script>/.exec(html)!;
-    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: ["https://a.example"], turnstileSiteKey: evil });
+    expect(JSON.parse(cfg[1]!)).toEqual({ allowedOrigins: ["https://a.example"], turnstileSiteKey: evil, storeId: sid });
   });
 });
 

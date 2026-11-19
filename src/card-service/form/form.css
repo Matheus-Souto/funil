@@ -12,6 +12,7 @@
   --color-brand-strong: #0b6e4f;
   --color-success: #157347;
   --color-danger: #b42318;
+  --color-danger-soft: #fdecea;
   --radius-md: 10px;
   --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -160,6 +161,17 @@ select.input {
 .lockIcon {
   flex: none;
   color: var(--color-success);
+}
+
+.alert {
+  margin: 12px 0 0;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .turnstile {

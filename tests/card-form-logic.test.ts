@@ -175,6 +175,8 @@ describe("safeFieldNames e mapApiResponse", () => {
 const SHOP = "https://loja.example";
 const OTHER_SHOP = "https://loja.example.com.br";
 const EVIL = "https://evil.example";
+const STORE = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
+const GENERIC = "Não foi possível processar o pagamento. Tente de novo em instantes.";
 type Posted = { msg: FrameMsg; origin: string };
 type FetchCall = { url: string; init: RequestInit; body: Record<string, unknown> };
 
@@ -183,20 +185,22 @@ afterEach(async () => {
   for (const w of open.splice(0)) await w.happyDOM.close();
 });
 
-function setup(opts: { turnstileSiteKey?: string; responses?: (Response | Error | Promise<Response>)[] } = {}) {
+function setup(
+  opts: { turnstileSiteKey?: string; responses?: (Response | Error | Promise<Response>)[]; storeId?: string | null; payTimeoutMs?: number; topLevel?: boolean } = {},
+) {
   const w = new Window({ url: "https://pagar.example/form/x", settings: { disableJavaScriptFileLoading: true, disableCSSFileLoading: true } as never });
   open.push(w);
-  w.document.head.innerHTML = `<script type="application/json" id="cfg">${JSON.stringify({ allowedOrigins: [SHOP, OTHER_SHOP], turnstileSiteKey: opts.turnstileSiteKey ?? null })}</script>`;
+  w.document.head.innerHTML = `<script type="application/json" id="cfg">${JSON.stringify({ allowedOrigins: [SHOP, OTHER_SHOP], turnstileSiteKey: opts.turnstileSiteKey ?? null, ...(opts.storeId === null ? {} : { storeId: opts.storeId ?? STORE }) })}</script>`;
   w.document.body.innerHTML = `<main id="card-form"></main>`;
   const posted: Posted[] = [];
   const waiters: ((p: Posted) => void)[] = [];
-  const parent = {
-    postMessage(msg: FrameMsg, origin: string) {
-      const p = { msg, origin };
-      posted.push(p);
-      waiters.splice(0).forEach((r) => r(p));
-    },
+  const postMessage = (msg: FrameMsg, origin: string) => {
+    const p = { msg, origin };
+    posted.push(p);
+    waiters.splice(0).forEach((r) => r(p));
   };
+  // Aberto fora de moldura: window.parent é a própria janela.
+  const parent: { postMessage: typeof postMessage } = opts.topLevel ? Object.assign(w as unknown as { postMessage: typeof postMessage }, { postMessage }) : { postMessage };
   const calls: FetchCall[] = [];
   const responses = [...(opts.responses ?? [])];
   const fakeFetch = (async (url: string, init: RequestInit) => {
@@ -206,7 +210,7 @@ function setup(opts: { turnstileSiteKey?: string; responses?: (Response | Error 
     return await r;
   }) as unknown as typeof fetch;
   let k = 0;
-  mountCardForm({ win: w as unknown as FormDeps["win"], parent, fetch: fakeFetch, newKey: () => `key-${++k}`, now: () => NOW });
+  mountCardForm({ win: w as unknown as FormDeps["win"], parent, fetch: fakeFetch, newKey: () => `key-${++k}`, now: () => NOW, payTimeoutMs: opts.payTimeoutMs });
   const doc = w.document;
   const input = (id: string) => doc.getElementById(id) as unknown as HTMLInputElement;
   const type = (id: string, value: string) => {
@@ -320,6 +324,7 @@ describe("formulário no iframe", () => {
     expect(calls[0]!.init.method).toBe("POST");
     expect(new Headers(calls[0]!.init.headers).get("content-type")).toBe("application/json");
     expect(calls[0]!.body).toEqual({
+      storeId: STORE,
       ticket: "bilhete-1",
       orderPublicId: "ped-1",
       idempotencyKey: "key-1",
@@ -334,19 +339,91 @@ describe("formulário no iframe", () => {
     for (const secret of ["4111111111111111", "4111 1111", "\"123\"", "12/34", "bilhete-1"]) expect(all).not.toContain(secret);
   });
 
-  test("um pay por vez: o segundo, durante o primeiro, é ignorado (nem é lembrado)", async () => {
+  test("um pay por vez: o segundo, durante o primeiro, recebe erro genérico; id repetido continua ignorado", async () => {
     let release!: (r: Response) => void;
     const pending = new Promise<Response>((r) => (release = r));
     const { fill, pay, next, calls, posted } = setup({ responses: [pending, Response.json({ status: "approved" })] });
     fill();
     pay("p1");
     pay("p2");
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p2", status: "error", message: GENERIC });
+    pay("p1");
     expect(calls).toHaveLength(1);
     release(Response.json({ status: "unknown", message: "m" }));
     expect((await next("funil-card:result")).msg).toMatchObject({ id: "p1", status: "unknown" });
-    expect(posted.filter((p) => p.msg.t === "funil-card:result")).toHaveLength(1);
+    expect(posted.filter((p) => p.msg.t === "funil-card:result")).toHaveLength(2);
     pay("p2");
     expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "approved" });
+  });
+
+  test("POST sem resposta no prazo conta como queda de rede: 'Sem conexão…' e a mesma chave na próxima", async () => {
+    const { fill, pay, next, calls } = setup({ payTimeoutMs: 5, responses: [new Promise<Response>(() => {}), Response.json({ status: "approved" })] });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: NETWORK_MESSAGE });
+    expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
+    pay("p2");
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "approved" });
+    expect(calls.map((c) => c.body.idempotencyKey)).toEqual(["key-1", "key-1"]);
+  });
+
+  test("bilhete vencido (403): nada foi processado, então a próxima tentativa usa a mesma chave", async () => {
+    const { fill, pay, next, calls } = setup({ responses: [Response.json({ error: "ticket", ticketExpired: true }, { status: 403 }), Response.json({ status: "approved" })] });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p1", status: "error", ticketExpired: true });
+    pay("p2", { ticket: "bilhete-2" });
+    await next("funil-card:result");
+    expect(calls.map((c) => [c.body.ticket, c.body.idempotencyKey])).toEqual([
+      ["bilhete-1", "key-1"],
+      ["bilhete-2", "key-1"],
+    ]);
+  });
+
+  test("depois de um result, pay para OUTRO pedido só passa se o comprador editou o iframe", async () => {
+    const { fill, pay, next, calls, type, doc } = setup({ responses: [Response.json({ status: "declined" }), Response.json({ status: "approved" }), Response.json({ status: "approved" })] });
+    fill();
+    pay("p1");
+    await next("funil-card:result");
+    // mesmo pedido (retentativa normal): passa sem edição
+    pay("p2");
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p2", status: "approved" });
+    // outro pedido sem edição: recusado sem chamar a API, com o número do cartão marcado
+    pay("p3", { orderPublicId: "ped-2" });
+    expect((await next("funil-card:result")).msg).toEqual({
+      t: "funil-card:result",
+      id: "p3",
+      status: "error",
+      message: "Confira o campo marcado para continuar.",
+      fields: [["cardNumber"]],
+    });
+    expect(calls).toHaveLength(2);
+    expect(doc.getElementById("cardNumber")!.closest("[data-invalid]")).not.toBeNull();
+    // o comprador mexe em qualquer campo: outro pedido passa
+    type("cvv", "123");
+    pay("p4", { orderPublicId: "ped-2" });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p4", status: "approved" });
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.body.orderPublicId).toBe("ped-2");
+  });
+
+  test("página sem storeId no cfg: não envia o cartão", async () => {
+    const { fill, pay, next, calls } = setup({ storeId: null });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: GENERIC });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("aberto fora de moldura (window.parent é a própria janela): não aceita mensagem nenhuma", async () => {
+    const { fill, send, posted, w, calls } = setup({ topLevel: true });
+    fill();
+    const self = w as unknown;
+    send({ t: "funil-card:validate", id: "v1" }, SHOP, self);
+    send({ t: "funil-card:pay", id: "p1", orderPublicId: "ped-1", ticket: "b", buyerCpf: "52998224725" }, SHOP, self);
+    await Promise.resolve();
+    expect(posted.filter((p) => p.msg.t === "funil-card:validated" || p.msg.t === "funil-card:result")).toEqual([]);
+    expect(calls).toHaveLength(0);
   });
 
   test("rede cai: result de erro com a mensagem de sempre; a próxima tentativa com os mesmos dados reaproveita a chave", async () => {
@@ -449,6 +526,29 @@ describe("formulário no iframe", () => {
     noKey.pay("p1");
     await noKey.next("funil-card:result");
     expect(noKey.doc.querySelector("script[src]")).toBeNull();
+  });
+
+  test("Turnstile com erro: esconde a caixa e mostra a mensagem genérica", async () => {
+    const t = setup({ turnstileSiteKey: "site-key", responses: [Response.json({ captcha: true, message: "m" }, { status: 429 })] });
+    let opts: Record<string, unknown> = {};
+    (t.w as unknown as { turnstile: unknown }).turnstile = {
+      render: (_el: unknown, o: Record<string, unknown>) => {
+        opts = o;
+        return "w1";
+      },
+      reset: () => {},
+    };
+    t.fill();
+    t.pay("p1");
+    await t.next("funil-card:result");
+    const box = t.doc.querySelector(".turnstile") as unknown as HTMLElement;
+    expect(box.hidden).toBe(false);
+    expect(opts.sitekey).toBe("site-key");
+    (opts["error-callback"] as () => void)();
+    expect(box.hidden).toBe(true);
+    const alert = t.doc.querySelector("[role=alert]") as unknown as HTMLElement;
+    expect(alert.hidden).toBe(false);
+    expect(alert.textContent).toBe(GENERIC);
   });
 
   test("config: parcelas com os rótulos do checkout; escondidas com 1x", () => {

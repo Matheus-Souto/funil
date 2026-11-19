@@ -17,6 +17,7 @@ import { requireSecret } from "@/lib/env";
 import { createIntegrationSecrets } from "@/lib/integrations";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { issueCardTicket } from "@/lib/payments/card-ticket";
+import { cardDevEnv } from "../scripts/card-dev";
 import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 import { createFakeAsaas, newCardOrder, seedAsaasStore } from "./asaas-helpers";
 
@@ -78,6 +79,37 @@ describe("form.js como script clássico (a página o carrega com <script src def
     } finally {
       await w.happyDOM.close();
     }
+  });
+});
+
+describe("card:dev", () => {
+  test("o serviço recebe só a lista de permissão do .env, com o papel `card` no banco", () => {
+    const env = cardDevEnv({
+      PATH: "/bin",
+      DATABASE_URL: "postgres://app:app@localhost:5433/funil",
+      CARD_DB_PASSWORD: "senha-card",
+      BASE_URL: "http://localhost:3000",
+      CARD_ORIGIN: "http://localhost:3100",
+      CARD_TICKET_KEY: "t".repeat(40),
+      ASAAS_SEAL_KEY: "s".repeat(40),
+      TURNSTILE_SITE_KEY: "",
+      SECRET: "x".repeat(40),
+      OWNER_DATABASE_URL: "postgres://owner:owner@localhost:5433/funil",
+      APP_DB_PASSWORD: "app",
+      SMTP_PASSWORD: "smtp",
+      META_GRAPH_BASE_URL: "http://localhost:9",
+      HOME: "/home/x",
+    });
+    expect(env).toEqual({
+      SERVICE: "card",
+      DATABASE_URL: "postgres://card:senha-card@localhost:5433/funil",
+      PATH: "/bin",
+      BASE_URL: "http://localhost:3000",
+      CARD_ORIGIN: "http://localhost:3100",
+      CARD_TICKET_KEY: "t".repeat(40),
+      ASAAS_SEAL_KEY: "s".repeat(40),
+    });
+    expect(() => cardDevEnv({ DATABASE_URL: "postgres://app:app@localhost/x" })).toThrow("CARD_DB_PASSWORD");
   });
 });
 
@@ -190,6 +222,7 @@ describe("servidor empacotado em Node", () => {
     const order = await newCardOrder(shop.storeId, shop.offerId, `node-${randomUUID()}@example.com`);
     const ticket = issueCardTicket({ storeId: shop.storeId, orderId: order.id, publicId: order.publicId }, KEY);
     const res = await post({
+      storeId: shop.storeId,
       ticket,
       orderPublicId: order.publicId,
       idempotencyKey: randomUUID(),
