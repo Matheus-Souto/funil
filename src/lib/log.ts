@@ -5,12 +5,44 @@ const MASK = "[redacted]";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const HASH_KEY = /hash$/i;
 
+const QUERY_FAILED = "falha na consulta ao banco";
+
+/** Código SQLSTATE (5 caracteres) de um erro do Postgres, se houver. */
+function sqlState(v: unknown): string | null {
+  const code = (v as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) ? code : null;
+}
+
+/**
+ * Erro de consulta ao banco: DrizzleQueryError (mensagem com a SQL e os `params` — CPF, e-mail, nome...) ou erro do
+ * Postgres (mensagem e `detail` podem ecoar valores). Nunca vai para log, auditoria ou fila como veio.
+ */
+function queryErrorCode(v: unknown): string | null | undefined {
+  if (!(v instanceof Error)) return undefined;
+  const e = v as Error & { params?: unknown; query?: unknown; cause?: unknown; severity?: unknown };
+  if (Array.isArray(e.params) || typeof e.query === "string") return sqlState(e.cause) ?? sqlState(e);
+  if (typeof e.severity === "string" && sqlState(e)) return sqlState(e);
+  return undefined;
+}
+
+/**
+ * Mensagem de erro segura para log, auditoria e `job.last_error`: erro de consulta ao banco vira só o código do
+ * Postgres + texto genérico; os demais passam pela máscara de cartão.
+ */
+export function safeErrorMessage(e: unknown): string {
+  const code = queryErrorCode(e);
+  if (code !== undefined) return code ? `${QUERY_FAILED} (${code})` : QUERY_FAILED;
+  return String(walk(e instanceof Error ? e.message : String(e), new WeakSet()));
+}
+
 function walk(v: unknown, seen: WeakSet<object>): unknown {
   if (typeof v === "string") return v.replace(PAN, MASK);
   if (v === null || typeof v !== "object") return v;
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
   if (seen.has(v)) return "[circular]";
   seen.add(v);
+  const query = queryErrorCode(v);
+  if (query !== undefined) return { name: "DatabaseError", ...(query ? { code: query } : {}), message: QUERY_FAILED };
   if (v instanceof Error) return { name: v.name, message: walk(v.message, seen) };
   if (Array.isArray(v)) return v.map((x) => walk(x, seen));
   const out: Record<string, unknown> = {};

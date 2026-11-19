@@ -18,7 +18,7 @@ import { withStore, type Tx } from "@/lib/db/client";
 import { emailLog, store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
-import { log, redact } from "@/lib/log";
+import { log, safeErrorMessage } from "@/lib/log";
 
 export interface SmtpSettings {
   host: string;
@@ -230,7 +230,7 @@ export async function logEmail(
   tx: Tx,
   row: { storeId: string; orderId?: string | null; jobId?: string | null; to: string; kind: EmailKind; status: "sent" | "failed"; error?: unknown },
 ): Promise<void> {
-  const error = row.error === undefined ? null : String(redact(row.error instanceof Error ? row.error.message : String(row.error))).slice(0, 500);
+  const error = row.error === undefined ? null : safeErrorMessage(row.error).slice(0, 500);
   await tx.insert(emailLog).values({
     storeId: row.storeId,
     orderId: row.orderId ?? null,

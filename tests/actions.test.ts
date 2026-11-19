@@ -1,6 +1,9 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { z } from "zod";
-import { auditLog } from "@/lib/db/schema";
+import { auditLog, job } from "@/lib/db/schema";
+import { enqueue, runDueJobs } from "@/lib/jobs";
+import { log, redact, safeErrorMessage } from "@/lib/log";
 import { withStore } from "@/lib/db/client";
 import { ActionError, defineAction, runAction, type Actor } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
@@ -393,5 +396,66 @@ describe("prepare (trabalho externo antes da transação)", () => {
     expect((await runAction(a, { storeId, actor: owner, origin: "mcp" }, { k: "x" }).catch((e) => e)).code).toBe("approval_required");
     expect((await runAction(a, { storeId, actor: owner, origin: "panel" }, { k: 1 }).catch((e) => e)).code).toBe("invalid_input");
     expect(log).toEqual([]);
+  });
+});
+
+describe("erro de consulta ao banco (DrizzleQueryError com params) nunca leva dados pessoais a log, auditoria ou fila", () => {
+  const CPF = "52998224725";
+  const EMAIL = "ana.souza@example.com";
+  const NAME = "Ana Souza Pereira";
+  const leaks = (text: string) => [CPF, EMAIL, NAME].filter((v) => text.includes(v));
+  // `::int` estoura com o CPF: a mensagem do Postgres também ecoa o valor.
+  const badQuery = (tx: Parameters<Parameters<typeof withStore>[1]>[0]) => tx.execute(sql`select ${CPF}::int as a, ${EMAIL}::text as b, ${NAME}::text as c`);
+
+  test("redact/log: só o código do Postgres e mensagem genérica", async () => {
+    const { storeId } = await seedStore();
+    const e = await withStore(storeId, badQuery).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(Error);
+    expect((e as { params?: unknown }).params).toBeDefined(); // é mesmo o erro com params do Drizzle
+    expect(leaks(JSON.stringify(redact(e)))).toEqual([]);
+    expect(redact(e)).toMatchObject({ code: "22003" });
+    expect(leaks(safeErrorMessage(e))).toEqual([]);
+    expect(safeErrorMessage(e)).toContain("22003");
+    const out: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+    try {
+      log.error("falhou", { error: e, nested: { cause: e } });
+    } finally {
+      write.mockRestore();
+    }
+    expect(leaks(out.join(""))).toEqual([]);
+  });
+
+  test("auditoria da ação que falhou: sem os params", async () => {
+    const { storeId } = await seedStore();
+    const boom = defineAction(
+      { name: "test.dbFail", description: "x", input: z.object({}), permission: "products.read", run: async (ctx) => badQuery(ctx.tx) },
+      def,
+    );
+    const write = spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    try {
+      await runAction(boom, { storeId, actor: owner, origin: "panel" }, {}).catch(() => undefined);
+    } finally {
+      write.mockRestore();
+    }
+    const rows = (await auditRows(storeId)).filter((r) => r.action === "test.dbFail");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ok).toBe(false);
+    expect(leaks(JSON.stringify(rows[0]))).toEqual([]);
+    expect(rows[0]!.error).toContain("22003");
+  });
+
+  test("fila: last_error do job sem os params", async () => {
+    const { storeId } = await seedStore();
+    await withStore(storeId, (tx) => enqueue(tx, { storeId, type: "notify_seller", payload: {} }));
+    const write = spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    try {
+      await runDueJobs({ notify_seller: async () => void (await withStore(storeId, badQuery)) }, 1, new Date(Date.now() + 1000), { types: ["notify_seller"] });
+    } finally {
+      write.mockRestore();
+    }
+    const [j] = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(j!.lastError).toContain("22003");
+    expect(leaks(j!.lastError ?? "")).toEqual([]);
   });
 });

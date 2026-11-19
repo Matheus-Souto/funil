@@ -1,7 +1,7 @@
 import type { z } from "zod";
 import { withStore, type Tx } from "@/lib/db/client";
 import { auditLog } from "@/lib/db/schema";
-import { log, redact } from "@/lib/log";
+import { log, redact, safeErrorMessage } from "@/lib/log";
 import { hasPermission, type Permission, type Role } from "./permissions";
 import { registry } from "./registry";
 
@@ -195,7 +195,8 @@ function capped(input: unknown): unknown {
 
 function describe(e: unknown): string {
   if (e instanceof ActionError) return `${e.code}: ${e.message}`;
-  return e instanceof Error ? e.message : "erro desconhecido";
+  // Erro de consulta ao banco: só o código do Postgres (a mensagem do Drizzle traz os params: CPF, e-mail, nome...).
+  return e instanceof Error ? safeErrorMessage(e) : "erro desconhecido";
 }
 
 async function auditFailure(storeId: string, audited: boolean, row: typeof auditLog.$inferInsert, e: unknown): Promise<void> {

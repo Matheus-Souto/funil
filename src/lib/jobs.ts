@@ -6,7 +6,7 @@ import { and, asc, eq, inArray, lt, lte, sql } from "drizzle-orm";
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { db, type Tx } from "@/lib/db/client";
 import { job } from "@/lib/db/schema";
-import { log, redact } from "@/lib/log";
+import { log, safeErrorMessage } from "@/lib/log";
 
 export type JobType =
   | "deliver_order"
@@ -58,8 +58,7 @@ export async function scheduleOnce(type: JobType, runAt: Date = new Date()): Pro
 }
 
 function errorText(e: unknown): string {
-  const msg = e instanceof Error ? e.message : String(e);
-  return String(redact(msg)).slice(0, MAX_ERROR);
+  return safeErrorMessage(e).slice(0, MAX_ERROR);
 }
 
 /** Devolve à fila (ou falha, se já esgotou as tentativas) os jobs `running` travados. */
