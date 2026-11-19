@@ -1,10 +1,12 @@
 // Estado das conexões para o painel. Segredos (chave do Asaas, senha do SMTP, token do Meta) nunca saem daqui: só
 // "configured". O token do webhook do Asaas precisa ser colado no Asaas, então aparece, mas só para quem pode alterar
 // conexões (connections.write); os demais veem que existe.
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { env } from "@/lib/env";
+import { offer } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
@@ -22,6 +24,13 @@ export const connectionsStatus = defineAction({
       (["pix_manual", "asaas", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)),
     );
     const cfg = (c: typeof pix) => (c?.config ?? {}) as Record<string, unknown>;
+    // Sem Turnstile, o disjuntor do cartão só limita por IP: com oferta ativa de cartão, o painel recomenda configurar.
+    const turnstileConfigured = Boolean(env.TURNSTILE_SECRET);
+    const [cardOffer] = await ctx.tx
+      .select({ id: offer.id })
+      .from(offer)
+      .where(and(eq(offer.active, true), sql`'card' = any(${offer.methods})`))
+      .limit(1);
     return {
       pixManual: pix ? { key: str(cfg(pix).key) ?? "", name: str(cfg(pix).name) ?? "", city: str(cfg(pix).city) ?? "" } : null,
       asaas: asaas
@@ -45,6 +54,7 @@ export const connectionsStatus = defineAction({
       meta: meta
         ? { pixelId: str(cfg(meta).pixelId) ?? "", testEventCode: str(cfg(meta).testEventCode), accessToken: meta.secret ? ("configured" as const) : null }
         : null,
+      turnstile: { configured: turnstileConfigured, recommended: !turnstileConfigured && cardOffer !== undefined },
     };
   },
 });

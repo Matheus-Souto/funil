@@ -115,6 +115,11 @@ Preencha no `.env` (o arquivo explica cada linha):
   mesmo `SECRET`, as chaves salvas (Asaas, SMTP, Meta) não abrem mais; e quem tiver um backup do banco **mais** o
   `SECRET` consegue abrir todas essas chaves (cobrar e estornar pelo Asaas da loja, mandar e-mail como a loja).
 - `POSTGRES_PASSWORD` só vale na primeira subida (quando o banco é criado).
+- **Cartão: configure o Cloudflare Turnstile** (`TURNSTILE_SITE_KEY` e `TURNSTILE_SECRET`, as duas juntas; crie o
+  widget em <https://dash.cloudflare.com/?to=/:account/turnstile>). Com muitas recusas de cartão em pouco tempo (sinal
+  de teste de cartões roubados), a loja passa a pedir a verificação anti-robô a todos. Sem Turnstile, cada IP fica
+  limitado a 3 tentativas por hora enquanto durar o alerta. O painel (Conexões) avisa quando há oferta com cartão e o
+  Turnstile não está configurado.
 
 ## 4. Subir
 

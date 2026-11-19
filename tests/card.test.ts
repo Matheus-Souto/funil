@@ -7,6 +7,7 @@ import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import {
   payWithCard,
+  BREAKER,
   BUSY_MESSAGE,
   DECLINE_MESSAGE,
   UNAVAILABLE_MESSAGE,
@@ -44,6 +45,16 @@ const CVV = "987";
 const HOLDER = "TITULAR UNICO ZETA";
 
 const sha256hex = (v: string) => createHash("sha256").update(v).digest("hex");
+/** Acrescenta o dígito verificador (Luhn) a `body`: números sintéticos válidos para os testes de limite. */
+function luhn(body: string): string {
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) {
+    let d = Number(body[body.length - 1 - i]);
+    if (i % 2 === 0) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+    sum += d;
+  }
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const fastDeps: CardDeps = { wait: tick };
 let ipSeq = 0;
@@ -578,16 +589,16 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     for (let i = 0; i < 10; i++) {
       const o = await newCardOrder(storeId, offerId, email());
       const ip = `2001:db8:77:${i % 2 === 0 ? "0" : "0000"}:${(i + 1).toString(16)}::${i + 7}`;
-      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: `43000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4300000000${String(i).padStart(5, "0")}`) }), fastDeps);
       expect(r.status).toBe("approved");
     }
     const o = await newCardOrder(storeId, offerId, email());
-    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:0db8:0077:0000:ffff:ffff:ffff:ffff", number: "4300000000099999" }), fastDeps).catch(
+    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:0db8:0077:0000:ffff:ffff:ffff:ffff", number: luhn("430000000009999") }), fastDeps).catch(
       (x: unknown) => x,
     );
     expect((e as ActionError).code).toBe("rate_limited");
     const other = await newCardOrder(storeId, offerId, email());
-    expect((await payWithCard(call, input(other.publicId, { clientIp: "2001:db8:77:1::1", number: "4300000000088888" }), fastDeps)).status).toBe(
+    expect((await payWithCard(call, input(other.publicId, { clientIp: "2001:db8:77:1::1", number: luhn("430000000008888") }), fastDeps)).status).toBe(
       "approved",
     );
   });
@@ -607,7 +618,7 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
     for (let i = 0; i < 10; i++) {
       const o = await newCardOrder(storeId, offerId, email());
-      const r = await payWithCard(call, input(o.publicId, { number: `44100000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => now });
+      const r = await payWithCard(call, input(o.publicId, { number: luhn(`4410000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => now });
       expect(r.status).toBe("declined");
     }
     fake.clearFailures();
@@ -644,12 +655,12 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     // outra loja não é afetada
     const b = await setup();
     const ob = await newCardOrder(b.storeId, b.offerId, email());
-    expect((await payWithCard(b.call, input(ob.publicId, { number: "4410000000077777" }), { ...deps, now: () => later })).status).toBe("approved");
+    expect((await payWithCard(b.call, input(ob.publicId, { number: luhn("441000000007777") }), { ...deps, now: () => later })).status).toBe("approved");
 
     // passada 1 h do disparo, volta ao normal
     const reset = new Date(t0.getTime() + 61 * 60_000);
     const o2 = await newCardOrder(storeId, offerId, email());
-    expect((await payWithCard(call, input(o2.publicId, { number: "4410000000066666" }), { ...deps, now: () => reset })).status).toBe("approved");
+    expect((await payWithCard(call, input(o2.publicId, { number: luhn("441000000006666") }), { ...deps, now: () => reset })).status).toBe("approved");
   }, HEAVY_TEST_MS);
 
   test("disjuntor: 9 recusas não disparam; recusas fora da janela de 15 min não somam", async () => {
@@ -661,7 +672,7 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
       // 9 recusas em t0 e 9 em t0 + 16 min: nunca 10 dentro de 15 min
       const at = new Date(t0.getTime() + (i < 9 ? 0 : 16 * 60_000));
       const o = await newCardOrder(storeId, offerId, email());
-      expect((await payWithCard(call, input(o.publicId, { number: `44200000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => at })).status).toBe(
+      expect((await payWithCard(call, input(o.publicId, { number: luhn(`4420000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at })).status).toBe(
         "declined",
       );
     }
@@ -671,21 +682,65 @@ describe("payWithCard: IPv6 por /64 e disjuntor por loja", () => {
     expect((await payWithCard(call, input(o.publicId), { ...deps, now: () => at })).status).toBe("approved");
   }, 30_000);
 
-  test("disjuntor sem Turnstile configurado: no máximo 20 tentativas de cartão por hora na loja", async () => {
+  test("disjuntor sem Turnstile configurado: teto por IP (/64) por hora, não global (o atacante não esgota a loja)", async () => {
     const { fake, call, storeId, offerId } = await setup();
     const t0 = new Date("2026-11-18T18:00:00Z");
     const deps: CardDeps = { ...fastDeps, turnstileConfigured: false };
     await tripBreaker(fake, call, storeId, offerId, t0, deps);
     const at = new Date(t0.getTime() + 60_000);
-    for (let i = 0; i < 20; i++) {
+    // Um IP (vários endereços da mesma /64) esgota só o próprio teto.
+    for (let i = 0; i < BREAKER.capPerSourceWithoutTurnstile; i++) {
       const o = await newCardOrder(storeId, offerId, email());
-      const r = await payWithCard(call, input(o.publicId, { number: `44300000000${String(i).padStart(5, "0")}` }), { ...deps, now: () => at });
+      const ip = `2001:db8:44:3::${i + 1}`;
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4430000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at });
       expect(r.status).toBe("approved");
     }
     const o = await newCardOrder(storeId, offerId, email());
-    const e = await payWithCard(call, input(o.publicId, { number: "4430000000099999" }), { ...deps, now: () => at }).catch((x: unknown) => x);
+    const e = await payWithCard(call, input(o.publicId, { clientIp: "2001:db8:44:3::ff", number: luhn("443000000009999") }), { ...deps, now: () => at }).catch(
+      (x: unknown) => x,
+    );
     expect((e as ActionError).code).toBe("rate_limited");
+    // Compradores de outros IPs continuam comprando (bem mais que o antigo teto global de 20).
+    for (let i = 0; i < 25; i++) {
+      const other = await newCardOrder(storeId, offerId, email());
+      const r = await payWithCard(call, input(other.publicId, { number: luhn(`4431000000${String(i).padStart(5, "0")}`) }), { ...deps, now: () => at });
+      expect(r.status).toBe("approved");
+    }
+    const global = await t.ownerDb.execute(sql`select key from rate_limit where key = ${`card:store:${storeId}`}`);
+    expect(global).toHaveLength(0);
   }, 30_000);
+
+  test("número que falha no Luhn: invalid_input antes do Asaas; não conta como recusa, nem no disjuntor, nem nos limites", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const ip = "203.0.113.77";
+    for (let i = 0; i < 12; i++) {
+      const o = await newCardOrder(storeId, offerId, email());
+      const bad = `${luhn(`4400000000${String(i).padStart(5, "0")}`).slice(0, 15)}${(Number(luhn(`4400000000${String(i).padStart(5, "0")}`).slice(15)) + 1) % 10}`;
+      const e = (await payWithCard(call, input(o.publicId, { clientIp: ip, number: bad }), fastDeps).catch((x: unknown) => x)) as ActionError;
+      expect(e.code).toBe("invalid_input");
+      expect(e.details).toEqual([{ path: ["card", "number"] }]);
+      expect(JSON.stringify({ m: e.message, d: e.details })).not.toContain(bad);
+    }
+    expect(paymentPosts(fake)).toHaveLength(0);
+    const keys = await t.ownerDb.execute(
+      sql`select key from rate_limit where key like ${`card:%${storeId}%`} or key = ${`card:ip:${ip}`} or key like 'card:decline:ip:203.0.113.77%'`,
+    );
+    expect(keys).toHaveLength(0);
+    // O mesmo IP segue podendo pagar com um cartão válido.
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn("440000000009999") }), fastDeps)).status).toBe("approved");
+  }, 30_000);
+
+  test("cartão de teste do sandbox (4444 4444 4444 4444, falha no Luhn) só é aceito com a conexão sandbox", async () => {
+    const { fake, call, storeId, offerId } = await setup();
+    const o = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o.publicId, { number: APPROVE }), fastDeps)).status).toBe("approved");
+    await t.ownerDb.execute(sql`update integration set config = config || '{"env":"production"}'::jsonb where store_id = ${storeId} and kind = 'asaas'`);
+    const o2 = await newCardOrder(storeId, offerId, email());
+    const e = (await payWithCard(call, input(o2.publicId, { number: APPROVE }), fastDeps).catch((x: unknown) => x)) as ActionError;
+    expect(e.code).toBe("invalid_input");
+    expect(paymentPosts(fake)).toHaveLength(1);
+  });
 });
 
 describe("payWithCard: limites e Turnstile", () => {
@@ -694,11 +749,11 @@ describe("payWithCard: limites e Turnstile", () => {
     const ip = "203.0.113.11";
     for (let i = 0; i < 10; i++) {
       const o = await newCardOrder(storeId, offerId, email());
-      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: `40000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      const r = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn(`4000000000${String(i).padStart(5, "0")}`) }), fastDeps);
       expect(r.status).toBe("approved");
     }
     const o = await newCardOrder(storeId, offerId, email());
-    const e = await payWithCard(call, input(o.publicId, { clientIp: ip, number: "4000000000099999" }), fastDeps).catch((x: unknown) => x);
+    const e = await payWithCard(call, input(o.publicId, { clientIp: ip, number: luhn("400000000009999") }), fastDeps).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("rate_limited");
     expect(paymentPosts(fake)).toHaveLength(10);
   });
@@ -707,13 +762,13 @@ describe("payWithCard: limites e Turnstile", () => {
     const { fake, call, storeId, offerId } = await setup();
     for (let i = 0; i < 11; i++) {
       const o = await newCardOrder(storeId, offerId, email());
-      const r = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: `42000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      const r = await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: luhn(`4200000000${String(i).padStart(5, "0")}`) }), fastDeps);
       expect(r.status).toBe("approved");
     }
     const rows = await t.ownerDb.execute(sql`select key from rate_limit where key like 'card:ip:%unknown%'`);
     expect(rows).toHaveLength(0);
     expect((paymentPosts(fake)[0]!.body as { remoteIp: string }).remoteIp).toBe("0.0.0.0");
-    const pan = "4200000000088888";
+    const pan = luhn("420000000008888");
     for (let i = 0; i < 3; i++) {
       const o = await newCardOrder(storeId, offerId, email());
       await payWithCard(call, input(o.publicId, { clientIp: UNKNOWN_IP, number: pan }), fastDeps);
@@ -739,7 +794,7 @@ describe("payWithCard: limites e Turnstile", () => {
 
   test("4ª tentativa do mesmo cartão na hora -> rate_limited", async () => {
     const { fake, call, storeId, offerId } = await setup();
-    const pan = "4000000000077777";
+    const pan = luhn("400000000007777");
     for (let i = 0; i < 3; i++) {
       const o = await newCardOrder(storeId, offerId, email());
       expect((await payWithCard(call, input(o.publicId, { number: pan }), fastDeps)).status).toBe("approved");
@@ -755,11 +810,11 @@ describe("payWithCard: limites e Turnstile", () => {
     const mail = email();
     for (let i = 0; i < 5; i++) {
       const o = await newCardOrder(storeId, offerId, mail);
-      const r = await payWithCard(call, input(o.publicId, { number: `41000000000${String(i).padStart(5, "0")}` }), fastDeps);
+      const r = await payWithCard(call, input(o.publicId, { number: luhn(`4100000000${String(i).padStart(5, "0")}`) }), fastDeps);
       expect(r.status).toBe("approved");
     }
     const o = await newCardOrder(storeId, offerId, mail);
-    const e = await payWithCard(call, input(o.publicId, { number: "4100000000099999" }), fastDeps).catch((x: unknown) => x);
+    const e = await payWithCard(call, input(o.publicId, { number: luhn("410000000009999") }), fastDeps).catch((x: unknown) => x);
     expect((e as ActionError).code).toBe("rate_limited");
   });
 

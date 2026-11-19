@@ -4,7 +4,7 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, job, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, job, offer, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
@@ -351,9 +351,18 @@ describe("connections.status", () => {
     expect(await fails(runAction(connectionsStatus, panelCall(s.storeId, "support"), {}))).toBe("forbidden");
   });
 
+  test("Turnstile: recomendado quando não está configurado e há oferta ativa com cartão", async () => {
+    const s = await seedPanelStore(); // oferta ativa com pix e cartão; os testes rodam sem TURNSTILE_SECRET
+    expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).turnstile).toEqual({ configured: false, recommended: true });
+    await t.ownerDb.update(offer).set({ methods: ["pix"] }).where(eq(offer.id, s.offerId));
+    expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).turnstile).toEqual({ configured: false, recommended: false });
+    await t.ownerDb.update(offer).set({ methods: ["pix", "card"], active: false }).where(eq(offer.id, s.offerId));
+    expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).turnstile).toEqual({ configured: false, recommended: false });
+  });
+
   test("loja sem conexões: tudo null", async () => {
     const s = await seedPanelStore();
-    expect(await runAction(connectionsStatus, panelCall(s.storeId), {})).toEqual({ pixManual: null, asaas: null, smtp: null, meta: null });
+    expect(await runAction(connectionsStatus, panelCall(s.storeId), {})).toMatchObject({ pixManual: null, asaas: null, smtp: null, meta: null });
   });
 });
 

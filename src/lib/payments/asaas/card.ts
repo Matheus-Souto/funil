@@ -21,7 +21,7 @@ import { z } from "zod";
 import { alertSeller } from "@/lib/alerts";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { cardAttempt, customer, offer, orders, payment } from "@/lib/db/schema";
+import { cardAttempt, customer, integration, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
@@ -47,10 +47,28 @@ const CARD_TIMEOUT_MS = 60_000;
 const HOUR = 3600;
 export const LIMITS = { ip: 10, email: 5, card: 3 } as const;
 /**
- * Disjuntor por loja: ≥ 10 recusas de cartão em 15 min ⇒ por 1 h toda tentativa de cartão da loja exige Turnstile
- * (sem Turnstile configurado: no máximo 20 tentativas de cartão por hora na loja).
+ * Disjuntor por loja: ≥ 10 recusas de cartão em 15 min ⇒ por 1 h toda tentativa de cartão da loja exige Turnstile.
+ * Sem Turnstile configurado: no máximo 3 tentativas por hora por origem (IP, agrupado por /64; IP desconhecido: e-mail)
+ * na loja. Um teto global da loja seria consumido pelo próprio atacante e desligaria o cartão para todos.
  */
-export const BREAKER = { declines: 10, windowSec: 15 * 60, holdSec: 3600, capWithoutTurnstile: 20 } as const;
+export const BREAKER = { declines: 10, windowSec: 15 * 60, holdSec: 3600, capPerSourceWithoutTurnstile: 3 } as const;
+/**
+ * Cartão de aprovação do sandbox do Asaas (documentado; não passa no Luhn). Aceito só com a conexão sandbox: em
+ * produção nenhum cartão real falha no Luhn.
+ */
+export const SANDBOX_TEST_CARD = "4444444444444444";
+
+/** Dígito verificador (Luhn): todo número de cartão real passa. Número inválido nunca vai ao Asaas. */
+export function luhnValid(number: string): boolean {
+  if (!/^\d{13,19}$/.test(number)) return false;
+  let sum = 0;
+  for (let i = 0; i < number.length; i++) {
+    let d = number.charCodeAt(number.length - 1 - i) - 48;
+    if (i % 2 === 1) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+    sum += d;
+  }
+  return sum % 10 === 0;
+}
 /** Códigos de erro do Asaas que significam recusa do cartão (doc: "invalid_creditCard"). Os demais: integração. */
 const DECLINE_CODES = new Set(["invalid_creditCard"]);
 /** HTTP em que o Asaas rejeitou a requisição sem processá-la (sem cobrança): erro de integração/configuração. */
@@ -172,13 +190,23 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
         ),
       )
       .limit(1);
-    return { o, existing, maxInstallments: of?.maxInstallments ?? 1, cust: c!, unresolved: unresolved !== undefined };
+    const [conn] = await tx
+      .select({ config: integration.config })
+      .from(integration)
+      .where(and(eq(integration.storeId, storeId), eq(integration.kind, "asaas")));
+    const sandbox = (conn?.config as { env?: unknown } | undefined)?.env !== "production";
+    return { o, existing, maxInstallments: of?.maxInstallments ?? 1, cust: c!, unresolved: unresolved !== undefined, sandbox };
   });
   const order = pre.o;
   if (pre.existing) return awaitAttempt(storeId, pre.existing, order.id, deps);
   if (order.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
   if (order.status === "paid") return approved();
   if (order.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
+  // Luhn antes de qualquer limite ou chamada ao Asaas: erro de digitação (ou número aleatório de quem quer derrubar o
+  // cartão da loja) não vira recusa, não conta nos limites nem no disjuntor.
+  if (!luhnValid(input.card.number) && !(pre.sandbox && input.card.number === SANDBOX_TEST_CARD)) {
+    throw new ActionError("invalid_input", "Número do cartão inválido. Confira os dígitos.", [{ path: ["card", "number"] }]);
+  }
 
   // 2. Parcelas, limites e Turnstile (antes de gravar a tentativa).
   if (input.installments > pre.maxInstallments) {
@@ -196,7 +224,11 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   if (!checkCardFingerprint(input.card.number, LIMITS.card, HOUR, t.getTime())) throw limited();
   const breakerOn = await hadRecentEvent(breakerKey, BREAKER.holdSec, t);
   const turnstileOn = deps.turnstileConfigured ?? Boolean(env.TURNSTILE_SECRET);
-  if (breakerOn && !turnstileOn && !(await checkRateLimit(`card:store:${storeId}`, BREAKER.capWithoutTurnstile, HOUR, t))) throw limited();
+  if (breakerOn && !turnstileOn) {
+    // Teto por origem (IP /64; sem IP conhecido, o e-mail), nunca global: o atacante só esgota o próprio teto.
+    const source = knownIp ? `ip:${ipKey}` : `email:${emailHash}`;
+    if (!(await checkRateLimit(`card:store:${storeId}:${source}`, BREAKER.capPerSourceWithoutTurnstile, HOUR, t))) throw limited();
+  }
   const recentDecline =
     (knownIp && (await hadRecentEvent(`card:decline:ip:${ipKey}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
   if (recentDecline || (breakerOn && turnstileOn)) {
