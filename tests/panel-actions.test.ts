@@ -4,9 +4,9 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, job, offer, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, integration, job, offer, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
 import { centsToInput, parseBrl } from "@/lib/format";
-import { saveIntegration } from "@/lib/integrations";
+import { createIntegrationSecrets, getIntegration, saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
 import { pixManualExpiry } from "@/lib/orders/labels";
 import { allowedOrderActions, csvCell, exportOrders, getOrderDetail, listOrders, maskCpf, orderCounts, ordersCsv } from "@/lib/orders/panel";
@@ -358,6 +358,27 @@ describe("connections.status", () => {
     expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).turnstile).toEqual({ configured: false, recommended: false });
     await t.ownerDb.update(offer).set({ methods: ["pix", "card"], active: false }).where(eq(offer.id, s.offerId));
     expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).turnstile).toEqual({ configured: false, recommended: false });
+  });
+
+  test("chave do Asaas ilegível: o painel mostra 'unreadable', os demais tipos seguem e o dono salva uma chave nova", async () => {
+    const s = await seedPanelStore();
+    // a1 selado com uma ASAAS_SEAL_KEY que este processo não tem (chave trocada, removida ou rollback).
+    const sealed = createIntegrationSecrets({ asaasKey: "z".repeat(40) }).seal("asaas", "chave-perdida");
+    await t.ownerDb
+      .insert(integration)
+      .values({ storeId: s.storeId, kind: "asaas", config: { env: "sandbox", webhookToken: "tok-antigo", accountKey: "sandbox:wallet:antiga" }, secret: sealed });
+    await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "smtp", { host: "smtp.exemplo.com", port: 587, secure: false, user: null, from: "l@e.com" }, "senha"));
+
+    const before = await runAction(connectionsStatus, panelCall(s.storeId), {});
+    expect(before.asaas).toMatchObject({ env: "sandbox", apiKey: "unreadable", webhookToken: "tok-antigo" });
+    expect(before.smtp).toMatchObject({ host: "smtp.exemplo.com", password: "configured" });
+
+    const fake = createFakeAsaas();
+    setAsaasFetchForTests(fake.fetch);
+    const saved = await runAction(saveAsaas, panelCall(s.storeId), { env: "sandbox", apiKey: fake.apiKey });
+    expect(saved.webhookToken).toBe("tok-antigo");
+    expect((await runAction(connectionsStatus, panelCall(s.storeId), {})).asaas).toMatchObject({ apiKey: "configured" });
+    expect((await withStore(s.storeId, (tx) => getIntegration(tx, s.storeId, "asaas")))?.secret).toBe(fake.apiKey);
   });
 
   test("loja sem conexões: tudo null", async () => {

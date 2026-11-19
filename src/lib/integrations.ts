@@ -72,6 +72,27 @@ export async function getIntegration<K extends IntegrationKind>(
 }
 
 /**
+ * Como `getIntegration`, mas um segredo que não abre (ASAAS_SEAL_KEY trocada ou ausente, rollback) não lança: volta
+ * `secret: null` e `unreadable: true`. Só para o painel e para regravar a conexão; pagamento usa `getIntegration`.
+ */
+export async function readIntegration(
+  tx: Tx,
+  storeId: string,
+  kind: IntegrationKind,
+): Promise<{ config: IntegrationConfig; secret: string | null; unreadable: boolean } | null> {
+  const [row] = await tx.select().from(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, kind)));
+  if (!row) return null;
+  const config = row.config as IntegrationConfig;
+  if (row.secret === null) return { config, secret: null, unreadable: false };
+  try {
+    return { config, secret: openIntegrationSecret(kind, row.secret), unreadable: false };
+  } catch (e) {
+    log.warn("segredo da conexão não pode ser aberto", { storeId, kind, error: e });
+    return { config, secret: null, unreadable: true };
+  }
+}
+
+/**
  * Grava (upsert) a conexão. `secret` omitido mantém o segredo atual; `null` apaga; texto é selado conforme o tipo
  * (`asaas` em `a1.` com ASAAS_SEAL_KEY; o resto em `v1.` com o SECRET).
  */
@@ -120,10 +141,59 @@ export async function resealAsaasSecrets(secrets: IntegrationSecrets = defaultSe
       });
     } catch (e) {
       failed++;
-      // Só a mensagem: nunca o valor selado nem o aberto.
-      log.error("re-selagem da conexão Asaas falhou na loja", { storeId: s.id, error: e instanceof Error ? e.message : String(e) });
+      // O objeto do erro, nunca a mensagem crua: o log.ts troca erro de consulta (SQL + params com os selos) por um
+      // texto genérico com o código do Postgres.
+      log.error("re-selagem da conexão Asaas falhou na loja", { storeId: s.id, error: e });
     }
   }
   if (failed > 0) throw new Error(`re-selagem da conexão Asaas falhou em ${failed} loja(s); ${changed} re-selada(s)`);
   return changed;
+}
+
+/**
+ * Confere se as chaves do processo abrem as conexões `asaas` já em `a1.`: `sealed` = quantas estão em a1,
+ * `unreadable` = quantas delas não abrem (ASAAS_SEAL_KEY ausente ou diferente). Usada no boot do app e do serviço de
+ * cartão. Erro de banco propaga. `secrets` existe para os testes.
+ */
+export async function checkAsaasSealKey(secrets: IntegrationSecrets = defaultSecrets()): Promise<{ sealed: number; unreadable: number }> {
+  const stores = await db.select({ id: store.id }).from(store);
+  let sealed = 0;
+  let unreadable = 0;
+  for (const s of stores) {
+    const [row] = await withStore(s.id, (tx) =>
+      tx
+        .select({ secret: integration.secret })
+        .from(integration)
+        .where(and(eq(integration.storeId, s.id), eq(integration.kind, "asaas"))),
+    );
+    if (!row?.secret?.startsWith("a1.")) continue;
+    sealed++;
+    try {
+      secrets.open("asaas", row.secret);
+    } catch {
+      unreadable++;
+    }
+  }
+  return { sealed, unreadable };
+}
+
+/**
+ * Passo do boot do app: re-sela `asaas` v1 -> a1 só com CARD_ISOLATED=1 (o passo é irreversível; no fluxo antigo não
+ * há por que dar), com falha só no log; depois confere a chave (`checkAsaasSealKey`). Erro na conferência propaga.
+ */
+export async function prepareAsaasSealOnBoot(
+  opts: { cardIsolated: boolean },
+  secrets: IntegrationSecrets = defaultSecrets(),
+): Promise<{ resealed: number; sealed: number; unreadable: number }> {
+  let resealed = 0;
+  if (opts.cardIsolated) {
+    try {
+      resealed = await resealAsaasSecrets(secrets);
+      if (resealed > 0) log.info("conexões Asaas re-seladas com a ASAAS_SEAL_KEY", { count: resealed });
+    } catch (e) {
+      // Não derruba: um `v1.` continua abrindo com o SECRET no app.
+      log.error("re-selagem das conexões Asaas falhou no boot", { error: e });
+    }
+  }
+  return { resealed, ...(await checkAsaasSealKey(secrets)) };
 }

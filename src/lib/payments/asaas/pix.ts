@@ -5,7 +5,7 @@ import { randomToken } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { customer, orders, payment } from "@/lib/db/schema";
 import { env as appEnv } from "@/lib/env";
-import { getIntegration, saveIntegration } from "@/lib/integrations";
+import { readIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import {
   asaasAccountKey,
@@ -214,13 +214,14 @@ export const saveAsaas = defineAction({
     await client.getBalance();
     const accountKey = await asaasAccountKey(client, input.env, input.apiKey);
     // Só leitura: a chave anterior fica em memória para cancelar, depois do commit, as cobranças da conta anterior.
-    const prev = await withStore(call.storeId, (tx) => getIntegration(tx, call.storeId, "asaas"));
+    // Chave anterior ilegível (ASAAS_SEAL_KEY trocada ou ausente) não impede salvar a nova; só não há como cancelar.
+    const prev = await withStore(call.storeId, (tx) => readIntegration(tx, call.storeId, "asaas"));
     const prevEnv: AsaasEnv = (prev?.config as { env?: string } | undefined)?.env === "production" ? "production" : "sandbox";
     const previous = prev?.secret ? { apiKey: prev.secret, env: prevEnv } : null;
     return { accountKey, previous };
   },
   async run(ctx, input, { accountKey }) {
-    const current = await getIntegration(ctx.tx, ctx.storeId, "asaas");
+    const current = await readIntegration(ctx.tx, ctx.storeId, "asaas");
     const cfg = current?.config as { webhookToken?: string; accountKey?: string } | undefined;
     const kept = cfg?.webhookToken;
     const webhookToken = kept && !input.rotateWebhookToken ? kept : randomToken();

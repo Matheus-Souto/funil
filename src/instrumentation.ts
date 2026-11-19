@@ -4,23 +4,30 @@ export async function register(): Promise<void> {
   // Env inválido derruba a subida (código 1, mensagem clara no log) em vez de o app subir e falhar no primeiro uso:
   // o `env` do app só é lido sob demanda, e o healthcheck passaria com a configuração quebrada.
   const { parseEnv } = await import("@/lib/env");
-  let service: "app" | "card";
+  let parsed: ReturnType<typeof parseEnv>;
   try {
-    service = parseEnv(process.env).SERVICE;
+    parsed = parseEnv(process.env);
   } catch (e) {
     console.error(`funil: não foi possível iniciar. ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
-  if (service === "app") {
-    // Conexões Asaas gravadas antes da ASAAS_SEAL_KEY passam para a chave própria (a1), que o serviço de cartão abre.
-    // Falha não derruba a subida: um `v1.` continua abrindo com o SECRET no app.
-    const { resealAsaasSecrets } = await import("@/lib/integrations");
-    const { log } = await import("@/lib/log");
+  if (parsed.SERVICE === "app") {
+    // Re-sela as conexões Asaas na chave própria (só com CARD_ISOLATED=1) e confere se a ASAAS_SEAL_KEY abre as que já
+    // estão em a1: chave trocada, removida ou rollback trancaria o Asaas de todas as lojas sem aviso.
+    const { prepareAsaasSealOnBoot } = await import("@/lib/integrations");
+    let unreadable = 0;
     try {
-      const n = await resealAsaasSecrets();
-      if (n > 0) log.info("conexões Asaas re-seladas com a ASAAS_SEAL_KEY", { count: n });
+      unreadable = (await prepareAsaasSealOnBoot({ cardIsolated: parsed.CARD_ISOLATED })).unreadable;
     } catch (e) {
-      log.error("re-selagem das conexões Asaas falhou no boot", { error: e instanceof Error ? e.message : String(e) });
+      // Banco fora no boot: o healthcheck acusa; a conferência fica para a próxima subida.
+      const { log } = await import("@/lib/log");
+      log.error("não foi possível conferir a ASAAS_SEAL_KEY no boot", { error: e });
+    }
+    if (unreadable > 0) {
+      console.error(
+        `funil: não foi possível iniciar. ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão Asaas de ${unreadable} loja(s); restaure a chave correta`,
+      );
+      process.exit(1);
     }
   }
   const { startWorker } = await import("@/lib/jobs/worker");

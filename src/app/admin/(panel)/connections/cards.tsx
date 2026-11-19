@@ -183,16 +183,19 @@ const ASAAS_EVENTS = [
   "PAYMENT_AWAITING_CHARGEBACK_REVERSAL",
 ];
 
+const UNREADABLE_KEY = "A chave salva não pode ser lida; informe a chave de API de novo.";
+
 export function AsaasCard({
   data,
   canWrite,
 }: {
-  data: { env: "sandbox" | "production"; apiKey: "configured" | null; webhookUrl: string; webhookToken: string | null } | null;
+  data: { env: "sandbox" | "production"; apiKey: "configured" | "unreadable" | null; webhookUrl: string; webhookToken: string | null } | null;
   canWrite: boolean;
 }) {
+  const unreadable = data?.apiKey === "unreadable";
   const [env, setEnv] = useState<"sandbox" | "production">(data?.env ?? "sandbox");
   const [apiKey, setApiKey] = useState("");
-  const [replacing, setReplacing] = useState(!data);
+  const [replacing, setReplacing] = useState(!data || unreadable);
   const [rotate, setRotate] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const run = useActionRunner();
@@ -232,6 +235,7 @@ export function AsaasCard({
               <span className={s.label}>Chave de API</span>
               <input className={`${s.input} ${s.mono}`} type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="$aact_…" />
               </label>
+              {unreadable ? <span className={s.hint}>{UNREADABLE_KEY}</span> : null}
               <span className={s.hint}>No Asaas: Integrações → Chaves de API. A chave é testada antes de salvar.</span>
             </div>
           ) : (
@@ -262,7 +266,7 @@ export function AsaasCard({
       ) : data ? (
         <div className={s.rows} style={{ marginTop: 12 }}>
           <Row k="Ambiente">{envLabel(data.env)}</Row>
-          <Row k="Chave de API">{data.apiKey ? <Configured /> : "—"}</Row>
+          <Row k="Chave de API">{unreadable ? UNREADABLE_KEY : data.apiKey ? <Configured /> : "—"}</Row>
         </div>
       ) : (
         <p className={s.muted}>Ainda não conectado.</p>

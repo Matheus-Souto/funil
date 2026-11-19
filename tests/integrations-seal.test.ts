@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { withStore } from "@/lib/db/client";
 import { integration } from "@/lib/db/schema";
 import { env, parseEnv, requireSecret } from "@/lib/env";
-import { createIntegrationSecrets, getIntegration, openIntegrationSecret, resealAsaasSecrets, saveIntegration } from "@/lib/integrations";
+import { createIntegrationSecrets, getIntegration, type IntegrationSecrets, openIntegrationSecret, resealAsaasSecrets, saveIntegration } from "@/lib/integrations";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 const ASAAS_KEY = "k".repeat(40);
@@ -32,12 +32,12 @@ describe("createIntegrationSecrets: regra de selagem por tipo", () => {
   test("a1 só abre para o tipo asaas (SMTP e Meta nunca com a chave do Asaas)", () => {
     const s = createIntegrationSecrets({ secret: SECRET, asaasKey: ASAAS_KEY });
     const sealed = s.seal("asaas", "x");
-    for (const kind of ["smtp", "meta", "pix_manual"]) expect(() => s.open(kind, sealed)).toThrow();
+    for (const kind of ["smtp", "meta", "pix_manual"]) expect(() => s.open(kind, sealed)).toThrow(`não abre a conexão ${kind}`);
   });
 
   test("openIntegrationSecret (env do processo) recusa a1 fora do asaas e prefixo desconhecido", () => {
     const sealed = createIntegrationSecrets({ asaasKey: ASAAS_KEY }).seal("asaas", "x");
-    expect(() => openIntegrationSecret("smtp", sealed)).toThrow();
+    expect(() => openIntegrationSecret("smtp", sealed)).toThrow("não abre a conexão smtp");
     expect(() => openIntegrationSecret("asaas", "z9.a.b.c")).toThrow("Valor selado inválido");
     expect(() => openIntegrationSecret("asaas", "lixo")).toThrow("Valor selado inválido");
   });
@@ -136,6 +136,41 @@ describe("resealAsaasSecrets", () => {
     const logged = lines.join("");
     expect(logged).toContain(ruim.storeId);
     for (const v of [alheio, "chave-alheia-456", "chave-boa-123"]) expect(logged).not.toContain(v);
+  });
+
+  test("UPDATE da re-selagem falhando (erro de consulta do drizzle): nenhum dos dois selos vai para o log", async () => {
+    const s = await seedStore();
+    await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "asaas", {}, "chave-update-789"));
+    const antigo = (await rawSecret(s.storeId, "asaas"))!;
+    const real = createIntegrationSecrets({ secret: requireSecret(), asaasKey: ASAAS_KEY });
+    let novo = "";
+    // NUL no texto: o Postgres recusa (22021) e o drizzle lança DrizzleQueryError com `params` = [novo, ..., antigo].
+    const quebrado: IntegrationSecrets = {
+      asaasOwnKey: true,
+      open: (kind, sealed) => real.open(kind, sealed),
+      seal: (kind, plain) => (novo = real.seal(kind, plain)) + "\u0000",
+    };
+
+    const lines: string[] = [];
+    const out = spyOn(process.stdout, "write").mockImplementation(((chunk: string) => {
+      lines.push(String(chunk));
+      return true;
+    }) as never);
+    let error: unknown;
+    try {
+      await resealAsaasSecrets(quebrado).catch((e: unknown) => {
+        error = e;
+      });
+    } finally {
+      out.mockRestore();
+    }
+    expect(String(error)).toMatch(/falhou em \d+ loja/);
+    expect(novo.startsWith("a1.")).toBe(true);
+    const logged = lines.join("");
+    expect(logged).toContain(s.storeId);
+    expect(logged).toContain("falha na consulta ao banco");
+    for (const v of [antigo, novo, antigo.split(".")[3]!, novo.split(".")[3]!, "chave-update-789"]) expect(logged).not.toContain(v);
+    expect(await rawSecret(s.storeId, "asaas")).toBe(antigo);
   });
 
   test("sem ASAAS_SEAL_KEY não muda nada", async () => {
