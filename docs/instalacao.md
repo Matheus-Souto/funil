@@ -89,6 +89,22 @@ Se quiser o proxy **ligado**, faça tudo isto (senão o cartão e os limites ant
 
    e no `.env` use `TRUST_PROXY=2`. Sem isso, todos os compradores parecem ter o mesmo IP (o limite por IP bloqueia
    gente honesta e o Asaas recebe um `remoteIp` errado na análise antifraude do cartão).
+4. **Feche a origem para quem não vem da Cloudflare.** O IP do servidor acaba descoberto (DNS antigo, certificado,
+   varredura) e quem acessa direto pula a Cloudflare (e o WAF/limites dela). No firewall do servidor, libere as portas
+   80 e 443 só para as faixas da Cloudflare (<https://www.cloudflare.com/ips/>; atualize quando a lista mudar), por
+   exemplo com `ufw`:
+
+   ```sh
+   for ip in $(curl -s https://www.cloudflare.com/ips-v4) $(curl -s https://www.cloudflare.com/ips-v6); do
+     sudo ufw allow from "$ip" to any port 80,443 proto tcp
+   done
+   sudo ufw deny 80/tcp && sudo ufw deny 443/tcp
+   ```
+
+   Atenção: o Docker publica portas por fora do `ufw` (regras próprias no iptables). Confira com
+   `curl -m 5 https://<IP-do-servidor>` de uma máquina de fora; se responder, aplique as regras na cadeia `DOCKER-USER`
+   ou use o firewall do provedor da VPS (o mais simples). Alternativa: "Authenticated Origin Pulls" da Cloudflare
+   (certificado de cliente exigido pelo Caddy).
 
 ## 3. Baixar e configurar
 

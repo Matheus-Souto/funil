@@ -4,6 +4,8 @@
 // IP do cliente (`TRUST_PROXY`, obrigatória em produção fora de loopback):
 // - 1 (ou N proxies confiáveis): o N-ésimo endereço da DIREITA em X-Forwarded-For, isto é, o que o nosso proxy (Caddy)
 //   acrescentou a partir do socket. Entradas à esquerda vêm do cliente e podem ser forjadas: nunca são usadas.
+//   Com MENOS entradas que N (a requisição não passou por todos os proxies, ex.: acesso direto à origem atrás da
+//   Cloudflare), vale a mais à esquerda: o Caddy descarta o cabeçalho de quem não é proxy confiável e escreve o socket.
 // - 0 (sem proxy): X-Forwarded-For NÃO é lido. O Next só o preenche com o endereço do socket quando o cliente não
 //   mandou o cabeçalho (`??=` em base-server.js), então ele é forjável e o app router não expõe o socket. O IP vira a
 //   chave fixa "unknown": o limite por IP é pulado e valem os limites por e-mail e por cartão.
@@ -49,8 +51,11 @@ export function clientIpFrom(headers: Headers, trustProxy: number): string {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (hops.length < trustProxy) return UNKNOWN_IP;
-  return normalizeIp(hops[hops.length - trustProxy]) ?? UNKNOWN_IP;
+  if (hops.length === 0) return UNKNOWN_IP;
+  // Menos entradas que proxies confiáveis: a requisição não passou por todos (ex.: acesso direto à origem, sem a
+  // Cloudflare). A mais à esquerda é a que o nosso proxy (Caddy) escreveu a partir do socket; "desconhecido" aqui
+  // desligaria todos os limites por IP para quem acha o IP da origem.
+  return normalizeIp(hops[Math.max(0, hops.length - trustProxy)]) ?? UNKNOWN_IP;
 }
 
 function isHttps(headers: Headers, trustProxy: number): boolean {

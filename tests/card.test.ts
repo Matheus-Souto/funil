@@ -1020,6 +1020,14 @@ describe("rota POST /api/checkout/card", () => {
     expect(clientIpFrom(new Headers(), 1)).toBe(UNKNOWN_IP);
   });
 
+  test("clientIpFrom: menos entradas que TRUST_PROXY (acesso direto à origem, sem a Cloudflare) usa a mais à esquerda", () => {
+    // O Caddy descarta o X-Forwarded-For de quem não é proxy confiável e escreve só o IP do socket: é a única entrada.
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "203.0.113.9" }), 2)).toBe("203.0.113.9");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "203.0.113.9, 10.0.0.2" }), 3)).toBe("203.0.113.9");
+    expect(clientIpFrom(new Headers({ "x-forwarded-for": "lixo" }), 2)).toBe(UNKNOWN_IP);
+    expect(clientIpFrom(new Headers(), 2)).toBe(UNKNOWN_IP);
+  });
+
   test("clientIpFrom: sem proxy confiável nunca lê X-Forwarded-For (chave fixa 'unknown')", () => {
     expect(UNKNOWN_IP).toBe("unknown");
     for (const xff of ["10.0.0.5", "6.6.6.6, 203.0.113.4"]) expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 0)).toBe(UNKNOWN_IP);
