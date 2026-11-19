@@ -1,0 +1,50 @@
+// Estado das conexões para o painel. Segredos (chave do Asaas, senha do SMTP, token do Meta) nunca saem daqui: só
+// "configured". O token do webhook do Asaas precisa ser colado no Asaas, então aparece, mas só para quem pode alterar
+// conexões (connections.write); os demais veem que existe.
+import { z } from "zod";
+import { defineAction } from "@/lib/actions/core";
+import { hasPermission } from "@/lib/actions/permissions";
+import { env } from "@/lib/env";
+import { getIntegration } from "@/lib/integrations";
+
+const str = (v: unknown) => (typeof v === "string" ? v : null);
+const webhookUrl = (storeId: string) => `${env.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
+
+export const connectionsStatus = defineAction({
+  name: "connections.status",
+  description: "Conexões da loja (Pix manual, Asaas, SMTP, Meta) sem segredos: segredos aparecem só como configurados.",
+  input: z.object({}),
+  permission: "connections.read",
+  audit: false,
+  async run(ctx) {
+    const canWrite = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.write");
+    const [pix, asaas, smtp, meta] = await Promise.all(
+      (["pix_manual", "asaas", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)),
+    );
+    const cfg = (c: typeof pix) => (c?.config ?? {}) as Record<string, unknown>;
+    return {
+      pixManual: pix ? { key: str(cfg(pix).key) ?? "", name: str(cfg(pix).name) ?? "", city: str(cfg(pix).city) ?? "" } : null,
+      asaas: asaas
+        ? {
+            env: cfg(asaas).env === "production" ? ("production" as const) : ("sandbox" as const),
+            apiKey: asaas.secret ? ("configured" as const) : null,
+            webhookUrl: webhookUrl(ctx.storeId),
+            webhookToken: canWrite ? str(cfg(asaas).webhookToken) : null,
+          }
+        : null,
+      smtp: smtp
+        ? {
+            host: str(cfg(smtp).host) ?? "",
+            port: typeof cfg(smtp).port === "number" ? (cfg(smtp).port as number) : 0,
+            secure: cfg(smtp).secure === true,
+            user: str(cfg(smtp).user),
+            from: str(cfg(smtp).from) ?? "",
+            password: smtp.secret ? ("configured" as const) : null,
+          }
+        : null,
+      meta: meta
+        ? { pixelId: str(cfg(meta).pixelId) ?? "", testEventCode: str(cfg(meta).testEventCode), accessToken: meta.secret ? ("configured" as const) : null }
+        : null,
+    };
+  },
+});

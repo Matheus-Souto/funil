@@ -4,6 +4,7 @@
 import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
+import { alertSeller } from "@/lib/alerts";
 import { withStore } from "@/lib/db/client";
 import { orders, payment } from "@/lib/db/schema";
 import { enqueue, hasOpenJob, type JobHandler } from "@/lib/jobs";
@@ -143,7 +144,7 @@ export const refundOrderJob: JobHandler = async (j) => {
         .where(and(eq(orders.id, orderId), eq(orders.status, "paid"), isNotNull(orders.refundRequestedAt)))
         .returning({ id: orders.id });
       // Só quem limpou avisa (a retentativa do job ou o webhook que chegar depois não duplicam o aviso).
-      if (cleared.length > 0) await enqueue(tx, { storeId, type: "notify_seller", payload: { orderId, reason: "estorno_cancelado" } });
+      if (cleared.length > 0) await alertSeller(tx, storeId, "estorno_cancelado", { orderId });
     });
     log.warn("estorno cancelado no Asaas; o pedido continua pago (confira no Asaas e peça de novo se for o caso)", { orderId, paymentId: providerId });
     return;

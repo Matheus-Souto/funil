@@ -5,7 +5,7 @@ import { ActionError, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
-import { loginAttempt, membership, session, users } from "@/lib/db/schema";
+import { loginAttempt, membership, session, store, users } from "@/lib/db/schema";
 import { hashPassword, verifyPassword } from "./password";
 
 export const SESSION_COOKIE = "__Host-funil_session";
@@ -142,4 +142,25 @@ export async function destroySession(): Promise<void> {
   const token = jar.get(SESSION_COOKIE)?.value;
   if (token) await deleteSession(token);
   jar.delete(SESSION_COOKIE);
+}
+
+/** Quem está no painel (usuário; nome, endereço e cor da loja) para a moldura e os links. Tabelas globais, sem RLS. */
+export async function getPanelIdentity(panel: PanelActor): Promise<{
+  userName: string;
+  userEmail: string;
+  storeName: string;
+  store: { slug: string; domain: string | null; brandColor: string | null };
+}> {
+  const [u] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, panel.actor.userId)).limit(1);
+  const [s] = await db
+    .select({ name: store.name, slug: store.slug, domain: store.domain, brandColor: store.brandColor })
+    .from(store)
+    .where(eq(store.id, panel.storeId))
+    .limit(1);
+  return {
+    userName: u?.name ?? "",
+    userEmail: u?.email ?? "",
+    storeName: s?.name ?? "",
+    store: { slug: s?.slug ?? "", domain: s?.domain ?? null, brandColor: s?.brandColor ?? null },
+  };
 }

@@ -18,11 +18,11 @@
 import { createHash } from "node:crypto";
 import { and, eq, gt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
+import { alertSeller } from "@/lib/alerts";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
-import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
@@ -391,7 +391,7 @@ async function countStoreDecline(storeId: string, t: Date): Promise<void> {
   if (n < BREAKER.declines || (await hadRecentEvent(breakerKey, BREAKER.holdSec, t))) return;
   await recordEvent(breakerKey, t);
   // Aviso por e-mail ao vendedor (no máximo 1 por disparo: o disjuntor fica ligado 1 h). Falha aqui não muda a recusa.
-  await withStore(storeId, (tx) => enqueue(tx, { storeId, type: "notify_seller", payload: { reason: "disjuntor_cartao" } })).catch((e: unknown) =>
+  await withStore(storeId, (tx) => alertSeller(tx, storeId, "disjuntor_cartao")).catch((e: unknown) =>
     log.error("falha ao enfileirar o aviso do disjuntor de cartão", { storeId, error: e }),
   );
   log.warn("loja com muitas recusas de cartão (possível teste de cartão): verificação anti-robô exigida por 1 h", {

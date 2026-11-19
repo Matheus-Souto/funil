@@ -1,11 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, runAction } from "@/lib/actions/core";
+import { alertSeller } from "@/lib/alerts";
 import { timingSafeEqualStr } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
-import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { transitionOrder, type OrderStatus } from "@/lib/orders/state";
@@ -92,7 +92,7 @@ export const applyAsaasPayment = defineAction({
     if (refund === "done" && mapAsaasStatus(p.status) === "paid") p = { ...p, status: "REFUNDED" };
     if (refund === "cancelled" && o.status === "paid" && o.refundRequestedAt) {
       await ctx.tx.update(orders).set({ refundRequestedAt: null }).where(eq(orders.id, o.id));
-      await enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_seller", payload: { orderId: o.id, reason: "estorno_cancelado" } });
+      await alertSeller(ctx.tx, ctx.storeId, "estorno_cancelado", { orderId: o.id });
       log.warn("estorno cancelado no Asaas; o pedido continua pago (confira no Asaas e peça de novo se for o caso)", {
         orderId: o.id,
         paymentId: p.paymentId,
@@ -195,11 +195,7 @@ export const noteUnreachableAsaasPayment = defineAction({
       .set({ raw: sql`coalesce(${payment.raw}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` })
       .where(eq(payment.id, row.id));
     if (notify) {
-      await enqueue(ctx.tx, {
-        storeId: ctx.storeId,
-        type: "notify_seller",
-        payload: { orderId: row.orderId, reason: "evento_conta_asaas_anterior", paymentId: p.paymentId },
-      });
+      await alertSeller(ctx.tx, ctx.storeId, "evento_conta_asaas_anterior", { orderId: row.orderId, paymentId: p.paymentId });
     }
     return { recorded: true, notified: notify };
   },
@@ -236,7 +232,7 @@ export const alertAsaasKeyRejected = defineAction({
   permission: "system",
   async run(ctx, { httpStatus }) {
     if (!(await checkRateLimit(`asaas:key_rejected:${ctx.storeId}`, 1, KEY_ALERT_WINDOW_SEC))) return { alerted: false };
-    await enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_seller", payload: { reason: "chave_asaas_invalida", httpStatus } });
+    await alertSeller(ctx.tx, ctx.storeId, "chave_asaas_invalida", { httpStatus });
     log.warn("chave do Asaas recusada; vendedor avisado para reconectar", { storeId: ctx.storeId, httpStatus });
     return { alerted: true };
   },

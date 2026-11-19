@@ -39,3 +39,52 @@ export function validUntilSP(d: Date, now: Date = new Date()): string {
   const prefix = diff === 0 ? "hoje, " : diff === 1 ? "amanhã, " : "";
   return `${prefix}${SP_DAY_MONTH.format(d)} às ${SP_TIME.format(d)}`;
 }
+
+/** Código curto do pedido mostrado ao vendedor e nos e-mails ("#PED10510"): 8 primeiros caracteres do txid. */
+export const orderCode = (publicId: string): string => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
+
+const SP_DAY_KEY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" });
+const SP_DAY_MONTH_TIME = new Intl.DateTimeFormat("pt-BR", {
+  timeZone: "America/Sao_Paulo",
+  day: "2-digit",
+  month: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/** "hoje, 15:12" / "ontem, 22:14" / "16/11, 09:40" (São Paulo). */
+export function shortWhenSP(d: Date, now: Date = new Date()): string {
+  const day = SP_DAY_KEY.format(d);
+  if (day === SP_DAY_KEY.format(now)) return `hoje, ${SP_TIME.format(d)}`;
+  if (day === SP_DAY_KEY.format(new Date(now.getTime() - 86_400_000))) return `ontem, ${SP_TIME.format(d)}`;
+  return SP_DAY_MONTH_TIME.format(d);
+}
+
+/**
+ * Texto de preço digitado no painel -> centavos inteiros (sem ponto flutuante). Aceita "9,90", "R$ 1.284,70", "27",
+ * "9.90". Devolve null se não for um valor válido.
+ */
+export function parseBrl(text: string): number | null {
+  const t = text.replace(/R\$|\s/g, "");
+  if (!/^[\d.,]+$/.test(t)) return null;
+  let reais: string;
+  let cents = "";
+  const comma = t.lastIndexOf(",");
+  const dot = t.lastIndexOf(".");
+  if (comma >= 0) {
+    reais = t.slice(0, comma).replace(/\./g, "");
+    cents = t.slice(comma + 1);
+  } else if (dot >= 0 && t.length - dot - 1 <= 2 && t.indexOf(".") === dot) {
+    reais = t.slice(0, dot);
+    cents = t.slice(dot + 1);
+  } else {
+    reais = t.replace(/\./g, "");
+  }
+  if (!/^\d*$/.test(reais) || !/^\d{0,2}$/.test(cents) || (reais === "" && cents === "")) return null;
+  const value = Number(reais || "0") * 100 + Number(cents.padEnd(2, "0") || "0");
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/** 990 -> "9,90" (campo de preço). */
+export const centsToInput = (cents: number): string => brl(cents).replace("R$ ", "");

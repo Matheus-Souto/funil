@@ -1,30 +1,54 @@
 import { redirect } from "next/navigation";
 import { needsSetup } from "@/lib/stores";
 import { loginAction } from "../actions";
+import { PIcon } from "../icons";
+import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Entrar" };
 
+// P01 Login.
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ erro?: string }> }) {
   if (await needsSetup()) redirect("/admin/setup");
   const { erro } = await searchParams;
   return (
-    <main>
-      <h1>Entrar</h1>
-      {erro ? <p role="alert">E-mail ou senha inválidos.</p> : null}
-      <form action={loginAction}>
-        <p>
-          <label>
-            E-mail <input name="email" type="email" autoComplete="username" required />
-          </label>
+    <div className={`${s.root} ${s.auth}`}>
+      <header className={s.authTop}>
+        <span className={s.brand} style={{ padding: 0 }}>
+          funil
+        </span>
+      </header>
+      <main className={s.authBody}>
+        <h1>Entrar no painel</h1>
+        <p className={s.authLead}>Acompanhe vendas, libere Pix e configure sua loja.</p>
+        <div className={s.authCard}>
+          <form action={loginAction}>
+            {erro ? (
+              <div className={s.banner} data-tone="danger" role="alert">
+                <PIcon name="circle-alert" />
+                <div>E-mail ou senha inválidos.</div>
+              </div>
+            ) : null}
+            <label className={s.field}>
+              <span className={s.label}>E-mail</span>
+              <input className={s.input} name="email" type="email" autoComplete="username" required maxLength={254} autoFocus />
+            </label>
+            <label className={s.field}>
+              <span className={s.label}>Senha</span>
+              <input className={s.input} name="password" type="password" autoComplete="current-password" required maxLength={256} />
+            </label>
+            <button type="submit" className={`${s.btn} ${s.btnPrimary} ${s.btnLg} ${s.btnBlock}`}>
+              Entrar
+            </button>
+          </form>
+        </div>
+        <p className={s.hint} style={{ marginTop: 18, textAlign: "center", maxWidth: 400 }}>
+          Esqueceu a senha? Peça ao dono da loja ou ao administrador da instalação.
         </p>
-        <p>
-          <label>
-            Senha <input name="password" type="password" autoComplete="current-password" required />
-          </label>
-        </p>
-        <button type="submit">Entrar</button>
-      </form>
-    </main>
+      </main>
+      <footer className={s.authFoot}>
+        <span>Funil · plataforma de vendas de código aberto</span>
+      </footer>
+    </div>
   );
 }

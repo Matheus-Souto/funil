@@ -1,15 +1,17 @@
-// SÓ PARA O SMOKE E2E (scripts/verify.sh): o painel ainda não tem telas de oferta, conexões e liberação (Task 14),
-// então o smoke configura a loja por aqui. Desligada (404) a menos que E2E_SEED_ROUTES=1, variável que o env só
+// SÓ PARA O SMOKE E2E (scripts/verify.sh). Desde a Task 14 o smoke configura a loja pelas telas do painel; aqui ficam
+// o que o painel não tem: a URL do Asaas falso, a origem gravada no pedido e um membro da equipe (a tela de equipe é
+// da fase 2), além das operações antigas. Desligada (404) a menos que E2E_SEED_ROUTES=1, variável que o env só
 // aceita com BASE_URL em loopback: uma instalação acessível de fora nunca a liga.
 // Mesmo ligado, exige a sessão do DONO no painel e passa por `runAction` (mesmas permissões e auditoria do painel):
 // não faz nada que o dono não possa fazer.
 import { eq } from "drizzle-orm";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
+import { hashPassword } from "@/lib/auth/password";
 import { getPanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer } from "@/lib/catalog/offers";
 import { saveSmtp } from "@/lib/delivery/mailer";
-import { withStore } from "@/lib/db/client";
-import { orders } from "@/lib/db/schema";
+import { db, withStore } from "@/lib/db/client";
+import { membership, orders, users } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
@@ -30,6 +32,8 @@ const BY_PUBLIC_ID: Record<string, Action<unknown, unknown>> = {
   refund: refundOrder as Action<unknown, unknown>,
 };
 
+const MEMBER_ROLES = new Set(["admin", "support", "traffic"]);
+
 /** Ligada só com E2E_SEED_ROUTES=1 (o env recusa essa variável fora de BASE_URL em loopback). */
 export function e2eRoutesEnabled(e: Pick<typeof env, "E2E_SEED_ROUTES" | "ASAAS_BASE_URL"> = env): boolean {
   return e.E2E_SEED_ROUTES === "1";
@@ -49,7 +53,15 @@ export async function handleE2e(
   if (req.method !== "POST" || (req.headers.get("content-type") ?? "").split(";")[0] !== "application/json") {
     return json(400, { error: "invalid_request" });
   }
-  const body = (await req.json().catch(() => null)) as { action?: string; input?: unknown; publicId?: string } | null;
+  const body = (await req.json().catch(() => null)) as {
+    action?: string;
+    input?: unknown;
+    publicId?: string;
+    email?: string;
+    password?: string;
+    name?: string;
+    role?: string;
+  } | null;
   const call = { storeId: panel.storeId, actor: panel.actor, origin: "panel" as const };
   try {
     if (op === "action" && body?.action && Object.hasOwn(ACTIONS, body.action)) {
@@ -62,6 +74,15 @@ export async function handleE2e(
         tx.select({ firstTouch: orders.firstTouch, lastTouch: orders.lastTouch, ref: orders.ref }).from(orders).where(eq(orders.publicId, publicId)),
       );
       return o ? json(200, o) : json(404, { error: "not_found" });
+    }
+    if (op === "member" && typeof body?.email === "string" && typeof body.password === "string" && MEMBER_ROLES.has(body.role ?? "")) {
+      // Membro da equipe na loja do dono (support/traffic/admin) para o smoke conferir o painel por papel.
+      const [u] = await db
+        .insert(users)
+        .values({ email: body.email.trim().toLowerCase(), name: body.name ?? "Equipe", passwordHash: await hashPassword(body.password) })
+        .returning({ id: users.id });
+      await db.insert(membership).values({ userId: u!.id, storeId: panel.storeId, role: body.role! });
+      return json(200, { userId: u!.id });
     }
     const byPublicId = Object.hasOwn(BY_PUBLIC_ID, op) ? BY_PUBLIC_ID[op] : undefined;
     if (byPublicId && typeof body?.publicId === "string") {

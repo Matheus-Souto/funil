@@ -6,3 +6,4 @@ export * from "./jobs";
 export * from "./card";
 export * from "./delivery";
 export * from "./tracking";
+export * from "./alerts";
