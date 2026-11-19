@@ -13,7 +13,7 @@ import { isIP } from "node:net";
 import { ActionError, type ActionErrorCode } from "@/lib/actions/core";
 import { env } from "@/lib/env";
 import { readCapped } from "@/lib/http";
-import { log } from "@/lib/log";
+import { errorFields, log } from "@/lib/log";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
 import { payWithCard as defaultPayWithCard, UNKNOWN_IP, type CardPaymentInput, type CardResult } from "./card";
 
@@ -151,20 +151,7 @@ export function cardErrorResponse(e: unknown): { status: number; body: object } 
           : {};
     return { status: STATUS[e.code] ?? 400, body: { error: e.code, message: e.message, ...extra } };
   }
-  // Só nome e código do erro: a mensagem é texto livre e pode trazer dados do comprador (a máscara do `log` só
-  // reconhece PAN, não nome impresso, CVV ou validade). Nunca registramos o corpo da requisição.
-  log.error("checkout cartão: erro inesperado", errorTag(e));
+  // Sem texto livre do erro (pode trazer dados do comprador; ver `errorFields`). Nunca registramos o corpo da requisição.
+  log.error("checkout cartão: erro inesperado", errorFields(e));
   return { status: 500, body: { error: "internal", message: INTERNAL_MESSAGE } };
-}
-
-const TAG = /^[A-Za-z0-9_.:-]{1,64}$/;
-
-/** Identificação segura de um erro para o log: só `errorName` e `errorCode` (quando têm formato de identificador). */
-export function errorTag(e: unknown): { errorName: string; errorCode?: string } {
-  const name = e instanceof Error ? e.name : typeof e;
-  const code = (e as { code?: unknown } | null)?.code;
-  return {
-    errorName: TAG.test(name) ? name : "Error",
-    ...(typeof code === "string" && TAG.test(code) ? { errorCode: code } : {}),
-  };
 }

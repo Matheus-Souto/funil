@@ -12,9 +12,9 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path";
 import { dbHealthy } from "@/lib/db/client";
 import { isLoopbackUrl } from "@/lib/env";
-import { log } from "@/lib/log";
+import { errorFields, log } from "@/lib/log";
 import { payWithCard as defaultPayWithCard, type CardPaymentInput } from "@/lib/payments/asaas/card";
-import { cardErrorResponse, clientIpFrom, errorTag, isHttps } from "@/lib/payments/asaas/card-http";
+import { cardErrorResponse, clientIpFrom, isHttps } from "@/lib/payments/asaas/card-http";
 import { verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
 import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardFormCsp, cardFormHtml } from "./page";
@@ -193,8 +193,8 @@ export function createCardServer(opts: CardServerOptions): Server {
 
   const server = createServer({ connectionsCheckingInterval: SERVER_LIMITS.connectionsCheckingInterval }, (req, res) => {
     handle(req, res).catch((e: unknown) => {
-      // Só nome e código: nunca o corpo da requisição nem o texto livre do erro.
-      log.error("serviço de cartão: erro inesperado", errorTag(e));
+      // Nunca o corpo da requisição nem o texto livre do erro (ver `errorFields`).
+      log.error("serviço de cartão: erro inesperado", errorFields(e));
       if (!res.headersSent) send(res, 500);
       else res.destroy();
     });

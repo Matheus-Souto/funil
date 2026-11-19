@@ -8,10 +8,11 @@ import { connect, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { ActionError } from "@/lib/actions/core";
 import { cardFormCsp, cardFormHtml } from "@/card-service/page";
 import { createCardServer, type CardServerOptions } from "@/card-service/server";
-import { setDbForTests } from "@/lib/db/client";
+import { db, setDbForTests } from "@/lib/db/client";
 import { integration, orders } from "@/lib/db/schema";
 import { env, requireSecret } from "@/lib/env";
 import { createIntegrationSecrets } from "@/lib/integrations";
@@ -392,6 +393,43 @@ describe("POST /api/card: cobrança com o payWithCard real (papel card)", () => 
     expect(cap.text()).toContain('"errorName":"TypeError"');
     expect(cap.text()).toContain('"errorCode":"E_TESTE"');
     for (const secret of [APPROVE, "44444444", HOLDER, "falhou com"]) expect(cap.text()).not.toContain(secret);
+  });
+});
+
+describe("catch externo: o log identifica o erro sem texto livre", () => {
+  async function outerCatchLog(thrower: () => Promise<string[]>) {
+    const base = await start({ origins: thrower });
+    const cap = captureOutput();
+    let res: Response;
+    try {
+      res = await fetch(`${base}/form/${shop.storeId}`);
+    } finally {
+      cap.restore();
+    }
+    expect(res!.status).toBe(500);
+    expect(await res!.text()).toBe("");
+    const text = cap.text();
+    for (const secret of [APPROVE, "44444444", HOLDER]) expect(text).not.toContain(secret);
+    return text;
+  }
+
+  test("erro do drizzle (consulta real, papel card): SQLSTATE no log; nem SQL nem parâmetros", async () => {
+    const text = await outerCatchLog(async () => {
+      await db.execute(sql`select * from tabela_que_nao_existe where nome = ${HOLDER} and n = ${APPROVE}`);
+      return [];
+    });
+    expect(text).toContain('"errorName":"DrizzleQueryError"');
+    expect(text).toContain('"sqlState":"42P01"');
+    expect(text).not.toContain("tabela_que_nao_existe");
+  });
+
+  test("provider_error do Asaas: code, mensagem e status no log", async () => {
+    const text = await outerCatchLog(async () => {
+      throw new ActionError("provider_error", "Erro no Asaas (HTTP 503)", { status: 503, errorCodes: [] });
+    });
+    expect(text).toContain('"errorCode":"provider_error"');
+    expect(text).toContain('"errorMessage":"Erro no Asaas (HTTP 503)"');
+    expect(text).toContain('"status":503');
   });
 });
 
