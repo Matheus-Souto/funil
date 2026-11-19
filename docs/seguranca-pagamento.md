@@ -1,9 +1,10 @@
 # Segurança das páginas de pagamento
 
 Páginas do comprador: `/c/<oferta>` (checkout: nome, e-mail, celular, CPF e, no cartão, número, validade e CVV) e
-`/o/<pedido>` (pedido e obrigado). Com o cartão isolado (`CARD_ISOLATED=1`), os campos do cartão saem do checkout e vão
-para a página do iframe, `CARD_ORIGIN/form/<loja>`, servida pelo container `card` (seção "Cartão isolado"). Referências: PCI DSS 4.0 requisitos 6.4.3 (inventário, autorização e integridade
-dos scripts da página de pagamento) e 11.6.1 (detecção de mudanças nos cabeçalhos de segurança e scripts).
+`/o/<pedido>` (pedido e obrigado). Com o cartão isolado (`CARD_ISOLATED=1`, experimental), os campos do cartão saem
+do checkout e vão para a página do iframe, `CARD_ORIGIN/form/<loja>`, servida pelo container `card` (seção "Cartão
+isolado"). Referências: PCI DSS 4.0 requisitos 6.4.3 (inventário, autorização e integridade dos scripts da página de
+pagamento) e 11.6.1 (detecção de mudanças nos cabeçalhos de segurança e scripts).
 
 ## Escopo PCI real: SAQ D (o cartão passa pelo servidor)
 
@@ -33,67 +34,160 @@ dados do titular (CDE). Por isso:
   sem acesso às tabelas de outras lojas. **No host:** o swap que o guia cria serve à montagem da imagem; com RAM de
   sobra, desligue-o depois (`swapoff -a` e remova a linha do `/etc/fstab`) ou use swap cifrado. Não tire o
   `memswap_limit` nem o `ulimits` do `compose.yaml`.
-- **Próximo passo:** ligar o cartão isolado (seção abaixo), que tira o cartão do processo principal. Enquanto ele
-  estiver desligado (`CARD_ISOLATED=0`, o padrão), o escopo é o descrito aqui.
+- **Próximo passo:** o cartão isolado (seção abaixo), que tira o cartão do processo principal, é **experimental**:
+  não ligue em produção até a versão que inclui o E2E do cartão isolado (PR 2). Mesmo ligado, no mesmo servidor o
+  escopo continua o descrito aqui (a seção abaixo explica por quê); o que reduz o escopo é o `card` num host separado
+  com teste de segmentação.
 
-## Cartão isolado (`CARD_ISOLATED=1`): escopo novo
+## Cartão isolado (`CARD_ISOLATED=1`): o que muda (experimental)
+
+> **Experimental.** Não ligue em produção até a versão que inclui o E2E do cartão isolado (PR 2). Até lá, vale o
+> escopo da seção anterior.
 
 Com o isolamento ligado (passo a passo em `docs/instalacao.md`, seção 12), o comprador digita o cartão num iframe do
 domínio `pagar.` (`CARD_ORIGIN`), servido pelo container `card`: um processo Node pequeno (`src/card-service/`), sem
-painel, PDF, SMTP nem Meta, que recebe o `POST /api/card` e cobra no Asaas. O app (Next) nunca recebe número, validade,
-CVV nem nome impresso (nem por rede, URL, cabeçalho, `postMessage` ou bundle); ele só emite um bilhete assinado do
-pedido (`CARD_TICKET_KEY`) e recebe do iframe o resultado (aprovado, recusado).
+painel, PDF, SMTP nem Meta, que recebe o `POST /api/card` e cobra no Asaas. No fluxo novo, o app (Next) não recebe
+número, validade, CVV nem nome impresso (nem por URL, cabeçalho, `postMessage` ou bundle); ele só emite um bilhete
+assinado do pedido (`CARD_TICKET_KEY`, com o total e as parcelas que o iframe confere) e recebe do iframe o resultado
+(aprovado, recusado). A rota antiga (`POST /api/checkout/card`) responde 404 sem ler o corpo; o Caddy da instalação
+padrão (`deploy/Caddyfile` e `deploy/Caddyfile.multi`) já a corta antes do app. Numa cópia `Caddyfile.local` sem
+esse bloco (ou com outro proxy na frente), os bytes que uma aba aberta antes da troca mandar ainda chegam ao socket do
+Next, que os descarta sem ler.
 
-- **Continua SAQ D** (o cartão passa por um servidor da instalação), mas com escopo menor:
-  - **CDE (ambiente do cartão):** o container `card`, o Caddy (termina o TLS do `pagar.`) e o host (sistema, memória,
-    swap, Docker);
-  - **Postgres: sistema conectado** (o `card` lê e grava pedidos e tentativas pelo papel `card`; nenhum dado do
-    cartão vai para o banco);
-  - **app (Next): sistema conectado** ao CDE pelo banco (cria o pedido que o `card` cobra) e pela página que embute o
-    iframe. Um app comprometido não lê o cartão (o iframe é outra origem), mas pode tentar enganar o comprador na
-    própria página; por isso o checkout continua com CSP e monitor.
+### Escopo: menos risco, o mesmo escopo enquanto tudo estiver no mesmo servidor
+
+- **Continua SAQ D** (o cartão passa por um servidor da instalação) e, **no mesmo servidor, o escopo não diminui.** O
+  app e o `card` dividem host, kernel, Docker e Caddy: quem compromete qualquer um deles alcança o cartão, venha o
+  ataque do app ou de fora. O app segue no escopo como sistema conectado ao ambiente do cartão e que afeta a
+  segurança dele: serve a página que embute o iframe (um app comprometido troca o iframe por um formulário falso),
+  tem a `CARD_TICKET_KEY` (emite bilhetes) e a `ASAAS_SEAL_KEY` (abre a chave de API do Asaas de todas as lojas) e
+  roda o monitor 11.6.1.
+- **O ganho é de risco:** número, validade e CVV não passam mais pelo processo que serve o painel, valida PDFs, fala
+  SMTP e roda a fila. Uma falha nessas partes (pacote npm do painel, PDF malicioso) não lê o cartão em trânsito sem
+  antes sair do processo do app.
+- **Componentes:**
+  - ambiente do cartão (CDE): o container `card`, o Caddy (termina o TLS do `pagar.`) e o host (sistema, Docker,
+    memória, swap);
+  - conectados ou que afetam a segurança do CDE: o app (Next) e o Postgres (o `card` lê e grava pedidos e tentativas
+    pelo papel `card`; nenhum dado do cartão vai para o banco);
+  - prestadores de serviço com acesso ao cartão ou ao ambiente (12.8: liste-os com o atestado PCI de cada um): o
+    **Asaas**, o provedor do servidor (VPS) e, com o proxy da Cloudflare (nuvem laranja) ligado no `pagar.`, a
+    **Cloudflare**: ela termina o TLS e vê o número do cartão em claro. Como o checkout e o `pagar.` precisam do mesmo
+    estado de proxy (seção 12 da instalação), com a nuvem laranja no checkout ela entra nesta lista.
+- **Próximo passo (exigido pela spec para reduzir o escopo):** o `card` num **host separado**, com Caddy próprio, sem
+  nada do app. Só então o app sai do CDE, e só depois do **teste de segmentação** (11.4.5) que comprove que o resto
+  não alcança o ambiente do cartão; no `MODE=multi` (provedor de serviço), o teste de segmentação se repete **a cada 6
+  meses** (11.4.6). Sem o teste, responda ao questionário com o escopo do servidor inteiro.
+- **Escopo confirmado todo ano (12.5.2) e diagrama de fluxo de dados atualizado (1.2.4):** revise esta seção e o
+  diagrama abaixo pelo menos uma vez a cada 12 meses e a cada mudança significativa (ligar ou desligar o isolamento,
+  trocar de servidor, ligar o proxy da Cloudflare, levar o `card` para outro host). Registre a data e quem revisou.
+
+Fluxo de dados do cartão (o mesmo servidor; `[CDE]` marca o que vê o cartão em claro):
+
+```
+ navegador do comprador
+   |  checkout da loja (app)                      iframe pagar.<domínio>
+   |  nome, e-mail, celular, CPF                  número, validade, CVV, nome impresso
+   v                                               v
+ [CDE] Caddy :443 (TLS do checkout)             [CDE] Caddy :443 (TLS do pagar.) ---(proxy da Cloudflare? [CDE])
+   |                                               |  só /form/*, /form.js, /form.css, /api/card
+   v                                               v
+ app (Next) ---- bilhete do pedido ----------> [CDE] card (Node) ---- HTTPS ----> Asaas (prestador, 12.8)
+   |  (o bilhete vai pelo navegador: pay)          |  papel `card`
+   v                                               v
+ Postgres  <------------------------------------- Postgres (pedidos, tentativas; nunca o cartão)
+ host, kernel, Docker e memória: [CDE] (dividido por todos acima)
+```
+
+### O `card` por dentro
+
 - **O que o `card` recebe** (`compose.yaml`): `SERVICE=card`, o papel `card` do banco, `CARD_ORIGIN`,
-  `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY`, `TRUST_PROXY`, o Turnstile, `MODE`, `PLATFORM_DOMAIN` e `BASE_URL`. Nunca o
-  `SECRET`, o papel dono, a senha do papel `app` nem credenciais de SMTP/Meta (o serviço recusa subir com elas).
+  `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY`, `TRUST_PROXY`, as duas chaves do Turnstile, `MODE`, `PLATFORM_DOMAIN` e
+  `BASE_URL`. Nunca o `SECRET`, o papel dono nem a senha do papel `app`: o serviço recusa subir com `SECRET`,
+  `OWNER_DATABASE_URL` ou `APP_DB_PASSWORD` no ambiente. As credenciais de SMTP e Meta não vêm do ambiente em
+  nenhum dos dois serviços (ficam no banco, cifradas com o `SECRET`, que o `card` não tem, e o papel `card` só
+  enxerga a conexão do Asaas).
 - **Endurecimento do container:** sem volume, raiz só leitura (`/tmp` em memória), 192 MB sem swap além da RAM, sem
   core dump, usuário não-root, sem capabilities (`cap_drop: ALL`), `no-new-privileges` (um binário setuid da imagem
   base não vira root), no máximo 64 processos, imagem só com o bundle do serviço (sem `node_modules`). Rede `card`
   própria, só com o Postgres e o Caddy: o `card` não alcança o app diretamente (só pelo Caddy, pelo domínio público,
-  como qualquer visitante). A senha do papel `card` precisa ser diferente das do `app` e do dono (o entrypoint recusa). O Caddy só encaminha `/form/*`, `/form.js`, `/form.css` e
-  `/api/card` do domínio do cartão para o `card`, e nada mais vai para ele.
-- **Papel `card` no Postgres** (`src/lib/db/rls.sql`, `card_role_grants`): sem `BYPASSRLS`, só o necessário para cobrar.
-  Tabelas novas não ganham permissão para ele.
+  como qualquer visitante). A senha do papel `card` precisa ser diferente das do `app` e do dono (o entrypoint
+  recusa). O Caddy só encaminha `/form/*`, `/form.js`, `/form.css` e `/api/card` do domínio do cartão para o `card`,
+  lê o corpo inteiro antes de repassar (um corpo enviado devagar não prende as conexões do serviço) e nada mais vai
+  para ele.
+- **Papel `card` no Postgres** (`src/lib/db/rls.sql`, `card_role_grants`): sem `BYPASSRLS`, só o necessário para
+  cobrar, no máximo 10 conexões e consultas de até 10 s. Tabelas novas não ganham permissão para ele.
 
 **Limites conhecidos** (do desenho; aceitos):
 
 - O `card` lê a chave de API do Asaas **de qualquer loja** (e `id`, `slug` e `domain` da lista de lojas): ele precisa
-  cobrar por qualquer loja da instalação. Um `card` comprometido com a `ASAAS_SEAL_KEY` abre essas chaves.
-- Um `card` comprometido consegue, no banco, **só marcar como pago um pedido de cartão pendente** (gatilho
-  `orders_card_guard`: nunca tira de pago, nunca mexe em pedido de Pix), gravar tentativas e cobranças de cartão, os
-  ids do Asaas do comprador, avisos do disjuntor e auditoria. Não lê usuários, sessões, produtos, PDFs nem as outras
-  conexões (SMTP, Meta).
+  cobrar por qualquer loja da instalação. Um `card` comprometido com a `ASAAS_SEAL_KEY` abre essas chaves, e a chave
+  de API do Asaas permite mais que cobrar (inclusive transferir o saldo da loja): ver "`card` comprometido" abaixo.
+- Um `card` comprometido consegue, no banco: marcar como pago **só um pedido de cartão pendente ou expirado** (gatilho
+  `orders_card_guard`: nunca tira de pago, nunca mexe em pedido de Pix); **inserir cobranças (`payment`) em qualquer
+  pedido da loja e mudar o status de qualquer `payment`** (não só os de cartão); gravar tentativas, os ids do Asaas
+  do comprador, avisos do disjuntor e auditoria. Não lê usuários, sessões, produtos, PDFs nem as outras conexões
+  (SMTP, Meta).
+
+**Regras a configurar no servidor** (o compose não as aplica; são requisito do escopo acima, PCI 1.3, não opcionais):
+
 - **Saída de rede do `card`:** o compose não consegue limitar destinos por nome. A regra é: o container `card` só fala
-  com o **Asaas** (`api.asaas.com`, e `api-sandbox.asaas.com` em testes), o **Turnstile** (`challenges.cloudflare.com`)
-  e o **Postgres** (rede interna). Aplique no firewall do host (cadeia `DOCKER-USER`, a sub-rede da rede `funil_card`
-  vem de `docker network inspect funil_card`) ou num proxy de saída; no mínimo, só TCP 443 e DNS para fora. Isto é
-  requisito do escopo acima (PCI 1.3), não opcional.
+  com o **Asaas** (`api.asaas.com`, e `api-sandbox.asaas.com` em testes), o **Turnstile** (`challenges.cloudflare.com`,
+  onde o `card` confere o token) e o **Postgres** (rede interna). Aplique no firewall do host (cadeia `DOCKER-USER`, a
+  sub-rede da rede `funil_card` vem de `docker network inspect funil_card`) ou num proxy de saída; no mínimo, só TCP
+  443 e DNS para fora.
+- **Entrada no Postgres vinda da rede `card`:** hoje o Postgres aceita qualquer papel de qualquer rede do compose (só
+  a senha separa). Da sub-rede `funil_card`, só o papel `card` no banco `funil`; o resto, recusado. Num
+  `pg_hba.conf` próprio (montado no container `postgres`), antes da linha geral:
+
+  ```
+  host  funil  card  <sub-rede da funil_card>  scram-sha-256
+  host  all    all   <sub-rede da funil_card>  reject
+  ```
+
+### `card` comprometido: o que trocar
+
+Suspeita de invasão do `card` (ou do host): guarde os logs antes de qualquer coisa
+(`docker compose logs --no-color --timestamps card > card-incidente.log`, fora do servidor) e então:
+
+1. **Chave de API do Asaas de todas as lojas:** gere uma nova no Asaas de cada loja e cole em Conexões → Asaas. A
+   chave antiga permite transferir o saldo: troque primeiro as lojas com saldo. Nas configurações de segurança da
+   conta Asaas, quando disponíveis, restrinja o uso da chave de API ao IP do servidor e exija aprovação para
+   transferências.
+2. **`CARD_TICKET_KEY`:** valor novo no `.env` e reinicie o app e o `card` juntos (`docker compose up -d app card`).
+   Os bilhetes antigos param de valer; quem estava no meio da compra recebe um bilhete novo ou a mensagem genérica.
+3. **`CARD_DB_PASSWORD`:** valor novo no `.env` e `docker compose up -d` (a migração do app troca a senha do papel
+   `card`; o `card` reinicia com ela).
+4. **Chave secreta do Turnstile** (`TURNSTILE_SECRET`): gere outra no painel da Cloudflare e troque no `.env`.
+5. **`ASAAS_SEAL_KEY`:** não há rotação automática (limitação conhecida). Com o `card` comprometido, a chave vazou junto
+   com acesso de leitura às conexões; o que protege as lojas é o item 1. Para trocá-la mesmo assim: desligue o
+   isolamento (`CARD_ISOLATED=0`, `docker compose up -d`), rode `docker compose exec app asaas-unseal` (volta tudo
+   para `v1`, com o `SECRET`), troque a `ASAAS_SEAL_KEY` no `.env` e ligue o isolamento de novo: no boot, o app re-sela
+   tudo com a chave nova.
 
 **Avisos operacionais:**
 
 - **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois que o app re-selou as conexões (primeira subida com
   `CARD_ISOLATED=1`). O app e o `card` recusam subir com "ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão
-  Asaas de N loja(s); restaure a chave correta". Guarde-a com o `SECRET`, fora dos backups.
+  Asaas de N loja(s); restaure a chave correta". Guarde-a com o `SECRET`, fora dos backups. (Troca planejada: item 5
+  acima.)
 - **A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`.** Com `CARD_ISOLATED=0` o app grava a chave do Asaas com
   o `SECRET` (`v1`), mesmo com a `ASAAS_SEAL_KEY` presente; só com `CARD_ISOLATED=1` ela passa a ser cifrada com a
-  chave própria (`a1`) e a re-selagem roda.
+  chave própria (`a1`) e a re-selagem roda. O `card` não abre `v1`: o boot dele registra quantas conexões ainda estão
+  assim, e o pagamento dessas lojas responde "indisponível" (sem cobrança).
 - **Rollback:** voltar para `CARD_ISOLATED=0` na mesma versão é seguro (o app ainda abre `a1` com a chave). Voltar
   para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback:
   desligue o isolamento na versão atual, rode a CLI `asaas-unseal` (`docker compose exec app asaas-unseal`; regrava
   `a1` em `v1` com o `SECRET`, loja a loja, idempotente, só contagens no log) e só então volte a imagem.
   Desligando de vez: `alter role card nologin` (`docs/instalacao.md`, seção 12).
+- **Logs do `card` (10.5.1, guardar 12 meses):** o driver de log padrão do Docker apaga os logs quando o container é
+  recriado (`docker compose up -d --build` numa atualização, `docker compose rm`). Configure um driver persistente no
+  Docker do host (por exemplo, `journald` no `/etc/docker/daemon.json`, com o journal guardado por 12 meses) ou envie
+  os logs a um coletor externo; no mínimo, exporte (`docker compose logs --no-color --timestamps card`) antes de
+  recriar ou remover o container. Os logs do `card` não têm dados do cartão.
 - **Cloudflare:** o checkout e o `pagar.` com o mesmo estado de proxy (o `TRUST_PROXY` é um só para o app e o `card`)
   e sem recursos que injetam scripts (Rocket Loader, Email Obfuscation, JS Detections, Zaraz, Web Analytics
-  automático): ver `docs/instalacao.md`, seção 12.
+  automático): ver `docs/instalacao.md`, seção 12. Com a nuvem laranja, a Cloudflare vê o cartão (prestador, acima).
 - **Restore de backup:** precisa do mesmo `SECRET` e da mesma `ASAAS_SEAL_KEY`. Os erros de `CREATE POLICY ... TO
   card` ("role does not exist") e o "errors ignored on restore" no `pg_restore` são esperados (`docs/instalacao.md`,
   seção 10); a migração do app recria o papel `card` (com login, se houver `CARD_DB_PASSWORD`) ao iniciar.
