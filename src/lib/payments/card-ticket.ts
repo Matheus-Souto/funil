@@ -1,6 +1,7 @@
 // Bilhete assinado do pedido: o app emite quando o comprador escolhe cartão; o serviço de cartão confere.
-// Formato: base64url(JSON {s,o,p,e}) + "." + base64url(HMAC-SHA256(corpo)). `e` = vencimento em segundos (epoch).
-// A chave vem por parâmetro (CARD_TICKET_KEY); nada aqui lê o `env`.
+// Formato: base64url(JSON {s,o,p,e,t,m}) + "." + base64url(HMAC-SHA256(corpo)). `e` = vencimento em segundos (epoch);
+// `t` = total do pedido em centavos e `m` = parcelas máximas da oferta: o iframe lê os dois do corpo (sem a chave) e
+// recusa pagar se o checkout mostrou outro total. A chave vem por parâmetro (CARD_TICKET_KEY); nada aqui lê o `env`.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const CARD_TICKET_TTL_MS = 30 * 60 * 1000;
@@ -17,21 +18,29 @@ export interface CardTicket {
   storeId: string;
   orderId: string;
   publicId: string;
+  /** Total do pedido em centavos (com bump). */
+  totalCents: number;
+  /** Parcelas máximas da oferta (1 a 12). */
+  maxInstallments: number;
 }
+
+const MAX_TOTAL_CENTS = 100_000_000; // o mesmo teto do `config` do protocolo do iframe
+const intIn = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
 
 const sign = (payload: string, key: string): Buffer => createHmac("sha256", key).update(payload).digest();
 
 export function issueCardTicket(t: CardTicket, key: string, now: Date = new Date()): string {
   if (!key) throw new Error("CARD_TICKET_KEY ausente");
   const e = Math.floor((now.getTime() + CARD_TICKET_TTL_MS) / 1000);
-  const payload = Buffer.from(JSON.stringify({ s: t.storeId, o: t.orderId, p: t.publicId, e })).toString("base64url");
+  if (!intIn(t.totalCents, 1, MAX_TOTAL_CENTS) || !intIn(t.maxInstallments, 1, 12)) throw new Error("bilhete: total ou parcelas fora do limite");
+  const payload = Buffer.from(JSON.stringify({ s: t.storeId, o: t.orderId, p: t.publicId, e, t: t.totalCents, m: t.maxInstallments })).toString("base64url");
   return `${payload}.${sign(payload, key).toString("base64url")}`;
 }
 
 /** Devolve o conteúdo se o bilhete é íntegro, válido e não vencido; `null` para qualquer defeito. */
 export function verifyCardTicket(token: string, key: string, now: Date = new Date()): CardTicket | null {
   const r = verifyCardTicketDetailed(token, key, now);
-  return r.ok ? { storeId: r.storeId, orderId: r.orderId, publicId: r.publicId } : null;
+  return r.ok ? { storeId: r.storeId, orderId: r.orderId, publicId: r.publicId, totalCents: r.totalCents, maxInstallments: r.maxInstallments } : null;
 }
 
 export type CardTicketCheck = ({ ok: true } & CardTicket) | { ok: false; expired: boolean };
@@ -81,12 +90,13 @@ function inspect(token: string, key: string, now: Date): { ticket: CardTicket; e
     return null;
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
-  const { s, o, p, e } = body as Record<string, unknown>;
+  const { s, o, p, e, t, m } = body as Record<string, unknown>;
   if (typeof s !== "string" || !UUID.test(s) || typeof o !== "string" || !UUID.test(o)) return null;
   if (typeof p !== "string" || !PUBLIC_ID.test(p)) return null;
   if (typeof e !== "number" || !Number.isInteger(e)) return null;
+  if (!intIn(t, 1, MAX_TOTAL_CENTS) || !intIn(m, 1, 12)) return null;
   const nowS = Math.floor(now.getTime() / 1000);
   if (!Number.isFinite(nowS)) return null;
   if (e > nowS + CARD_TICKET_TTL_MS / 1000 + FUTURE_SLACK_S) return null;
-  return { ticket: { storeId: s, orderId: o, publicId: p }, e, nowS };
+  return { ticket: { storeId: s, orderId: o, publicId: p, totalCents: t, maxInstallments: m }, e, nowS };
 }

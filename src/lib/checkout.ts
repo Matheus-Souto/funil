@@ -106,7 +106,13 @@ function requireCpf(cpf: string | undefined): string {
 // ---------------------------------------------------------------------------------------------------------------
 // checkout.start
 
-type StartOutput = { publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; orderId: string };
+type StartOutput = {
+  publicId: string;
+  method: "pix_manual" | "pix_asaas" | "card_asaas";
+  orderId: string;
+  totalCents: number;
+  maxInstallments: number;
+};
 
 export const checkoutStart = defineAction({
   name: "checkout.start",
@@ -196,7 +202,14 @@ export const checkoutStart = defineAction({
     }
     // Pedido criado: InitiateCheckout do servidor com o id do navegador (na mesma transação: só sai se o pedido existir).
     await enqueueInitiateCheckout(ctx.tx, ctx.storeId, order.id, input.eventId);
-    return { publicId: order.publicId, method: order.method as "pix_manual" | "pix_asaas" | "card_asaas", orderId: order.id };
+    return {
+      publicId: order.publicId,
+      method: order.method as "pix_manual" | "pix_asaas" | "card_asaas",
+      orderId: order.id,
+      // O bilhete do cartão leva o total e as parcelas (o iframe confere com o que o checkout mostrou).
+      totalCents: order.totalCents,
+      maxInstallments: o.maxInstallments,
+    };
   },
 });
 
@@ -230,7 +243,11 @@ export async function startCheckout(
 ): Promise<{ publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }> {
   const out = await runAction(checkoutStart, publicCall(call.storeId), raw);
   if (out.method === "card_asaas" && opts.cardTicketKey) {
-    const cardTicket = issueCardTicket({ storeId: call.storeId, orderId: out.orderId, publicId: out.publicId }, opts.cardTicketKey, opts.now);
+    const cardTicket = issueCardTicket(
+      { storeId: call.storeId, orderId: out.orderId, publicId: out.publicId, totalCents: out.totalCents, maxInstallments: out.maxInstallments },
+      opts.cardTicketKey,
+      opts.now,
+    );
     return { publicId: out.publicId, method: out.method, cardTicket };
   }
   if (out.method === "pix_asaas") {
@@ -275,14 +292,23 @@ export const checkoutRenewCardTicket = defineAction({
     if (!prev || prev.storeId !== ctx.storeId || prev.publicId !== input.publicId) throw new ActionError("forbidden", BAD_TICKET);
     // RLS: pedido de outra loja não aparece (not_found, como um publicId inexistente).
     const [o] = await ctx.tx
-      .select({ id: orders.id, publicId: orders.publicId, method: orders.method, status: orders.status })
+      .select({
+        id: orders.id,
+        publicId: orders.publicId,
+        method: orders.method,
+        status: orders.status,
+        totalCents: orders.totalCents,
+        maxInstallments: offer.maxInstallments,
+      })
       .from(orders)
+      .innerJoin(offer, eq(offer.id, orders.offerId))
       .where(eq(orders.publicId, input.publicId));
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
     if (o.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
-    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId }, input.ticketKey, now) };
+    const terms = { totalCents: o.totalCents, maxInstallments: o.maxInstallments };
+    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, input.ticketKey, now) };
   },
 });
 

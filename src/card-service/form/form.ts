@@ -5,8 +5,9 @@
 //   origem que mandou. `ready` e `height` vão a cada origem permitida (o navegador descarta as que não batem).
 // - `pay`: um por vez (o que chega durante outro recebe erro genérico); id repetido é ignorado. Depois de um
 //   `result` em que o servidor pode ter cobrado (`mayHaveCharged`), `pay` para OUTRO pedido só passa se o comprador
-//   mexeu no iframe desde então: um pai comprometido não reusa sozinho o cartão que ficou nos campos. POST relativo /api/card (mesma origem), com prazo; leva o `storeId`
-//   da página, que o servidor confere com a loja do bilhete.
+//   mexeu no iframe desde então: um pai comprometido não reusa sozinho o cartão que ficou nos campos. O total e as
+//   parcelas do bilhete precisam ser os do último `config` (o que o comprador vê). POST relativo /api/card (mesma
+//   origem), com prazo; leva o `storeId` da página, que o servidor confere com a loja do bilhete.
 // - Nenhum script de terceiro: quando o servidor pede captcha, o `result` sai com `captcha: true` e o checkout (pai)
 //   mostra o Turnstile; o token volta no `pay` seguinte e só vai no corpo daquele POST.
 //
@@ -34,6 +35,7 @@ import {
   NETWORK_MESSAGE,
   newAttemptKey,
   serverFieldMessage,
+  ticketTerms,
   type CardBody,
   type CardFields,
   type FieldName,
@@ -235,6 +237,8 @@ export function mountCardForm(deps: FormDeps): void {
 
   // ---- estado ----
   let installments = 1;
+  /** Total e parcelas do último `config`: o que o comprador vê no checkout. `null` até o primeiro. */
+  let shown: { totalCents: number; maxInstallments: number } | null = null;
   let busy = false;
   const seenPays = new Set<string>();
   /** Chave da tentativa: sobrevive só a uma queda de rede (mesmos dados), nunca a uma resposta. */
@@ -356,6 +360,7 @@ export function mountCardForm(deps: FormDeps): void {
     const origin = e.origin;
     switch (msg.t) {
       case "funil-card:config": {
+        shown = { totalCents: msg.totalCents, maxInstallments: msg.maxInstallments };
         const keep = installments;
         const opts = installmentOptions(msg.totalCents, msg.maxInstallments);
         select.replaceChildren(...opts.map((o) => el(doc, "option", { value: String(o.n) }, o.label)));
@@ -375,6 +380,12 @@ export function mountCardForm(deps: FormDeps): void {
         // Outro em andamento: responde (o app não fica esperando) e não guarda o id, que pode voltar depois.
         if (busy) return sendResult(msg.id, origin, { status: "error", message: GENERIC_MESSAGE });
         seenPays.add(msg.id);
+        // O pedido do bilhete precisa ter o total e as parcelas que o checkout mostrou (e que o seletor daqui usa): um
+        // pai comprometido não cobra outro valor com o comprador vendo este.
+        const terms = ticketTerms(msg.ticket);
+        if (!shown || !terms || terms.totalCents !== shown.totalCents || terms.maxInstallments !== shown.maxInstallments) {
+          return sendResult(msg.id, origin, { status: "error", message: GENERIC_MESSAGE });
+        }
         if (lastOrder !== null && msg.orderPublicId !== lastOrder && !editedSinceResult) {
           // Outro pedido com o cartão que ficou nos campos, sem gesto do comprador no iframe: pede para conferir.
           showErrors({ cardNumber: serverFieldMessage("cardNumber") });

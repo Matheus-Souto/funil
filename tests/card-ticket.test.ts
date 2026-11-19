@@ -12,7 +12,7 @@ import {
 
 const KEY = "k".repeat(48);
 const NOW = new Date("2026-11-19T12:00:00Z");
-const t = () => ({ storeId: randomUUID(), orderId: randomUUID(), publicId: "AbC_123-xyz0987654321q" });
+const t = () => ({ storeId: randomUUID(), orderId: randomUUID(), publicId: "AbC_123-xyz0987654321q", totalCents: 4990, maxInstallments: 3 });
 const b64 = (s: string | Buffer) => Buffer.from(s).toString("base64url");
 /** Monta um bilhete com corpo arbitrário e assinatura válida (para testar a validação do corpo). */
 const forge = (body: unknown, key = KEY) => {
@@ -57,8 +57,8 @@ describe("bilhete do pedido", () => {
   });
 
   test("s/o que não são UUID, p fora do formato ou longo demais, e não-string → null", () => {
-    const ok = { s: randomUUID(), o: randomUUID(), p: "abc123", e: exp(NOW) + 60 };
-    expect(verifyCardTicket(forge(ok), KEY, NOW)).toEqual({ storeId: ok.s, orderId: ok.o, publicId: "abc123" });
+    const ok = { s: randomUUID(), o: randomUUID(), p: "abc123", e: exp(NOW) + 60, t: 990, m: 1 };
+    expect(verifyCardTicket(forge(ok), KEY, NOW)).toEqual({ storeId: ok.s, orderId: ok.o, publicId: "abc123", totalCents: 990, maxInstallments: 1 });
     for (const bad of [
       { ...ok, s: "nao-uuid" },
       { ...ok, o: "123" },
@@ -71,6 +71,16 @@ describe("bilhete do pedido", () => {
       { ...ok, e: 1.5 + exp(NOW) },
       { ...ok, e: Number.NaN },
       { s: ok.s, o: ok.o, p: ok.p },
+      // Total e parcelas do pedido (o iframe compara com o que o checkout mostra): obrigatórios, inteiros, nos limites.
+      { ...ok, t: undefined },
+      { ...ok, m: undefined },
+      { ...ok, t: 0 },
+      { ...ok, t: 100_000_001 },
+      { ...ok, t: 9.9 },
+      { ...ok, t: "990" },
+      { ...ok, m: 0 },
+      { ...ok, m: 13 },
+      { ...ok, m: 1.5 },
     ]) {
       expect(verifyCardTicket(forge(bad), KEY, NOW)).toBeNull();
     }
@@ -78,7 +88,7 @@ describe("bilhete do pedido", () => {
   });
 
   test("vencimento muito no futuro (> now + TTL + 60s) é recusado, mesmo com assinatura válida", () => {
-    const base = { s: randomUUID(), o: randomUUID(), p: "abc" };
+    const base = { s: randomUUID(), o: randomUUID(), p: "abc", t: 990, m: 1 };
     const lim = exp(NOW) + CARD_TICKET_TTL_MS / 1000 + 60;
     expect(verifyCardTicket(forge({ ...base, e: lim }), KEY, NOW)).not.toBeNull();
     expect(verifyCardTicket(forge({ ...base, e: lim + 1 }), KEY, NOW)).toBeNull();
@@ -119,7 +129,7 @@ describe("bilhete do pedido: motivo da recusa (verifyCardTicketDetailed)", () =>
   test("assinatura válida e vencido -> expired: true", () => {
     const tk = issueCardTicket(t(), KEY, NOW);
     expect(verifyCardTicketDetailed(tk, KEY, new Date(NOW.getTime() + CARD_TICKET_TTL_MS + 1000))).toEqual({ ok: false, expired: true });
-    expect(verifyCardTicketDetailed(forge({ s: randomUUID(), o: randomUUID(), p: "abc", e: exp(NOW) }), KEY, NOW)).toEqual({
+    expect(verifyCardTicketDetailed(forge({ s: randomUUID(), o: randomUUID(), p: "abc", e: exp(NOW), t: 990, m: 1 }), KEY, NOW)).toEqual({
       ok: false,
       expired: true,
     });
@@ -129,7 +139,7 @@ describe("bilhete do pedido: motivo da recusa (verifyCardTicketDetailed)", () =>
     const old = issueCardTicket(t(), KEY, new Date(NOW.getTime() - 2 * CARD_TICKET_TTL_MS));
     const [p, s] = old.split(".") as [string, string];
     const flip = (v: string, i: number) => v.slice(0, i) + (v[i] === "A" ? "B" : "A") + v.slice(i + 1);
-    const base = { s: randomUUID(), o: randomUUID(), p: "abc" };
+    const base = { s: randomUUID(), o: randomUUID(), p: "abc", t: 990, m: 1 };
     for (const bad of [
       "",
       "semponto",
@@ -160,9 +170,9 @@ describe("bilhete do pedido: renovação (verifyCardTicketForRenewal)", () => {
     expect(verifyCardTicketForRenewal(tk, KEY, new Date(expiredAt + CARD_TICKET_RENEW_WINDOW_MS - 1000))).toEqual(x);
     expect(verifyCardTicketForRenewal(tk, KEY, new Date(expiredAt + CARD_TICKET_RENEW_WINDOW_MS + 1000))).toBeNull();
     expect(verifyCardTicketForRenewal(tk, "z".repeat(48), NOW)).toBeNull();
-    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 600 }, "outra-chave-".repeat(4)), KEY, NOW)).toBeNull();
+    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 600, t: 990, m: 1 }, "outra-chave-".repeat(4)), KEY, NOW)).toBeNull();
     expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: "a b", e: exp(NOW) }), KEY, NOW)).toBeNull();
-    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 86_400 }), KEY, NOW)).toBeNull(); // longe demais no futuro
+    expect(verifyCardTicketForRenewal(forge({ s: x.storeId, o: x.orderId, p: x.publicId, e: exp(NOW) + 86_400, t: 990, m: 1 }), KEY, NOW)).toBeNull(); // longe demais no futuro
     expect(verifyCardTicketForRenewal("", KEY, NOW)).toBeNull();
   });
 });

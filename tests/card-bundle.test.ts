@@ -235,7 +235,7 @@ describe("servidor empacotado em Node", () => {
 
   test("conexão Asaas que o serviço não abre (v1): resposta unavailable, sem cobrança, não 500", async () => {
     const order = await newCardOrder(legacy.storeId, legacy.offerId, `v1-${randomUUID()}@example.com`);
-    const ticket = issueCardTicket({ storeId: legacy.storeId, orderId: order.id, publicId: order.publicId }, KEY);
+    const ticket = issueCardTicket({ storeId: legacy.storeId, orderId: order.id, publicId: order.publicId, totalCents: 2700, maxInstallments: 1 }, KEY);
     const res = await post({
       storeId: legacy.storeId,
       ticket,
@@ -260,7 +260,7 @@ describe("servidor empacotado em Node", () => {
 
   test("POST /api/card com bilhete válido contra o Asaas falso: aprovado, pedido pago, cartão fora do log", async () => {
     const order = await newCardOrder(shop.storeId, shop.offerId, `node-${randomUUID()}@example.com`);
-    const ticket = issueCardTicket({ storeId: shop.storeId, orderId: order.id, publicId: order.publicId }, KEY);
+    const ticket = issueCardTicket({ storeId: shop.storeId, orderId: order.id, publicId: order.publicId, totalCents: 2700, maxInstallments: 1 }, KEY);
     const res = await post({
       storeId: shop.storeId,
       ticket,

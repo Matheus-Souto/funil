@@ -85,7 +85,7 @@ async function start(over: Partial<CardServerOptions> = {}): Promise<string> {
 }
 
 const ticketFor = (storeId: string, order: Order, now = new Date()) =>
-  issueCardTicket({ storeId, orderId: order.id, publicId: order.publicId }, KEY, now);
+  issueCardTicket({ storeId, orderId: order.id, publicId: order.publicId, totalCents: 2700, maxInstallments: 1 }, KEY, now);
 
 /** Corpo como o iframe de `/form/<storeId>` manda; `storeId` padrão: a loja `shop`. */
 function cardBody(order: Order, ticket: string, over: Record<string, unknown> = {}) {
@@ -177,7 +177,7 @@ describe("POST /api/card: bilhete", () => {
       [42, false],
       ["lixo.lixo", false],
       [`${p}.${s.slice(0, 42)}${s[42] === "A" ? "B" : "A"}`, false],
-      [issueCardTicket({ storeId: shop.storeId, orderId: o.approve.id, publicId: o.approve.publicId }, "outra-chave-".repeat(4)), false],
+      [issueCardTicket({ storeId: shop.storeId, orderId: o.approve.id, publicId: o.approve.publicId, totalCents: 2700, maxInstallments: 1 }, "outra-chave-".repeat(4)), false],
       [ticketFor(shop.storeId, o.approve, new Date(Date.now() - CARD_TICKET_TTL_MS - 60_000)), true],
     ];
     for (const [ticket, expired] of cases) {
@@ -213,7 +213,7 @@ describe("POST /api/card: bilhete", () => {
 
   test("bilhete com a loja errada para o publicId: a cobrança roda na loja do bilhete e não acha o pedido (404)", async () => {
     const base = await start();
-    const res = await post(base, cardBody(o.crossed, issueCardTicket({ storeId: other.storeId, orderId: o.crossed.id, publicId: o.crossed.publicId }, KEY), { storeId: other.storeId }));
+    const res = await post(base, cardBody(o.crossed, issueCardTicket({ storeId: other.storeId, orderId: o.crossed.id, publicId: o.crossed.publicId, totalCents: 2700, maxInstallments: 1 }, KEY), { storeId: other.storeId }));
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not_found", message: "Pedido não encontrado" });
     expect(await orderStatus(o.crossed.id)).toBe("pending");

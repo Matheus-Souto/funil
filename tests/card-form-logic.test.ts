@@ -15,6 +15,7 @@ import {
   NETWORK_MESSAGE,
   newAttemptKey,
   safeFieldNames,
+  ticketTerms,
   validateCardFields,
   type CardFields,
 } from "@/card-service/form/logic";
@@ -217,6 +218,20 @@ describe("safeFieldNames e mapApiResponse", () => {
   });
 });
 
+describe("ticketTerms (lê o corpo do bilhete, sem conferir a assinatura: quem confere é o servidor)", () => {
+  const body = (o: unknown) => `${Buffer.from(JSON.stringify(o)).toString("base64url")}.sig`;
+  test("total e parcelas do corpo", () => {
+    expect(ticketTerms(body({ s: "x", t: 4990, m: 3 }))).toEqual({ totalCents: 4990, maxInstallments: 3 });
+    // base64url sem padding, com - e _ (caracteres que o atob não aceita direto)
+    expect(ticketTerms(body({ p: "??>>~~", t: 1, m: 12 }))).toEqual({ totalCents: 1, maxInstallments: 12 });
+  });
+  test("malformado ou sem os campos: null", () => {
+    for (const bad of ["", ".", "x", "@@@.sig", body([1]), body({ t: 990 }), body({ m: 1 }), body({ t: "990", m: 1 }), body({ t: 9.5, m: 1 }), body({ t: 0, m: 1 }), body({ t: 1, m: 13 }), `${Buffer.from("{nope").toString("base64url")}.s`]) {
+      expect(ticketTerms(bad)).toBeNull();
+    }
+  });
+});
+
 // ---- formulário montado (happy-dom) ----
 
 const SHOP = "https://loja.example";
@@ -224,6 +239,11 @@ const OTHER_SHOP = "https://loja.example.com.br";
 const EVIL = "https://evil.example";
 const STORE = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
 const GENERIC = "Não foi possível processar o pagamento. Tente de novo em instantes.";
+/** Bilhete no formato do app (corpo base64url + assinatura); o iframe só lê o corpo (total e parcelas), sem a chave. */
+const ticketFor = (n: number | string, totalCents = 990, maxInstallments = 1) =>
+  `${Buffer.from(JSON.stringify({ s: STORE, o: "0b1c2d3e-4f50-4617-8899-000000000001", p: `ped-${n}`, e: 2_000_000_000, t: totalCents, m: maxInstallments })).toString("base64url")}.assinatura-${n}`;
+const T1 = ticketFor(1);
+const T2 = ticketFor(2);
 type Posted = { msg: FrameMsg; origin: string };
 type FetchCall = { url: string; init: RequestInit; body: Record<string, unknown> };
 
@@ -233,7 +253,7 @@ afterEach(async () => {
 });
 
 function setup(
-  opts: { responses?: (Response | Error | Promise<Response>)[]; storeId?: string | null; payTimeoutMs?: number; topLevel?: boolean } = {},
+  opts: { responses?: (Response | Error | Promise<Response>)[]; storeId?: string | null; payTimeoutMs?: number; topLevel?: boolean; config?: false } = {},
 ) {
   const w = new Window({ url: "https://pagar.example/form/x", settings: { disableJavaScriptFileLoading: true, disableCSSFileLoading: true } as never });
   open.push(w);
@@ -271,6 +291,8 @@ function setup(
   };
   const send = (data: unknown, origin = SHOP, source: unknown = parent) =>
     w.dispatchEvent(new w.MessageEvent("message", { data, origin, source: source as never }));
+  // O checkout manda o total e as parcelas assim que o iframe fica pronto (o bilhete padrão, T1, bate com eles).
+  if (opts.config !== false) send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1 });
   /** Próxima mensagem do iframe de um tipo (sem espera fixa: resolve quando o iframe posta). */
   const next = (t: FrameMsg["t"]) =>
     new Promise<Posted>((resolve) => {
@@ -289,7 +311,7 @@ function setup(
     });
   const seen = new Set<Posted>();
   const pay = (id: string, over: Record<string, unknown> = {}) =>
-    send({ t: "funil-card:pay", id, orderPublicId: "ped-1", ticket: "bilhete-1", buyerCpf: "52998224725", ...over });
+    send({ t: "funil-card:pay", id, orderPublicId: "ped-1", ticket: T1, buyerCpf: "52998224725", ...over });
   return { w, doc, posted, calls, parent, input, type, fill, send, next, pay };
 }
 
@@ -372,7 +394,7 @@ describe("formulário no iframe", () => {
     expect(new Headers(calls[0]!.init.headers).get("content-type")).toBe("application/json");
     expect(calls[0]!.body).toEqual({
       storeId: STORE,
-      ticket: "bilhete-1",
+      ticket: T1,
       orderPublicId: "ped-1",
       idempotencyKey: "key-1",
       installments: 1,
@@ -383,7 +405,7 @@ describe("formulário no iframe", () => {
     pay("p1");
     expect(calls).toHaveLength(1);
     const all = JSON.stringify(posted);
-    for (const secret of ["4111111111111111", "4111 1111", "\"123\"", "12/34", "bilhete-1"]) expect(all).not.toContain(secret);
+    for (const secret of ["4111111111111111", "4111 1111", "\"123\"", "12/34", T1]) expect(all).not.toContain(secret);
   });
 
   test("um pay por vez: o segundo, durante o primeiro, recebe erro genérico; id repetido continua ignorado", async () => {
@@ -419,11 +441,11 @@ describe("formulário no iframe", () => {
     fill();
     pay("p1");
     expect((await next("funil-card:result")).msg).toMatchObject({ id: "p1", status: "error", ticketExpired: true });
-    pay("p2", { ticket: "bilhete-2" });
+    pay("p2", { ticket: T2 });
     await next("funil-card:result");
     expect(calls.map((c) => [c.body.ticket, c.body.idempotencyKey])).toEqual([
-      ["bilhete-1", "key-1"],
-      ["bilhete-2", "key-1"],
+      [T1, "key-1"],
+      [T2, "key-1"],
     ]);
   });
 
@@ -522,6 +544,7 @@ describe("formulário no iframe", () => {
       queueMicrotask(() => ctrl.handle({ origin: CARD, source: frameWin, data: msg }));
     };
     try {
+      ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
       ctrl.start();
       // O `ready` da montagem saiu antes do gancho: entrega o que já foi postado.
       for (const p of [...posted]) ctrl.handle({ origin: CARD, source: frameWin, data: p.msg });
@@ -533,7 +556,7 @@ describe("formulário no iframe", () => {
           order,
           sig,
           now: () => 0,
-          start: async () => ({ ok: true as const, publicId: `ped-${++created}`, cardTicket: `bilhete-${created}` }),
+          start: async () => ({ ok: true as const, publicId: `ped-${++created}`, cardTicket: ticketFor(created) }),
           renew: async () => ({ ok: false as const, message: "x", definitive: true }),
           pay: (a) => ctrl.pay({ ...a, buyerCpf: "52998224725" }),
         });
@@ -728,6 +751,31 @@ describe("formulário no iframe", () => {
         expect(calls).toHaveLength(1);
         expect(calls[0]!.init.signal).toBeInstanceOf(AbortSignal);
       }));
+  });
+
+  test("bilhete com total ou parcelas diferentes do que o checkout mostrou: recusa sem chamar a API", async () => {
+    const { fill, pay, next, calls, send } = setup({ responses: [Response.json({ status: "approved" })] });
+    fill();
+    pay("p1", { ticket: ticketFor(1, 2700, 1) }); // pedido de R$ 27,00 com o checkout mostrando R$ 9,90
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: GENERIC });
+    pay("p2", { ticket: ticketFor(1, 990, 12) });
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p2", status: "error", message: GENERIC });
+    pay("p3", { ticket: "nao-e-bilhete" });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p3", status: "error", message: GENERIC });
+    expect(calls).toHaveLength(0);
+    // Checkout atualiza o total (bump ligado): o bilhete do pedido novo bate e passa.
+    send({ t: "funil-card:config", totalCents: 2700, maxInstallments: 1 });
+    pay("p4", { ticket: ticketFor(2, 2700, 1) });
+    expect((await next("funil-card:result")).msg).toMatchObject({ id: "p4", status: "approved" });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("sem config do checkout (total que o comprador viu desconhecido): não paga", async () => {
+    const { fill, pay, next, calls } = setup({ config: false });
+    fill();
+    pay("p1");
+    expect((await next("funil-card:result")).msg).toEqual({ t: "funil-card:result", id: "p1", status: "error", message: GENERIC });
+    expect(calls).toHaveLength(0);
   });
 
   test("config: parcelas com os rótulos do checkout; escondidas com 1x", () => {

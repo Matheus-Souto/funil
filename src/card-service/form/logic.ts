@@ -231,6 +231,27 @@ export function mapApiResponse(httpStatus: number, body: unknown, last4: string,
   return { status: "error", ...captcha, message: message ?? GENERIC_MESSAGE };
 }
 
+/**
+ * Total (centavos) e parcelas máximas que o app gravou no bilhete do pedido. Lê só o corpo (base64url de um JSON), sem
+ * conferir a assinatura (a chave é do servidor, que confere de qualquer forma): serve para o iframe recusar pagar
+ * quando o checkout mostrou ao comprador outro total. `null` para qualquer defeito.
+ */
+export function ticketTerms(ticket: string): { totalCents: number; maxInstallments: number } | null {
+  const payload = ticket.split(".")[0] ?? "";
+  if (!/^[A-Za-z0-9_-]+$/.test(payload)) return null;
+  try {
+    const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const body = JSON.parse(atob(b64 + "===".slice((b64.length + 3) % 4))) as unknown;
+    const t = own(body, "t");
+    const m = own(body, "m");
+    const isInt = (v: unknown, min: number, max: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= min && v <= max;
+    if (!isInt(t, 1, 100_000_000) || !isInt(m, 1, 12)) return null;
+    return { totalCents: t, maxInstallments: m };
+  } catch {
+    return null;
+  }
+}
+
 /** Chave de idempotência (UUID v4; sem `randomUUID` antes do iOS 15.4). Implementação única em protocol.ts. */
 export const newAttemptKey = randomUuid;
 
