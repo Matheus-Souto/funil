@@ -47,7 +47,8 @@ const ident = (v: unknown): string | undefined => (typeof v === "string" && IDEN
  * Identificação de um erro para log quando a mensagem pode trazer dados do comprador (nome impresso, CVV, validade:
  * a máscara só reconhece PAN). Nunca inclui texto livre do erro:
  * - consulta ao banco (drizzle/Postgres, inclusive pelo `cause`): nome e SQLSTATE (ou o `code` da causa, ex. rede);
- * - `ActionError` nosso (mensagens nossas; as do Asaas no cartão são opacas): code, mensagem e `details.status`;
+ * - `ActionError` nosso: code, mensagem e `details.status`; `provider_error` (erro de um provedor, ex. o Asaas, cuja
+ *   descrição pode ecoar o que foi enviado): só code e `details.status`, nunca a mensagem;
  * - demais: nome, `code` e `cause.code` (ECONNRESET, ETIMEDOUT...).
  * Nome e códigos só entram com formato de identificador.
  */
@@ -65,7 +66,7 @@ export function errorFields(e: unknown): Record<string, string | number> {
   }
   if (e instanceof Error && e.name === "ActionError" && ident(obj.code)) {
     out.errorCode = obj.code as string;
-    out.errorMessage = e.message.slice(0, 200);
+    if (obj.code !== "provider_error") out.errorMessage = e.message.slice(0, 200);
     const status = (obj.details as { status?: unknown } | null | undefined)?.status;
     if (typeof status === "number" && Number.isInteger(status) && status >= 0 && status <= 999) out.status = status;
     return out;

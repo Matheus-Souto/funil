@@ -438,12 +438,12 @@ describe("catch externo: o log identifica o erro sem texto livre", () => {
     expect(text).not.toContain("tabela_que_nao_existe");
   });
 
-  test("provider_error do Asaas: code, mensagem e status no log", async () => {
+  test("provider_error do Asaas: code e status no log, nunca a mensagem", async () => {
     const text = await outerCatchLog(async () => {
       throw new ActionError("provider_error", "Erro no Asaas (HTTP 503)", { status: 503, errorCodes: [] });
     });
     expect(text).toContain('"errorCode":"provider_error"');
-    expect(text).toContain('"errorMessage":"Erro no Asaas (HTTP 503)"');
+    expect(text).not.toContain("errorMessage");
     expect(text).toContain('"status":503');
   });
 });

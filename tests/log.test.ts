@@ -184,16 +184,18 @@ describe("errorFields: identificação de erro para log, sem texto livre", () =>
     expect(errorFields(new DrizzleQueryError("select 1", [HOLDER], net))).toEqual({ errorName: "DrizzleQueryError", causeCode: "ECONNREFUSED" });
   });
 
-  test("ActionError nosso: code, mensagem e status de details (provider_error do Asaas)", () => {
+  test("ActionError nosso: code e mensagem; provider_error (Asaas): só code e status, nunca a mensagem", () => {
     const e = new ActionError("provider_error", "Erro no Asaas (HTTP 401)", { status: 401, errorCodes: ["invalid_access_token"] });
-    expect(errorFields(e)).toEqual({ errorName: "ActionError", errorCode: "provider_error", errorMessage: "Erro no Asaas (HTTP 401)", status: 401 });
+    expect(errorFields(e)).toEqual({ errorName: "ActionError", errorCode: "provider_error", status: 401 });
+    // A descrição do provedor pode ecoar o que foi enviado (nome impresso, validade): fora do log.
+    expect(leaks(errorFields(new ActionError("provider_error", `Asaas: titular ${HOLDER} inválido`, { status: 400 })))).not.toContain(HOLDER);
     expect(errorFields(new ActionError("conflict", "Pedido ocupado"))).toEqual({
       errorName: "ActionError",
       errorCode: "conflict",
       errorMessage: "Pedido ocupado",
     });
     // status que não é inteiro HTTP é ignorado; a mensagem passa pela máscara do log
-    const odd = errorFields(new ActionError("provider_error", `falhou ${PAN}`, { status: "x" }));
+    const odd = errorFields(new ActionError("conflict", `falhou ${PAN}`, { status: "x" }));
     expect(odd.status).toBeUndefined();
     expect(leaks(odd)).not.toContain(PAN);
   });
