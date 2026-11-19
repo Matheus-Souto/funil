@@ -142,9 +142,14 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   if (parsed.data.MODE === "multi" && parsed.data.PLATFORM_DOMAIN === undefined) {
     throw new Error("Variáveis de ambiente inválidas: PLATFORM_DOMAIN é obrigatória com MODE=multi");
   }
+  if (parsed.data.MODE === "multi") {
+    // Antes desta validação o valor era aceito como viesse: maiúsculas e o ponto final (FQDN) viram a forma canônica,
+    // em vez de impedir o boot de uma instalação que já subia. Porta, esquema e caminho continuam recusados.
+    parsed.data.PLATFORM_DOMAIN = parsed.data.PLATFORM_DOMAIN!.toLowerCase().replace(/\.$/, "");
+  }
   if (parsed.data.MODE === "multi" && !PLATFORM_HOSTNAME.test(parsed.data.PLATFORM_DOMAIN!)) {
     throw new Error(
-      "Variáveis de ambiente inválidas: PLATFORM_DOMAIN deve ser só o hostname, em minúsculas, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
+      "Variáveis de ambiente inválidas: PLATFORM_DOMAIN deve ser só o hostname, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
     );
   }
   if ((parsed.data.TURNSTILE_SITE_KEY === undefined) !== (parsed.data.TURNSTILE_SECRET === undefined)) {

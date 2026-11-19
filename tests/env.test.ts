@@ -258,9 +258,16 @@ test("PLATFORM_DOMAIN: só hostname (minúsculas, sem esquema, porta, caminho ou
   for (const ok of ["plataforma.com.br", "lojas.example.com", "lvh.me", "a-b.c1.io", "localhost"]) {
     expect(parseEnv({ ...multi, PLATFORM_DOMAIN: ok }).PLATFORM_DOMAIN).toBe(ok);
   }
-  for (const bad of ["https://plataforma.com", "plataforma.com:8443", "plataforma.com/x", "*.plataforma.com", "Plataforma.com", "plataforma.com.", ".plataforma.com", "a..com", "-a.com", "a b.com"]) {
+  for (const bad of ["https://plataforma.com", "plataforma.com:8443", "Plataforma.com:8443", "plataforma.com/x", "*.plataforma.com", ".plataforma.com", "plataforma.com..", "a..com", "-a.com", "a b.com"]) {
     expect(() => parseEnv({ ...multi, PLATFORM_DOMAIN: bad })).toThrow(/PLATFORM_DOMAIN/);
   }
+});
+
+test("PLATFORM_DOMAIN no multi: normalizado (minúsculas, sem o ponto final) antes de validar; instalações que subiam continuam subindo", () => {
+  const multi = { ...base, MODE: "multi" };
+  expect(parseEnv({ ...multi, PLATFORM_DOMAIN: "Plataforma.COM.br" }).PLATFORM_DOMAIN).toBe("plataforma.com.br");
+  expect(parseEnv({ ...multi, PLATFORM_DOMAIN: "plataforma.com.br." }).PLATFORM_DOMAIN).toBe("plataforma.com.br");
+  expect(parseEnv({ ...multi, PLATFORM_DOMAIN: "Lojas.Example.com." }).PLATFORM_DOMAIN).toBe("lojas.example.com");
 });
 
 test("PLATFORM_DOMAIN é ignorado fora do MODE=multi (valor antigo malformado não impede o boot)", () => {
