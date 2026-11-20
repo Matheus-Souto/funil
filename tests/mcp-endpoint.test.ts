@@ -5,6 +5,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
+import { ActionError } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { auditLog, customer, emailLog, mcpToken, orders, rateLimit, storeAlert } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
@@ -37,6 +38,17 @@ const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000 + 30_000);
 const BASE: McpHttpOptions = { now: () => NOW };
 /** Cabeçalho de espera do 429, montado em partes: a higiene dos testes recusa a palavra (é sobre repetir teste, não este cabeçalho). */
 const WAIT_HEADER = ["re", "try-after"].join("");
+/** `n` requisições em ondas de `size` simultâneas (cada uma precisa responder `status`): o total exato, mais rápido. */
+async function inWaves(n: number, size: number, status: number, req: (i: number) => Promise<Response>): Promise<void> {
+  for (let start = 0; start < n; start += size) {
+    const got = await Promise.all(Array.from({ length: Math.min(size, n - start) }, (_, k) => req(start + k).then((r) => r.status)));
+    const bad = got.findIndex((x) => x !== status);
+    if (bad >= 0) throw new Error(`requisição ${start + bad + 1}: ${got[bad]}`);
+  }
+}
+
+/** Token bem-formado (abre a transação de autenticação) de uma loja que não existe. */
+const forgedToken = () => ["fnl", randomUUID().replaceAll("-", ""), randomBytes(32).toString("base64url")].join("_");
 
 async function mkToken(storeId: string, role: Role, opts: { revoked?: boolean } = {}) {
   const { token, hash, last4 } = mintMcpToken(storeId);
@@ -178,6 +190,17 @@ describe("tools/list e tools/call", () => {
     expect(t.length).toBeLessThanOrEqual(500);
   });
 
+  test("issue de invalid_input sem mensagem mostra só o campo", async () => {
+    const owner = await mkToken(s.storeId, "owner");
+    const r = await callTool(owner.token, "products_list", {}, {
+      ...BASE,
+      callTool: async () => {
+        throw new ActionError("invalid_input", "Entrada inválida", [{ path: ["from"] }, { path: [], message: "Faltou algo" }, { path: ["to"], message: 7 }]);
+      },
+    });
+    expect(r).toEqual({ content: [{ type: "text", text: "invalid_input: Entrada inválida (from; Faltou algo; to)" }], isError: true });
+  });
+
   test("lote JSON-RPC → 400 -32600, sem executar nenhuma ferramenta", async () => {
     const owner = await mkToken(s.storeId, "owner");
     let calls = 0;
@@ -306,10 +329,9 @@ describe("limites", () => {
     const ip = `198.51.100.${1 + (randomBytes(1)[0]! % 250)}`;
     const opts: McpHttpOptions = { ...BASE, trustProxy: 1 };
     const fwd = { "x-forwarded-for": ip };
-    for (let i = 0; i < 300; i++) {
-      const res = await handleMcpRequest(rpc("tools/list", {}, { headers: { ...fwd, authorization: `Bearer ${randomBytes(8).toString("hex")}` } }), opts);
-      if (res.status !== 401) throw new Error(`requisição ${i + 1}: ${res.status}`);
-    }
+    // 300 requisições boas do IP (três tokens, abaixo do limite de cada um).
+    const toks = [await mkToken(s.storeId, "reader"), await mkToken(s.storeId, "reader"), await mkToken(s.storeId, "reader")];
+    await inWaves(300, 15, 200, (i) => handleMcpRequest(rpc("tools/list", {}, { token: toks[i % 3]!.token, headers: fwd }), opts));
     const limited = await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: fwd }), opts);
     expect(limited.status).toBe(429);
     expect(limited.headers.get(WAIT_HEADER)).toBe("60");
@@ -317,9 +339,42 @@ describe("limites", () => {
     expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: { "x-forwarded-for": "198.51.100.251" } }), opts)).status).toBe(200);
     // Sem proxy confiável o IP é desconhecido: nada de limite (nem linha) por IP.
     await handleMcpRequest(rpc("tools/list", {}, { token: owner.token }), { ...BASE, trustProxy: 0 });
-    const unknown = await t.ownerDb.select().from(rateLimit).where(like(rateLimit.key, "mcp:ip:unknown%"));
+    await handleMcpRequest(rpc("tools/list", {}, { token: "falso" }), { ...BASE, trustProxy: 0 });
+    const unknown = await t.ownerDb.select().from(rateLimit).where(like(rateLimit.key, "mcp:%ip:unknown%"));
     expect(unknown).toEqual([]);
+  }, HEAVY_TEST_MS);
+
+  test("IP conhecido: 30 falhas de autenticação do mesmo IP → as próximas desse IP recebem 429 sem autenticar; outro IP autentica normal", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    const opts: McpHttpOptions = { ...BASE, trustProxy: 1 };
+    const fwd = { "x-forwarded-for": "192.0.2.77" };
+    for (let i = 0; i < 30; i++) {
+      const res = await handleMcpRequest(rpc("tools/list", {}, { token: forgedToken(), headers: fwd }), opts);
+      if (res.status !== 401) throw new Error(`requisição ${i + 1}: ${res.status}`);
+    }
+    const limited = await handleMcpRequest(rpc("tools/list", {}, { token: forgedToken(), headers: fwd }), opts);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get(WAIT_HEADER)).toBe("60");
+    // Nem token válido desse IP autentica: last_used_at intacto.
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: fwd }), opts)).status).toBe(429);
+    const [row] = await t.ownerDb.select({ lastUsedAt: mcpToken.lastUsedAt }).from(mcpToken).where(eq(mcpToken.id, owner.id));
+    expect(row!.lastUsedAt).toBeNull();
+    // Outro IP autentica normal.
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: { "x-forwarded-for": "192.0.2.78" } }), opts)).status).toBe(200);
   });
+
+  test("IP conhecido: 600 falhas vindas de outros IPs não bloqueiam o token válido de um terceiro IP", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    // Janela própria: com o balde global (o de IP desconhecido), estas 600 falhas bloqueariam todo mundo.
+    const later = new Date(NOW.getTime() + 240_000);
+    const opts: McpHttpOptions = { now: () => later, trustProxy: 1 };
+    await inWaves(600, 20, 401, (i) =>
+      handleMcpRequest(rpc("tools/list", {}, { token: forgedToken(), headers: { "x-forwarded-for": `203.0.113.${i % 20}` } }), opts),
+    );
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: { "x-forwarded-for": "203.0.113.200" } }), opts)).status).toBe(200);
+  }, HEAVY_TEST_MS);
 
   test("601ª falha de autenticação no minuto (qualquer cliente, sem IP conhecido) → 429 e nenhuma autenticação nova até a virada", async () => {
     const s = await seedPanelStore();
@@ -327,12 +382,8 @@ describe("limites", () => {
     // Janela própria (dois minutos à frente): não divide o balde global com os outros testes do arquivo.
     const later = new Date(NOW.getTime() + 120_000);
     const opts: McpHttpOptions = { now: () => later, trustProxy: 0 };
-    const forged = () => ["fnl", randomUUID().replaceAll("-", ""), randomBytes(32).toString("base64url")].join("_");
-    for (let i = 0; i < 600; i++) {
-      const res = await handleMcpRequest(rpc("tools/list", {}, { token: forged() }), opts);
-      if (res.status !== 401) throw new Error(`requisição ${i + 1}: ${res.status}`);
-    }
-    const limited = await handleMcpRequest(rpc("tools/list", {}, { token: forged() }), opts);
+    await inWaves(600, 20, 401, () => handleMcpRequest(rpc("tools/list", {}, { token: forgedToken() }), opts));
+    const limited = await handleMcpRequest(rpc("tools/list", {}, { token: forgedToken() }), opts);
     expect(limited.status).toBe(429);
     expect(limited.headers.get(WAIT_HEADER)).toBe("60");
     // Estourado, nem token válido autentica (nenhuma transação de autenticação nova): last_used_at fica intocado.

@@ -1,8 +1,9 @@
 // Endpoint MCP (/api/mcp): um agente de IA usa a loja com um token MCP (`Authorization: Bearer <token>`).
-// Ordem: limite por IP (antes de autenticar, contra varredura de tokens) → corpo até 256 KB → balde global de falhas
-// de autenticação → token (401 com o MESMO corpo em todo caso de falha) → limite por token → sem lote → um `Server` e
-// um transporte por requisição (sem sessão, resposta JSON). As ferramentas vêm do catálogo (src/lib/mcp/tools.ts) pelo papel do token; `runAction` decide permissão e
-// auditoria. Nenhum dado pessoal do comprador sai por aqui (projeções do catálogo) e erro inesperado nunca leva pilha.
+// Ordem: limite por IP (antes de autenticar, contra varredura de tokens) → corpo até 256 KB → balde de falhas de
+// autenticação (por IP; global sem IP) → token (401 com o MESMO corpo em todo caso de falha) → limite por token → sem
+// lote → um `Server` e um transporte por requisição (sem sessão, resposta JSON). As ferramentas vêm do catálogo
+// (src/lib/mcp/tools.ts) pelo papel do token; `runAction` decide permissão e auditoria. Nenhum dado pessoal do
+// comprador sai por aqui (projeções do catálogo) e erro inesperado nunca leva pilha.
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -20,9 +21,10 @@ import { callMcpTool, mcpTools } from "./tools";
 const MAX_BODY = 256 * 1024;
 const TOKEN_LIMIT = 120;
 const IP_LIMIT = 300;
-/** Falhas de autenticação somadas de todos os clientes (vale também sem IP conhecido, com `TRUST_PROXY=0`). */
-const UNAUTH_KEY = "mcp:unauth";
-const UNAUTH_LIMIT = 600;
+/** Falhas de autenticação por IP; sem IP conhecido (`TRUST_PROXY=0` ou sem cabeçalho do proxy), num balde global. */
+const UNAUTH_IP_LIMIT = 30;
+const UNAUTH_GLOBAL_KEY = "mcp:unauth";
+const UNAUTH_GLOBAL_LIMIT = 600;
 const WINDOW_SEC = 60;
 const MAX_ERROR_TEXT = 500;
 
@@ -59,7 +61,8 @@ function actionErrorText(e: ActionError): string {
   if (e.code === "invalid_input" && Array.isArray(e.details) && e.details.length > 0) {
     const issues = (e.details as { path?: unknown; message?: unknown }[]).map((i) => {
       const path = Array.isArray(i.path) ? i.path.map(String).join(".") : "";
-      return path ? `${path}: ${String(i.message)}` : String(i.message);
+      const message = typeof i.message === "string" ? i.message : "";
+      return path && message ? `${path}: ${message}` : path || message;
     });
     t += ` (${issues.join("; ")})`;
   }
@@ -106,15 +109,18 @@ export async function handleMcpRequest(req: Request, opts: McpHttpOptions = {}):
   const now = opts.now ?? (() => new Date());
 
   const ip = clientIpFrom(req.headers, opts.trustProxy ?? env.TRUST_PROXY);
-  if (ip !== UNKNOWN_IP && !(await checkRateLimit(`mcp:ip:${ipRateKey(ip)}`, IP_LIMIT, WINDOW_SEC, now()))) return tooMany();
+  const ipKey = ip === UNKNOWN_IP ? null : ipRateKey(ip);
+  if (ipKey && !(await checkRateLimit(`mcp:ip:${ipKey}`, IP_LIMIT, WINDOW_SEC, now()))) return tooMany();
 
   const raw = await readCapped(req, MAX_BODY);
   if (raw === null) return rpcError(413, -32000, "Requisição grande demais (máximo de 256 KB)");
 
-  // Muitas falhas de autenticação no minuto (de qualquer cliente): nenhuma transação de autenticação nova até a virada.
-  if (!(await peekRateLimit(UNAUTH_KEY, UNAUTH_LIMIT, WINDOW_SEC, now()))) return tooMany();
+  // Muitas falhas de autenticação no minuto (do IP; sem IP, de todos): nenhuma transação de autenticação nova até a
+  // virada. Com IP conhecido o balde é só do IP: um atacante não bloqueia os tokens válidos de outros IPs.
+  const [unauthKey, unauthLimit] = ipKey ? [`mcp:unauth:ip:${ipKey}`, UNAUTH_IP_LIMIT] : [UNAUTH_GLOBAL_KEY, UNAUTH_GLOBAL_LIMIT];
+  if (!(await peekRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now()))) return tooMany();
   const auth = await authenticateMcpToken(bearer(req));
-  if (!auth) return (await checkRateLimit(UNAUTH_KEY, UNAUTH_LIMIT, WINDOW_SEC, now())) ? unauthorized() : tooMany();
+  if (!auth) return (await checkRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now())) ? unauthorized() : tooMany();
   if (!(await checkRateLimit(`mcp:${auth.tokenId}`, TOKEN_LIMIT, WINDOW_SEC, now()))) return tooMany();
 
   let body: unknown;
