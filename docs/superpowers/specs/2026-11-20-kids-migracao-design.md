@@ -44,11 +44,24 @@ Na prática, o item 1 muda:
   - A soma dos itens é sempre igual ao total do pedido. Um teste de propriedade garante isso.
 - **Entrega:** um `download_link` por produto, com validade, limite e carimbo próprios. O e-mail lista um link por produto, na ordem da oferta.
 - **Reembolso:** revoga todos os links. Hoje isso já acontece; um teste garante com N itens.
+- **O que o comprador vê (decidido pelo dono):**
+  - o checkout mostra o nome da oferta e, embaixo, "Inclui:" com a lista dos PDFs;
+  - o cartão do bump mostra o rótulo escrito pelo vendedor (ex.: "5 Kits Extras");
+  - o e-mail de entrega lista um link por PDF, **sem preço por item**, só com o total do pedido.
+
+  O rateio é interno: serve aos relatórios e a fazer a soma bater. O comprador nunca vê preço rateado.
+
+  ```
+  Completo — R$ 27,00
+  Inclui: Almanaque Bíblico Kids · Pack de jogos · Datas especiais ·
+          Cartões de versículos · Diário de oração · Escola dominical
+  ```
 - **Painel:**
   - o detalhe do pedido lista os itens;
-  - o CSV traz uma coluna com os nomes dos itens separados por `;`, além das colunas de hoje;
+  - o CSV não ganha coluna nova: a coluna `produto(s)`, com os nomes unidos por " + ", passa a listar todos os PDFs;
   - o editor de oferta permite escolher N produtos principais e N do bump, mantendo o caso de 1 produto simples, como hoje.
-- **Pixel e CAPI:** `content_ids` com todos os produtos do pedido. `value` continua sendo o total.
+- **Mudar os produtos de uma oferta é ação sensível**, porque muda o que é entregue, como mudar o preço.
+- **Pixel e CAPI:** `content_ids` com todos os produtos do pedido. A CAPI já faz isso; falta conferir o Pixel do navegador. `value` continua sendo o total.
 - **Migração:** as ofertas existentes viram o formato novo sem mudar o que vendem, ou seja, 1 principal e 0 ou 1 no bump. Pedidos antigos não mudam.
 - **Compatibilidade:** o editor e o fluxo atual com 1 produto continuam funcionando, e o E2E atual passa sem mudança.
 
@@ -81,10 +94,12 @@ Na prática, o item 1 muda:
   - tem nome e está ligado a um papel: dono, admin, suporte, tráfego ou o novo **leitor**;
   - é mostrado uma vez só, guardado como hash, com data de último uso, e pode ser revogado.
 - **Endpoint MCP:** HTTP no app, com `Authorization: Bearer <token>`. As ferramentas são as ações da camada `runAction` que o papel do token pode usar. Origem `mcp` na auditoria, sempre com o token que agiu.
-- **Papel "leitor":**
-  - só leitura de produtos, ofertas, métricas e da ferramenta nova de pedidos;
-  - não vê dado pessoal do comprador;
-  - não vê o CSV, que tem e-mail.
+- **Nenhum dado pessoal do comprador sai pelo MCP, em nenhum papel (decidido pelo dono).** Tudo o que uma ferramenta devolve vai para o provedor do modelo do agente (LGPD).
+  - Pelo MCP, as ações de pedido devolvem nome, e-mail, telefone e CPF mascarados (ex.: `m***@gmail.com`).
+  - A busca por e-mail não é exposta.
+  - `orders.export` (CSV) fica fora do MCP.
+  - Consultas sobre um comprador específico continuam no painel.
+- **Papel "leitor":** só leitura de produtos, ofertas, métricas e da ferramenta nova de pedidos.
 - **Ferramenta nova `orders.paidReport`:** pedidos pagos num período, por dia, com:
   - oferta, itens, valor, forma de pagamento;
   - UTM de primeiro e último toque;
@@ -98,11 +113,21 @@ Na prática, o item 1 muda:
   - aprovada, a ação roda com a auditoria marcando origem `mcp` e quem aprovou;
   - a solicitação expira em 7 dias;
   - o agente consulta o estado pela ferramenta `approvals.status`.
-- **Matriz de ações sensíveis:** revisada antes de ligar o MCP (pendência M6 da fase 1). Hoje são `orders.refund`, `orders.release`, `connections.saveAsaas`, `connections.saveSmtp`, `products.delete`, `offers.setPixel`, `account.changePassword` e `team.revokeSessions`. Entram também as conexões novas (Resend e Telegram) e a gestão de tokens.
+- **Matriz de ações sensíveis:** revisada antes de ligar o MCP (pendência M6 da fase 1). Vale a marcação do código:
+  - `orders.refund`, `orders.release`;
+  - `connections.saveAsaas`, `connections.saveSmtp`, `connections.saveMeta`, `connections.savePixManual`;
+  - `products.delete`;
+  - `offers.setPixel`, `offers.updatePrice`;
+  - `store.updateSettings`;
+  - `account.changePassword`, `team.revokeSessions`.
+
+  Entram também as conexões novas (Resend e Telegram), a edição dos produtos de uma oferta e a gestão de tokens. O PR 5 expõe só as ações não sensíveis por essa marcação.
 - **Upload de PDF pelo MCP:**
-  - a ferramenta `products.createUploadLink` devolve uma URL de upload de **uso único**, válida por 15 minutos e presa à loja e ao produto;
-  - o agente faz `PUT` do arquivo nela, e o upload passa pelas mesmas validações do painel (PDF, teto de 50 MB);
-  - o arquivo nunca passa pela conversa.
+  - a ferramenta `products.createUploadLink` recebe o nome do produto e do arquivo e devolve uma URL de upload de **uso único**, válida por 15 minutos e presa à loja;
+  - o agente faz `PUT` do PDF nela;
+  - o produto **só passa a existir quando o arquivo chega**, depois das mesmas validações do painel (PDF, teto de 50 MB);
+  - o arquivo nunca passa pela conversa;
+  - trocar o PDF de um produto que já existe fica fora, porque o painel também não faz isso.
 - **Segredos pelo MCP:** salvar uma conexão aceita a chave pelo MCP. Como é ação sensível, sempre passa pela aprovação. A chave nunca volta em resposta e aparece mascarada na fila.
 
 ## Fora do escopo (próximos passos, só com o ok do dono)
@@ -159,8 +184,10 @@ Cada PR segue o processo do repo: spec e plano, implementação com code review 
 
 ## Decisões minhas (o dono pode corrigir)
 
-- **Rateio:** divisão igual com sobra no primeiro item; o bump é rateado separadamente.
-- **Coluna nova no CSV:** itens separados por `;`.
+- **Rateio:** divisão igual com sobra no primeiro item; o bump é rateado separadamente; uso só interno.
+- **CSV:** sem coluna nova; a `produto(s)` existente lista todos os PDFs.
+- **Edição dos produtos de uma oferta:** ação sensível.
+- **Upload por link:** cria um produto novo. Trocar o PDF de um produto existente fica fora.
 - **Provedor de e-mail:** SMTP ou Resend, um ativo por vez.
 - **Webhook do Resend:** só entregue, devolvido e spam, gravados no `email_log`.
 - **Telegram:** mensagem no formato do exemplo acima.
