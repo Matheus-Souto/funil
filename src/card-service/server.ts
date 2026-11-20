@@ -140,13 +140,15 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
 }
 
 /**
- * Endereço em que o serviço escuta: 127.0.0.1 quando CARD_ORIGIN é http em loopback (verify e desenvolvimento: nada
+ * Endereço em que o serviço escuta: 127.0.0.1 (ou ::1, com `http://[::1]`) quando CARD_ORIGIN é http em loopback (verify e desenvolvimento: nada
  * exposto no IP da máquina); 0.0.0.0 nos outros casos (no container, atrás do Caddy, que o alcança pela rede `card`).
  */
 export function cardBindHost(cardOrigin: string | undefined): string {
   if (cardOrigin === undefined) return "0.0.0.0";
   try {
-    return new URL(cardOrigin).protocol === "http:" && isLoopbackUrl(cardOrigin) ? "127.0.0.1" : "0.0.0.0";
+    const u = new URL(cardOrigin);
+    if (u.protocol !== "http:" || !isLoopbackUrl(cardOrigin)) return "0.0.0.0";
+    return u.hostname === "[::1]" ? "::1" : "127.0.0.1";
   } catch {
     return "0.0.0.0";
   }

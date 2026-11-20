@@ -732,6 +732,9 @@ describe("main.ts: subida do serviço", () => {
   test("bind (R17): 127.0.0.1 com CARD_ORIGIN http em loopback (verify/dev); 0.0.0.0 nos outros casos (container, atrás do Caddy)", () => {
     expect(cardBindHost("http://127.0.0.1:3100")).toBe("127.0.0.1");
     expect(cardBindHost("http://localhost:3100")).toBe("127.0.0.1");
+    // IPv6 em loopback: escuta no ::1 (127.0.0.1 não atenderia quem chega em [::1]).
+    expect(cardBindHost("http://[::1]:3100")).toBe("::1");
+    expect(cardBindHost("https://[::1]:3100")).toBe("0.0.0.0");
     expect(cardBindHost("https://pagar.example.com")).toBe("0.0.0.0");
     expect(cardBindHost("https://pagar.localhost:8443")).toBe("0.0.0.0");
     expect(cardBindHost(undefined)).toBe("0.0.0.0");
