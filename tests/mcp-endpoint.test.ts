@@ -4,9 +4,11 @@
 // Nenhum literal com o formato do token: tudo montado em tempo de execução.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
-import { and, eq, like } from "drizzle-orm";
-import { ActionError } from "@/lib/actions/core";
+import { and, eq, like, sql } from "drizzle-orm";
+import { z } from "zod";
+import { ActionError, defineAction, type Action } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
+import { registry } from "@/lib/actions/registry";
 import { auditLog, customer, emailLog, mcpToken, orders, rateLimit, storeAlert } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { handleMcpRequest, type McpHttpOptions } from "@/lib/mcp/server";
@@ -131,6 +133,16 @@ describe("autenticação", () => {
     }
   });
 });
+
+/** Ação criada só no teste (fora do registro global), posta no registro durante `fn` e retirada no fim. */
+async function withTestAction<T>(action: Action<unknown, unknown>, fn: () => Promise<T>): Promise<T> {
+  registry.set(action.name, action);
+  try {
+    return await fn();
+  } finally {
+    registry.delete(action.name);
+  }
+}
 
 describe("tools/list e tools/call", () => {
   let s: PanelStore;
@@ -299,6 +311,72 @@ describe("limites", () => {
     expect(ok.status).toBe(200);
   });
 
+  test("3ª requisição simultânea do mesmo token → 429 com espera de 5 s; outro token segue livre; vaga volta ao terminar (inclusive com erro)", async () => {
+    const s = await seedPanelStore();
+    const tok = await mkToken(s.storeId, "reader");
+    const other = await mkToken(s.storeId, "reader");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered = 0;
+    let bothIn!: () => void;
+    const both = new Promise<void>((r) => (bothIn = r));
+    const held: McpHttpOptions = {
+      ...BASE,
+      callTool: async () => {
+        if (++entered === 2) bothIn();
+        await gate;
+        return null;
+      },
+    };
+    const call = () => handleMcpRequest(rpc("tools/call", { name: "products_list", arguments: {} }, { token: tok.token }), held);
+    const first = call();
+    const second = call();
+    await both;
+    const busy = await handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE);
+    expect(busy.status).toBe(429);
+    expect(busy.headers.get(WAIT_HEADER)).toBe("5");
+    expect(await busy.json()).toMatchObject({ jsonrpc: "2.0", error: { code: expect.any(Number) }, id: null });
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: other.token }), BASE)).status).toBe(200);
+    release();
+    expect([(await first).status, (await second).status]).toEqual([200, 200]);
+    // Ferramenta que falha devolve a vaga: três seguidas passam (sem devolver, a terceira daria 429).
+    const failing: McpHttpOptions = {
+      ...BASE,
+      callTool: async () => {
+        throw new Error("falhou");
+      },
+    };
+    for (let i = 0; i < 3; i++) {
+      const r = await handleMcpRequest(rpc("tools/call", { name: "products_list", arguments: {} }, { token: tok.token }), failing);
+      expect([i, r.status]).toEqual([i, 200]);
+    }
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE)).status).toBe(200);
+  });
+
+  test("consulta lenta pelo MCP é cortada pelo banco (statement_timeout de 5 s) e vira \"error: falha interna\"", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    // Sem o corte, a ação terminaria bem depois de 15 s e devolveria { dormiu: true } (o teste falharia na conferência).
+    const slow = defineAction(
+      {
+        name: "testes.lenta",
+        description: "Consulta lenta, só neste teste.",
+        input: z.object({}),
+        permission: "products.read",
+        audit: false,
+        async run(ctx) {
+          await ctx.tx.execute(sql`select pg_sleep(15)`);
+          return { dormiu: true };
+        },
+      },
+      { register: false },
+    );
+    const r = await withTestAction(slow as Action<unknown, unknown>, () => callTool(owner.token, "testes_lenta", {}));
+    expect(r).toEqual({ content: [{ type: "text", text: "error: falha interna" }], isError: true });
+    // 57014 = query_canceled (statement_timeout).
+    expect(out).toContain("57014");
+  }, HEAVY_TEST_MS);
+
   test("corpo que não é JSON → 400 de parse (JSON-RPC), com token válido", async () => {
     const s = await seedPanelStore();
     const owner = await mkToken(s.storeId, "owner");
@@ -329,9 +407,9 @@ describe("limites", () => {
     const ip = `198.51.100.${1 + (randomBytes(1)[0]! % 250)}`;
     const opts: McpHttpOptions = { ...BASE, trustProxy: 1 };
     const fwd = { "x-forwarded-for": ip };
-    // 300 requisições boas do IP (três tokens, abaixo do limite de cada um).
-    const toks = [await mkToken(s.storeId, "reader"), await mkToken(s.storeId, "reader"), await mkToken(s.storeId, "reader")];
-    await inWaves(300, 15, 200, (i) => handleMcpRequest(rpc("tools/list", {}, { token: toks[i % 3]!.token, headers: fwd }), opts));
+    // 300 requisições boas do IP (dez tokens, abaixo do limite de cada um; ondas de 20 = 2 simultâneas por token).
+    const toks = await Promise.all(Array.from({ length: 10 }, () => mkToken(s.storeId, "reader")));
+    await inWaves(300, 20, 200, (i) => handleMcpRequest(rpc("tools/list", {}, { token: toks[i % 10]!.token, headers: fwd }), opts));
     const limited = await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: fwd }), opts);
     expect(limited.status).toBe(429);
     expect(limited.headers.get(WAIT_HEADER)).toBe("60");

@@ -1,7 +1,8 @@
 // Endpoint MCP (/api/mcp): um agente de IA usa a loja com um token MCP (`Authorization: Bearer <token>`).
 // Ordem: limite por IP (antes de autenticar, contra varredura de tokens) → corpo até 256 KB → balde de falhas de
-// autenticação (por IP; global sem IP) → token (401 com o MESMO corpo em todo caso de falha) → limite por token → sem
-// lote → um `Server` e um transporte por requisição (sem sessão, resposta JSON). As ferramentas vêm do catálogo
+// autenticação (por IP; global sem IP) → token (401 com o MESMO corpo em todo caso de falha) → no máximo 2
+// requisições simultâneas por token → limite por token → sem lote → um `Server` e um transporte por requisição (sem
+// sessão, resposta JSON). As ferramentas vêm do catálogo
 // (src/lib/mcp/tools.ts) pelo papel do token; `runAction` decide permissão e auditoria. Nenhum dado pessoal do
 // comprador sai por aqui (projeções do catálogo) e erro inesperado nunca leva pilha.
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -27,6 +28,11 @@ const UNAUTH_GLOBAL_KEY = "mcp:unauth";
 const UNAUTH_GLOBAL_LIMIT = 600;
 const WINDOW_SEC = 60;
 const MAX_ERROR_TEXT = 500;
+/** Requisições em andamento por token (o pool do banco tem 5 conexões): acima disso, 429 com espera curta. */
+const MAX_IN_FLIGHT = 2;
+const BUSY_WAIT_SEC = 5;
+/** tokenId → requisições em andamento neste processo (a entrada some ao zerar). */
+const inFlight = new Map<string, number>();
 
 const INSTRUCTIONS =
   "Servidor MCP da loja no funil (checkout de infoprodutos). As ferramentas seguem o papel do token. " +
@@ -52,6 +58,8 @@ const rpcError = (status: number, code: number, message: string, headers: Record
 // Sem dizer qual caso (sem token, malformado, revogado, loja ou segredo errado): corpo único.
 const unauthorized = () => rpcError(401, -32001, "Não autorizado");
 const tooMany = () => rpcError(429, -32000, "Muitas requisições; tente de novo em um minuto", { "retry-after": String(WINDOW_SEC) });
+const busy = () =>
+  rpcError(429, -32000, "Requisições simultâneas demais para este token; tente de novo em alguns segundos", { "retry-after": String(BUSY_WAIT_SEC) });
 
 const text = (t: string, isError = false): CallToolResult => ({ content: [{ type: "text", text: t }], ...(isError ? { isError: true } : {}) });
 
@@ -121,6 +129,21 @@ export async function handleMcpRequest(req: Request, opts: McpHttpOptions = {}):
   if (!(await peekRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now()))) return tooMany();
   const auth = await authenticateMcpToken(bearer(req));
   if (!auth) return (await checkRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now())) ? unauthorized() : tooMany();
+
+  const running = inFlight.get(auth.tokenId) ?? 0;
+  if (running >= MAX_IN_FLIGHT) return busy();
+  inFlight.set(auth.tokenId, running + 1);
+  try {
+    return await handleAuthenticated(req, raw, auth, opts, now);
+  } finally {
+    const left = (inFlight.get(auth.tokenId) ?? 1) - 1;
+    if (left > 0) inFlight.set(auth.tokenId, left);
+    else inFlight.delete(auth.tokenId);
+  }
+}
+
+/** Depois da autenticação, com a vaga de requisição simultânea do token já reservada. */
+async function handleAuthenticated(req: Request, raw: string, auth: Auth, opts: McpHttpOptions, now: () => Date): Promise<Response> {
   if (!(await checkRateLimit(`mcp:${auth.tokenId}`, TOKEN_LIMIT, WINDOW_SEC, now()))) return tooMany();
 
   let body: unknown;

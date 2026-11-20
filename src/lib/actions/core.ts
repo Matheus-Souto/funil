@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import { withStore, type Tx } from "@/lib/db/client";
 import { auditLog } from "@/lib/db/schema";
@@ -97,6 +98,9 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
   }
 }
 
+/** Teto de cada consulta numa transação de origem `mcp` (`set local`: vale só para a transação). */
+const MCP_STATEMENT_TIMEOUT = "5s";
+
 /** Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora). */
 export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
 
@@ -161,6 +165,8 @@ export async function runAction<I, O, P = any, S = any>(
   let committed: O;
   try {
     committed = await withStore(storeId, async (tx) => {
+      // Agente pelo MCP não segura conexão do pool (5) com consulta longa: o banco corta e vira "falha interna".
+      if (origin === "mcp") await tx.execute(sql.raw(`set local statement_timeout = '${MCP_STATEMENT_TIMEOUT}'`));
       const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P, call.server);
       ran = { out };
       if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));

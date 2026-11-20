@@ -132,14 +132,19 @@ export const payment = pgTable(
   ],
 );
 
-export const checkoutView = pgTable("checkout_view", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  storeId: uuid("store_id")
-    .notNull()
-    .references(() => store.id, { onDelete: "cascade" }),
-  offerId: uuid("offer_id")
-    .notNull()
-    .references(() => offer.id),
-  touch: jsonb("touch"),
-  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const checkoutView = pgTable(
+  "checkout_view",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "cascade" }),
+    offerId: uuid("offer_id")
+      .notNull()
+      .references(() => offer.id),
+    touch: jsonb("touch"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Visitas por período (metrics.summary e metrics.breakdown, também pelo MCP) sem varrer a tabela inteira.
+  (t) => [index("checkout_view_store_at_idx").on(t.storeId, t.at)],
+);

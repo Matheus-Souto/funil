@@ -1,0 +1,1 @@
+CREATE INDEX "checkout_view_store_at_idx" ON "checkout_view" USING btree ("store_id","at");
