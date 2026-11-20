@@ -453,16 +453,14 @@ describe("aviso de venda no Telegram", () => {
   test("pedido pago enfileira notify_telegram sale; disputed → paid não enfileira; loja sem Telegram: o job pula sem chamar o fetch", async () => {
     const shop = await seedShop();
     const o = await paidOrder(shop);
-    // O pedido Pix também tem o "Pix gerado" da criação (outros avisos): aqui só o de venda.
-    const sales = async () => (await tgJobs(o.id)).filter((j) => eventOf(j) === "sale");
-    const first = await sales();
+    const first = await tgJobs(o.id);
     expect(first).toHaveLength(1);
     expect(first[0]!.payload).toEqual({ event: "sale", orderId: o.id });
     await withStore(shop.storeId, async (tx) => {
       await transitionOrder(systemCtx(shop.storeId, tx), o.id, "disputed", "teste");
       await transitionOrder(systemCtx(shop.storeId, tx), o.id, "paid", "teste");
     });
-    expect(await sales()).toHaveLength(1);
+    expect(await tgJobs(o.id)).toHaveLength(1);
 
     const bare = await seedShop({ telegram: false });
     const o2 = await paidOrder(bare);
@@ -609,7 +607,7 @@ describe("aviso de venda no Telegram", () => {
       throw new Error(`fetch failed: ${String(url)}`);
     }) as unknown as typeof fetch);
     await runDueJobs({ notify_telegram: getHandlers().notify_telegram! }, 50, () => new Date(), { types: ["notify_telegram"] });
-    const [row] = (await tgJobs(o.id)).filter((j) => eventOf(j) === "sale");
+    const [row] = await tgJobs(o.id);
     expect(row!.status).toBe("queued");
     expect(row!.lastError).toBeTruthy();
     expect(JSON.stringify(row)).not.toContain(BOT_TOKEN);
@@ -756,7 +754,7 @@ describe("outros avisos do Telegram", () => {
     const o = await pendingOrder(shop);
     const scheduled = (await tgJobs(o.id)).filter((j) => eventOf(j) === "abandoned");
     expect(scheduled).toHaveLength(1);
-    expect(scheduled[0]!.payload).toEqual({ event: "abandoned", orderId: o.id });
+    expect(scheduled[0]!.payload).toEqual({ event: "abandoned", orderId: o.id, afterMinutes: 30 });
     expect(scheduled[0]!.runAt.getTime()).toBe(o.createdAt.getTime() + 30 * MIN);
     await backdate(o, 30 * MIN);
     const calls = fakeTg(okFor);
@@ -781,12 +779,42 @@ describe("outros avisos do Telegram", () => {
   });
 
   test("abandono com o evento desligado na criação: nada agendado", async () => {
-    const shop = await seedShop();
+    const shop = await seedShop({ events: { pixGenerated: true } });
     const o = await pendingOrder(shop);
     expect((await tgJobs(o.id)).map(eventOf)).toEqual(["pix_generated"]);
+  });
+
+  test("loja sem Telegram ou com \"Pix gerado\" desligado: pedido Pix não cria job notify_telegram", async () => {
     const bare = await seedShop({ telegram: false });
-    const o2 = await pendingOrder(bare);
-    expect((await tgJobs(o2.id)).map(eventOf)).toEqual(["pix_generated"]);
+    expect(await tgJobs((await pendingOrder(bare)).id)).toHaveLength(0);
+    const off = await seedShop();
+    expect(await tgJobs((await pendingOrder(off)).id)).toHaveLength(0);
+  });
+
+  test("abandono usa o prazo do agendamento: agendado com 30, config mudada para 60, rodando no minuto 30 envia \"(30 min sem pagamento)\"", async () => {
+    const shop = await seedShop({ events: { abandoned: true } });
+    const o = await pendingOrder(shop);
+    fakeTg(okFor);
+    await runAction(saveTelegram, panel(shop.storeId), { chatId: CHAT, abandonAfterMinutes: 60 });
+    await backdate(o, 30 * MIN);
+    const calls = fakeTg(okFor);
+    expect(await runQueued(o.id, "abandoned")).toBe(1);
+    expect(texts(calls)).toEqual([`Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #${orderCode(o.publicId)}`]);
+  });
+
+  test("abandono com payload sem afterMinutes (job antigo) usa o prazo da config", async () => {
+    const shop = await seedShop({ events: { abandoned: true } });
+    fakeTg(okFor);
+    await runAction(saveTelegram, panel(shop.storeId), { chatId: CHAT, abandonAfterMinutes: 60 });
+    const o = await pendingOrder(shop);
+    const calls = fakeTg(okFor);
+    await backdate(o, 31 * MIN);
+    await runJob(shop, "abandoned", o.id);
+    expect(calls).toHaveLength(0);
+    expect(await notices(o.id)).toHaveLength(0);
+    await backdate(o, 60 * MIN);
+    await runJob(shop, "abandoned", o.id);
+    expect(texts(calls)).toEqual([`Carrinho abandonado (60 min sem pagamento): Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #${orderCode(o.publicId)}`]);
   });
 
   test("nenhuma mensagem dos três eventos contém dado do cliente", async () => {

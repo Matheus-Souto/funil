@@ -14,9 +14,14 @@ import { log } from "@/lib/log";
 import { itemOrder } from "@/lib/orders/items";
 import type { OrderMethod } from "@/lib/orders/labels";
 import { TelegramError, telegramMessage, telegramSend, type TelegramEvent } from "./telegram";
-import { loadTelegram, type TelegramEvents } from "./telegram-connection";
+import { MAX_ABANDON, MIN_ABANDON, loadTelegram, type TelegramEvents } from "./telegram-connection";
 
-const payloadSchema = z.object({ event: z.enum(["sale", "pix_generated", "card_declined", "abandoned"]), orderId: z.uuid() });
+const payloadSchema = z.object({
+  event: z.enum(["sale", "pix_generated", "card_declined", "abandoned"]),
+  orderId: z.uuid(),
+  /** Abandono: o prazo usado no agendamento (o vendedor pode mudá-lo depois). Ausente (job antigo): o da config. */
+  afterMinutes: z.number().int().min(MIN_ABANDON).max(MAX_ABANDON).optional(),
+});
 
 const EVENT_FLAG: Record<TelegramEvent, keyof TelegramEvents> = {
   sale: "sale",
@@ -44,7 +49,7 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
     return;
   }
   const storeId = j.storeId;
-  const { event, orderId } = parsed.data;
+  const { event, orderId, afterMinutes } = parsed.data;
 
   const prep: Prepared = await withStore(storeId, async (tx) => {
     const [o] = await tx.select().from(orders).where(eq(orders.id, orderId));
@@ -100,8 +105,10 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
     const conn = await loadTelegram(tx, storeId);
     if (!conn) return { skip: "sem_conexao" };
     if (!conn.events[EVENT_FLAG[event]]) return { skip: "evento_desligado" };
-    // Abandono antes do prazo (job forjado ou prazo aumentado depois): pula sem marca; o agendamento legítimo envia depois.
-    if (event === "abandoned" && Date.now() < o.createdAt.getTime() + conn.abandonAfterMinutes * 60_000 - ABANDON_TOLERANCE_MS) {
+    // Prazo do agendamento (não o atual da config): mudar o prazo depois não perde os abandonos já agendados.
+    const abandonAfterMinutes = afterMinutes ?? conn.abandonAfterMinutes;
+    // Abandono antes do prazo (job forjado ou relógio): pula sem marca; o agendamento legítimo envia depois.
+    if (event === "abandoned" && Date.now() < o.createdAt.getTime() + abandonAfterMinutes * 60_000 - ABANDON_TOLERANCE_MS) {
       return { skip: "antes_do_prazo" };
     }
 
@@ -123,7 +130,7 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
       totalCents: o.totalCents,
       method: o.method as OrderMethod,
       orderCode: orderCode(o.publicId),
-      abandonAfterMinutes: conn.abandonAfterMinutes,
+      abandonAfterMinutes,
     });
     return { token: conn.token, chatId: conn.chatId, text };
   });

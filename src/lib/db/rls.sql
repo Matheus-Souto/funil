@@ -77,8 +77,8 @@ $$;
 -- Segurança: a política por loja depende de `app.store_id`, que quem tem a conexão escolhe; não é barreira contra um
 -- serviço `card` comprometido. Esse serviço AINDA consegue, em qualquer loja: marcar pedido de cartão (`card_asaas`)
 -- pendente/expirado como pago e enfileirar a entrega; enfileirar avisos do Telegram de pedidos da loja (venda e cartão
--- recusado), com texto montado do banco pelo job e no máximo um por pedido e evento; ler pedidos e clientes (PII) e a
--- chave de API do Asaas; gravar auditoria e avisos falsos; mudar status de cobrança e o cliente Asaas guardado. NÃO
+-- recusado), com texto montado do banco pelo job e no máximo um envio por pedido e evento; ler pedidos e clientes (PII)
+-- e a chave de API do Asaas; gravar auditoria e avisos falsos; mudar status de cobrança e o cliente Asaas guardado. NÃO
 -- consegue: tirar pedido de pago, reembolsar ou revogar (fila), mexer nos limites do app, ler usuários, sessões,
 -- produtos, a fila e as conexões SMTP/Meta.
 create or replace function card_role_grants() returns void

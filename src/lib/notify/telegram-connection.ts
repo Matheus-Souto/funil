@@ -20,8 +20,8 @@ export interface TelegramEvents {
 
 export const DEFAULT_TELEGRAM_EVENTS: TelegramEvents = { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false };
 export const DEFAULT_ABANDON_MINUTES = 30;
-const MIN_ABANDON = 10;
-const MAX_ABANDON = 1440;
+export const MIN_ABANDON = 10;
+export const MAX_ABANDON = 1440;
 
 /** Config guardada com os padrões nos campos ausentes ou inválidos. */
 export function parseTelegramConfig(c: IntegrationConfig | undefined): { chatId: string | null; botUsername: string | null; events: TelegramEvents; abandonAfterMinutes: number } {

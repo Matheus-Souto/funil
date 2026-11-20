@@ -139,14 +139,18 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
 }
 
 /**
- * Avisos do Telegram da loja na criação do pedido (mesma transação). "Pix gerado" vai sempre para a fila: o job confere
- * no envio se o evento está ligado e se o pedido segue pendente. O abandono só é agendado (para criado + prazo) se a
- * loja tem Telegram com o evento ligado agora; lê só a config pública, sem abrir o token.
+ * Avisos do Telegram da loja na criação do pedido (mesma transação), só para os eventos ligados agora (lê só a config
+ * pública, sem abrir o token); o job confere de novo no envio. "Pix gerado" em pedido Pix; abandono agendado para
+ * criado + prazo, com o prazo no payload (o vendedor pode mudá-lo depois).
  */
 async function enqueueTelegramNotices(ctx: Ctx, order: Order): Promise<void> {
-  const notice = (event: "pix_generated" | "abandoned", runAt?: Date) =>
-    enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_telegram", payload: { event, orderId: order.id }, runAt });
-  if (order.method === "pix_asaas" || order.method === "pix_manual") await notice("pix_generated");
   const tg = await telegramSettings(ctx.tx, ctx.storeId);
-  if (tg?.events.abandoned) await notice("abandoned", new Date(order.createdAt.getTime() + tg.abandonAfterMinutes * 60_000));
+  if (!tg) return;
+  const notice = (payload: { event: "pix_generated" } | { event: "abandoned"; afterMinutes: number }, runAt?: Date) =>
+    enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_telegram", payload: { ...payload, orderId: order.id }, runAt });
+  if (tg.events.pixGenerated && (order.method === "pix_asaas" || order.method === "pix_manual")) await notice({ event: "pix_generated" });
+  if (tg.events.abandoned) {
+    const afterMinutes = tg.abandonAfterMinutes;
+    await notice({ event: "abandoned", afterMinutes }, new Date(order.createdAt.getTime() + afterMinutes * 60_000));
+  }
 }
