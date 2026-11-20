@@ -10,7 +10,7 @@ import postgres from "postgres";
 import type { ActionError } from "@/lib/actions/core";
 import { setDbForTests, withStore } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
-import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert } from "@/lib/db/schema";
+import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
@@ -86,20 +86,32 @@ describe("papel card: atributos e o que fica de fora", () => {
     }
   });
 
-  test("conexões: só a asaas da loja aparece (smtp, meta e resend não); sem loja fixada, nenhuma", async () => {
+  test("conexões: só a asaas da loja aparece (smtp, meta, resend e telegram não); sem loja fixada, nenhuma", async () => {
     const { storeId } = await seedStore("Conexões");
     await t.ownerDb.insert(integration).values([
       { storeId, kind: "asaas", config: { env: "sandbox" }, secret: "a1.selado" },
       { storeId, kind: "smtp", config: { host: "smtp.example.com" }, secret: "v1.senha-smtp" },
       { storeId, kind: "meta", config: {}, secret: "v1.token-meta" },
       { storeId, kind: "resend", config: {}, secret: "v1.chave-resend" },
+      { storeId, kind: "telegram", config: {}, secret: "v1.token-telegram" },
     ]);
     const kinds = await asCardIn(storeId, (tx) => tx`select kind from integration order by kind`);
     expect(kinds.map((r) => r.kind)).toEqual(["asaas"]);
     // Nem pedindo a smtp explicitamente.
     expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'smtp'`)).toHaveLength(0);
     expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'resend'`)).toHaveLength(0);
+    expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'telegram'`)).toHaveLength(0);
     expect(await card`select kind from integration`).toHaveLength(0);
+  });
+
+  test("telegram_notice: select, insert e delete dão permission denied", async () => {
+    const { shop, order } = await pendingOrder();
+    await t.ownerDb.insert(telegramNotice).values({ storeId: shop.storeId, orderId: order.id, event: "sale", messageId: 1 });
+    await expect(asCardIn(shop.storeId, (tx) => tx`select 1 from telegram_notice`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(shop.storeId, (tx) => tx`insert into telegram_notice (store_id, order_id, event, message_id) values (${shop.storeId}, ${order.id}, 'abandoned', 2)`),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from telegram_notice`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {

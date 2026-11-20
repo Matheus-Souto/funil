@@ -176,6 +176,13 @@
       "when": 1795175574978,
       "tag": "0024_resend",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1795183751129,
+      "tag": "0025_telegram",
+      "breakpoints": true
     }
   ]
 }
