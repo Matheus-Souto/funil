@@ -4,7 +4,7 @@
 // `auditResult`. Os pedidos são semeados direto na tabela (o módulo da fila é a Task 2).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, TOKEN_DENIED, type Actor, type Origin } from "@/lib/actions/core";
 import { hasPermission, type Role } from "@/lib/actions/permissions";
@@ -53,10 +53,10 @@ async function seedUser(): Promise<string> {
   return u!.id;
 }
 
-async function seedToken(storeId: string): Promise<string> {
+async function seedToken(storeId: string, role: Role = "owner"): Promise<string> {
   const [tok] = await t.ownerDb
     .insert(mcpToken)
-    .values({ storeId, name: "agente", role: "owner", tokenHash: randomBytes(32).toString("hex"), last4: "abcd" })
+    .values({ storeId, name: "agente", role, tokenHash: randomBytes(32).toString("hex"), last4: "abcd" })
     .returning({ id: mcpToken.id });
   return tok!.id;
 }
@@ -77,7 +77,6 @@ async function seedRequest(
   input: unknown,
   extra: Partial<typeof approvalRequest.$inferInsert> = {},
 ) {
-  const inputSha256 = sha256(JSON.stringify(input));
   const [row] = await t.ownerDb
     .insert(approvalRequest)
     .values({
@@ -85,13 +84,13 @@ async function seedRequest(
       tokenId,
       action,
       inputSealed: seal(JSON.stringify(input)),
-      inputSha256,
+      inputSha256: sha256(JSON.stringify(input)),
       summary: { title: "Reembolsar pedido" },
       expiresAt: new Date(Date.now() + 7 * DAY_MS),
       ...extra,
     })
     .returning({ id: approvalRequest.id });
-  return { requestId: row!.id, inputSha256 };
+  return { requestId: row!.id };
 }
 
 const requestRow = async (id: string) => (await t.ownerDb.select().from(approvalRequest).where(eq(approvalRequest.id, id)))[0]!;
@@ -135,8 +134,8 @@ describe("portão de ação sensível", () => {
     const { storeId, approver, tokenId } = await setup();
     const { action, calls } = refundLike("t.appr.wrongcaller");
     const input = { orderId: "o1" };
-    const { requestId, inputSha256 } = await seedRequest(storeId, tokenId, action.name, input);
-    const approval = { requestId, inputSha256 };
+    const { requestId } = await seedRequest(storeId, tokenId, action.name, input);
+    const approval = { requestId };
     const token: Actor = { kind: "token", tokenId, role: "owner" };
     expect(await code(runAction(action, { storeId, actor: token, origin: "mcp", approval }, input))).toBe("forbidden");
     expect(await code(runAction(action, { storeId, actor: approver, origin: "panel", approval }, input))).toBe("forbidden");
@@ -154,9 +153,9 @@ describe("concessão de aprovação", () => {
     const resultId = randomUUID();
     const { action, calls } = refundLike("t.appr.ok", { out: { id: resultId, ok: true } });
     const input = { orderId: "o1" };
-    const { requestId, inputSha256 } = await seedRequest(storeId, tokenId, action.name, input);
+    const { requestId } = await seedRequest(storeId, tokenId, action.name, input);
 
-    const out = await runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId, inputSha256 } }, input);
+    const out = await runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input);
     expect(out).toEqual({ id: resultId, ok: true });
     expect(calls).toEqual([input]);
 
@@ -169,7 +168,7 @@ describe("concessão de aprovação", () => {
     expect(audit!.actor).toEqual({ ...approver, approval: { requestId, tokenId } });
 
     // A mesma concessão de novo: a linha já foi decidida, a ação não roda outra vez.
-    const again = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId, inputSha256 } }, input));
+    const again = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input));
     expect(again).toMatchObject({ code: "conflict", details: { approval: "unclaimed" } });
     expect(calls).toHaveLength(1);
   });
@@ -181,13 +180,13 @@ describe("concessão de aprovação", () => {
       ["t.appr.textid", { id: "pedido-123" }],
     ] as const) {
       const { action } = refundLike(name, { out });
-      const { requestId, inputSha256 } = await seedRequest(storeId, tokenId, name, { orderId: "o1" });
-      await runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId, inputSha256 } }, { orderId: "o1" });
+      const { requestId } = await seedRequest(storeId, tokenId, name, { orderId: "o1" });
+      await runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, { orderId: "o1" });
       expect(await requestRow(requestId)).toMatchObject({ status: "approved", resultId: null });
     }
   });
 
-  test("approval de pedido já decidido, vencido, de outra loja, de outra ação, com outro hash ou de token revogado → conflict e nada muda", async () => {
+  test("approval de pedido já decidido, vencido, de outra loja, de outra ação, com outro hash, de token revogado ou com requestId inválido → conflict e nada muda", async () => {
     const { storeId, approver, tokenId } = await setup();
     const { action, calls } = refundLike("t.appr.conflict");
     const input = { orderId: "o1" };
@@ -196,26 +195,28 @@ describe("concessão de aprovação", () => {
     const revokedToken = await seedToken(storeId);
     await t.ownerDb.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, revokedToken));
 
-    const cases: { label: string; req: { requestId: string; inputSha256: string }; hash?: string }[] = [
-      { label: "já aprovado", req: await seedRequest(storeId, tokenId, action.name, input, { status: "approved", inputSealed: null }) },
-      { label: "recusado", req: await seedRequest(storeId, tokenId, action.name, input, { status: "rejected", inputSealed: null }) },
-      { label: "vencido", req: await seedRequest(storeId, tokenId, action.name, input, { expiresAt: new Date(Date.now() - 1000) }) },
-      { label: "outra loja", req: await seedRequest(other.storeId, otherToken, action.name, input) },
-      { label: "outra ação", req: await seedRequest(storeId, tokenId, "t.appr.outra", input) },
-      // Pedido de outra entrada (o2) aprovado com o hash da entrada enviada (o1).
-      { label: "outro hash", req: await seedRequest(storeId, tokenId, action.name, { orderId: "o2" }), hash: sha256(JSON.stringify(input)) },
-      { label: "token revogado", req: await seedRequest(storeId, revokedToken, action.name, input) },
-      { label: "pedido inexistente", req: { requestId: randomUUID(), inputSha256: sha256(JSON.stringify(input)) } },
+    const cases: { label: string; requestId: string }[] = [
+      { label: "já aprovado", ...(await seedRequest(storeId, tokenId, action.name, input, { status: "approved", inputSealed: null })) },
+      { label: "recusado", ...(await seedRequest(storeId, tokenId, action.name, input, { status: "rejected", inputSealed: null })) },
+      { label: "vencido", ...(await seedRequest(storeId, tokenId, action.name, input, { expiresAt: new Date(Date.now() - 1000) })) },
+      { label: "outra loja", ...(await seedRequest(other.storeId, otherToken, action.name, input)) },
+      { label: "outra ação", ...(await seedRequest(storeId, tokenId, "t.appr.outra", input)) },
+      // Pedido de outra entrada (o2) executado com a entrada o1: o hash calculado pelo runAction não bate.
+      { label: "outro hash", ...(await seedRequest(storeId, tokenId, action.name, { orderId: "o2" })) },
+      { label: "token revogado", ...(await seedRequest(storeId, revokedToken, action.name, input)) },
+      { label: "pedido inexistente", requestId: randomUUID() },
+      { label: "requestId que não é UUID", requestId: "nao-e-uuid" },
     ];
     for (const c of cases) {
-      const before = c.label === "pedido inexistente" ? undefined : await requestRow(c.req.requestId);
-      const approval = { requestId: c.req.requestId, inputSha256: c.hash ?? c.req.inputSha256 };
+      const known = c.label !== "pedido inexistente" && c.label !== "requestId que não é UUID";
+      const before = known ? await requestRow(c.requestId) : undefined;
+      const approval = { requestId: c.requestId };
       const err = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval }, input));
       expect(err, c.label).toBeInstanceOf(ActionError);
       expect(err!.code, c.label).toBe("conflict");
       expect(err!.message, c.label).toBe("Solicitação já decidida, expirada ou cancelada");
       expect(err!.details, c.label).toEqual({ approval: "unclaimed" });
-      if (before) expect(await requestRow(c.req.requestId), c.label).toEqual(before);
+      if (before) expect(await requestRow(c.requestId), c.label).toEqual(before);
     }
     expect(calls).toEqual([]);
     // Cada tentativa fica na auditoria como falha (só a entrada validada, sem efeito).
@@ -228,9 +229,9 @@ describe("concessão de aprovação", () => {
     const { storeId, approver, tokenId } = await setup();
     const { action, calls } = refundLike("t.appr.fail", { fail: true });
     const input = { orderId: "o1" };
-    const { requestId, inputSha256 } = await seedRequest(storeId, tokenId, action.name, input);
+    const { requestId } = await seedRequest(storeId, tokenId, action.name, input);
     const before = await requestRow(requestId);
-    const err = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId, inputSha256 } }, input));
+    const err = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input));
     expect(err).toMatchObject({ code: "provider_error" });
     expect(calls).toHaveLength(1);
     expect(await requestRow(requestId)).toEqual(before);
@@ -243,10 +244,75 @@ describe("concessão de aprovação", () => {
     const { storeId, approver, tokenId } = await setup("support");
     const { action, calls } = refundLike("t.appr.support");
     const input = { orderId: "o1" };
-    const { requestId, inputSha256 } = await seedRequest(storeId, tokenId, action.name, input);
-    expect(await code(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId, inputSha256 } }, input))).toBe("forbidden");
+    const { requestId } = await seedRequest(storeId, tokenId, action.name, input);
+    expect(await code(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input))).toBe("forbidden");
     expect(calls).toEqual([]);
     expect(await requestRow(requestId)).toMatchObject({ status: "pending", decidedBy: null });
+  });
+});
+
+describe("concessão: papel do token e trava", () => {
+  test("ação de TOKEN_DENIED não passa pela fila: approval → forbidden, sem efeito", async () => {
+    const { storeId, approver, tokenId } = await setup();
+    let calls = 0;
+    const denied = defineAction(
+      { name: "t.appr.denied", description: "x", input: z.object({}), permission: "team.manage", sensitive: true, run: async () => ++calls },
+      def,
+    );
+    const { requestId } = await seedRequest(storeId, tokenId, denied.name, {});
+    expect(await code(runAction(denied, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, {}))).toBe("forbidden");
+    expect(calls).toBe(0);
+    expect(await requestRow(requestId)).toMatchObject({ status: "pending", decidedBy: null });
+  });
+
+  test("papel do token sem a permissão da ação (leitor pedindo reembolso) → forbidden, linha segue pendente", async () => {
+    const { storeId, approver } = await setup();
+    const readerToken = await seedToken(storeId, "reader");
+    const { action, calls } = refundLike("t.appr.readerrole");
+    const input = { orderId: "o1" };
+    const { requestId } = await seedRequest(storeId, readerToken, action.name, input);
+    const err = await failure(runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input));
+    expect(err).toMatchObject({ code: "forbidden" });
+    expect(calls).toEqual([]);
+    const row = await requestRow(requestId);
+    expect(row).toMatchObject({ status: "pending", decidedBy: null });
+    expect(row.inputSealed).not.toBeNull();
+  });
+
+  test("a reivindicação trava a linha do token: revogar no meio da execução aprovada espera o commit", async () => {
+    const { storeId, approver, tokenId } = await setup();
+    let lockError: unknown = null;
+    const action = defineAction(
+      {
+        name: "t.appr.lock",
+        description: "x",
+        input: z.object({ orderId: z.string() }),
+        permission: "orders.refund",
+        sensitive: true,
+        run: async () => {
+          // Outra conexão tenta revogar o token enquanto a transação aprovada está aberta: com a trava, não consegue.
+          lockError = await t.ownerDb
+            .transaction(async (tx) => {
+              await tx.execute(sql`set local lock_timeout = '200ms'`);
+              await tx.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, tokenId));
+            })
+            .then(
+              () => null,
+              (e: unknown) => e,
+            );
+          return { ok: true };
+        },
+      },
+      def,
+    );
+    const input = { orderId: "o1" };
+    const { requestId } = await seedRequest(storeId, tokenId, action.name, input);
+    await runAction(action, { storeId, actor: approver, origin: "mcp", approval: { requestId } }, input);
+    const cause = (lockError as { cause?: { code?: string } } | null)?.cause ?? lockError;
+    expect((cause as { code?: string } | null)?.code).toBe("55P03");
+    const [tok] = await t.ownerDb.select().from(mcpToken).where(eq(mcpToken.id, tokenId));
+    expect(tok!.revokedAt).toBeNull();
+    expect(await requestRow(requestId)).toMatchObject({ status: "approved" });
   });
 });
 
@@ -286,5 +352,46 @@ describe("auditResult", () => {
     const [b] = await auditRows(storeId, projected.name);
     expect(b!.input).toEqual({ fromEmail: "vendas@loja.com", result: { activated: false } });
     expect(JSON.stringify(b)).not.toContain(apiKey);
+  });
+  test("auditResult que lança vira o marcador de erro de auditoria e a ação segue", async () => {
+    const { storeId } = await seedStore("Auditoria do resultado que lança");
+    const owner: Actor = { kind: "user", userId: randomUUID(), role: "owner" };
+    const action = defineAction(
+      {
+        name: "t.appr.resultthrows",
+        description: "x",
+        input: z.object({ fromEmail: z.string() }),
+        permission: "connections.write",
+        run: async () => ({ activated: true }),
+        auditResult: () => {
+          throw new Error("quebrou");
+        },
+      },
+      def,
+    );
+    expect(await runAction(action, { storeId, actor: owner, origin: "panel" }, { fromEmail: "vendas@loja.com" })).toEqual({ activated: true });
+    const [a] = await auditRows(storeId, action.name);
+    expect(a).toMatchObject({ ok: true, input: { fromEmail: "vendas@loja.com", result: { omitted: "audit_result_error" } } });
+  });
+
+  test("auditResult acima de 8 KB: a auditoria guarda só os nomes das chaves (entrada e result)", async () => {
+    const { storeId } = await seedStore("Auditoria do resultado grande");
+    const owner: Actor = { kind: "user", userId: randomUUID(), role: "owner" };
+    const big = "x".repeat(9 * 1024);
+    const action = defineAction(
+      {
+        name: "t.appr.resultbig",
+        description: "x",
+        input: z.object({ fromEmail: z.string() }),
+        permission: "connections.write",
+        run: async () => ({ big }),
+        auditResult: (out) => ({ big: out.big }),
+      },
+      def,
+    );
+    await runAction(action, { storeId, actor: owner, origin: "panel" }, { fromEmail: "vendas@loja.com" });
+    const [a] = await auditRows(storeId, action.name);
+    expect(a!.input).toEqual({ truncated: true, keys: ["fromEmail", "result"] });
+    expect(JSON.stringify(a)).not.toContain(big);
   });
 });

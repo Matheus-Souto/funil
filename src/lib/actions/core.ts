@@ -1,5 +1,6 @@
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import type { z } from "zod";
+import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { approvalRequest, auditLog, mcpToken } from "@/lib/db/schema";
 import { log, redact, safeErrorMessage } from "@/lib/log";
@@ -114,35 +115,53 @@ export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self
 
 /**
  * Concessão de aprovação: executa uma ação pedida pela fila do MCP (`approval_request`) em nome do aprovador. Só vale
- * para um membro (`actor.kind === "user"`, autorizado com o próprio papel) com origem `mcp`; pula o portão de ação
- * sensível porque a linha da fila é reivindicada (pendente -> aprovada) na MESMA transação de `run`, antes dele: sem
- * linha reivindicada nada roda, e uma falha em `run` devolve a linha a pendente.
+ * para um membro (`actor.kind === "user"`, autorizado com o próprio papel) com origem `mcp`, e nunca para ação de
+ * `TOKEN_DENIED`; pula o portão de ação sensível porque a linha da fila é reivindicada (pendente -> aprovada) na MESMA
+ * transação de `run`, antes dele: sem linha reivindicada nada roda, e uma falha em `run` devolve a linha a pendente.
+ * O hash da entrada é calculado aqui (`sha256(JSON.stringify(raw))`), nunca informado por quem chama.
  */
-export type ApprovalGrant = { requestId: string; inputSha256: string };
+export type ApprovalGrant = { requestId: string };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** `details.approval === "unclaimed"` distingue este `conflict` do `conflict` da própria ação (ex.: slug duplicado). */
 const unclaimed = () => new ActionError("conflict", "Solicitação já decidida, expirada ou cancelada", { approval: "unclaimed" });
 
+/** Hash da entrada como a fila grava (`approvals.request`): sha256 do JSON. */
+export const approvalInputSha256 = (raw: unknown): string => sha256(JSON.stringify(raw ?? null));
+
 /**
  * Reivindica o pedido: pendente, no prazo, desta loja (RLS e filtro), desta ação, com o mesmo hash de entrada e de token
- * não revogado. Apaga a entrada selada na mesma escrita. Devolve o token que pediu; sem linha, lança `unclaimed`.
+ * não revogado, cujo papel ainda tem a permissão da ação. Trava a linha do token (`for share`) antes: uma revogação
+ * concorrente espera o commit desta transação (e então não acha mais o pedido pendente para cancelar), ou, se veio
+ * antes, faz esta leitura não achar o token. Apaga a entrada selada na mesma escrita. Devolve o token que pediu; sem
+ * linha, lança `unclaimed`.
  */
-async function claimApproval(tx: Tx, storeId: string, action: string, grant: ApprovalGrant, userId: string): Promise<string> {
-  if (!UUID_RE.test(grant.requestId)) throw unclaimed();
+async function claimApproval(tx: Tx, storeId: string, action: Action<unknown, unknown>, requestId: string, inputSha256: string, userId: string): Promise<string> {
+  if (!UUID_RE.test(requestId)) throw unclaimed();
+  const [token] = await tx
+    .select({ id: mcpToken.id, role: mcpToken.role })
+    .from(mcpToken)
+    .innerJoin(approvalRequest, eq(approvalRequest.tokenId, mcpToken.id))
+    .where(and(eq(approvalRequest.id, requestId), isNull(mcpToken.revokedAt)))
+    .for("share", { of: mcpToken });
+  if (!token) throw unclaimed();
+  const p = action.permission;
+  if (p === "public" || p === "system" || !hasPermission(token.role as Role, p)) {
+    throw new ActionError("forbidden", `O papel do token que pediu não inclui esta ação: ${action.name}`);
+  }
   const [row] = await tx
     .update(approvalRequest)
     .set({ status: "approved", decidedBy: userId, decidedAt: sql`now()`, inputSealed: null })
     .where(
       and(
-        eq(approvalRequest.id, grant.requestId),
+        eq(approvalRequest.id, requestId),
         eq(approvalRequest.storeId, storeId),
-        eq(approvalRequest.action, action),
+        eq(approvalRequest.tokenId, token.id),
+        eq(approvalRequest.action, action.name),
         eq(approvalRequest.status, "pending"),
         gt(approvalRequest.expiresAt, sql`now()`),
-        eq(approvalRequest.inputSha256, grant.inputSha256),
-        sql`exists (select 1 from ${mcpToken} where ${mcpToken.id} = ${approvalRequest.tokenId} and ${mcpToken.revokedAt} is null)`,
+        eq(approvalRequest.inputSha256, inputSha256),
       ),
     )
     .returning({ tokenId: approvalRequest.tokenId });
@@ -186,6 +205,10 @@ export async function runAction<I, O, P = any, S = any>(
   try {
     if (approval && (approverId === undefined || origin !== "mcp")) {
       throw new ActionError("forbidden", "Aprovação só vale para um membro da loja, pela fila do MCP");
+    }
+    // O que um token nunca pode fazer também não passa pela fila (nem com aprovação de quem pode).
+    if (approval && TOKEN_DENIED.includes(action.permission as Permission)) {
+      throw new ActionError("forbidden", `Sem permissão pela fila: ${action.permission}`);
     }
     authorize(action as Action<unknown, unknown>, actor);
     const parsed = action.input.safeParse(raw);
@@ -239,7 +262,7 @@ export async function runAction<I, O, P = any, S = any>(
       // Agente pelo MCP não segura conexão do pool (5) com consulta longa: o banco corta e vira "falha interna".
       if (origin === "mcp") await tx.execute(sql.raw(`set local statement_timeout = '${MCP_STATEMENT_TIMEOUT}'`));
       if (approval) {
-        const tokenId = await claimApproval(tx, storeId, action.name, approval, approverId!);
+        const tokenId = await claimApproval(tx, storeId, action as Action<unknown, unknown>, approval.requestId, approvalInputSha256(raw), approverId!);
         auditActor = { ...actor, approval: { requestId: approval.requestId, tokenId } };
       }
       const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P, call.server);
