@@ -1,6 +1,19 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { ActionError } from "@/lib/actions/core";
-import { RESEND_ERRORS, resendFrom, sendViaResend, setResendFetchForTests } from "@/lib/delivery/resend";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { and, eq } from "drizzle-orm";
+import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { connectionsStatus } from "@/lib/connections";
+import { withStore } from "@/lib/db/client";
+import { auditLog, integration, store } from "@/lib/db/schema";
+import { RESEND_ERRORS, loadResend, resendFrom, saveResend, sendViaResend, setEmailProvider, setResendFetchForTests } from "@/lib/delivery/resend";
+import { createTestDb, seedStore, type TestDb } from "./db";
+
+let t: TestDb;
+beforeAll(async () => {
+  t = await createTestDb();
+});
+afterAll(async () => {
+  await t.drop();
+});
 
 const KEY = "re_teste_1234";
 const settings = { apiKey: KEY, fromEmail: "vendas@loja.com", fromName: null };
@@ -132,5 +145,113 @@ describe("resendFrom", () => {
   });
   test("nome vazio após a limpeza: só o e-mail", () => {
     expect(resendFrom('<>"\\ \n', "v@l.com")).toBe("v@l.com");
+  });
+});
+
+describe("conexão Resend", () => {
+  const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
+  const support: Actor = { kind: "user", userId: "u2", role: "support" };
+  const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
+  const API_KEY = "re_AbCdEfGh_1234";
+  const WHSEC = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+  const INPUT = { fromEmail: "Vendas@Loja.com", fromName: "  Loja Kids  ", apiKey: API_KEY, webhookSecret: WHSEC };
+  const rowOf = async (storeId: string, kind = "resend") =>
+    (await t.ownerDb.select().from(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, kind))))[0];
+
+  test("saveResend sela a chave e o segredo; config só com os últimos 4; auditoria sem segredos", async () => {
+    const { storeId } = await seedStore();
+    const out = await runAction(saveResend, panel(storeId), INPUT);
+    expect(out).toEqual({ fromEmail: "vendas@loja.com", fromName: "Loja Kids", apiKeyLast4: "1234", webhookSecretLast4: WHSEC.slice(-4) });
+    const row = await rowOf(storeId);
+    expect(row!.secret).toStartWith("v1.");
+    expect(row!.config).toEqual(out);
+    for (const secret of [API_KEY, WHSEC]) expect(JSON.stringify(row)).not.toContain(secret);
+    const audits = await t.ownerDb.select().from(auditLog).where(and(eq(auditLog.storeId, storeId), eq(auditLog.action, "connections.saveResend")));
+    expect(audits).toHaveLength(1);
+    for (const secret of [API_KEY, WHSEC]) expect(JSON.stringify(audits)).not.toContain(secret);
+    expect(JSON.stringify(audits)).toContain("[novo]");
+    const loaded = await withStore(storeId, (tx) => loadResend(tx, storeId));
+    expect(loaded).toEqual({ apiKey: API_KEY, fromEmail: "vendas@loja.com", fromName: "Loja Kids", webhookSecret: WHSEC });
+  });
+
+  test("salvar de novo sem chave mantém a chave e o segredo; sem chave nenhuma -> invalid_input", async () => {
+    const { storeId } = await seedStore();
+    await expect(runAction(saveResend, panel(storeId), { fromEmail: "a@loja.com" })).rejects.toMatchObject({ code: "invalid_input" });
+    expect(await rowOf(storeId)).toBeUndefined();
+    await runAction(saveResend, panel(storeId), INPUT);
+    const out = await runAction(saveResend, panel(storeId), { fromEmail: "outro@loja.com", fromName: "" });
+    expect(out).toEqual({ fromEmail: "outro@loja.com", fromName: null, apiKeyLast4: "1234", webhookSecretLast4: WHSEC.slice(-4) });
+    expect(await withStore(storeId, (tx) => loadResend(tx, storeId))).toEqual({ apiKey: API_KEY, fromEmail: "outro@loja.com", fromName: null, webhookSecret: WHSEC });
+    const audits = await t.ownerDb.select().from(auditLog).where(and(eq(auditLog.storeId, storeId), eq(auditLog.action, "connections.saveResend")));
+    expect(JSON.stringify(audits)).toContain("[mantido]");
+  });
+
+  test("chave e segredo do webhook com formato inválido -> invalid_input", async () => {
+    const { storeId } = await seedStore();
+    await expect(runAction(saveResend, panel(storeId), { ...INPUT, apiKey: "chave-errada" })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(runAction(saveResend, panel(storeId), { ...INPUT, webhookSecret: "whsec_curto" })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(runAction(saveResend, panel(storeId), { ...INPUT, fromEmail: "nao-e-email" })).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  test("sensível: MCP/IA precisam de aprovação; support não pode", async () => {
+    const { storeId } = await seedStore();
+    await expect(runAction(saveResend, { storeId, actor: owner, origin: "mcp" }, INPUT)).rejects.toMatchObject({ code: "approval_required" });
+    await expect(runAction(saveResend, panel(storeId, support), INPUT)).rejects.toMatchObject({ code: "forbidden" });
+    expect(await rowOf(storeId)).toBeUndefined();
+  });
+
+  test("setEmailProvider: resend sem conexão -> invalid_input; com conexão -> ativa; sensível pelo MCP", async () => {
+    const { storeId } = await seedStore();
+    const provider = async () => (await t.ownerDb.select({ p: store.emailProvider }).from(store).where(eq(store.id, storeId)))[0]!.p;
+    expect(await provider()).toBe("smtp");
+    const err = await runAction(setEmailProvider, panel(storeId), { provider: "resend" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ActionError);
+    expect(err).toMatchObject({ code: "invalid_input", message: "Configure o Resend antes de ativá-lo." });
+    await expect(runAction(setEmailProvider, panel(storeId), { provider: "smtp" })).rejects.toMatchObject({
+      code: "invalid_input",
+      message: "Configure o SMTP antes de ativá-lo.",
+    });
+    await runAction(saveResend, panel(storeId), INPUT);
+    await expect(runAction(setEmailProvider, { storeId, actor: owner, origin: "mcp" }, { provider: "resend" })).rejects.toMatchObject({ code: "approval_required" });
+    await expect(runAction(setEmailProvider, panel(storeId, support), { provider: "resend" })).rejects.toMatchObject({ code: "forbidden" });
+    expect(await runAction(setEmailProvider, panel(storeId), { provider: "resend" })).toEqual({ provider: "resend" });
+    expect(await provider()).toBe("resend");
+    await t.ownerDb.insert(integration).values({ storeId, kind: "smtp", config: {}, secret: null });
+    expect(await runAction(setEmailProvider, panel(storeId), { provider: "smtp" })).toEqual({ provider: "smtp" });
+    expect(await provider()).toBe("smtp");
+  });
+
+  test("connectionsStatus mostra só last4 e a URL do webhook; segredo ilegível -> apiKey 'unreadable'", async () => {
+    const { storeId } = await seedStore();
+    const empty = await runAction(connectionsStatus, panel(storeId), {});
+    expect(empty.resend).toBeNull();
+    expect(empty.emailProvider).toBe("smtp");
+    await runAction(saveResend, panel(storeId), INPUT);
+    const status = await runAction(connectionsStatus, panel(storeId), {});
+    expect(status.resend).toEqual({
+      fromEmail: "vendas@loja.com",
+      fromName: "Loja Kids",
+      apiKey: { last4: "1234" },
+      webhookSecret: { last4: WHSEC.slice(-4) },
+      webhookUrl: expect.stringMatching(new RegExp(`/api/webhooks/resend/${storeId}$`)),
+    });
+    for (const secret of [API_KEY, WHSEC, "re_"]) expect(JSON.stringify(status)).not.toContain(secret);
+
+    await t.ownerDb.update(integration).set({ secret: "v1.lixo" }).where(and(eq(integration.storeId, storeId), eq(integration.kind, "resend")));
+    const broken = await runAction(connectionsStatus, panel(storeId), {});
+    expect(broken.resend).toMatchObject({ apiKey: "unreadable", webhookSecret: { last4: WHSEC.slice(-4) } });
+    expect(JSON.stringify(broken)).not.toContain("re_");
+    // loadResend não lança para o envio: segredo ilegível = sem conexão utilizável, e o log leva só a loja e o tipo.
+    expect(await withStore(storeId, (tx) => loadResend(tx, storeId))).toBeNull();
+    expect(out).not.toContain("lixo");
+  });
+
+  test("isolamento: loja B não vê a conexão Resend da loja A", async () => {
+    const a = await seedStore("A");
+    const b = await seedStore("B");
+    await runAction(saveResend, panel(a.storeId), INPUT);
+    expect((await runAction(connectionsStatus, panel(b.storeId), {})).resend).toBeNull();
+    expect(await withStore(b.storeId, (tx) => loadResend(tx, b.storeId))).toBeNull();
+    await expect(runAction(setEmailProvider, panel(b.storeId), { provider: "resend" })).rejects.toMatchObject({ code: "invalid_input" });
   });
 });

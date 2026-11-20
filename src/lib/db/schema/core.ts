@@ -2,16 +2,22 @@ import { sql } from "drizzle-orm";
 import { boolean, check, index, jsonb, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 
 // Tabelas globais (sem RLS): lojas, usuários, vínculos e sessões.
-export const store = pgTable("store", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  slug: text("slug").notNull().unique(),
-  name: text("name").notNull(),
-  domain: text("domain").unique(),
-  notifyEmail: text("notify_email"),
-  /** Cor da marca no checkout (#RRGGBB). Nula = cor padrão da plataforma. O contraste é garantido em src/lib/brand.ts. */
-  brandColor: text("brand_color"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const store = pgTable(
+  "store",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    slug: text("slug").notNull().unique(),
+    name: text("name").notNull(),
+    domain: text("domain").unique(),
+    notifyEmail: text("notify_email"),
+    /** Cor da marca no checkout (#RRGGBB). Nula = cor padrão da plataforma. O contraste é garantido em src/lib/brand.ts. */
+    brandColor: text("brand_color"),
+    /** Provedor ativo do e-mail da loja: 'smtp' (padrão) ou 'resend'. Só se ativa um provedor já conectado. */
+    emailProvider: text("email_provider").notNull().default("smtp"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [check("store_email_provider_check", sql`${t.emailProvider} in ('smtp','resend')`)],
+);
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),

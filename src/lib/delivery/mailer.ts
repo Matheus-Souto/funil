@@ -19,6 +19,7 @@ import { emailLog, store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log, safeErrorMessage } from "@/lib/log";
+import { EMAIL } from "./resend";
 import { oneLine } from "./templates";
 
 export interface SmtpSettings {
@@ -254,8 +255,6 @@ function smtpProblem(e: unknown, s: SmtpSettings): string {
   }
   return "O servidor SMTP não aceitou a conexão. Confira os dados e tente de novo.";
 }
-
-const EMAIL = z.string().trim().toLowerCase().max(254).pipe(z.email());
 
 const smtpInput = z.object({
   host: z

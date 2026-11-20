@@ -169,6 +169,13 @@
       "when": 1795157836891,
       "tag": "0023_drop_offer_product_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795175574978,
+      "tag": "0024_resend",
+      "breakpoints": true
     }
   ]
 }

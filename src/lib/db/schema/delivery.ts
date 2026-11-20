@@ -54,9 +54,18 @@ export const emailLog = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull(),
     error: text("error"),
+    /** Provedor que enviou e o id da mensagem nele (o webhook do Resend casa o evento por aqui). */
+    provider: text("provider"),
+    providerMessageId: text("provider_message_id"),
+    /** Último estado de entrega informado pelo provedor (webhook); `bounced` e `complained` não voltam a `delivered`. */
+    deliveryStatus: text("delivery_status"),
+    deliveryStatusAt: timestamp("delivery_status_at", { withTimezone: true }),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    check("email_log_provider_check", sql`${t.provider} in ('smtp','resend')`),
+    check("email_log_delivery_status_check", sql`${t.deliveryStatus} in ('delivered','bounced','complained')`),
+    index("email_log_provider_message_idx").on(t.storeId, t.providerMessageId),
     check("email_log_status_check", sql`${t.status} in ('sent','failed')`),
     check("email_log_kind_check", sql`${t.kind} in ('delivery','seller_notice','test')`),
     index("email_log_order_idx").on(t.orderId, t.kind),

@@ -6,15 +6,17 @@ import { z } from "zod";
 import { defineAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { env } from "@/lib/env";
-import { offer } from "@/lib/db/schema";
+import { offer, store } from "@/lib/db/schema";
 import { getIntegration, readIntegration } from "@/lib/integrations";
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
-const webhookUrl = (storeId: string) => `${env.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
+const baseUrl = () => env.BASE_URL.replace(/\/+$/, "");
+const webhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/asaas/${storeId}`;
+const resendWebhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/resend/${storeId}`;
 
 export const connectionsStatus = defineAction({
   name: "connections.status",
-  description: "Conexões da loja (Pix manual, Asaas, SMTP, Meta) sem segredos: segredos aparecem só como configurados.",
+  description: "Conexões da loja (Pix manual, Asaas, SMTP, Resend, Meta) sem segredos: segredos aparecem só como configurados.",
   input: z.object({}),
   permission: "connections.read",
   audit: false,
@@ -24,6 +26,12 @@ export const connectionsStatus = defineAction({
     // Chave do Asaas que não abre (ASAAS_SEAL_KEY trocada, removida ou rollback) não derruba a tela: aparece como
     // ilegível para o dono colar a chave de novo.
     const asaas = await readIntegration(ctx.tx, ctx.storeId, "asaas");
+    // Idem para a chave do Resend (SECRET trocado): aparece como ilegível, nunca derruba a tela.
+    const resend = await readIntegration(ctx.tx, ctx.storeId, "resend");
+    const [{ emailProvider } = { emailProvider: "smtp" }] = await ctx.tx
+      .select({ emailProvider: store.emailProvider })
+      .from(store)
+      .where(eq(store.id, ctx.storeId));
     const cfg = (c: typeof pix) => (c?.config ?? {}) as Record<string, unknown>;
     // Sem Turnstile, o disjuntor do cartão só limita por IP: com oferta ativa de cartão, o painel recomenda configurar.
     const turnstileConfigured = Boolean(env.TURNSTILE_SECRET);
@@ -32,6 +40,7 @@ export const connectionsStatus = defineAction({
       .from(offer)
       .where(and(eq(offer.active, true), sql`'card' = any(${offer.methods})`))
       .limit(1);
+    const webhookLast4 = resend ? str(cfg(resend).webhookSecretLast4) : null;
     return {
       pixManual: pix ? { key: str(cfg(pix).key) ?? "", name: str(cfg(pix).name) ?? "", city: str(cfg(pix).city) ?? "" } : null,
       asaas: asaas
@@ -50,6 +59,16 @@ export const connectionsStatus = defineAction({
             user: str(cfg(smtp).user),
             from: str(cfg(smtp).from) ?? "",
             password: smtp.secret ? ("configured" as const) : null,
+          }
+        : null,
+      emailProvider: emailProvider === "resend" ? ("resend" as const) : ("smtp" as const),
+      resend: resend
+        ? {
+            fromEmail: str(cfg(resend).fromEmail) ?? "",
+            fromName: str(cfg(resend).fromName),
+            apiKey: resend.unreadable ? ("unreadable" as const) : resend.secret ? { last4: str(cfg(resend).apiKeyLast4) ?? "" } : null,
+            webhookSecret: webhookLast4 ? { last4: webhookLast4 } : null,
+            webhookUrl: resendWebhookUrl(ctx.storeId),
           }
         : null,
       meta: meta

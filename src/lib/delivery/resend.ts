@@ -1,8 +1,13 @@
 // Cliente da API do Resend (e-mail pela conta da própria loja). Destino fixo (`api.resend.com`): sem host configurável,
 // logo sem SSRF. A chave vai SÓ no header `Authorization`; a mensagem de erro vem só do status HTTP (nunca do corpo da
 // resposta) e o log leva só o status. Nada aqui toca o banco nem roda dentro de transação.
-// Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
-import { ActionError } from "@/lib/actions/core";
+// Também guarda a conexão e a escolha do provedor ativo (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
+import { and, eq } from "drizzle-orm";
+import { z } from "zod";
+import { ActionError, defineAction } from "@/lib/actions/core";
+import type { Tx } from "@/lib/db/client";
+import { integration, store } from "@/lib/db/schema";
+import { IntegrationSecretUnreadable, getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import type { MailMessage } from "./mailer";
 import { oneLine } from "./templates";
@@ -95,3 +100,91 @@ export async function sendViaResend(
   }
   return { id: body.id };
 }
+
+/** E-mail de remetente/destinatário: sem espaços nas pontas, em minúsculas, até 254 caracteres. Usado também pelo mailer. */
+export const EMAIL = z.string().trim().toLowerCase().max(254).pipe(z.email());
+
+/**
+ * Conexão Resend da loja (config `{ fromEmail, fromName, apiKeyLast4, webhookSecretLast4 }`; segredo selado
+ * `{ apiKey, webhookSecret }`). `null` quando não há conexão ou o segredo não abre (SECRET trocado): o envio vira o
+ * erro genérico "não configurado" e o painel mostra "ilegível". Outros erros propagam.
+ */
+export async function loadResend(tx: Tx, storeId: string): Promise<(ResendSettings & { webhookSecret: string | null }) | null> {
+  let conn: Awaited<ReturnType<typeof getIntegration>>;
+  try {
+    conn = await getIntegration(tx, storeId, "resend");
+  } catch (e) {
+    if (!(e instanceof IntegrationSecretUnreadable)) throw e;
+    log.warn("segredo da conexão não pode ser aberto", { storeId, kind: "resend" });
+    return null;
+  }
+  const sealed = parseSealed(conn?.secret ?? null);
+  if (!conn || !sealed) return null;
+  const fromEmail = conn.config.fromEmail;
+  if (typeof fromEmail !== "string") return null;
+  const fromName = conn.config.fromName;
+  return { apiKey: sealed.apiKey, fromEmail, fromName: typeof fromName === "string" ? fromName : null, webhookSecret: sealed.webhookSecret };
+}
+
+function parseSealed(secret: string | null): { apiKey: string; webhookSecret: string | null } | null {
+  if (secret === null) return null;
+  try {
+    const v = JSON.parse(secret) as { apiKey?: unknown; webhookSecret?: unknown } | null;
+    if (typeof v?.apiKey !== "string" || !v.apiKey) return null;
+    return { apiKey: v.apiKey, webhookSecret: typeof v.webhookSecret === "string" && v.webhookSecret ? v.webhookSecret : null };
+  } catch {
+    return null;
+  }
+}
+
+const last4 = (v: string | null) => (v ? v.slice(-4) : null);
+
+export const saveResend = defineAction({
+  name: "connections.saveResend",
+  description: "Conecta o Resend da loja (remetente, chave de API e segredo do webhook): campo omitido mantém o valor guardado.",
+  input: z.object({
+    fromEmail: EMAIL,
+    fromName: z.string().trim().max(100).optional(),
+    /** Omitida: mantém a chave guardada. */
+    apiKey: z.string().regex(/^re_[A-Za-z0-9_]{8,200}$/, "Chave de API do Resend inválida").optional(),
+    /** Omitido: mantém o segredo guardado. */
+    webhookSecret: z.string().regex(/^whsec_[A-Za-z0-9+/=]{16,200}$/, "Segredo do webhook do Resend inválido").optional(),
+  }),
+  permission: "connections.write",
+  // Quem controla a chave controla o remetente das entregas: MCP/IA precisam de aprovação.
+  sensitive: true,
+  auditInput: (i) => ({
+    fromEmail: i.fromEmail,
+    fromName: i.fromName ?? null,
+    apiKey: i.apiKey ? "[novo]" : "[mantido]",
+    webhookSecret: i.webhookSecret ? "[novo]" : "[mantido]",
+  }),
+  async run(ctx, input) {
+    const current = await loadResend(ctx.tx, ctx.storeId);
+    const apiKey = input.apiKey ?? current?.apiKey;
+    if (!apiKey) throw new ActionError("invalid_input", "Informe a chave de API do Resend.", [{ path: ["apiKey"], message: "Informe a chave de API do Resend." }]);
+    const webhookSecret = input.webhookSecret ?? current?.webhookSecret ?? null;
+    const config = {
+      fromEmail: input.fromEmail,
+      fromName: input.fromName ? input.fromName : null,
+      apiKeyLast4: apiKey.slice(-4),
+      webhookSecretLast4: last4(webhookSecret),
+    };
+    await saveIntegration(ctx.tx, ctx.storeId, "resend", config, JSON.stringify({ apiKey, webhookSecret }));
+    return config;
+  },
+});
+
+export const setEmailProvider = defineAction({
+  name: "connections.setEmailProvider",
+  description: "Escolhe por qual provedor (SMTP ou Resend) a loja envia e-mail. Só se ativa um provedor já conectado.",
+  input: z.object({ provider: z.enum(["smtp", "resend"]) }),
+  permission: "connections.write",
+  sensitive: true,
+  async run(ctx, { provider }) {
+    const [conn] = await ctx.tx.select({ kind: integration.kind }).from(integration).where(and(eq(integration.storeId, ctx.storeId), eq(integration.kind, provider)));
+    if (!conn) throw new ActionError("invalid_input", `Configure o ${provider === "smtp" ? "SMTP" : "Resend"} antes de ativá-lo.`, [{ path: ["provider"] }]);
+    await ctx.tx.update(store).set({ emailProvider: provider }).where(eq(store.id, ctx.storeId));
+    return { provider };
+  },
+});
