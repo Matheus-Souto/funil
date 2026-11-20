@@ -71,6 +71,7 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
         refCode={ref}
         eventId={eventId}
         turnstileSiteKey={env.TURNSTILE_SITE_KEY ?? null}
+        brandColor={brandColor}
         cardFrame={
           cardOrigin !== null && methods.includes("card")
             ? { origin: cardOrigin, src: `${cardOrigin}/form/${encodeURIComponent(store.id)}` }

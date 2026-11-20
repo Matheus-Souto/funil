@@ -106,6 +106,19 @@ describe("controlador do iframe", () => {
     expect(h.heights).toEqual([412]);
   });
 
+  test("cor da loja vai no config e, se mudar, o config é reenviado", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" });
+    h.ctrl.start();
+    h.send({ t: "funil-card:ready" });
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" }); // igual: não reenvia
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    expect(h.posted).toEqual([
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" },
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1 },
+    ]);
+  });
+
   test("bump ligado ou desligado depois do ready: reenvia config com o total novo", () => {
     const h = harness();
     h.ctrl.setConfig({ totalCents: 990, maxInstallments: 3 });

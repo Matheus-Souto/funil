@@ -25,6 +25,7 @@ import {
   payWithFrame,
   type CardFrameController,
   type CardOrder,
+  type FrameConfig,
   type FrameStatus,
 } from "./card-frame";
 import { checkoutTracking } from "./tracking";
@@ -173,6 +174,8 @@ export function CheckoutForm(props: {
   refCode?: string;
   eventId: string;
   turnstileSiteKey: string | null;
+  /** Cor da loja (#RRGGBB): vai no `config` do iframe do cartão, que a aplica nos campos dele. */
+  brandColor: string | null;
   /** Iframe do cartão (`${CARD_ORIGIN}/form/${storeId}`); `null` = sem cartão (a oferta não tem, ou falta o serviço). */
   cardFrame: { origin: string; src: string } | null;
 }) {
@@ -208,12 +211,13 @@ export function CheckoutForm(props: {
   }, [offer.slug, touch]);
 
   const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);
-  const frameConfig = useRef({ totalCents: total, maxInstallments: offer.maxInstallments });
+  const brandColor = props.brandColor ?? undefined;
+  const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments: offer.maxInstallments, brandColor });
   useEffect(() => {
     // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.
-    frameConfig.current = { totalCents: total, maxInstallments: offer.maxInstallments };
+    frameConfig.current = { totalCents: total, maxInstallments: offer.maxInstallments, brandColor };
     frameCtrl.current?.setConfig(frameConfig.current);
-  }, [total, offer.maxInstallments]);
+  }, [total, offer.maxInstallments, brandColor]);
 
   // O iframe é criado aqui (não no JSX) para o listener existir ANTES de ele carregar: o `ready` sai assim que carrega.
   // Ref com limpeza (React 19): desmontar o bloco (ou trocar `frameKey`) tira o listener e o iframe.

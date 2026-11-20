@@ -25,6 +25,14 @@ describe("parseParentMsg", () => {
     expect(parseParentMsg({ ...pay, ticket: undefined })).toBeNull();
   });
 
+  test("config com a cor da loja (brandColor): só #rrggbb; qualquer outro formato anula a mensagem inteira", () => {
+    const c = (brandColor: unknown) => parseParentMsg({ t: `${P}config`, totalCents: 1000, maxInstallments: 1, brandColor });
+    expect(c("#0b6e4f")).toEqual({ t: `${P}config`, totalCents: 1000, maxInstallments: 1, brandColor: "#0b6e4f" });
+    expect(c("#AB12CD")).toMatchObject({ brandColor: "#AB12CD" });
+    expect(parseParentMsg({ t: `${P}config`, totalCents: 1000, maxInstallments: 1 })).toEqual({ t: `${P}config`, totalCents: 1000, maxInstallments: 1 });
+    for (const bad of ["#fff", "0b6e4f", "#0b6e4g", "#0b6e4f00", "red", "#0b6e4f;color:red", "url(x)", "", 0x0b6e4f, null]) expect(c(bad)).toBeNull();
+  });
+
   test("limites de config", () => {
     const c = (totalCents: unknown, maxInstallments: unknown) =>
       parseParentMsg({ t: `${P}config`, totalCents, maxInstallments });

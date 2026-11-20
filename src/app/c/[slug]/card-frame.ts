@@ -70,6 +70,8 @@ export function frameFieldNames(fields: readonly (string | readonly string[])[])
 export interface FrameConfig {
   totalCents: number;
   maxInstallments: number;
+  /** Cor da loja (#RRGGBB), aplicada no iframe; ausente = cor padrão. */
+  brandColor?: string;
 }
 
 export interface FrameControllerDeps {
@@ -120,10 +122,15 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
   };
   const sendConfig = (force: boolean) => {
     if (status !== "ready" || config === null) return;
-    const key = `${config.totalCents}/${config.maxInstallments}`;
+    const key = `${config.totalCents}/${config.maxInstallments}/${config.brandColor ?? ""}`;
     if (!force && key === sentConfig) return;
     sentConfig = key;
-    d.post({ t: "funil-card:config", totalCents: config.totalCents, maxInstallments: config.maxInstallments });
+    d.post({
+      t: "funil-card:config",
+      totalCents: config.totalCents,
+      maxInstallments: config.maxInstallments,
+      ...(config.brandColor ? { brandColor: config.brandColor } : {}),
+    });
   };
   const settleAll = () => {
     for (const p of pending.values()) {
@@ -156,7 +163,7 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       }, FRAME_READY_TIMEOUT_MS);
     },
     setConfig(c) {
-      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments };
+      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...(c.brandColor ? { brandColor: c.brandColor } : {}) };
       sendConfig(false);
     },
     handle(ev) {

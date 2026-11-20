@@ -3,6 +3,7 @@
 // origem ou de outro frame: ignorada; resposta só para a origem que mandou).
 import { afterEach, describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
+import { brandVars } from "@/lib/brand";
 import { mountCardForm, type FormDeps } from "@/card-service/form/form";
 import {
   attemptKey,
@@ -350,6 +351,22 @@ describe("formulário no iframe", () => {
     expect(submits()).toHaveLength(2);
     key(input("holderName"));
     expect(submits()).toHaveLength(4);
+  });
+
+  test("cor da loja (config.brandColor): vira as variáveis --color-brand e --color-brand-strong pelo CSSOM (a CSP é style-src 'self')", () => {
+    const { doc, send } = setup();
+    const root = doc.documentElement;
+    const v = brandVars("#AB12CD");
+    send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" });
+    expect(root.style.getPropertyValue("--color-brand")).toBe(v["--color-brand"]);
+    expect(root.style.getPropertyValue("--color-brand-strong")).toBe(v["--color-brand-strong"]);
+    // Cor inválida: a mensagem inteira é descartada e nada muda.
+    send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1, brandColor: "red;background:url(x)" });
+    expect(root.style.getPropertyValue("--color-brand")).toBe(v["--color-brand"]);
+    // Sem cor: volta ao padrão do form.css.
+    send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1 });
+    expect(root.style.getPropertyValue("--color-brand")).toBe("");
+    expect(root.style.getPropertyValue("--color-brand-strong")).toBe("");
   });
 
   test("máscaras do checkout atual", () => {

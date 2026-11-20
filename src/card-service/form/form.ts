@@ -14,6 +14,7 @@
 // DADOS DO CARTÃO: número, validade e CVV só existem nos inputs e, durante o POST, em variáveis locais que são soltas
 // logo após a resposta. Nunca vão para postMessage, console, storage, URL ou atributo `name`; os inputs não têm
 // `name` e o <form> não tem `action` (sem JS, ou com JS, nada é enviado pelo navegador).
+import { brandVars } from "@/lib/brand";
 import { parseFrameMsg, parseParentMsg, type FrameMsg } from "@/lib/card-frame/protocol";
 import {
   attemptKey,
@@ -358,6 +359,22 @@ export function mountCardForm(deps: FormDeps): void {
     parent.postMessage(msg, origin);
   }
 
+  /**
+   * Cor da loja (já validada #rrggbb pelo protocolo) nas variáveis do form.css. Pelo CSSOM (`style.setProperty`), que a
+   * CSP `style-src 'self'` permite; atributo `style` e <style> inline seriam bloqueados. Sem cor, volta ao padrão.
+   */
+  function applyBrand(color: string | undefined): void {
+    const style = doc.documentElement.style;
+    if (color === undefined) {
+      style.removeProperty("--color-brand");
+      style.removeProperty("--color-brand-strong");
+      return;
+    }
+    const v = brandVars(color);
+    style.setProperty("--color-brand", v["--color-brand"]);
+    style.setProperty("--color-brand-strong", v["--color-brand-strong"]);
+  }
+
   // ---- mensagens do checkout ----
   win.addEventListener("message", (ev) => {
     const e = ev as MessageEvent;
@@ -368,6 +385,7 @@ export function mountCardForm(deps: FormDeps): void {
     switch (msg.t) {
       case "funil-card:config": {
         shown = { totalCents: msg.totalCents, maxInstallments: msg.maxInstallments };
+        applyBrand(msg.brandColor);
         const keep = installments;
         const opts = installmentOptions(msg.totalCents, msg.maxInstallments);
         select.replaceChildren(...opts.map((o) => el(doc, "option", { value: String(o.n) }, o.label)));
