@@ -11,6 +11,7 @@ import "@/lib/delivery/jobs";
 import "@/lib/delivery/mailer";
 import "@/lib/delivery/resend";
 import "@/lib/delivery/resend-webhook";
+import "@/lib/mcp/approvals";
 import "@/lib/mcp/tokens";
 import "@/lib/metrics";
 import "@/lib/notify/telegram-connection";

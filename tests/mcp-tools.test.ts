@@ -88,7 +88,7 @@ describe("classificação", () => {
   });
 
   test("MCP só de leitura: nenhuma ferramenta de nenhum papel tem permissão de escrita", () => {
-    const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read"];
+    const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read", "approvals.request"];
     for (const role of ROLES) {
       const writes = mcpTools(role).filter((x) => !READ.includes(x.permission));
       expect([role, writes.map((x) => x.name)]).toEqual([role, []]);
@@ -132,7 +132,7 @@ describe("classificação", () => {
       mcpTools("reader")
         .map((x) => x.name)
         .sort(),
-    ).toEqual(["metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    ).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
   });
 
   test("traffic não lista pedidos nem ações de connections.write", () => {

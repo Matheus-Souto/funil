@@ -171,7 +171,7 @@ describe("tools/list e tools/call", () => {
     }
 
     const tools = await listTools(reader.token);
-    expect(tools.map((x) => x.name).sort()).toEqual(["metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    expect(tools.map((x) => x.name).sort()).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
     for (const x of tools) {
       expect(x.description.length).toBeGreaterThan(0);
       expect(x.inputSchema).toMatchObject({ type: "object" });
@@ -541,6 +541,7 @@ describe("PII", () => {
   /** Entrada mínima válida de cada ferramenta. Ferramenta nova sem linha aqui faz o teste falhar. */
   const minimal = (s: PanelStore, orderId: string, range: { from: string; to: string }): Record<string, unknown> => ({
     alerts_list: {},
+    approvals_status: {},
     connections_status: {},
     metrics_breakdown: range,
     metrics_summary: range,

@@ -1,5 +1,5 @@
 // Catálogo de ferramentas MCP: cada ação registrada vira ferramenta, a menos que seja sensível (fila de aprovação no
-// PR 6), pública ou de sistema, de uma permissão que token nunca tem (team.manage, account.self) ou excluída com motivo.
+// PR 6), pública ou de sistema, de uma permissão que token nunca tem (TOKEN_DENIED) ou excluída com motivo.
 // Nesta versão o MCP é só de leitura: as escritas não sensíveis também ficam em MCP_EXCLUDED até o PR 6.
 // Nenhum dado pessoal do comprador sai por aqui: as saídas com comprador passam por projeção de lista branca (monta o
 // objeto só com os campos permitidos, mascarados). Ação nova sem decisão faz tests/mcp-tools.test.ts falhar.
@@ -35,6 +35,7 @@ export const MCP_EXCLUDED: Record<string, string> = {
   // MCP só de leitura nesta versão.
   "products.update": AWAITS_APPROVAL_QUEUE,
   "connections.testMeta": "chama a API do Meta e precisa de limite próprio (PR 6)",
+  "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
 };
 
 export interface McpTool {

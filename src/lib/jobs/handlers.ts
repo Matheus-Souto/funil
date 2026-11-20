@@ -8,6 +8,7 @@ import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJ
 import { refundOrderJob } from "@/lib/payments/refund";
 import { pciPageMonitorJob } from "@/lib/security/page-monitor";
 import { notifyTelegramJob } from "@/lib/notify/telegram-job";
+import { sweepMcpJob } from "@/lib/mcp/approvals";
 import { metaEventJob } from "@/lib/tracking/meta";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
@@ -65,6 +66,7 @@ const registry: JobHandlers = {
   meta_event: metaEventJob,
   pci_page_monitor: pciPageMonitorJob,
   notify_telegram: notifyTelegramJob,
+  sweep_mcp: sweepMcpJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {
