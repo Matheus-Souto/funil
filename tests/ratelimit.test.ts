@@ -106,24 +106,28 @@ describe("checkCardFingerprint (só memória)", () => {
 });
 
 describe("verifyTurnstile", () => {
+  const HOSTS = ["loja.example.com"];
+  /** siteverify falso: `success` pelo token, `hostname` (onde o desafio foi resolvido) pelo parâmetro. */
+  const siteverify = (hostname: unknown, seen: { url: string; body: string }[] = []) =>
+    (async (url: string, init: RequestInit) => {
+      seen.push({ url: String(url), body: String(init.body) });
+      const token = new URLSearchParams(String(init.body)).get("response");
+      return Response.json({ success: token === "bom", ...(hostname === undefined ? {} : { hostname }) });
+    }) as unknown as typeof fetch;
+
   test("sem TURNSTILE_SECRET passa sem chamar a rede", async () => {
     let called = 0;
     const f = (async () => {
       called++;
       return Response.json({ success: false });
     }) as unknown as typeof fetch;
-    expect(await verifyTurnstile(undefined, "1.2.3.4", { secret: undefined, fetch: f })).toBe(true);
+    expect(await verifyTurnstile(undefined, "1.2.3.4", { hosts: HOSTS, secret: undefined, fetch: f })).toBe(true);
     expect(called).toBe(0);
   });
 
   test("com segredo: sem token falha; envia secret, response e remoteip; usa success", async () => {
     const seen: { url: string; body: string }[] = [];
-    const f = (async (url: string, init: RequestInit) => {
-      seen.push({ url: String(url), body: String(init.body) });
-      const token = new URLSearchParams(String(init.body)).get("response");
-      return Response.json({ success: token === "bom" });
-    }) as unknown as typeof fetch;
-    const deps = { secret: "segredo-x", fetch: f };
+    const deps = { hosts: HOSTS, secret: "segredo-x", fetch: siteverify("loja.example.com", seen) };
     expect(await verifyTurnstile(undefined, "1.2.3.4", deps)).toBe(false);
     expect(seen).toHaveLength(0);
     expect(await verifyTurnstile("ruim", "1.2.3.4", deps)).toBe(false);
@@ -134,12 +138,25 @@ describe("verifyTurnstile", () => {
     expect(p.get("remoteip")).toBe("1.2.3.4");
   });
 
+  test("hostname da resposta precisa ser um host do checkout da loja: outro site, ausente ou sem hosts -> falha", async () => {
+    const ok = (hostname: unknown, hosts = HOSTS) => verifyTurnstile("bom", "1.2.3.4", { hosts, secret: "s", fetch: siteverify(hostname) });
+    expect(await ok("loja.example.com")).toBe(true);
+    expect(await ok("LOJA.example.com")).toBe(true);
+    expect(await ok("loja.example.com", ["outra.example.com", "LOJA.EXAMPLE.COM"])).toBe(true);
+    // Token resolvido em outro site com a mesma chave de site (ou em outra loja da plataforma) não vale aqui.
+    expect(await ok("evil.example")).toBe(false);
+    expect(await ok("outra-loja.lojas.example.com")).toBe(false);
+    expect(await ok(undefined)).toBe(false);
+    expect(await ok(42)).toBe(false);
+    expect(await ok("loja.example.com", [])).toBe(false);
+  });
+
   test("falha de rede ou resposta inválida conta como não verificado", async () => {
     const boom = (async () => {
       throw new Error("rede");
     }) as unknown as typeof fetch;
-    expect(await verifyTurnstile("x", "1.2.3.4", { secret: "s", fetch: boom })).toBe(false);
+    expect(await verifyTurnstile("x", "1.2.3.4", { hosts: HOSTS, secret: "s", fetch: boom })).toBe(false);
     const html = (async () => new Response("<html>", { status: 500 })) as unknown as typeof fetch;
-    expect(await verifyTurnstile("x", "1.2.3.4", { secret: "s", fetch: html })).toBe(false);
+    expect(await verifyTurnstile("x", "1.2.3.4", { hosts: HOSTS, secret: "s", fetch: html })).toBe(false);
   });
 });

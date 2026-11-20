@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
+import { env } from "@/lib/env";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import {
   payWithCard,
@@ -842,6 +843,25 @@ describe("payWithCard: limites e Turnstile", () => {
     const ok = await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "ok" }), deps);
     expect(ok.status).toBe("approved");
     expect(seen).toEqual([undefined, "ok"]);
+  });
+});
+
+describe("payWithCard: Turnstile confere o host do checkout da loja", () => {
+  test("token resolvido no checkout da loja passa; resolvido em outro host é recusado (captcha de novo)", async () => {
+    const { call, storeId, offerId } = await setup();
+    const ip = "203.0.113.78";
+    const hostOf = { value: "" };
+    const siteverify = (async () => Response.json({ success: true, hostname: hostOf.value })) as unknown as typeof fetch;
+    const deps: CardDeps = { ...fastDeps, turnstile: { secret: "s", fetch: siteverify } };
+    const o1 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: ip, number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, email());
+    hostOf.value = "evil.example";
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "tok" }), deps).catch((x: unknown) => x)) as ActionError;
+    expect([e.code, e.details]).toEqual(["rate_limited", { captcha: true }]);
+    // Checkout desta loja (MODE=single dos testes: o host do BASE_URL).
+    hostOf.value = new URL(env.BASE_URL).hostname;
+    expect((await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "tok" }), deps)).status).toBe("approved");
   });
 });
 

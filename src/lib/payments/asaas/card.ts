@@ -29,7 +29,8 @@ import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
-import { verifyTurnstile } from "@/lib/payments/turnstile";
+import { checkoutHostnames, verifyTurnstile, type TurnstileDeps } from "@/lib/payments/turnstile";
+import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardExpiryValid } from "@/lib/validation/br";
 import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
@@ -92,6 +93,8 @@ export interface CardDeps {
   /** Relógio (limites, janela de bloqueio, dueDate e created_at da tentativa). */
   now?: () => Date;
   verifyTurnstile?: (token: string | undefined, ip: string) => Promise<boolean>;
+  /** Sem `verifyTurnstile`: segredo e fetch do siteverify (testes); os hosts são sempre os do checkout da loja. */
+  turnstile?: TurnstileDeps;
   /** Turnstile está configurado (padrão: TURNSTILE_SECRET definido). Decide o que o disjuntor da loja exige. */
   turnstileConfigured?: boolean;
 }
@@ -219,7 +222,10 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   const recentDecline =
     (knownIp && (await hadRecentEvent(`card:decline:ip:${ipKey}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
   if (recentDecline || (breakerOn && turnstileOn)) {
-    const verify = deps.verifyTurnstile ?? verifyTurnstile;
+    const verify =
+      deps.verifyTurnstile ??
+      (async (tok: string | undefined, at: string) =>
+        verifyTurnstile(tok, at, { hosts: checkoutHostnames(await storeCheckoutOrigins(storeId)), ...deps.turnstile }));
     if (!(await verify(input.turnstileToken, ip))) {
       throw new ActionError("rate_limited", "Confirme que você não é um robô e tente de novo.", { captcha: true });
     }
