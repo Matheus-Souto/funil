@@ -1010,4 +1010,207 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await shot(a, "p01-login-1280");
     await anon.close();
   });
+
+  // ---- Almanaque Kids: oferta e bump com N produtos (PR 2 da migração do Kids, só verificação). ----
+  // Os 6 PDFs do Kids na ordem da oferta Completo; os 5 últimos são o bump "5 Kits Extras" do Almanaque. Cada PDF tem
+  // uma largura de página própria: o download prova o arquivo certo pelo conteúdo, além do nome do arquivo.
+  const KIDS = [
+    { name: "Almanaque Bíblico Kids", file: "almanaque-biblico-kids.pdf" },
+    { name: "Pack de jogos", file: "pack-de-jogos.pdf" },
+    { name: "Datas especiais", file: "datas-especiais.pdf" },
+    { name: "Cartões de versículos", file: "cartoes-de-versiculos.pdf" },
+    { name: "Diário de oração", file: "diario-de-oracao.pdf" },
+    { name: "Escola dominical", file: "escola-dominical.pdf" },
+  ].map((p, i) => ({ ...p, width: 200 + 10 * i }));
+  const KITS = KIDS.slice(1);
+  const INCLUI = `Inclui: ${KIDS.map((p) => p.name).join(" · ")}`;
+  // Número próprio (o serviço limita 3 tentativas por cartão por hora). CVV da lista E2E_CVVS do verify.
+  const KITS_CARD = { number: "5500 0000 0000 0004", cvv: "123" };
+
+  type DeliveryItem = { name: string; label: string; url: string };
+  /** E-mail de entrega do comprador no Mailpit; os itens saem da parte texto ("<nome> (<rótulo>)" e o link na linha seguinte). */
+  async function deliveryMail(request: APIRequestContext, to: string) {
+    const MAILPIT = "http://127.0.0.1:8025/api/v1";
+    type Found = { messages: { ID: string; Subject: string }[] };
+    const search = async () =>
+      ((await (await request.get(`${MAILPIT}/search?query=${encodeURIComponent(`to:"${to}"`)}`)).json()) as Found).messages;
+    await expect.poll(async () => (await search()).length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const [found] = await search();
+    const msg = (await (await request.get(`${MAILPIT}/message/${found!.ID}`)).json()) as { HTML: string; Text: string };
+    const lines = msg.Text.split(/\r?\n/);
+    const items: DeliveryItem[] = [];
+    lines.forEach((line, i) => {
+      const head = /^(.+) \(((?:Adicional · )?PDF)\)$/.exec(line);
+      const url = lines[i + 1] ?? "";
+      if (head && /^https?:\/\/\S+\/d\/[A-Za-z0-9_-]{43}$/.test(url)) items.push({ name: head[1]!, label: head[2]!, url });
+    });
+    const links = [...new Set([...msg.Text.matchAll(/https?:\/\/\S+\/d\/[A-Za-z0-9_-]{43}/g)].map((m) => m[0]))];
+    return { subject: found!.Subject, html: msg.HTML, text: msg.Text, items, links };
+  }
+
+  test("Kids, painel: 6 produtos com PDF, oferta Completo com os 6 e Almanaque com bump de 5 kits", async () => {
+    const page = owner;
+    await page.goto("/admin/products");
+    for (const p of KIDS) {
+      const doc = await PDFDocument.create();
+      doc.addPage([p.width, 300]);
+      await page.getByLabel("Nome do produto").fill(p.name);
+      await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: p.file, mimeType: "application/pdf", buffer: Buffer.from(await doc.save()) });
+      await page.getByRole("button", { name: "Criar produto" }).click();
+      await expect(page.getByText(`Produto “${p.name}” criado.`)).toBeVisible();
+    }
+
+    /** Preenche uma lista de produtos do editor: a 1ª linha já existe; cada nova linha entra pelo botão e é escolhida. */
+    async function pick(names: string[], first: string, nth: (n: number) => string, add: string) {
+      await page.getByRole("combobox", { name: first, exact: true }).selectOption({ label: names[0]! });
+      for (let i = 1; i < names.length; i++) {
+        await page.getByRole("button", { name: add, exact: true }).click();
+        await page.getByRole("combobox", { name: nth(i + 1), exact: true }).selectOption({ label: names[i]! });
+      }
+    }
+
+    // Completo: R$ 27,00 e os 6 PDFs na ordem do Kids, Pix manual.
+    await page.goto("/admin/offers/nova");
+    await page.getByLabel("Nome da oferta").fill("Completo");
+    await page.getByLabel("Preço", { exact: true }).fill("27,00");
+    await pick(
+      KIDS.map((p) => p.name),
+      "Produto entregue",
+      (n) => `Produto ${n}`,
+      "Adicionar produto",
+    );
+    await page.getByLabel("Endereço (slug)").fill("kids-completo");
+    await page.locator("label", { hasText: /^Manual$/ }).click();
+    await expect(page.getByLabel("Manual", { exact: true })).toBeChecked();
+    await page.getByRole("button", { name: "Criar oferta" }).click();
+    await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
+    await expect(page.getByText("Oferta criada.")).toBeVisible();
+    // Gravada na ordem: o editor recarregado mostra as 6 linhas como foram escolhidas.
+    await expect(page.getByRole("combobox", { name: "Produto entregue", exact: true }).locator("option:checked")).toHaveText(KIDS[0]!.name);
+    for (let n = 2; n <= KIDS.length; n++) {
+      await expect(page.getByRole("combobox", { name: `Produto ${n}`, exact: true }).locator("option:checked")).toHaveText(KIDS[n - 1]!.name);
+    }
+    await shot(page, "p12d-oferta-completo-6-produtos-1280");
+
+    // Almanaque: R$ 9,90, Pix manual e cartão, bump "5 Kits Extras" de R$ 17,10 com os 5 kits.
+    await page.goto("/admin/offers/nova");
+    await page.getByLabel("Nome da oferta").fill("Almanaque Bíblico Kids");
+    await page.getByLabel("Preço", { exact: true }).fill("9,90");
+    await page.getByRole("combobox", { name: "Produto entregue", exact: true }).selectOption({ label: KIDS[0]!.name });
+    await page.getByLabel("Endereço (slug)").fill("almanaque-kids");
+    await page.getByLabel("Cartão de crédito").check();
+    await page.locator("label", { hasText: /^Manual$/ }).click();
+    await expect(page.getByLabel("Manual", { exact: true })).toBeChecked();
+    await page.getByLabel("Oferecer order bump").check();
+    await pick(
+      KITS.map((p) => p.name),
+      "Produto do bump",
+      (n) => `Produto ${n} do bump`,
+      "Adicionar produto ao bump",
+    );
+    await page.getByLabel("Preço do acréscimo").fill("17,10");
+    await page.getByLabel("Título da caixa").fill("5 Kits Extras");
+    await expect(page.getByText("Total com bump: R$ 27,00")).toBeVisible();
+    await page.getByRole("button", { name: "Criar oferta" }).click();
+    await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
+    await expect(page.getByText("Oferta criada.")).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Produto do bump", exact: true }).locator("option:checked")).toHaveText(KITS[0]!.name);
+    for (let n = 2; n <= KITS.length; n++) {
+      await expect(page.getByRole("combobox", { name: `Produto ${n} do bump`, exact: true }).locator("option:checked")).toHaveText(KITS[n - 1]!.name);
+    }
+    await shot(page, "p12e-oferta-almanaque-bump-5-kits-1280");
+  });
+
+  test("Kids, Completo por Pix manual: 'Inclui:' com os 6 na ordem, dono libera, e-mail com 6 links e só o total, cada link baixa o PDF certo", async ({ page, request }) => {
+    await page.goto("/c/kids-completo");
+    await expect(page.getByText(INCLUI, { exact: true }).filter({ visible: true }).first()).toBeVisible();
+    await expect(page.getByTestId("total")).toHaveText("R$ 27,00");
+    await fillBuyer(page, "completo");
+    await shot(page, "12-checkout-completo-inclui");
+    await page.getByRole("button", { name: "Gerar Pix de R$ 27,00" }).click();
+    await expect(page).toHaveURL(/\/o\/[\w-]+$/);
+    const amount = page.getByTestId("unique-amount");
+    await expect(amount).toHaveText(/^R\$ 27,\d\d$/);
+    const publicId = new URL(page.url()).pathname.split("/").pop()!;
+
+    // O dono confere no extrato e libera (dupla confirmação).
+    await openOrder(owner, publicId, buyerEmail("completo"));
+    await expect(owner.getByTestId("panel-unique-amount")).toHaveText((await amount.textContent())!.trim());
+    await owner.getByRole("button", { name: "Liberar pedido" }).click();
+    const release = owner.getByRole("dialog", { name: `Liberar o pedido #${codeOf(publicId)}?` });
+    await release.getByRole("checkbox", { name: /Vi um Pix de R\$ 27,\d\d no extrato/ }).check();
+    await release.getByRole("checkbox", { name: "Não estou liberando com base em comprovante enviado pelo comprador." }).check();
+    await release.getByRole("button", { name: "Liberar e enviar acesso" }).click();
+    await expect(owner.getByText("Pedido liberado. O acesso vai para o e-mail do comprador agora.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible({ timeout: 15_000 });
+
+    // E-mail: assunto com o nome da oferta, um link por PDF na ordem da oferta, sem preço rateado (2.700 / 6 = R$ 4,50).
+    const mail = await deliveryMail(request, buyerEmail("completo"));
+    expect(mail.subject).toBe("Seu acesso: Completo");
+    expect(mail.links).toHaveLength(6);
+    expect(mail.items.map((i) => [i.name, i.label])).toEqual(KIDS.map((p) => [p.name, "PDF"]));
+    expect(mail.items.map((i) => i.url)).toEqual(mail.links);
+    for (const body of [mail.html, mail.text]) {
+      expect(body).toContain("R$ 27,00");
+      expect(body).not.toContain("R$ 4,50");
+    }
+    await page.setViewportSize({ width: 640, height: 900 });
+    await page.setContent(mail.html);
+    await shot(page, "14-email-completo-6-links");
+
+    // Cada link baixa o PDF do produto certo: nome do arquivo e largura da página dele.
+    const origin = new URL(mail.links[0]!).origin;
+    for (const [i, p] of KIDS.entries()) {
+      const res = await request.post(mail.items[i]!.url, { headers: { origin } });
+      expect(res.status(), p.name).toBe(200);
+      expect(res.headers()["content-type"]).toBe("application/pdf");
+      expect(res.headers()["content-disposition"], p.name).toMatch(/^attachment; /);
+      expect(res.headers()["content-disposition"], p.name).toContain(`filename="${p.file}"`);
+      const pdf = await PDFDocument.load(await res.body());
+      expect(pdf.getPageCount(), p.name).toBe(1);
+      expect(Math.round(pdf.getPage(0).getWidth()), p.name).toBe(p.width);
+    }
+  });
+
+  test("Kids, Almanaque com o bump '5 Kits Extras' pelo iframe do cartão: R$ 27,00, 6 links; reembolso pelo painel revoga os 6", async ({ page, request }) => {
+    await page.goto("/c/almanaque-kids?metodo=cartao");
+    await expect(cardFrame(page).getByLabel("Número do cartão")).toBeVisible();
+    await expect(page.getByTestId("total")).toHaveText("R$ 9,90");
+    await expect(page.getByText(`Leve também: ${KITS.map((p) => p.name).join(" · ")}.`, { exact: false })).toBeVisible();
+    await fillBuyer(page, "kits");
+    await page.getByLabel("CPF", { exact: true }).fill("52998224725");
+    await page.getByText("5 Kits Extras", { exact: true }).click();
+    await expect(page.getByTestId("total")).toHaveText("R$ 27,00");
+    await fillCard(page, { number: KITS_CARD.number, holder: "MARIA A SOUZA", expiry: "12/34", cvv: KITS_CARD.cvv });
+    await shot(page, "13-checkout-almanaque-bump-5-kits-cartao");
+    await page.getByRole("button", { name: "Pagar R$ 27,00" }).click();
+    await expect(page).toHaveURL(/\/o\/[\w-]+$/);
+    await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
+    const kitsPublicId = new URL(page.url()).pathname.split("/").pop()!;
+
+    // E-mail: 1 principal (assunto com o nome do produto) + 5 do bump, total R$ 27,00 e nenhum preço rateado (R$ 3,42).
+    const mail = await deliveryMail(request, buyerEmail("kits"));
+    expect(mail.subject).toBe("Seu acesso: Almanaque Bíblico Kids");
+    expect(mail.links).toHaveLength(6);
+    expect(mail.items.map((i) => [i.name, i.label])).toEqual([
+      [KIDS[0]!.name, "PDF"],
+      ...KITS.map((p) => [p.name, "Adicional · PDF"]),
+    ]);
+    for (const body of [mail.html, mail.text]) {
+      expect(body).toContain("R$ 27,00");
+      expect(body).not.toContain("R$ 3,42");
+    }
+    for (const link of mail.links) expect((await request.get(link)).status(), link).toBe(200);
+
+    // Reembolso pelo painel: o estorno vai ao Asaas falso (conclui na hora) e o pedido reembolsado revoga os 6 links.
+    await openOrder(owner, kitsPublicId, buyerEmail("kits"));
+    await owner.getByRole("button", { name: "Reembolsar" }).click();
+    await owner.getByRole("dialog", { name: "Reembolsar R$ 27,00 para Maria Aparecida Souza?" }).getByRole("button", { name: "Reembolsar R$ 27,00" }).click();
+    await expect(owner.getByText("Estorno solicitado. O pedido muda para reembolsado assim que o Asaas confirmar.")).toBeVisible();
+    await expect
+      .poll(async () => Promise.all(mail.links.map(async (l) => (await request.get(l)).status())), { timeout: 30_000 })
+      .toEqual(mail.links.map(() => 410));
+    const origin = new URL(mail.links[0]!).origin;
+    for (const link of mail.links) expect((await request.post(link, { headers: { origin } })).status(), link).toBe(410);
+  });
 });
