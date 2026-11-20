@@ -24,15 +24,23 @@ const ERRORS = {
   chat: "O Telegram não encontrou o chat ou o bot não está nele. Adicione o bot ao grupo e confira o chat id.",
   temporary: "Não foi possível falar com o Telegram agora. Tente de novo em instantes.",
 } as const;
+const MIGRATED = "O grupo virou supergrupo e mudou de id. Salve o id novo (começa com -100).";
 
-/** Falha do Telegram. Leva só o tipo e o status HTTP (0 = rede/timeout); a mensagem é o texto fixo do tipo. */
+/**
+ * Falha do Telegram. Leva só o tipo, o status HTTP (0 = rede/timeout) e se o chat migrou (grupo que virou supergrupo:
+ * o Telegram responde 400 com `parameters.migrate_to_chat_id`, cujo valor nunca é guardado); a mensagem é fixa.
+ */
 export class TelegramError extends Error {
+  readonly migrated: boolean;
   constructor(
     readonly kind: "token" | "chat" | "temporary",
     readonly httpStatus: number,
+    migrated = false,
   ) {
-    super(ERRORS[kind]);
+    const isMigrated = migrated && kind === "chat";
+    super(isMigrated ? MIGRATED : ERRORS[kind]);
     this.name = "TelegramError";
+    this.migrated = isMigrated;
   }
 }
 
@@ -49,11 +57,15 @@ function kindFor(status: number): TelegramError["kind"] {
   return "temporary";
 }
 
-/** Lê até `MAX_BODY` bytes do corpo e devolve o `error_code` numérico, se houver. O resto do corpo é descartado. */
-async function errorCodeOf(res: Response): Promise<number | null> {
+/**
+ * Lê até `MAX_BODY` bytes do corpo e devolve o `error_code` numérico, se houver, e se há `parameters.migrate_to_chat_id`
+ * (só a presença: o id novo não é guardado nem registrado). O resto do corpo é descartado.
+ */
+async function errorInfoOf(res: Response): Promise<{ errorCode: number | null; migrated: boolean }> {
+  const none = { errorCode: null, migrated: false };
   try {
     const reader = res.body?.getReader();
-    if (!reader) return null;
+    if (!reader) return none;
     const chunks: Uint8Array[] = [];
     let size = 0;
     while (size < MAX_BODY) {
@@ -64,10 +76,12 @@ async function errorCodeOf(res: Response): Promise<number | null> {
     }
     await reader.cancel().catch(() => {});
     const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, MAX_BODY));
-    const code = (JSON.parse(text) as { error_code?: unknown } | null)?.error_code;
-    return typeof code === "number" ? code : null;
+    const body = JSON.parse(text) as { error_code?: unknown; parameters?: { migrate_to_chat_id?: unknown } | null } | null;
+    const code = body?.error_code;
+    const to = body?.parameters?.migrate_to_chat_id;
+    return { errorCode: typeof code === "number" ? code : null, migrated: typeof to === "number" || typeof to === "string" };
   } catch {
-    return null;
+    return none;
   }
 }
 
@@ -90,9 +104,9 @@ async function call(token: string, method: "getMe" | "sendMessage", payload: unk
     throw new TelegramError("temporary", 0);
   }
   if (!res.ok) {
-    const errorCode = await errorCodeOf(res);
-    log.warn("Telegram recusou a requisição", { httpStatus: res.status, errorCode });
-    throw new TelegramError(kindFor(res.status), res.status);
+    const { errorCode, migrated } = await errorInfoOf(res);
+    log.warn("Telegram recusou a requisição", { httpStatus: res.status, errorCode, migrated });
+    throw new TelegramError(kindFor(res.status), res.status, migrated);
   }
   const body = (await res.json().catch(() => null)) as { ok?: unknown; result?: unknown } | null;
   if (body?.ok !== true) {

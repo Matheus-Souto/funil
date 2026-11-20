@@ -32,6 +32,13 @@ export interface AlertExtra {
   page?: "/c" | "/o" | "/form";
 }
 
+/** Aviso `telegram_falhou` de grupo que virou supergrupo (id novo): mesmo texto no painel e no e-mail (noticeFor). */
+export const TELEGRAM_MIGRATED = {
+  code: "grupo_migrado",
+  title: "O grupo do Telegram mudou de id",
+  body: "O grupo virou supergrupo e ganhou um id novo (começa com -100). Veja o id novo com o @RawDataBot, salve em Conexões e use “Enviar teste”.",
+} as const;
+
 const safeCode = (v: string) => v.replace(/[^\w.:-]/g, "").slice(0, 64);
 
 /** Grava o aviso do painel e enfileira o e-mail ao vendedor (`notify_seller` com `reason`), na transação `tx`. */
@@ -87,6 +94,7 @@ export function alertText(
         body: "A verificação semanal encontrou cabeçalho de segurança ou scripts diferentes do esperado na página do checkout, do pedido ou do formulário do cartão. Se você não atualizou o sistema, investigue antes de continuar vendendo com cartão.",
       };
     case "telegram_falhou":
+      if (detail.code === TELEGRAM_MIGRATED.code) return { title: TELEGRAM_MIGRATED.title, body: TELEGRAM_MIGRATED.body };
       return {
         title: "O Telegram recusou o aviso da loja",
         body: "Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”.",

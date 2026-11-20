@@ -5,6 +5,7 @@ import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
+import { noticeFor } from "@/lib/delivery/jobs";
 import { orderCode } from "@/lib/format";
 import { auditLog, integration, job, orders, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { runDueJobs, type Job } from "@/lib/jobs";
@@ -121,6 +122,19 @@ describe("cliente da Bot API do Telegram", () => {
     );
     fakeFetch(() => json(503, { ok: false }));
     expect((await failure(telegramSend(TOKEN, "1", "x"))).message).toBe("Não foi possível falar com o Telegram agora. Tente de novo em instantes.");
+  });
+
+  test("400 com migrate_to_chat_id: chat migrado, com a mensagem própria; o id novo não vai ao log", async () => {
+    fakeFetch(() =>
+      json(400, { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1009876543210 } }),
+    );
+    const e = await failure(telegramSend(TOKEN, "-4012345678", "x"));
+    expect([e.kind, e.httpStatus, e.migrated]).toEqual(["chat", 400, true]);
+    expect(e.message).toBe("O grupo virou supergrupo e mudou de id. Salve o id novo (começa com -100).");
+    expect(`${e.message} ${JSON.stringify(e)}`).not.toContain("9876543210");
+    expect(out).not.toContain("9876543210");
+    fakeFetch(() => json(400, { ok: false, error_code: 400, description: "Bad Request: chat not found" }));
+    expect((await failure(telegramSend(TOKEN, "-4012345678", "x"))).migrated).toBe(false);
   });
 
   test("fetch que lança vira temporário com httpStatus 0", async () => {
@@ -348,6 +362,9 @@ describe("conexão Telegram", () => {
     fakeTg(() => json(403, { ok: false, error_code: 403, description: "Forbidden: bot was kicked" }));
     const err = await runAction(testTelegram, panel(storeId), {}).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "provider_error", message: "O Telegram não encontrou o chat ou o bot não está nele. Adicione o bot ao grupo e confira o chat id." });
+    fakeTg(() => json(400, { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1009876543210 } }));
+    const migrated = await runAction(testTelegram, panel(storeId), {}).catch((e: unknown) => e);
+    expect(migrated).toMatchObject({ code: "provider_error", message: "O grupo virou supergrupo e mudou de id. Salve o id novo (começa com -100)." });
     expect(out).not.toContain(BOT_TOKEN);
   });
 
@@ -589,6 +606,27 @@ describe("aviso de venda no Telegram", () => {
     // O e-mail ao vendedor leva os mesmos título e texto do painel.
     const mails = await t.ownerDb.select().from(job).where(and(eq(job.type, "notify_seller"), eq(job.storeId, shop.storeId), sql`${job.payload}->>'reason' = 'telegram_falhou'`));
     expect(mails).toHaveLength(2);
+  });
+
+  test("grupo que virou supergrupo (400 com migrate_to_chat_id): aviso telegram_falhou com code grupo_migrado e o texto do id novo", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    fakeTg(() =>
+      json(400, { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1009876543210 } }),
+    );
+    await runJob(shop, "sale", o.id);
+    const [alert] = await openAlerts(shop.storeId);
+    expect(alert!.detail).toEqual({ httpStatus: 400, code: "grupo_migrado" });
+    const text = {
+      title: "O grupo do Telegram mudou de id",
+      body: "O grupo virou supergrupo e ganhou um id novo (começa com -100). Veja o id novo com o @RawDataBot, salve em Conexões e use “Enviar teste”.",
+    };
+    expect(alertText("telegram_falhou", alert!.detail as object, null)).toEqual(text);
+    const [mail] = await t.ownerDb.select().from(job).where(and(eq(job.type, "notify_seller"), eq(job.storeId, shop.storeId), sql`${job.payload}->>'reason' = 'telegram_falhou'`));
+    expect(mail!.payload).toEqual({ reason: "telegram_falhou", httpStatus: 400, code: "grupo_migrado" });
+    expect(noticeFor("telegram_falhou", mail!.payload as Parameters<typeof noticeFor>[1], null)).toEqual({ subject: text.title, heading: text.title, paragraphs: [text.body] });
+    expect(JSON.stringify(alert)).not.toContain("9876543210");
+    expect(out).not.toContain("9876543210");
   });
 
   test("falha temporária (502): o job lança e não grava aviso", async () => {

@@ -231,8 +231,11 @@ A plataforma não fornece bot: cada loja cria o seu e recebe os avisos num chat 
 1. **Criar o bot:** no Telegram, converse com o @BotFather, envie `/newbot` e siga os passos. Copie o token que ele
    entrega.
 2. **Adicionar ao grupo:** crie (ou escolha) o grupo da equipe e adicione o bot a ele.
-3. **Achar o chat id:** o id de um grupo começa com `-100`: para vê-lo, adicione o @RawDataBot ao grupo, copie o id e
-   remova esse bot em seguida. Um canal público também aceita `@nomedocanal`.
+3. **Achar o chat id:** o id de um grupo é um número negativo (supergrupos começam com `-100`; um grupo comum, não, ex.:
+   `-4012345678`): para vê-lo, adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. Se o grupo
+   virar supergrupo (o Telegram faz isso sozinho em alguns casos, como ao ligar o histórico para novos membros), o id
+   muda e é preciso salvar o novo: o painel avisa quando isso acontece. Um canal público também aceita
+   `@nomedocanal`; num canal, o bot precisa ser **administrador** para postar.
 4. **Colar em Conexões:** informe o token e o chat id, escolha os eventos e salve. O token é conferido no Telegram antes
    de salvar e nunca volta ao painel (só os 4 últimos caracteres).
 5. **Enviar teste:** o botão **Enviar teste** manda uma mensagem ao chat. Se o Telegram recusar o token ou não achar o

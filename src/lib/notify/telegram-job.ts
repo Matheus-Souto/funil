@@ -147,7 +147,7 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
   } catch (e) {
     if (!(e instanceof TelegramError) || e.kind === "temporary") throw e;
     // Falha definitiva (token ou chat): re-tentar não resolve. Um aviso no painel por vez, até o vendedor confirmar.
-    log.error("Telegram recusou o aviso da loja (definitivo); não será re-tentado", { orderId, event, httpStatus: e.httpStatus });
+    log.error("Telegram recusou o aviso da loja (definitivo); não será re-tentado", { orderId, event, httpStatus: e.httpStatus, migrated: e.migrated });
     await withStore(storeId, async (tx) => {
       // Falhas simultâneas da mesma loja: uma de cada vez confere e grava (senão cada uma veria "nenhum aberto").
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext('telegram_falhou:' || ${storeId}))`);
@@ -156,7 +156,8 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
         .from(storeAlert)
         .where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, "telegram_falhou"), isNull(storeAlert.acknowledgedAt)))
         .limit(1);
-      if (!open) await alertSeller(tx, storeId, "telegram_falhou", { httpStatus: e.httpStatus });
+      // Grupo que virou supergrupo: o aviso diz para salvar o id novo (não para conferir o token).
+      if (!open) await alertSeller(tx, storeId, "telegram_falhou", { httpStatus: e.httpStatus, ...(e.migrated ? { code: "grupo_migrado" } : {}) });
     });
     return;
   }

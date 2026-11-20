@@ -4,6 +4,7 @@
 import { and, eq, gte, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
+import { TELEGRAM_MIGRATED } from "@/lib/alerts";
 import { txidOf } from "@/lib/checkout";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { customer, downloadLink, emailLog, offer, orderItem, orders, product, store } from "@/lib/db/schema";
@@ -262,6 +263,7 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
       };
     }
     case "telegram_falhou":
+      if (p.code === TELEGRAM_MIGRATED.code) return { subject: TELEGRAM_MIGRATED.title, heading: TELEGRAM_MIGRATED.title, paragraphs: [TELEGRAM_MIGRATED.body] };
       return {
         subject: "O Telegram recusou o aviso da loja",
         heading: "O Telegram recusou o aviso da loja",

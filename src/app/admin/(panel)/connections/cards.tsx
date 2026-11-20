@@ -779,9 +779,10 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
           }}
         >
           <p className={s.hint} style={{ margin: 0 }}>
-            Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo começa com -100: para vê-lo,
-            adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. As mensagens levam só a oferta, o valor, a forma de pagamento e o código do pedido: nenhum dado do
-            comprador.
+            Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo é um número negativo
+            (supergrupos começam com -100): para vê-lo, adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. Se o grupo
+            virar supergrupo, o id muda e é preciso salvar o novo. As mensagens levam só a oferta, o valor, a forma de pagamento e o código do
+            pedido: nenhum dado do comprador.
           </p>
           <label className={s.field}>
             <span className={s.label}>Token do bot</span>
@@ -798,7 +799,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
           </label>
           <label className={s.field}>
             <span className={s.label}>Chat id</span>
-            <input className={`${s.input} ${s.mono}`} value={f.chatId} required onChange={(e) => setF({ ...f, chatId: e.target.value })} placeholder="-100…" />
+            <input className={`${s.input} ${s.mono}`} value={f.chatId} required onChange={(e) => setF({ ...f, chatId: e.target.value })} placeholder="-100… ou -…" />
           </label>
           <fieldset className={s.field} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
             <legend className={s.label}>Avisar quando</legend>
