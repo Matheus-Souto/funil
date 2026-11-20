@@ -71,7 +71,7 @@ export async function handleResendWebhook(storeId: string, headers: Headers, bod
     return { status: 200 };
   }
   const parsed = eventBody.safeParse(json);
-  if (!parsed.success || !(parsed.data.type in STATUS)) return { status: 200 };
+  if (!parsed.success || !Object.hasOwn(STATUS, parsed.data.type)) return { status: 200 };
 
   try {
     await runAction(

@@ -127,7 +127,7 @@ export const listAlerts = defineAction({
   },
 });
 
-/** Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou ou voltou (devolvido/spam): o worker ainda re-tenta, mas o painel mostra. */
+/** Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou ou voltou. Entram falhas de envio (que o worker ainda re-tenta) e e-mails devolvidos ou marcados como spam (que não são re-tentados); o painel mostra. */
 async function deliveryFailures(tx: Tx): Promise<Array<{ orderId: string; code: string; at: Date }>> {
   const since = new Date(Date.now() - FAILED_DELIVERY_WINDOW_MS);
   const latest = tx

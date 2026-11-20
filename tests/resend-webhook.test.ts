@@ -161,6 +161,10 @@ describe("rota do webhook do Resend", () => {
     await seedMail(storeId, null);
     const opened = signed(secret, event("email.opened"));
     expect((await call(storeId, opened.headers, opened.body)).status).toBe(200);
+    for (const type of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      const proto = signed(secret, event(type));
+      expect((await call(storeId, proto.headers, proto.body)).status).toBe(200);
+    }
     const junk = signed(secret, { type: "email.bounced", data: {} });
     expect((await call(storeId, junk.headers, junk.body)).status).toBe(200);
     expect((await rowsOf(storeId))[0]!.deliveryStatus).toBeNull();
