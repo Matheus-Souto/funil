@@ -7,7 +7,7 @@ import { hasPermission } from "@/lib/actions/permissions";
 import { auditLog, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
-import { maskCpf } from "@/lib/privacy";
+import { maskCpf, maskCpfStrict } from "@/lib/privacy";
 import { hasOpenJob } from "@/lib/jobs";
 import { refundMarkerOf } from "@/lib/payments/asaas/refunds";
 import { hasOldAccountEvent } from "@/lib/payments/asaas/webhook";
@@ -246,7 +246,8 @@ export const getOrderDetail = defineAction({
         name: o.buyerName ?? c.name,
         email: c.email,
         phone: o.buyerPhone ?? c.phone,
-        cpfMasked: maskCpf(snapshot ? o.buyerCpf : c.cpf),
+        // Token MCP: só os 2 últimos dígitos (a máscara do painel mostra os do meio; uma não se deriva da outra).
+        cpfMasked: (ctx.actor.kind === "token" ? maskCpfStrict : maskCpf)(snapshot ? o.buyerCpf : c.cpf),
       },
       items,
       payments: pays.map((p) => {

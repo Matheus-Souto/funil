@@ -36,7 +36,7 @@ function parseCursor(cursor: string): { at: string; id: string } | null {
  * Total de 8 a 14 dígitos (em qualquer posição, com pontuação) é telefone ou CPF e é descartado; 15 ou mais passa,
  * porque os ids de anúncio e campanha do Meta (ex.: 120212345678901234) são o principal uso do relatório.
  */
-function safeLabel(v: unknown): string | null {
+export function safeLabel(v: unknown): string | null {
   if (typeof v !== "string" || !LABEL_RE.test(v)) return null;
   const digits = v.replace(/\D/g, "").length;
   return digits >= 8 && digits <= 14 ? null : v;
@@ -57,7 +57,7 @@ const input = z
   });
 
 /** Só as chaves da lista branca com valor que passa em `safeLabel`; nada sobrando → nulo. */
-function cleanTouch(v: unknown): Record<string, string> | null {
+export function cleanTouch(v: unknown): Record<string, string> | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
   const out: Record<string, string> = {};
   for (const k of TOUCH_KEYS) {

@@ -97,7 +97,8 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
   }
 }
 
-const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
+/** Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora). */
+export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

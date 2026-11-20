@@ -7,7 +7,7 @@ import { log, redact, safeErrorMessage } from "@/lib/log";
 import { withStore } from "@/lib/db/client";
 import { ActionError, defineAction, runAction, type Actor } from "@/lib/actions/core";
 import { ROLE_PERMISSIONS, hasPermission } from "@/lib/actions/permissions";
-import { listActions } from "@/lib/actions/registry";
+import { listActions, registry } from "@/lib/actions/registry";
 import "@/lib/catalog/offers";
 import "@/lib/tracking/meta";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -185,6 +185,8 @@ test("registro rejeita nome duplicado; register:false não vaza", () => {
   expect(mk).toThrow(/reg\.dup/);
   expect(listActions().filter((a) => a.name === "test.echo")).toHaveLength(0);
   const item = listActions().find((a) => a.name === "reg.dup")!;
+  // O registro é do processo (todos os arquivos de teste): a ação de teste não pode sobrar para o catálogo do MCP.
+  registry.delete("reg.dup");
   expect(item).toMatchObject({ permission: "offers.read", sensitive: false });
   expect(item.inputSchema).toHaveProperty("properties.a");
 });

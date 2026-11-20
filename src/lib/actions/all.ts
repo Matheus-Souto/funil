@@ -1,0 +1,24 @@
+// Registro completo das ações: importar este arquivo garante que `registry` tem todas (o catálogo do MCP depende disso).
+// Todo módulo com ações entra aqui (tests/mcp-tools.test.ts varre src/ pelos módulos que definem ações e falha se faltar algum).
+import "@/lib/alerts";
+import "@/lib/auth/account";
+import "@/lib/catalog/offers";
+import "@/lib/catalog/products";
+import "@/lib/checkout";
+import "@/lib/connections";
+import "@/lib/delivery/download";
+import "@/lib/delivery/jobs";
+import "@/lib/delivery/mailer";
+import "@/lib/delivery/resend";
+import "@/lib/delivery/resend-webhook";
+import "@/lib/mcp/tokens";
+import "@/lib/metrics";
+import "@/lib/notify/telegram-connection";
+import "@/lib/orders/panel";
+import "@/lib/orders/report";
+import "@/lib/payments/asaas/pix";
+import "@/lib/payments/asaas/webhook";
+import "@/lib/payments/manual";
+import "@/lib/payments/refund";
+import "@/lib/store-settings";
+import "@/lib/tracking/meta";
