@@ -280,22 +280,21 @@ export const checkoutRenewCardTicket = defineAction({
   name: "checkout.renewCardTicket",
   description:
     "Emite um bilhete novo de um pedido de cartão pendente da loja para quem já tinha um bilhete do mesmo pedido (o anterior venceu ou está perto de vencer).",
-  // `ticketKey` (CARD_TICKET_KEY) e `nowMs` vêm do servidor, como o `clientIp` do checkout. Uma chave escolhida por
-  // quem chama não ajuda ninguém: o bilhete novo sai assinado com ela, e o serviço de cartão só aceita a verdadeira.
+  // A chave (CARD_TICKET_KEY) e a hora vêm do servidor por `call.server`, fora da entrada: não aparecem no schema, no
+  // catálogo de ações nem na auditoria, e quem chama a ação não as escolhe.
   input: z.object({
     publicId: publicIdSchema,
     ticket: z.string().min(1).max(2048),
-    ticketKey: z.string().min(32),
-    nowMs: z.number().int().optional(),
   }),
   permission: "public",
-  // Anônima e repetível (o bilhete dura 30 min); a entrada tem a chave: sem linha de auditoria, como checkout.view.
+  // Anônima e repetível (o bilhete dura 30 min): sem linha de auditoria, como checkout.view.
   audit: false,
-  async run(ctx, input): Promise<{ ticket: string }> {
-    const now = input.nowMs === undefined ? new Date() : new Date(input.nowMs);
+  async run(ctx, input, _prepared: undefined, server?: { ticketKey: string; now?: Date }): Promise<{ ticket: string }> {
+    if (!server?.ticketKey) throw new Error("checkout.renewCardTicket sem a chave dos bilhetes (call.server.ticketKey)");
+    const now = server.now ?? new Date();
     // Só quem tinha um bilhete do MESMO pedido e da MESMA loja (íntegro; vencido há no máximo 24 h): saber o
     // `publicId` não basta. Conferido antes de olhar o pedido.
-    const prev = verifyCardTicketForRenewal(input.ticket, input.ticketKey, now);
+    const prev = verifyCardTicketForRenewal(input.ticket, server.ticketKey, now);
     if (!prev || prev.storeId !== ctx.storeId || prev.publicId !== input.publicId) throw new ActionError("forbidden", BAD_TICKET);
     // RLS: pedido de outra loja não aparece (not_found, como um publicId inexistente).
     const [o] = await ctx.tx
@@ -315,7 +314,7 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
     const terms = { totalCents: o.totalCents, maxInstallments: o.maxInstallments };
-    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, input.ticketKey, now) };
+    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, server.ticketKey, now) };
   },
 });
 
@@ -325,9 +324,9 @@ export const checkoutRenewCardTicket = defineAction({
  */
 export async function renewCardTicket(call: { storeId: string }, raw: unknown, key: string, now: Date = new Date()): Promise<string> {
   const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  // Só os dois campos do navegador; a chave e a hora são do servidor.
-  const input = { publicId: body.publicId, ticket: body.ticket, ticketKey: key, nowMs: now.getTime() };
-  return (await runAction(checkoutRenewCardTicket, publicCall(call.storeId), input)).ticket;
+  // Só os dois campos do navegador na entrada; a chave e a hora vão por `server`.
+  const input = { publicId: body.publicId, ticket: body.ticket };
+  return (await runAction(checkoutRenewCardTicket, { ...publicCall(call.storeId), server: { ticketKey: key, now } }, input)).ticket;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

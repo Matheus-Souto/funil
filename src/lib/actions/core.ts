@@ -29,7 +29,7 @@ export class ActionError extends Error {
   }
 }
 
-export interface ActionDef<I, O, P = undefined> {
+export interface ActionDef<I, O, P = undefined, S = undefined> {
   name: string;
   description: string;
   input: z.ZodType<I>;
@@ -44,7 +44,11 @@ export interface ActionDef<I, O, P = undefined> {
    * Falhas são auditadas como as demais rejeições (só chaves da entrada).
    */
   prepare?: (call: { storeId: string; actor: Actor; origin: Origin }, input: I) => Promise<P>;
-  run(ctx: Ctx, input: I, prepared: P): Promise<O>;
+  /**
+   * `server`: dados do servidor que NÃO são entrada (ex.: uma chave do ambiente). Vem de `call.server` em `runAction`,
+   * fora do schema, do catálogo de ações e da auditoria; quem chama a ação de fora (MCP, IA) não consegue escolhê-los.
+   */
+  run(ctx: Ctx, input: I, prepared: P, server?: S): Promise<O>;
   /** Desfaz efeitos fora do banco (ex.: arquivos) se a transação falhar depois de `run` ter sucesso. Melhor esforço: erros são ignorados. */
   compensate?: (call: { storeId: string }, input: I, output: O) => Promise<void>;
   /**
@@ -53,13 +57,13 @@ export interface ActionDef<I, O, P = undefined> {
    */
   afterCommit?: (call: { storeId: string }, input: I, output: O, prepared: P) => Promise<void>;
 }
-export type Action<I, O, P = any> = ActionDef<I, O, P>; // eslint-disable-line @typescript-eslint/no-explicit-any
+export type Action<I, O, P = any, S = any> = ActionDef<I, O, P, S>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /**
  * Define uma ação e a registra (nome único; duplicado lança).
  * `register: false` é para testes: devolve a ação sem tocar no registro global.
  */
-export function defineAction<I, O, P = undefined>(def: ActionDef<I, O, P>, opts: { register?: boolean } = {}): Action<I, O, P> {
+export function defineAction<I, O, P = undefined, S = undefined>(def: ActionDef<I, O, P, S>, opts: { register?: boolean } = {}): Action<I, O, P, S> {
   if (opts.register !== false) {
     if (registry.has(def.name)) throw new Error(`Ação já registrada: ${def.name}`);
     registry.set(def.name, def);
@@ -83,9 +87,9 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function runAction<I, O, P = any>(
-  action: Action<I, O, P>,
-  call: { storeId: string; actor: Actor; origin: Origin },
+export async function runAction<I, O, P = any, S = any>(
+  action: Action<I, O, P, S>,
+  call: { storeId: string; actor: Actor; origin: Origin; server?: S },
   raw: unknown,
 ): Promise<O> {
   const { storeId, actor, origin } = call;
@@ -141,7 +145,7 @@ export async function runAction<I, O, P = any>(
   let committed: O;
   try {
     committed = await withStore(storeId, async (tx) => {
-      const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P);
+      const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P, call.server);
       ran = { out };
       if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));
       return out;

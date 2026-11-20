@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { listActions } from "@/lib/actions/registry";
 import { createOffer } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
@@ -671,11 +673,26 @@ describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
     const s = await seed({ asaas: createFakeAsaas() });
     const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
     const b = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
-    const run = (ticket: unknown) => runAction(checkoutRenewCardTicket, pub(s.storeId), { publicId: a.publicId, ticket, ticketKey: KEY });
+    // A chave vem do servidor (`call.server`), fora da entrada da ação.
+    const run = (ticket: unknown) => runAction(checkoutRenewCardTicket, { ...pub(s.storeId), server: { ticketKey: KEY } }, { publicId: a.publicId, ticket });
     expect((await fail(run(b.cardTicket))).code).toBe("forbidden");
     expect((await fail(run(undefined))).code).toBe("invalid_input");
     const ok = await run(a.cardTicket);
     expect(verifyCardTicket(ok.ticket, KEY)).toMatchObject({ storeId: s.storeId, publicId: a.publicId });
+  });
+
+  test("checkout.renewCardTicket: a chave (e a hora) ficam fora da entrada: nem no schema, nem no catálogo de ações", async () => {
+    const shape = z.toJSONSchema(checkoutRenewCardTicket.input) as { properties?: Record<string, unknown> };
+    expect(Object.keys(shape.properties ?? {}).sort()).toEqual(["publicId", "ticket"]);
+    const listed = listActions().find((x) => x.name === "checkout.renewCardTicket")!;
+    expect(JSON.stringify(listed.inputSchema)).not.toMatch(/ticketKey|nowMs/);
+    // Uma chave escolhida por quem chama, na entrada, é descartada: sem a do servidor, nada é emitido.
+    const s = await seed({ asaas: createFakeAsaas() });
+    const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const chosen = "c".repeat(64);
+    const e = await runAction(checkoutRenewCardTicket, pub(s.storeId), { publicId: a.publicId, ticket: a.cardTicket, ticketKey: chosen, nowMs: 0 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(ActionError);
   });
 
   test("renewCardTicket: pedido de outra loja, pago ou de Pix -> falha", async () => {
