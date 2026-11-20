@@ -82,6 +82,22 @@ test("ator token: autorizado pelo papel do token, como o usuário; ação de sis
   expect((await runAction(sys, { storeId, actor: token("admin"), origin: "mcp" }, {}).catch((e) => e)).code).toBe("forbidden");
 });
 
+test("ator token: team.manage e account.self recusados mesmo para o dono; ação sensível exige aprovação por qualquer origem", async () => {
+  const { storeId } = await seedStore();
+  let calls = 0;
+  const mk = (name: string, permission: "team.manage" | "account.self" | "orders.refund", sensitive = false) =>
+    defineAction({ name, description: "x", input: z.object({}), permission, sensitive, run: async () => ++calls }, def);
+  const owner = (origin: "mcp" | "api" | "panel") => ({ storeId, actor: { kind: "token" as const, tokenId: "tok-1", role: "owner" as const }, origin });
+  for (const origin of ["mcp", "api", "panel"] as const) {
+    expect((await runAction(mk("t.tokteam", "team.manage"), owner(origin), {}).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(mk("t.tokself", "account.self"), owner(origin), {}).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(mk("t.toksens", "orders.refund", true), owner(origin), {}).catch((e) => e)).code).toBe("approval_required");
+  }
+  expect(calls).toBe(0);
+  // O mesmo sensível com usuário do painel por "api" segue executando (o portão por ator é só do token).
+  expect(await runAction(mk("t.usrsens", "orders.refund", true), { storeId, actor: { kind: "user", userId: "u1", role: "owner" }, origin: "api" }, {})).toBe(1);
+});
+
 test("ação sensitive: mcp/ai exigem aprovação; panel com owner executa", async () => {
   const { storeId } = await seedStore();
   let calls = 0;

@@ -6,18 +6,19 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { runAction, type Actor } from "@/lib/actions/core";
 import { ROLE_PERMISSIONS, type Role } from "@/lib/actions/permissions";
-import { changePassword } from "@/lib/auth/account";
+import { changePassword, listTeam } from "@/lib/auth/account";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
-import { sha256 } from "@/lib/crypto";
+import { seal, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { auditLog, integration, mcpToken, users } from "@/lib/db/schema";
+import { auditLog, emailLog, integration, mcpToken, users } from "@/lib/db/schema";
 import { authenticateMcpToken, createMcpToken, listMcpTokens, mintMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { metricsSummary } from "@/lib/metrics";
 import { removeTelegram } from "@/lib/notify/telegram-connection";
-import { exportOrders, listOrders } from "@/lib/orders/panel";
+import { exportOrders, getOrderDetail, listOrders } from "@/lib/orders/panel";
 import { createTestDb, seedStore, type TestDb } from "./db";
+import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -125,11 +126,18 @@ describe("ações do painel", () => {
       await expect(runAction(listMcpTokens, call, {})).rejects.toMatchObject({ code: "forbidden" });
       await expect(runAction(revokeMcpToken, call, { id: tok.id })).rejects.toMatchObject({ code: "forbidden" });
     }
-    // Mesmo com um token de dono, pelo MCP/IA criar e revogar exigem aprovação (sensíveis).
+    // Pelo MCP/IA, criar e revogar exigem aprovação mesmo para o dono (sensíveis).
     for (const origin of ["mcp", "ai"] as const) {
-      const call = { storeId, actor: tokenActor("owner"), origin };
+      const call = { ...panel, origin };
       await expect(runAction(createMcpToken, call, { name: "y", role: "owner" })).rejects.toMatchObject({ code: "approval_required" });
       await expect(runAction(revokeMcpToken, call, { id: tok.id })).rejects.toMatchObject({ code: "approval_required" });
+    }
+    // Token, nem de dono e por nenhuma origem, administra tokens (team.manage é recusado ao ator token).
+    for (const origin of ["mcp", "api", "panel"] as const) {
+      const call = { storeId, actor: tokenActor("owner"), origin };
+      await expect(runAction(createMcpToken, call, { name: "y", role: "owner" })).rejects.toMatchObject({ code: "forbidden" });
+      await expect(runAction(listMcpTokens, call, {})).rejects.toMatchObject({ code: "forbidden" });
+      await expect(runAction(revokeMcpToken, call, { id: tok.id })).rejects.toMatchObject({ code: "forbidden" });
     }
     expect(createMcpToken.sensitive).toBe(true);
     expect(revokeMcpToken.sensitive).toBe(true);
@@ -205,41 +213,78 @@ describe("ator token no runAction", () => {
     // Outro papel no token: vale o papel (support lê pedidos; traffic não).
     expect(await runAction(listOrders, { storeId, actor: tokenActor("support"), origin: "mcp" }, {})).toMatchObject({ total: 0 });
     await expect(runAction(listOrders, { storeId, actor: tokenActor("traffic"), origin: "mcp" }, {})).rejects.toMatchObject({ code: "forbidden" });
-    // Token de dono lista tokens (não sensível: a lista não tem token nem hash).
-    expect(await runAction(listMcpTokens, { storeId, actor: tokenActor("owner"), origin: "mcp" }, {})).toEqual([]);
+  });
+
+  test("token de dono não herda team.manage nem account.self: team.list e mcpTokens.list dão forbidden", async () => {
+    const { storeId } = await ownerStore();
+    const call = { storeId, actor: tokenActor("owner"), origin: "mcp" as const };
+    await expect(runAction(listTeam, call, {})).rejects.toMatchObject({ code: "forbidden" });
+    await expect(runAction(listMcpTokens, call, {})).rejects.toMatchObject({ code: "forbidden" });
   });
 
   test("ação feita com ator token grava o tokenId e o papel no ator da auditoria", async () => {
+    const { storeId } = await ownerStore();
+    const actor = tokenActor("reader");
+    await runAction(listProducts, { storeId, actor, origin: "mcp" }, {});
+    const [audit] = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "products.list")));
+    expect(audit).toMatchObject({ actor, origin: "mcp", ok: true });
+  });
+
+  test("connections.status: token (mesmo de dono) nunca recebe o token do webhook do Asaas nem os finais das chaves", async () => {
     const { storeId, panel } = await ownerStore();
-    const actor = tokenActor("owner");
-    const tok = await runAction(createMcpToken, { storeId, actor, origin: "panel" }, { name: "via token", role: "reader" });
-    const [audit] = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "mcpTokens.create")));
-    expect(audit!.actor).toEqual(actor);
-    // created_by só para usuário do painel.
-    expect((await rowsOf(storeId)).find((r) => r.id === tok.id)!.createdBy).toBeNull();
-    expect((await runAction(listMcpTokens, panel, {}))[0]!.createdBy).toBeNull();
-  });
-
-  test("connections.status: com ator token vale o papel (o token do webhook só para quem tem connections.write)", async () => {
-    const { storeId } = await ownerStore();
     const hook = randomBytes(16).toString("hex");
-    await t.ownerDb.insert(integration).values({ storeId, kind: "asaas", config: { env: "sandbox", webhookToken: hook }, secret: "a1.selado" });
-    const as = (role: Role) => runAction(connectionsStatus, { storeId, actor: tokenActor(role), origin: "mcp" }, {});
-    expect((await as("owner")).asaas?.webhookToken).toBe(hook);
-    expect((await as("traffic")).asaas?.webhookToken).toBeNull();
-    await expect(as("reader")).rejects.toMatchObject({ code: "forbidden" });
+    const [apiLast4, whLast4, botLast4] = ["Wq7z", "Kp3m", "Rt9x"];
+    await t.ownerDb.insert(integration).values([
+      { storeId, kind: "asaas", config: { env: "sandbox", webhookToken: hook }, secret: "a1.selado" },
+      { storeId, kind: "resend", config: { fromEmail: "vendas@loja.com", apiKeyLast4: apiLast4, webhookSecretLast4: whLast4 }, secret: seal("chave-resend") },
+      { storeId, kind: "telegram", config: { chatId: "12345", tokenLast4: botLast4 }, secret: seal("token-bot") },
+    ]);
+    for (const role of ["owner", "traffic"] as const) {
+      const st = await runAction(connectionsStatus, { storeId, actor: tokenActor(role), origin: "mcp" }, {});
+      expect(st.asaas?.webhookToken).toBeNull();
+      expect(st.resend).toMatchObject({ apiKey: "configured", webhookSecret: "configured" });
+      expect(st.telegram?.token).toBe("configured");
+      const json = JSON.stringify(st);
+      for (const secret of [hook, apiLast4, whLast4, botLast4]) expect(json).not.toContain(secret);
+    }
+    await expect(runAction(connectionsStatus, { storeId, actor: tokenActor("reader"), origin: "mcp" }, {})).rejects.toMatchObject({ code: "forbidden" });
+    // Controle: o dono no painel vê.
+    const own = await runAction(connectionsStatus, panel, {});
+    expect(own.asaas?.webhookToken).toBe(hook);
+    expect(own.resend?.apiKey).toEqual({ last4: apiLast4 });
+    expect(own.telegram?.token).toEqual({ last4: botLast4 });
   });
 
-  test("ações da própria conta (senha) exigem usuário do painel: o ator token é recusado mesmo fora do MCP", async () => {
+  test("orders.get: token (mesmo de dono) recebe só \"falha no envio\", nunca o erro cru do SMTP", async () => {
+    const s = await seedPanelStore();
+    const o = await seedOrder(s, { status: "paid" });
+    const raw = "550 5.1.1 <comprador.unico@exemplo.com>: Recipient address rejected";
+    await t.ownerDb.insert(emailLog).values({ storeId: s.storeId, orderId: o.id, toHash: "x", kind: "delivery", status: "failed", error: raw });
+    for (const role of ["owner", "admin", "support"] as const) {
+      const d = await runAction(getOrderDetail, { storeId: s.storeId, actor: tokenActor(role), origin: "mcp" }, { id: o.id });
+      expect(d.emails[0]!.error).toBe("falha no envio");
+      expect(JSON.stringify(d.emails)).not.toContain("comprador.unico");
+    }
+    // Controle: o dono no painel vê o texto do provedor.
+    expect((await runAction(getOrderDetail, panelCall(s.storeId, "owner"), { id: o.id })).emails[0]!.error).toBe(raw);
+  });
+
+  test("ações da própria conta (senha): o ator token é recusado (account.self) por qualquer origem", async () => {
     const { storeId } = await ownerStore();
-    const call = { storeId, actor: tokenActor("owner"), origin: "api" as const };
-    await expect(runAction(changePassword, call, { currentPassword: "a".repeat(12), newPassword: "b".repeat(12) })).rejects.toMatchObject({ code: "forbidden" });
+    for (const origin of ["mcp", "api", "panel"] as const) {
+      const call = { storeId, actor: tokenActor("owner"), origin };
+      await expect(runAction(changePassword, call, { currentPassword: "a".repeat(12), newPassword: "b".repeat(12) })).rejects.toMatchObject({ code: "forbidden" });
+    }
   });
 
   test("removeTelegram pelo MCP → approval_required; pelo painel continua funcionando", async () => {
     const { storeId, panel } = await ownerStore();
     await t.ownerDb.insert(integration).values({ storeId, kind: "telegram", config: {}, secret: "v1.selado" });
     for (const origin of ["mcp", "ai"] as const) {
+      await expect(runAction(removeTelegram, { ...panel, origin }, {})).rejects.toMatchObject({ code: "approval_required" });
+    }
+    // Ator token: aprovação por qualquer origem (não escapa chamando como "api" ou "panel").
+    for (const origin of ["mcp", "api", "panel"] as const) {
       await expect(runAction(removeTelegram, { storeId, actor: tokenActor("owner"), origin }, {})).rejects.toMatchObject({ code: "approval_required" });
     }
     expect(removeTelegram.sensitive).toBe(true);

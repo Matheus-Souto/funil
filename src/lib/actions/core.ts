@@ -6,8 +6,8 @@ import { hasPermission, type Permission, type Role } from "./permissions";
 import { registry } from "./registry";
 
 /**
- * `token`: agente com token MCP da loja (src/lib/mcp/tokens.ts). Autorizado pelo papel do token como um usuário, mas sem
- * conta: ações que precisam de um usuário real (a própria senha) o recusam.
+ * `token`: agente com token MCP da loja (src/lib/mcp/tokens.ts). Autorizado pelo papel do token como um usuário, menos
+ * `team.manage` e `account.self` (sempre forbidden); ação sensível exige aprovação qualquer que seja a origem.
  */
 export type Actor =
   | { kind: "user"; userId: string; role: Role }
@@ -91,7 +91,13 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
   if ((actor.kind !== "user" && actor.kind !== "token") || !hasPermission(actor.role, action.permission)) {
     throw new ActionError("forbidden", `Sem permissão: ${action.permission}`);
   }
+  // Token MCP nunca administra a equipe (nem os próprios tokens) nem uma conta, qualquer que seja o papel.
+  if (actor.kind === "token" && TOKEN_DENIED.includes(action.permission)) {
+    throw new ActionError("forbidden", `Sem permissão: ${action.permission}`);
+  }
 }
+
+const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,7 +132,8 @@ export async function runAction<I, O, P = any, S = any>(
       throw new ActionError("invalid_input", "Entrada inválida", issues);
     }
     input = parsed.data;
-    if (action.sensitive && (origin === "mcp" || origin === "ai")) {
+    // Pelo ator também: um token MCP chamando por outra origem não escapa da aprovação.
+    if (action.sensitive && (origin === "mcp" || origin === "ai" || actor.kind === "token")) {
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
     if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
