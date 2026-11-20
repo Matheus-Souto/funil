@@ -64,6 +64,33 @@ export function frameFieldNames(fields: readonly (string | readonly string[])[])
   return out;
 }
 
+/** O único formato de cor que o protocolo aceita no `config` (parseParentMsg). */
+const BRAND_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Um "Pagar" por vez. O estado `busy` do React só muda no próximo render: um Enter no iframe (`submit`) e um clique no
+ * botão no mesmo instante passariam os dois e criariam um pedido extra. `run` ignora (devolve `false`) quem chega com
+ * outro em andamento e libera ao terminar, com ou sem erro.
+ */
+export function createSubmitGate(): { readonly running: boolean; run(fn: () => Promise<void>): Promise<boolean> } {
+  let running = false;
+  return {
+    get running() {
+      return running;
+    },
+    async run(fn) {
+      if (running) return false;
+      running = true;
+      try {
+        await fn();
+      } finally {
+        running = false;
+      }
+      return true;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Controlador do iframe
 
@@ -163,7 +190,9 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       }, FRAME_READY_TIMEOUT_MS);
     },
     setConfig(c) {
-      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...(c.brandColor ? { brandColor: c.brandColor } : {}) };
+      // Cor fora de #rrggbb fica de fora: o iframe recusaria o `config` inteiro (e ficaria sem o total).
+      const color = c.brandColor !== undefined && BRAND_COLOR.test(c.brandColor) ? { brandColor: c.brandColor } : {};
+      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...color };
       sendConfig(false);
     },
     handle(ev) {

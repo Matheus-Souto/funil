@@ -20,6 +20,7 @@ import { recordCheckoutViewAction, renewCardTicketAction, startCheckoutAction, t
 import {
   FRAME_UNAVAILABLE_MESSAGE,
   createCardFrameController,
+  createSubmitGate,
   frameFieldNames,
   newFrameMsgId,
   payWithFrame,
@@ -203,6 +204,8 @@ export function CheckoutForm(props: {
   const [frameStatus, setFrameStatus] = useState<FrameStatus>("loading");
   // Enter num campo do iframe (`submit`): o mesmo que o botão "Pagar". Atualizado a cada render (ver o efeito abaixo).
   const submitFromFrame = useRef<() => void>(() => {});
+  // Um "Pagar" por vez, mesmo antes de o `busy` chegar ao render (Enter no iframe + clique juntos).
+  const [submitGate] = useState(createSubmitGate);
 
   useEffect(() => {
     if (viewed.current) return;
@@ -381,7 +384,7 @@ export function CheckoutForm(props: {
 
   function onSubmit(ev: FormEvent) {
     ev.preventDefault();
-    void submit();
+    void submitGate.run(submit);
   }
 
   /** O "Pagar" (botão, Enter num campo do checkout ou Enter num campo do iframe do cartão). */
@@ -419,7 +422,7 @@ export function CheckoutForm(props: {
   // Só com o cartão escolhido (o iframe fica escondido no Pix); `submit` confere o resto (ocupado, iframe pronto).
   useEffect(() => {
     submitFromFrame.current = () => {
-      if (method === "card") void submit();
+      if (method === "card") void submitGate.run(submit);
     };
   });
 
