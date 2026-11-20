@@ -176,6 +176,8 @@ export const ackAlert = defineAction({
   input: z.object({ id: z.uuid() }),
   // Confirmar some com o aviso para todos: só quem resolve as conexões da loja.
   permission: "connections.write",
+  // Fechar o aviso (inclusive o de segurança da página de pagamento) é decisão de quem aprova: MCP/IA pedem aprovação.
+  sensitive: true,
   async run(ctx, { id }) {
     const [row] = await ctx.tx
       .update(storeAlert)

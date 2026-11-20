@@ -22,6 +22,7 @@ import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { enqueue, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
+import { limitConnectionTest } from "@/lib/mcp/limits";
 import { itemOrder } from "@/lib/orders/items";
 import { META_EVENT_ID_RE } from "./touch";
 
@@ -259,6 +260,7 @@ export const testMeta = defineAction({
   input: z.object({}),
   permission: "tracking.write",
   async prepare(call) {
+    await limitConnectionTest(call.actor, "testMeta", call.storeId);
     const meta = await withStore(call.storeId, (tx) => getIntegration(tx, call.storeId, "meta"));
     const pixelId = validPixel((meta?.config as MetaConfig | undefined)?.pixelId);
     if (!pixelId || !meta?.secret) throw new ActionError("conflict", "Conecte o Meta (Pixel ID e token) antes de testar.");

@@ -9,6 +9,7 @@ import { integration, store, storeAlert } from "@/lib/db/schema";
 import { oneLine } from "@/lib/delivery/templates";
 import { IntegrationSecretUnreadable, getIntegration, readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
 import { log } from "@/lib/log";
+import { limitConnectionTest } from "@/lib/mcp/limits";
 import { TELEGRAM_CHAT_RE, TELEGRAM_TOKEN_RE, TelegramError, cutChars, telegramGetMe, telegramSend } from "./telegram";
 
 export interface TelegramEvents {
@@ -144,6 +145,7 @@ export const testTelegram = defineAction({
   input: z.object({}),
   permission: "connections.write",
   async prepare(call) {
+    await limitConnectionTest(call.actor, "testTelegram", call.storeId);
     const { conn, storeName } = await withStore(call.storeId, async (tx) => {
       const [s] = await tx.select({ name: store.name }).from(store).where(eq(store.id, call.storeId));
       return { conn: await loadTelegram(tx, call.storeId), storeName: s?.name ?? "" };

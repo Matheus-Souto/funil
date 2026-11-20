@@ -11,6 +11,7 @@ import { customer, downloadLink, emailLog, offer, orderItem, orders, product, st
 import { brl, dateTimeSP } from "@/lib/format";
 import { enqueue, hasOpenJob, type Job, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
+import { limitResend } from "@/lib/mcp/limits";
 import { groupItems, itemOrder } from "@/lib/orders/items";
 import { LINK_TTL_MS, MAX_DOWNLOADS, deliveryLinks, newTokens, restoreLinks, revokeLinks, saveTokens, storeBaseUrl } from "./links";
 import { logEmail, sendMail, type EmailProvider } from "./mailer";
@@ -426,6 +427,10 @@ export const resendOrder = defineAction({
   description: "Reenvia o e-mail de acesso de um pedido pago. Com renew, revoga os links atuais e emite novos (validade e downloads renovados).",
   input: z.object({ orderId: z.uuid(), renew: z.boolean().optional() }),
   permission: "orders.resend",
+  // Direto, mas com limite para token (o painel segue sem): o e-mail vai sempre ao comprador do pedido.
+  async prepare(call, { orderId }) {
+    await limitResend(call.actor, call.storeId, orderId);
+  },
   async run(ctx, { orderId, renew }) {
     const [o] = await ctx.tx.select({ id: orders.id, status: orders.status }).from(orders).where(eq(orders.id, orderId)).for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
