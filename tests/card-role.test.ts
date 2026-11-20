@@ -222,6 +222,25 @@ describe("papel card: atributos e o que fica de fora", () => {
     expect(jobs.map((j) => j.type)).toEqual(["notify_seller"]);
   });
 
+  test("fila: notify_telegram só com os eventos sale e card_declined (pix_generated, abandoned e sem evento são recusados)", async () => {
+    const { storeId } = await seedStore("Fila Telegram");
+    const insert = (event: string) =>
+      asCardIn(
+        storeId,
+        (tx) =>
+          tx`insert into job (store_id, type, payload)
+             values (${storeId}, 'notify_telegram', jsonb_build_object('event', ${event}::text, 'orderId', ${randomUUID()}::text))`,
+      );
+    await insert("card_declined");
+    await insert("sale");
+    for (const event of ["pix_generated", "abandoned"]) await expect(insert(event)).rejects.toThrow(RLS_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`insert into job (store_id, type, payload) values (${storeId}, 'notify_telegram', '{}')`)).rejects.toThrow(
+      RLS_DENIED,
+    );
+    const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(jobs.map((j) => (j.payload as { event: string }).event).sort()).toEqual(["card_declined", "sale"]);
+  });
+
   test("limites: só as chaves card: (não lê, não grava e não apaga os limites do app)", async () => {
     const key = `account:password:${randomUUID()}`;
     await t.ownerDb.insert(rateLimit).values({ key, windowStart: new Date(0), count: 3 });
@@ -539,4 +558,39 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     expect(ok.status).toBe("approved");
     expect((await orderRow(o.after.id)).status).toBe("paid");
   }, HEAVY_TEST_MS);
+});
+
+describe("aviso de cartão recusado no Telegram com o papel card", () => {
+  const fake = createFakeAsaas();
+  let shop: { storeId: string; offerId: string };
+  let order: Order;
+  beforeAll(async () => {
+    shop = await seedAsaasStore(fake);
+    order = await newCardOrder(shop.storeId, shop.offerId, email());
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+  }, HEAVY_TEST_MS);
+  afterAll(async () => {
+    await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+  });
+
+  test("o papel card enfileira o job na recusa: um card_declined por pedido, mesmo com 3 recusas", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    try {
+      for (let i = 0; i < 3; i++) {
+        const r = await payWithCard(
+          { storeId: shop.storeId },
+          input(order.publicId, { number: luhn(`4520000000${String(i).padStart(5, "0")}`) }),
+          { ...fastDeps, verifyTurnstile: async () => true },
+        );
+        expect(r.status).toBe("declined");
+      }
+    } finally {
+      fake.clearFailures();
+    }
+    const attempts = await t.ownerDb.select().from(cardAttempt).where(eq(cardAttempt.orderId, order.id));
+    expect(attempts.map((a) => a.status)).toEqual(["declined", "declined", "declined"]);
+    const jobs = await t.ownerDb.select().from(job).where(sql`${job.payload}->>'orderId' = ${order.id}`);
+    expect(jobs.map((j) => [j.type, j.payload, j.storeId])).toEqual([["notify_telegram", { event: "card_declined", orderId: order.id }, shop.storeId]]);
+  });
 });

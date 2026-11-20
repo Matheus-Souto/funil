@@ -14,7 +14,11 @@ import { transitionOrder } from "@/lib/orders/state";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { notifyTelegramJob } from "@/lib/notify/telegram-job";
 import { loadTelegram, removeTelegram, saveTelegram, telegramSettings, testTelegram } from "@/lib/notify/telegram-connection";
+import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
+import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
 import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { createFakeAsaas, seedAsaasStore } from "./asaas-helpers";
 import {
   TELEGRAM_CHAT_RE,
   TELEGRAM_TOKEN_RE,
@@ -449,14 +453,16 @@ describe("aviso de venda no Telegram", () => {
   test("pedido pago enfileira notify_telegram sale; disputed → paid não enfileira; loja sem Telegram: o job pula sem chamar o fetch", async () => {
     const shop = await seedShop();
     const o = await paidOrder(shop);
-    const first = await tgJobs(o.id);
+    // O pedido Pix também tem o "Pix gerado" da criação (outros avisos): aqui só o de venda.
+    const sales = async () => (await tgJobs(o.id)).filter((j) => eventOf(j) === "sale");
+    const first = await sales();
     expect(first).toHaveLength(1);
     expect(first[0]!.payload).toEqual({ event: "sale", orderId: o.id });
     await withStore(shop.storeId, async (tx) => {
       await transitionOrder(systemCtx(shop.storeId, tx), o.id, "disputed", "teste");
       await transitionOrder(systemCtx(shop.storeId, tx), o.id, "paid", "teste");
     });
-    expect(await tgJobs(o.id)).toHaveLength(1);
+    expect(await sales()).toHaveLength(1);
 
     const bare = await seedShop({ telegram: false });
     const o2 = await paidOrder(bare);
@@ -486,13 +492,17 @@ describe("aviso de venda no Telegram", () => {
     const shop = await seedShop({ events: { pixGenerated: true, cardDeclined: true, abandoned: true } });
     const paid = await paidOrder(shop);
     const pend = await pendingOrder(shop);
+    // Abandono só depois do prazo (o pedido pago segue anterior a ele); card_declined num pedido Pix não sai (o de
+    // cartão está em "outros avisos").
+    await backdate(paid, 60 * MIN);
+    await backdate(pend, 30 * MIN);
     const calls = fakeTg(okFor);
     await runJob(shop, "sale", paid.id);
     await runJob(shop, "pix_generated", pend.id);
     await runJob(shop, "card_declined", pend.id);
     await runJob(shop, "abandoned", pend.id);
     const sent = sendCalls(calls);
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(3);
     const all = JSON.stringify(sent.map((c) => c.body));
     for (const secret of ["Maria", "Teste", BUYER.email, BUYER.cpf, BUYER.phone, "maria.teste"]) expect(all).not.toContain(secret);
   });
@@ -556,6 +566,7 @@ describe("aviso de venda no Telegram", () => {
     // Pedido pendente sem pagamento depois: abandono sai com o prazo configurado.
     const lone = await seedShop({ events: { abandoned: true } });
     const o = await pendingOrder(lone);
+    await backdate(o, 30 * MIN);
     const calls2 = fakeTg(okFor);
     await runJob(lone, "abandoned", o.id);
     expect(String(sendCalls(calls2)[0]!.body.text)).toStartWith("Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #");
@@ -598,7 +609,7 @@ describe("aviso de venda no Telegram", () => {
       throw new Error(`fetch failed: ${String(url)}`);
     }) as unknown as typeof fetch);
     await runDueJobs({ notify_telegram: getHandlers().notify_telegram! }, 50, () => new Date(), { types: ["notify_telegram"] });
-    const [row] = await tgJobs(o.id);
+    const [row] = (await tgJobs(o.id)).filter((j) => eventOf(j) === "sale");
     expect(row!.status).toBe("queued");
     expect(row!.lastError).toBeTruthy();
     expect(JSON.stringify(row)).not.toContain(BOT_TOKEN);
@@ -610,5 +621,244 @@ describe("aviso de venda no Telegram", () => {
       title: "O Telegram recusou o aviso da loja",
       body: "Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”.",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+
+const cardDeps: CardDeps = { wait: () => new Promise<void>((r) => setImmediate(r)), verifyTurnstile: async () => true };
+let cardSeq = 0;
+/** Número de cartão sintético válido (Luhn), um por chamada: o limite por cartão não interfere entre testes. */
+function cardNumber(): string {
+  const body = `4300000000${String(++cardSeq).padStart(5, "0")}`;
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) {
+    let d = Number(body[body.length - 1 - i]);
+    if (i % 2 === 0) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+    sum += d;
+  }
+  return `${body}${(10 - (sum % 10)) % 10}`;
+}
+let ipSeq = 0;
+const cardInput = (orderPublicId: string): CardPaymentInput => ({
+  orderPublicId,
+  idempotencyKey: crypto.randomUUID(),
+  installments: 1,
+  card: { holderName: "TITULAR TELEGRAM", number: cardNumber(), expiryMonth: "08", expiryYear: "2034", ccv: "987" },
+  holder: { cpf: "52998224725", postalCode: "01310-100", addressNumber: "100" },
+  clientIp: `198.18.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`,
+});
+const uniqueEmail = () => `c-${crypto.randomUUID()}@example.com`;
+
+/** Loja com Asaas (Pix automático e cartão, produto "Principal" a R$ 9,90) e Telegram com os eventos dados. */
+async function seedAsaasTelegram(events: Record<string, boolean>) {
+  const fake = createFakeAsaas();
+  const shop = await seedAsaasStore(fake);
+  fakeTg(okFor);
+  await runAction(saveTelegram, panel(shop.storeId), { chatId: CHAT, token: BOT_TOKEN, events });
+  return { ...shop, fake };
+}
+type AsaasShop = Awaited<ReturnType<typeof seedAsaasTelegram>>;
+const newOrder = (shop: { storeId: string; offerId: string }, method: "pix_asaas" | "card_asaas", buyer = { ...BUYER, email: uniqueEmail() }) =>
+  withStore(shop.storeId, (tx) =>
+    createOrder(systemCtx(shop.storeId, tx), {
+      offerId: shop.offerId,
+      withBump: false,
+      method,
+      customer: buyer,
+      touch: { first: null, last: null },
+      clientIp: "203.0.113.7",
+      userAgent: "teste",
+    }),
+  );
+/** Recusa `n` vezes o cartão no pedido (o Asaas falso recusa qualquer número enquanto a falha estiver ligada). */
+async function declineCard(shop: AsaasShop, publicId: string, n = 1) {
+  setAsaasFetchForTests(shop.fake.fetch);
+  shop.fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+  try {
+    for (let i = 0; i < n; i++) expect((await payWithCard({ storeId: shop.storeId }, cardInput(publicId), cardDeps)).status).toBe("declined");
+  } finally {
+    shop.fake.clearFailures();
+  }
+}
+const eventOf = (j: Job) => (j.payload as { event: string }).event;
+/** Roda, com o handler, os jobs notify_telegram enfileirados do pedido para o evento. */
+async function runQueued(orderId: string, event: string): Promise<number> {
+  const rows = (await tgJobs(orderId)).filter((j) => eventOf(j) === event);
+  for (const j of rows) await notifyTelegramJob(j, new AbortController().signal);
+  return rows.length;
+}
+/** Recua a criação do pedido em `ms` (o prazo do abandono conta de `created_at`). */
+const backdate = (o: { id: string; createdAt: Date }, ms: number) =>
+  t.ownerDb.update(orders).set({ createdAt: new Date(o.createdAt.getTime() - ms) }).where(eq(orders.id, o.id));
+const MIN = 60_000;
+const texts = (calls: TgCall[]) => sendCalls(calls).map((c) => String(c.body.text));
+
+describe("outros avisos do Telegram", () => {
+  afterEach(() => {
+    setAsaasFetchForTests();
+    resetCardFingerprintsForTests();
+  });
+
+  test("pedido Pix (asaas e manual) enfileira pix_generated; com o evento ligado envia \"Pix gerado: … — pedido #<código>\"", async () => {
+    const manual = await seedShop({ events: { pixGenerated: true } });
+    const m = await pendingOrder(manual);
+    const asaas = await seedAsaasTelegram({ pixGenerated: true });
+    const a = await newOrder(asaas, "pix_asaas");
+    for (const o of [m, a]) expect((await tgJobs(o.id)).map((j) => j.payload)).toEqual([{ event: "pix_generated", orderId: o.id }]);
+    const calls = fakeTg(okFor);
+    expect(await runQueued(m.id, "pix_generated")).toBe(1);
+    expect(await runQueued(a.id, "pix_generated")).toBe(1);
+    expect(texts(calls)).toEqual([
+      `Pix gerado: Almanaque + 5 Kits — R$ 36,90 — pedido #${orderCode(m.publicId)}`,
+      `Pix gerado: Principal — R$ 9,90 — pedido #${orderCode(a.publicId)}`,
+    ]);
+    expect((await notices(m.id)).map((n) => n.event)).toEqual(["pix_generated"]);
+  });
+
+  test("Pix pago antes do envio não gera \"Pix gerado\"", async () => {
+    const shop = await seedShop({ events: { pixGenerated: true } });
+    const o = await paidOrder(shop);
+    const calls = fakeTg(okFor);
+    expect(await runQueued(o.id, "pix_generated")).toBe(1);
+    expect(calls).toHaveLength(0);
+    expect(await notices(o.id)).toHaveLength(0);
+  });
+
+  test("pedido de cartão não enfileira pix_generated", async () => {
+    const shop = await seedAsaasTelegram({ pixGenerated: true });
+    const o = await newOrder(shop, "card_asaas");
+    expect(await tgJobs(o.id)).toHaveLength(0);
+  });
+
+  test("cartão recusado enfileira card_declined uma vez por pedido (3 recusas) e envia o texto exato; recusado e depois aprovado antes do envio → não envia", async () => {
+    const shop = await seedAsaasTelegram({ cardDeclined: true });
+    const o = await newOrder(shop, "card_asaas");
+    await declineCard(shop, o.publicId, 3);
+    expect((await tgJobs(o.id)).map((j) => j.payload)).toEqual([{ event: "card_declined", orderId: o.id }]);
+    const calls = fakeTg(okFor);
+    await runQueued(o.id, "card_declined");
+    expect(texts(calls)).toEqual([`Cartão recusado: Principal — R$ 9,90 — pedido #${orderCode(o.publicId)}`]);
+    expect((await notices(o.id)).map((n) => n.event)).toEqual(["card_declined"]);
+
+    const o2 = await newOrder(shop, "card_asaas");
+    await declineCard(shop, o2.publicId);
+    setAsaasFetchForTests(shop.fake.fetch);
+    expect(await payWithCard({ storeId: shop.storeId }, cardInput(o2.publicId), cardDeps)).toEqual({ status: "approved" });
+    const calls2 = fakeTg(okFor);
+    expect(await runQueued(o2.id, "card_declined")).toBe(1);
+    expect(calls2).toHaveLength(0);
+    expect(await notices(o2.id)).toHaveLength(0);
+  });
+
+  test("abandono: com o evento ligado, criar o pedido agenda o job para criado + prazo; rodando no prazo com o pedido pending envia o texto", async () => {
+    const shop = await seedShop({ events: { abandoned: true } });
+    const o = await pendingOrder(shop);
+    const scheduled = (await tgJobs(o.id)).filter((j) => eventOf(j) === "abandoned");
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]!.payload).toEqual({ event: "abandoned", orderId: o.id });
+    expect(scheduled[0]!.runAt.getTime()).toBe(o.createdAt.getTime() + 30 * MIN);
+    await backdate(o, 30 * MIN);
+    const calls = fakeTg(okFor);
+    await notifyTelegramJob(scheduled[0]!, new AbortController().signal);
+    expect(texts(calls)).toEqual([`Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #${orderCode(o.publicId)}`]);
+    expect((await notices(o.id)).map((n) => n.event)).toEqual(["abandoned"]);
+  });
+
+  test("abandono não sai se o pedido foi pago, nem se o mesmo cliente pagou depois outro pedido da mesma oferta", async () => {
+    const shop = await seedShop({ events: { abandoned: true } });
+    const paid = await paidOrder(shop);
+    const first = await pendingOrder(shop);
+    const second = await pendingOrder(shop);
+    await runAction(releaseOrder, panel(shop.storeId), { orderId: second.id });
+    await backdate(paid, 31 * MIN);
+    await backdate(first, 31 * MIN);
+    const calls = fakeTg(okFor);
+    expect(await runQueued(paid.id, "abandoned")).toBe(1);
+    expect(await runQueued(first.id, "abandoned")).toBe(1);
+    expect(calls).toHaveLength(0);
+    expect([...(await notices(paid.id)), ...(await notices(first.id))]).toHaveLength(0);
+  });
+
+  test("abandono com o evento desligado na criação: nada agendado", async () => {
+    const shop = await seedShop();
+    const o = await pendingOrder(shop);
+    expect((await tgJobs(o.id)).map(eventOf)).toEqual(["pix_generated"]);
+    const bare = await seedShop({ telegram: false });
+    const o2 = await pendingOrder(bare);
+    expect((await tgJobs(o2.id)).map(eventOf)).toEqual(["pix_generated"]);
+  });
+
+  test("nenhuma mensagem dos três eventos contém dado do cliente", async () => {
+    const shop = await seedAsaasTelegram({ pixGenerated: true, cardDeclined: true, abandoned: true });
+    const pix = await newOrder(shop, "pix_asaas", BUYER);
+    const card = await newOrder(shop, "card_asaas", BUYER);
+    await declineCard(shop, card.publicId);
+    await backdate(pix, 30 * MIN);
+    await backdate(card, 30 * MIN);
+    const calls = fakeTg(okFor);
+    for (const [o, event] of [[pix, "pix_generated"], [pix, "abandoned"], [card, "card_declined"], [card, "abandoned"]] as const) {
+      expect(await runQueued(o.id, event)).toBe(1);
+    }
+    expect(texts(calls)).toHaveLength(4);
+    const all = JSON.stringify(sendCalls(calls).map((c) => c.body));
+    for (const secret of ["Maria", "Teste", BUYER.email, BUYER.cpf, BUYER.phone, "maria.teste"]) expect(all).not.toContain(secret);
+  });
+
+  test("venda: pedido pago há mais de 24 h não vira aviso; há 23 h ainda sai", async () => {
+    const shop = await seedShop();
+    const old = await paidOrder(shop);
+    const recent = await paidOrder(shop);
+    await t.ownerDb.update(orders).set({ paidAt: new Date(Date.now() - 25 * 60 * MIN) }).where(eq(orders.id, old.id));
+    await t.ownerDb.update(orders).set({ paidAt: new Date(Date.now() - 23 * 60 * MIN) }).where(eq(orders.id, recent.id));
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", old.id);
+    expect(calls).toHaveLength(0);
+    expect(await notices(old.id)).toHaveLength(0);
+    await runJob(shop, "sale", recent.id);
+    expect(texts(calls)).toEqual([`Venda: Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #${orderCode(recent.publicId)}`]);
+  });
+
+  test("card_declined forjado: pedido Pix ou cartão sem tentativa recusada não envia", async () => {
+    const shop = await seedAsaasTelegram({ cardDeclined: true });
+    const pix = await newOrder(shop, "pix_asaas");
+    const card = await newOrder(shop, "card_asaas");
+    const calls = fakeTg(okFor);
+    await runJob(shop, "card_declined", pix.id);
+    await runJob(shop, "card_declined", card.id);
+    expect(calls).toHaveLength(0);
+    expect([...(await notices(pix.id)), ...(await notices(card.id))]).toHaveLength(0);
+  });
+
+  test("abandoned forjado antes do prazo: não envia e não grava marca; o agendamento legítimo envia depois (tolerância de 5 s)", async () => {
+    const shop = await seedShop({ events: { abandoned: true } });
+    const o = await pendingOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "abandoned", o.id);
+    await backdate(o, 29 * MIN);
+    await runJob(shop, "abandoned", o.id);
+    expect(calls).toHaveLength(0);
+    expect(await notices(o.id)).toHaveLength(0);
+    await backdate(o, 30 * MIN - 3_000);
+    expect(await runQueued(o.id, "abandoned")).toBe(1);
+    expect(texts(calls)).toHaveLength(1);
+    expect((await notices(o.id)).map((n) => n.event)).toEqual(["abandoned"]);
+  });
+
+  test("falhas definitivas simultâneas na mesma loja gravam um só aviso telegram_falhou", async () => {
+    const shop = await seedShop();
+    const paid = [];
+    for (let i = 0; i < 5; i++) paid.push(await paidOrder(shop));
+    // As 5 respostas só saem quando as 5 chamadas chegaram: as gravações do aviso começam juntas.
+    let release!: () => void;
+    const all = new Promise<void>((r) => (release = r));
+    let arrived = 0;
+    setTelegramFetchForTests((async () => {
+      if (++arrived === paid.length) release();
+      await all;
+      return json(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked" });
+    }) as unknown as typeof fetch);
+    await Promise.all(paid.map((o) => runJob(shop, "sale", o.id)));
+    expect(await openAlerts(shop.storeId)).toHaveLength(1);
   });
 });

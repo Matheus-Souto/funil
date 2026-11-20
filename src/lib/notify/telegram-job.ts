@@ -3,11 +3,11 @@
 // a rede fica fora da transação; uma segunda grava a marca (`telegram_notice`, única por pedido e evento) e, numa falha
 // definitiva, o aviso `telegram_falhou` do painel (um só enquanto não for confirmado). Falha temporária: relança e a fila
 // tenta de novo (a mensagem do `TelegramError` é fixa e não tem o token).
-import { and, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { alertSeller } from "@/lib/alerts";
 import { withStore } from "@/lib/db/client";
-import { offer, orderItem, orders, product, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { cardAttempt, offer, orderItem, orders, product, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import type { JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
@@ -24,6 +24,11 @@ const EVENT_FLAG: Record<TelegramEvent, keyof TelegramEvents> = {
   card_declined: "cardDeclined",
   abandoned: "abandoned",
 };
+
+/** Venda paga há mais que isto não vira aviso. */
+const SALE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Folga do prazo do abandono: o job agendado para criado + prazo pode ser reivindicado um pouco antes do relógio. */
+const ABANDON_TOLERANCE_MS = 5_000;
 
 /** Pedido que já foi pago em algum momento (pago, contestado ou reembolsado). */
 const WAS_PAID = ["paid", "disputed", "refunded"] as const;
@@ -54,14 +59,24 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
     switch (event) {
       case "sale":
         if (o.status !== "paid") return { skip: `pedido_${o.status}` };
+        // Pedido pago há muito tempo nunca vira aviso de venda (job antigo ou forjado).
+        if (!o.paidAt || Date.now() - o.paidAt.getTime() > SALE_MAX_AGE_MS) return { skip: "venda_antiga" };
         break;
       case "pix_generated":
         if (o.method !== "pix_asaas" && o.method !== "pix_manual") return { skip: "nao_e_pix" };
         if (o.status !== "pending") return { skip: `pedido_${o.status}` };
         break;
-      case "card_declined":
+      case "card_declined": {
+        if (o.method !== "card_asaas") return { skip: "nao_e_cartao" };
         if (o.status !== "pending" && o.status !== "declined" && o.status !== "expired") return { skip: `pedido_${o.status}` };
+        const [declined] = await tx
+          .select({ id: cardAttempt.id })
+          .from(cardAttempt)
+          .where(and(eq(cardAttempt.orderId, o.id), eq(cardAttempt.status, "declined")))
+          .limit(1);
+        if (!declined) return { skip: "sem_recusa" };
         break;
+      }
       case "abandoned": {
         if (o.status !== "pending" && o.status !== "declined" && o.status !== "expired") return { skip: `pedido_${o.status}` };
         // O mesmo cliente pagou a mesma oferta depois deste pedido (ex.: gerou dois Pix e pagou o segundo): não abandonou.
@@ -85,6 +100,10 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
     const conn = await loadTelegram(tx, storeId);
     if (!conn) return { skip: "sem_conexao" };
     if (!conn.events[EVENT_FLAG[event]]) return { skip: "evento_desligado" };
+    // Abandono antes do prazo (job forjado ou prazo aumentado depois): pula sem marca; o agendamento legítimo envia depois.
+    if (event === "abandoned" && Date.now() < o.createdAt.getTime() + conn.abandonAfterMinutes * 60_000 - ABANDON_TOLERANCE_MS) {
+      return { skip: "antes_do_prazo" };
+    }
 
     const items = await tx
       .select({ name: product.name, kind: orderItem.kind })
@@ -123,10 +142,12 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
     // Falha definitiva (token ou chat): re-tentar não resolve. Um aviso no painel por vez, até o vendedor confirmar.
     log.error("Telegram recusou o aviso da loja (definitivo); não será re-tentado", { orderId, event, httpStatus: e.httpStatus });
     await withStore(storeId, async (tx) => {
+      // Falhas simultâneas da mesma loja: uma de cada vez confere e grava (senão cada uma veria "nenhum aberto").
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext('telegram_falhou:' || ${storeId}))`);
       const [open] = await tx
         .select({ id: storeAlert.id })
         .from(storeAlert)
-        .where(and(eq(storeAlert.kind, "telegram_falhou"), isNull(storeAlert.acknowledgedAt)))
+        .where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, "telegram_falhou"), isNull(storeAlert.acknowledgedAt)))
         .limit(1);
       if (!open) await alertSeller(tx, storeId, "telegram_falhou", { httpStatus: e.httpStatus });
     });

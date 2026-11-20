@@ -3,7 +3,9 @@ import { ActionError, type Ctx } from "@/lib/actions/core";
 import { loadOfferProducts, type ProductRef } from "@/lib/catalog/offer-products";
 import { randomToken } from "@/lib/crypto";
 import { customer, offer, orderItem, orders } from "@/lib/db/schema";
+import { enqueue } from "@/lib/jobs";
 import { splitCents } from "@/lib/money";
+import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
@@ -132,5 +134,19 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
   };
   await ctx.tx.insert(orderItem).values([...items("main", list.main, o.priceCents), ...(bump ? items("bump", bump.products, bump.priceCents) : [])]);
+  await enqueueTelegramNotices(ctx, order);
   return order;
+}
+
+/**
+ * Avisos do Telegram da loja na criação do pedido (mesma transação). "Pix gerado" vai sempre para a fila: o job confere
+ * no envio se o evento está ligado e se o pedido segue pendente. O abandono só é agendado (para criado + prazo) se a
+ * loja tem Telegram com o evento ligado agora; lê só a config pública, sem abrir o token.
+ */
+async function enqueueTelegramNotices(ctx: Ctx, order: Order): Promise<void> {
+  const notice = (event: "pix_generated" | "abandoned", runAt?: Date) =>
+    enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_telegram", payload: { event, orderId: order.id }, runAt });
+  if (order.method === "pix_asaas" || order.method === "pix_manual") await notice("pix_generated");
+  const tg = await telegramSettings(ctx.tx, ctx.storeId);
+  if (tg?.events.abandoned) await notice("abandoned", new Date(order.createdAt.getTime() + tg.abandonAfterMinutes * 60_000));
 }
