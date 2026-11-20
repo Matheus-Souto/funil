@@ -85,6 +85,11 @@ Na prática, o item 1 muda:
 - A cada pedido pago, um job envia ao chat uma mensagem com **só** oferta, valor e forma de pagamento. Não vão nome, e-mail, CPF nem telefone do comprador.
   - Exemplo: "Venda: Almanaque + 5 Kits — R$ 27,00 — Pix".
 - **Falha:** o job tenta de novo, como os outros. Uma falha definitiva, como token inválido ou chat inexistente, vira aviso no painel uma vez.
+- **Outros eventos (pedido do dono, 20/11):** além da venda aprovada, a loja pode receber "Pix gerado", "Cartão recusado" e "Carrinho abandonado".
+  - Uma caixa por evento no cartão do Telegram; só "Venda aprovada" vem ligada.
+  - **Abandono, nesta etapa:** pedido que continua sem pagamento depois de um prazo configurável (padrão 30 minutos), seja Pix gerado e não pago, seja cartão recusado sem nova tentativa aprovada. Não conta se o mesmo comprador já pagou outro pedido da mesma oferta depois.
+  - **Abandono antes de comprar** (capturar o contato quando a pessoa preenche o checkout, antes de clicar) fica para um PR seguinte, com aviso de privacidade.
+  - Nenhuma mensagem leva dado do comprador. As mensagens dos eventos novos levam o código do pedido, para a equipe abrir o pedido no painel.
 - **Rede:** o destino é fixo (`api.telegram.org`), então não há risco de SSRF por configuração.
 
 ### 4. MCP: ler e configurar tudo
@@ -169,7 +174,8 @@ Na prática, o item 1 muda:
    - reembolso revoga os links;
    - fica num PR separado, pela regra do repo.
 3. **Produto: Resend.** Envio pela API, Testar, webhook com assinatura, painel e escolha do provedor.
-4. **Produto: Telegram.**
+4. **Produto: Telegram.** Venda aprovada, Pix gerado, cartão recusado e abandono (pedido não pago no prazo), cada um ligável.
+   - **4b. Produto: abandono antes de comprar** (captura do contato no checkout, com aviso de privacidade), num PR seguinte.
 5. **Produto: MCP, primeira parte.**
    - tokens e papel leitor;
    - endpoint MCP;
@@ -192,7 +198,7 @@ Cada PR segue o processo do repo: spec e plano, implementação com code review 
 - **Upload por link:** cria um produto novo. Trocar o PDF de um produto existente fica fora.
 - **Provedor de e-mail:** SMTP ou Resend, um ativo por vez.
 - **Webhook do Resend:** só entregue, devolvido e spam, gravados no `email_log`.
-- **Telegram:** mensagem no formato do exemplo acima.
+- **Telegram:** mensagem no formato do exemplo acima; eventos novos com o código do pedido e sem dado do comprador; abandono com prazo padrão de 30 minutos.
 - **Tokens MCP:**
   - criados por quem tem `team.manage`;
   - gestão de tokens é ação sensível pelo MCP;
