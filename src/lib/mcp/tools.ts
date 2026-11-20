@@ -1,6 +1,6 @@
-// Catálogo de ferramentas MCP: cada ação registrada vira ferramenta, a menos que seja sensível (fila de aprovação no
-// PR 6), pública ou de sistema, de uma permissão que token nunca tem (TOKEN_DENIED) ou excluída com motivo.
-// Nesta versão o MCP é só de leitura: as escritas não sensíveis também ficam em MCP_EXCLUDED até o PR 6.
+// Catálogo de ferramentas MCP: cada ação registrada vira ferramenta, a menos que seja pública ou de sistema, de uma
+// permissão que token nunca tem (TOKEN_DENIED) ou excluída com motivo. Ação sensível vira ferramenta com aprovação:
+// chamá-la só cria um pedido pendente na fila (approvals.request) que alguém da loja aprova no painel.
 // Nenhum dado pessoal do comprador sai por aqui: as saídas com comprador passam por projeção de lista branca (monta o
 // objeto só com os campos permitidos, mascarados). Ação nova sem decisão faz tests/mcp-tools.test.ts falhar.
 import "@/lib/actions/all";
@@ -12,31 +12,20 @@ import type { metricsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
 import { cleanTouch, HIDDEN_LABEL, labelOrHidden, safeLabel } from "@/lib/orders/report";
 import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
-
-const SENDS_TO_CALLER_ADDRESS = "enviam a endereço escolhido por quem chama; revisão no PR 6";
-const AWAITS_APPROVAL_QUEUE = "aguarda a fila de aprovação (PR 6)";
+import { requestApproval } from "./approvals";
 
 /** Rótulo do papel do token como o painel de tokens mostra. */
 export const TOKEN_ROLE_LABEL: Record<Role, string> = { reader: "Leitor", traffic: "Tráfego", support: "Suporte", admin: "Admin", owner: "Dono" };
 
-/** Ações que não saem pelo MCP neste PR (nome → motivo). Públicas e de sistema ficam de fora pela permissão. */
+/** Ações que não saem pelo MCP (nome → motivo). Públicas e de sistema ficam de fora pela permissão. */
 export const MCP_EXCLUDED: Record<string, string> = {
   "orders.export": "CSV com dados do comprador",
-  "products.create": "upload por link no PR 6",
-  "connections.testSmtp": SENDS_TO_CALLER_ADDRESS,
-  "connections.testResend": SENDS_TO_CALLER_ADDRESS,
-  "connections.testTelegram": SENDS_TO_CALLER_ADDRESS,
-  "alerts.ack": "some com o aviso para toda a loja (inclusive o de segurança da página de pagamento); revisão no PR 6",
-  // Criar/alterar oferta contorna updatePrice/setProducts/setSlug (sensíveis): preço, ativa, métodos, texto ao comprador.
-  "offers.create": AWAITS_APPROVAL_QUEUE,
-  "offers.update": AWAITS_APPROVAL_QUEUE,
-  // Reenvia ao comprador sem limite por pedido e, com renew, gira os links de download.
-  "orders.resend": AWAITS_APPROVAL_QUEUE,
-  // MCP só de leitura nesta versão.
-  "products.update": AWAITS_APPROVAL_QUEUE,
-  "connections.testMeta": "chama a API do Meta e precisa de limite próprio (PR 6)",
+  "products.create": "recebe o arquivo; use products_createUploadLink",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
 };
+
+/** Prefixo da descrição das ferramentas que passam pela fila de aprovação. */
+export const APPROVAL_PREFIX = "[Exige aprovação no painel] ";
 
 export interface McpTool {
   /** Nome da ação com `.` trocado por `_` (cabe em `^[a-zA-Z0-9_-]{1,64}$`). */
@@ -45,6 +34,8 @@ export interface McpTool {
   description: string;
   inputSchema: object;
   permission: Permission;
+  /** Passa pela fila: a chamada só cria um pedido pendente, que alguém da loja aprova no painel. */
+  approval: boolean;
   /** Saída da ação → o que o agente recebe. `callMcpTool` usa sempre a do catálogo (pelo nome da ação), não esta. */
   project(out: unknown): unknown;
   /** Argumentos do agente → entrada da ação (ex.: descarta campos que o MCP não expõe). Idem: vale a do catálogo. */
@@ -207,10 +198,10 @@ const OVERRIDES: Record<string, Override> = {
   },
 };
 
-/** Permissão da ação se ela sai pelo MCP; nulo se não sai (sensível, pública, de sistema, negada a token ou excluída). */
+/** Permissão da ação se ela sai pelo MCP (direta ou pela fila); nulo se não sai (pública, de sistema, negada a token ou excluída). */
 function exposedPermission(action: Action<unknown, unknown>): Permission | null {
   const p = action.permission;
-  if (p === "public" || p === "system" || action.sensitive || TOKEN_DENIED.includes(p) || Object.hasOwn(MCP_EXCLUDED, action.name)) return null;
+  if (p === "public" || p === "system" || TOKEN_DENIED.includes(p) || Object.hasOwn(MCP_EXCLUDED, action.name)) return null;
   return p;
 }
 
@@ -233,9 +224,10 @@ function toTool(action: Action<unknown, unknown>, permission: Permission): McpTo
   return {
     name: toolName(action.name),
     action: action.name,
-    description: o.description ?? action.description,
+    description: (action.sensitive ? APPROVAL_PREFIX : "") + (o.description ?? action.description),
     inputSchema: toolInputSchema(action),
     permission,
+    approval: action.sensitive === true,
     project: o.project ?? identity,
     ...(o.input ? { input: o.input } : {}),
   };
@@ -244,27 +236,21 @@ function toTool(action: Action<unknown, unknown>, permission: Permission): McpTo
 const toolName = (action: string) => action.replaceAll(".", "_");
 
 /**
- * Texto do erro de ferramenta para um nome fora do catálogo do papel. O nome com `_` é procurado no registro: ação
- * sensível → aprovação; excluída → o motivo; exposta mas fora do papel → o papel; o resto (desconhecida, pública, de
- * sistema, negada a token) → indisponível.
+ * Texto do erro de ferramenta para um nome fora do catálogo do papel. O nome com `_` é procurado no registro: excluída
+ * → o motivo; exposta mas fora do papel → o papel; o resto (desconhecida, pública, de sistema, negada a token) →
+ * indisponível.
  */
 export function unavailableToolText(name: string, role: Role): string {
   const action = [...registry.values()].find((a) => toolName(a.name) === name);
   if (!action) return "forbidden: ferramenta indisponível";
-  if (action.sensitive) return `approval_required: ${action.name} exige aprovação; peça a quem administra a loja para fazer no painel`;
   if (Object.hasOwn(MCP_EXCLUDED, action.name)) return `indisponível pelo MCP: ${MCP_EXCLUDED[action.name]}`;
   if (exposedPermission(action) !== null) return `forbidden: o papel ${TOKEN_ROLE_LABEL[role]} não inclui esta ferramenta`;
   return "forbidden: ferramenta indisponível";
 }
 
-/** O que não está disponível pelo MCP (nomes de ferramenta): as ações sensíveis e as excluídas com o motivo. */
-export function unavailableTools(): { approval: string[]; excluded: { tool: string; reason: string }[] } {
-  const actions = [...registry.values()];
+/** O que está fora do MCP (nomes de ferramenta) com o motivo. */
+export function unavailableTools(): { excluded: { tool: string; reason: string }[] } {
   return {
-    approval: actions
-      .filter((a) => a.sensitive)
-      .map((a) => toolName(a.name))
-      .sort(),
     excluded: Object.entries(MCP_EXCLUDED)
       .map(([name, reason]) => ({ tool: toolName(name), reason }))
       .sort((a, b) => a.tool.localeCompare(b.tool)),
@@ -281,19 +267,24 @@ export function mcpTools(role: Role): McpTool[] {
   return tools.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** O que o agente recebe ao chamar uma ferramenta com aprovação: nunca os argumentos enviados. */
+const PENDING_MESSAGE = "Pedido enviado para aprovação no painel da loja. Consulte com approvals_status.";
+
 /**
  * Executa a ferramenta como o token (`runAction` decide permissão e auditoria) e aplica a projeção na saída.
  * Entrada e projeção vêm do catálogo pelo nome da ação, nunca do objeto recebido: ferramenta forjada (ação fora do
- * catálogo, `project` identidade, sem `input`) não muda o que sai.
+ * catálogo, `project` identidade, sem `input`) não muda o que sai. Ação sensível nunca roda aqui: vira um pedido na
+ * fila (approvals.request) e a resposta traz só o estado do pedido.
  */
 export async function callMcpTool(tool: McpTool, call: { storeId: string; tokenId: string; role: Role }, args: unknown): Promise<unknown> {
   const action = registry.get(tool.action);
   if (!action || exposedPermission(action) === null) throw new ActionError("forbidden", `Ferramenta indisponível: ${tool.name}`);
   const o = OVERRIDES[action.name] ?? {};
-  const out = await runAction(
-    action,
-    { storeId: call.storeId, actor: { kind: "token", tokenId: call.tokenId, role: call.role }, origin: "mcp" },
-    o.input ? o.input(args) : args,
-  );
-  return (o.project ?? identity)(out);
+  const ctx = { storeId: call.storeId, actor: { kind: "token", tokenId: call.tokenId, role: call.role }, origin: "mcp" } as const;
+  const input = o.input ? o.input(args) : args;
+  if (action.sensitive) {
+    const r = await runAction(requestApproval, ctx, { action: action.name, args: input });
+    return { status: r.status, requestId: r.requestId, expiresAt: r.expiresAt, message: PENDING_MESSAGE };
+  }
+  return (o.project ?? identity)(await runAction(action, ctx, input));
 }
