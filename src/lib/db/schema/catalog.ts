@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, index, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, index, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { store } from "./core";
 
 // Com RLS (enable_store_rls na migration).
@@ -16,7 +16,9 @@ export const product = pgTable("product", {
   fileSha256: text("file_sha256"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
-});
+},
+// Alvo das FKs compostas (store_id, product_id) de offer_product: amarra a linha à loja do produto.
+(t) => [unique("product_store_id_id_unique").on(t.storeId, t.id)]);
 
 // Com RLS (enable_store_rls na migration). Dinheiro em centavos inteiros.
 export const offer = pgTable(
@@ -45,6 +47,7 @@ export const offer = pgTable(
   },
   (t) => [
     unique("offer_store_slug_unique").on(t.storeId, t.slug),
+    unique("offer_store_id_id_unique").on(t.storeId, t.id), // alvo da FK composta de offer_product
     check("offer_price_check", sql`${t.priceCents} > 0`),
     check("offer_methods_check", sql`cardinality(${t.methods}) > 0 and ${t.methods} <@ array['pix','card']::text[]`),
     check("offer_pix_mode_check", sql`${t.pixMode} in ('manual','asaas')`),
@@ -67,16 +70,15 @@ export const offerProduct = pgTable(
     storeId: uuid("store_id")
       .notNull()
       .references(() => store.id, { onDelete: "cascade" }),
-    offerId: uuid("offer_id")
-      .notNull()
-      .references(() => offer.id, { onDelete: "cascade" }),
-    productId: uuid("product_id")
-      .notNull()
-      .references(() => product.id),
+    offerId: uuid("offer_id").notNull(),
+    productId: uuid("product_id").notNull(),
     kind: text("kind").notNull(),
     position: integer("position").notNull(),
   },
   (t) => [
+    // FKs compostas: a oferta e o produto precisam ser da mesma loja da linha (o RLS só confere o store_id da linha).
+    foreignKey({ columns: [t.storeId, t.offerId], foreignColumns: [offer.storeId, offer.id], name: "offer_product_offer_fk" }).onDelete("cascade"),
+    foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [product.storeId, product.id], name: "offer_product_product_fk" }),
     unique("offer_product_offer_product_unique").on(t.offerId, t.productId),
     index("offer_product_offer_kind_position_idx").on(t.offerId, t.kind, t.position),
     check("offer_product_kind_check", sql`${t.kind} in ('main','bump')`),

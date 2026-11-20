@@ -11,10 +11,13 @@ CREATE TABLE "offer_product" (
 );
 --> statement-breakpoint
 ALTER TABLE "order_item" ADD COLUMN "position" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "offer" ADD CONSTRAINT "offer_store_id_id_unique" UNIQUE("store_id","id");--> statement-breakpoint
+ALTER TABLE "product" ADD CONSTRAINT "product_store_id_id_unique" UNIQUE("store_id","id");--> statement-breakpoint
 ALTER TABLE "offer_product" ADD CONSTRAINT "offer_product_store_id_store_id_fk" FOREIGN KEY ("store_id") REFERENCES "public"."store"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "offer_product" ADD CONSTRAINT "offer_product_offer_id_offer_id_fk" FOREIGN KEY ("offer_id") REFERENCES "public"."offer"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "offer_product" ADD CONSTRAINT "offer_product_product_id_product_id_fk" FOREIGN KEY ("product_id") REFERENCES "public"."product"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "offer_product_offer_kind_position_idx" ON "offer_product" USING btree ("offer_id","kind","position");--> statement-breakpoint
+ALTER TABLE "offer_product" ADD CONSTRAINT "offer_product_offer_fk" FOREIGN KEY ("store_id","offer_id") REFERENCES "public"."offer"("store_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "offer_product" ADD CONSTRAINT "offer_product_product_fk" FOREIGN KEY ("store_id","product_id") REFERENCES "public"."product"("store_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "offer_product_offer_kind_position_idx" ON "offer_product" USING btree ("offer_id","kind","position");
+--> statement-breakpoint
 -- Backfill (escrito à mão): cada oferta vende o produto principal e, se tiver, o do bump (posição 0 nos dois grupos).
 -- Roda antes do enable_store_rls para não depender de o papel dono ignorar o RLS. As colunas offer.product_id e
 -- offer.bump_product_id continuam existindo (saem numa migration posterior).

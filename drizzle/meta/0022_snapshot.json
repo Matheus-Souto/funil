@@ -1,5 +1,5 @@
 {
-  "id": "6fa146d5-17c0-4ab0-a172-06fc5ca8e6ef",
+  "id": "c6753c93-ac02-4d43-a77f-da14542b26a2",
   "prevId": "ecefa772-a38e-4120-b3ad-170316ff2bc4",
   "version": "7",
   "dialect": "postgresql",
@@ -566,6 +566,14 @@
             "store_id",
             "slug"
           ]
+        },
+        "offer_store_id_id_unique": {
+          "name": "offer_store_id_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "store_id",
+            "id"
+          ]
         }
       },
       "policies": {},
@@ -678,27 +686,31 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "offer_product_offer_id_offer_id_fk": {
-          "name": "offer_product_offer_id_offer_id_fk",
+        "offer_product_offer_fk": {
+          "name": "offer_product_offer_fk",
           "tableFrom": "offer_product",
           "tableTo": "offer",
           "columnsFrom": [
+            "store_id",
             "offer_id"
           ],
           "columnsTo": [
+            "store_id",
             "id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "offer_product_product_id_product_id_fk": {
-          "name": "offer_product_product_id_product_id_fk",
+        "offer_product_product_fk": {
+          "name": "offer_product_product_fk",
           "tableFrom": "offer_product",
           "tableTo": "product",
           "columnsFrom": [
+            "store_id",
             "product_id"
           ],
           "columnsTo": [
+            "store_id",
             "id"
           ],
           "onDelete": "no action",
@@ -807,7 +819,16 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "product_store_id_id_unique": {
+          "name": "product_store_id_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "store_id",
+            "id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { withStore } from "@/lib/db/client";
-import { offer, offerProduct, orderItem, orders } from "@/lib/db/schema";
+import { offer, offerProduct, orderItem } from "@/lib/db/schema";
 import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -18,6 +18,17 @@ afterAll(async () => {
 
 const migration = readFileSync(join(import.meta.dir, "../drizzle/0022_offer_products.sql"), "utf8");
 const backfill = migration.split("--> statement-breakpoint").filter((s) => /insert\s+into\s+"?offer_product"?/i.test(s));
+
+/** Código SQLSTATE e constraint do erro do Postgres (o drizzle o embrulha em `cause`). */
+async function pgError(run: () => PromiseLike<unknown>): Promise<{ code?: string; constraint?: string }> {
+  try {
+    await run();
+  } catch (e) {
+    const err = ((e as { cause?: unknown }).cause ?? e) as { code?: string; constraint_name?: string };
+    return { code: err.code, constraint: err.constraint_name };
+  }
+  throw new Error("esperava erro do Postgres, mas a operação passou");
+}
 
 const newOffer = (storeId: string, slug: string, productId: string, bump?: string) => ({
   storeId,
@@ -60,27 +71,39 @@ test("backfill: oferta com bump vira main+bump (posição 0); sem bump vira só 
   expect(await withStore(a.storeId, (tx) => tx.select().from(offerProduct))).toHaveLength(3);
   const seenByB = await withStore(b.storeId, (tx) => tx.select().from(offerProduct));
   expect(seenByB.map((r) => r.offerId)).toEqual([other!.id]);
-  // e a loja B não grava na A.
-  await expect(withStore(b.storeId, (tx) => tx.insert(offerProduct).values({ storeId: a.storeId, offerId: withBump!.id, productId: p3.id, kind: "main", position: 1 }))).rejects.toThrow();
+  // e a loja B não grava na A (RLS: with check, 42501).
+  const rls = await pgError(() => withStore(b.storeId, (tx) => tx.insert(offerProduct).values({ storeId: a.storeId, offerId: withBump!.id, productId: p3.id, kind: "main", position: 1 })));
+  expect(rls.code).toBe("42501");
 });
 
-test("restrições: produto repetido na oferta, kind e posição inválidos; cascade ao apagar a oferta", async () => {
+test("restrições: produto repetido, kind e posição inválidos (causa conferida); cascade ao apagar a oferta", async () => {
   const a = await seedStore("A");
   const p = await seedProduct(a.storeId);
   const [o] = await t.ownerDb.insert(offer).values(newOffer(a.storeId, "r", p.id)).returning({ id: offer.id });
   const row = { storeId: a.storeId, offerId: o!.id, productId: p.id, kind: "main", position: 0 };
   await t.ownerDb.insert(offerProduct).values(row);
-  await expect((async () => t.ownerDb.insert(offerProduct).values({ ...row, kind: "bump", position: 1 }))()).rejects.toThrow();
   const q = await seedProduct(a.storeId, "Q");
-  await expect((async () => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, kind: "x" }))()).rejects.toThrow();
-  await expect((async () => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, position: -1 }))()).rejects.toThrow();
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, kind: "bump", position: 1 }))).toEqual({ code: "23505", constraint: "offer_product_offer_product_unique" });
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, kind: "x" }))).toEqual({ code: "23514", constraint: "offer_product_kind_check" });
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, position: -1 }))).toEqual({ code: "23514", constraint: "offer_product_position_check" });
   await t.ownerDb.delete(offer).where(sql`id = ${o!.id}`);
   expect(await t.ownerDb.select().from(offerProduct).where(sql`offer_id = ${o!.id}`)).toHaveLength(0);
+});
+
+test("FK composta: linha da loja A não aponta para oferta nem produto da loja B (papel dono, que ignora o RLS)", async () => {
+  const a = await seedStore("A");
+  const b = await seedStore("B");
+  const pa = await seedProduct(a.storeId, "PA");
+  const pb = await seedProduct(b.storeId, "PB");
+  const [oa, ob] = await t.ownerDb.insert(offer).values([newOffer(a.storeId, "fa", pa.id), newOffer(b.storeId, "fb", pb.id)]).returning({ id: offer.id });
+  const base = { storeId: a.storeId, offerId: oa!.id, productId: pa.id, kind: "main", position: 0 };
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...base, productId: pb.id }))).toEqual({ code: "23503", constraint: "offer_product_product_fk" });
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...base, offerId: ob!.id }))).toEqual({ code: "23503", constraint: "offer_product_offer_fk" });
+  await t.ownerDb.insert(offerProduct).values(base); // a combinação da mesma loja passa
 });
 
 test("order_item.position: pedidos sem posição ficam em 0", async () => {
   const col = await t.ownerDb.execute(sql`select column_default, is_nullable from information_schema.columns where table_name = 'order_item' and column_name = 'position'`);
   expect(col[0]).toMatchObject({ column_default: "0", is_nullable: "NO" });
   expect(orderItem.position.default).toBe(0);
-  void orders;
 });
