@@ -86,17 +86,19 @@ describe("papel card: atributos e o que fica de fora", () => {
     }
   });
 
-  test("conexões: só a asaas da loja aparece (smtp e meta não); sem loja fixada, nenhuma", async () => {
+  test("conexões: só a asaas da loja aparece (smtp, meta e resend não); sem loja fixada, nenhuma", async () => {
     const { storeId } = await seedStore("Conexões");
     await t.ownerDb.insert(integration).values([
       { storeId, kind: "asaas", config: { env: "sandbox" }, secret: "a1.selado" },
       { storeId, kind: "smtp", config: { host: "smtp.example.com" }, secret: "v1.senha-smtp" },
       { storeId, kind: "meta", config: {}, secret: "v1.token-meta" },
+      { storeId, kind: "resend", config: {}, secret: "v1.chave-resend" },
     ]);
     const kinds = await asCardIn(storeId, (tx) => tx`select kind from integration order by kind`);
     expect(kinds.map((r) => r.kind)).toEqual(["asaas"]);
     // Nem pedindo a smtp explicitamente.
     expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'smtp'`)).toHaveLength(0);
+    expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'resend'`)).toHaveLength(0);
     expect(await card`select kind from integration`).toHaveLength(0);
   });
 

@@ -8,6 +8,7 @@ import { withStore } from "@/lib/db/client";
 import { auditLog, downloadLink, downloadToken, emailLog, integration, job, orders, product, store } from "@/lib/db/schema";
 import { handleDownloadHead, handleDownloadPage, handleDownloadPost } from "@/lib/delivery/download";
 import { createSweepWatermarksHandler, resendOrder } from "@/lib/delivery/jobs";
+import { RESEND_ERRORS, saveResend, setEmailProvider, setResendFetchForTests } from "@/lib/delivery/resend";
 import {
   SMTP_GENERIC_ERROR,
   saveSmtp,
@@ -35,6 +36,7 @@ beforeAll(async () => {
   t = await createTestDb();
 });
 afterAll(async () => {
+  setResendFetchForTests();
   setMailTransportForTests();
   setSmtpNetworkForTests();
   await t.drop();
@@ -66,6 +68,7 @@ const fakeTransport = () =>
   });
 fakeTransport();
 afterEach(() => {
+  setResendFetchForTests();
   outbox = [];
   sendError = null;
   verifyError = null;
@@ -999,4 +1002,110 @@ describe("oferta com N produtos: entrega", () => {
     expect(links.every((l) => l.revokedAt instanceof Date)).toBe(true);
     for (const tk of tokens) expect((await download(shop, tk)).status).toBe(410);
   }, HEAVY_TEST_MS);
+});
+
+describe("envio pelo Resend", () => {
+  const API_KEY = "re_AbCdEfGh_1234";
+  let resendCalls: { headers: Record<string, string>; body: { to: string[]; subject: string } }[] = [];
+  let resendStatus = 200;
+  const fakeResend = () => {
+    resendCalls = [];
+    resendStatus = 200;
+    setResendFetchForTests((async (_url: string | URL | Request, init?: RequestInit) => {
+      resendCalls.push({ headers: init!.headers as Record<string, string>, body: JSON.parse(String(init!.body)) });
+      return resendStatus === 200
+        ? new Response(JSON.stringify({ id: `msg_${resendCalls.length}` }), { status: 200 })
+        : new Response(JSON.stringify({ message: `chave ${API_KEY} inválida` }), { status: resendStatus });
+    }) as typeof fetch);
+  };
+  const useResend = async (storeId: string) => {
+    await runAction(saveResend, panel(storeId), { fromEmail: "vendas@loja.com", apiKey: API_KEY });
+    await runAction(setEmailProvider, panel(storeId), { provider: "resend" });
+  };
+  const logsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(emailLog).orderBy(emailLog.at));
+  const sellerJob = (storeId: string, payload: unknown) => ({ id: crypto.randomUUID(), storeId, type: "notify_seller", payload }) as Job;
+
+  test("com Resend ativo: envia pela API com Idempotency-Key = id do job e grava provider e message id; nada no SMTP", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    const o = await paidOrder(shop, { bump: true });
+    const [j] = await jobsOf(o.id, "deliver_order");
+    await getHandlers().deliver_order!(j!, new AbortController().signal);
+    expect(resendCalls).toHaveLength(1);
+    expect(resendCalls[0]!.headers["Idempotency-Key"]).toMatch(new RegExp(`^${j!.id}:[0-9a-f]{64}$`));
+    expect(resendCalls[0]!.body.to).toEqual(["maria@exemplo.com"]);
+    expect(outbox).toHaveLength(0);
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.provider, l.providerMessageId, l.jobId])).toEqual([["sent", "resend", "msg_1", j!.id]]);
+  }, HEAVY_TEST_MS);
+
+  test("com SMTP ativo (padrão), nada muda: provider smtp e message id nulo", async () => {
+    const shop = await seedShop();
+    fakeResend();
+    const o = await paidOrder(shop);
+    await runJobs(o.id, "deliver_order");
+    expect(resendCalls).toHaveLength(0);
+    expect(lastMailTo("maria@exemplo.com")).toBeDefined();
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.provider, l.providerMessageId])).toEqual([["sent", "smtp", null]]);
+  }, HEAVY_TEST_MS);
+
+  test("Resend recusando (401): email_log failed com a mensagem fixa e sem a chave; o job lança", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    resendStatus = 401;
+    const o = await paidOrder(shop);
+    const [j] = await jobsOf(o.id, "deliver_order");
+    await expect(getHandlers().deliver_order!(j!, new AbortController().signal)).rejects.toMatchObject({ code: "provider_error", message: RESEND_ERRORS.key });
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.provider, l.providerMessageId, l.error])).toEqual([["failed", "resend", null, RESEND_ERRORS.key]]);
+    expect(JSON.stringify(logs)).not.toContain(API_KEY);
+  }, HEAVY_TEST_MS);
+
+  test("Resend ativo com segredo ilegível: provider_error 'E-mail não configurado' e email_log failed; sem cair no SMTP", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    await t.ownerDb.update(integration).set({ secret: "v1.lixo" }).where(and(eq(integration.storeId, shop.storeId), eq(integration.kind, "resend")));
+    const o = await paidOrder(shop);
+    const [j] = await jobsOf(o.id, "deliver_order");
+    await expect(getHandlers().deliver_order!(j!, new AbortController().signal)).rejects.toMatchObject({ code: "provider_error", message: "E-mail não configurado" });
+    expect(resendCalls).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.provider, l.error])).toEqual([["failed", "resend", "E-mail não configurado"]]);
+  }, HEAVY_TEST_MS);
+
+  test("nova execução do mesmo job (1ª tentativa 503, 2ª ok): links novos mudam o corpo, então a chave muda; grava sent com o id", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    resendStatus = 503;
+    const o = await paidOrder(shop);
+    const [j] = await jobsOf(o.id, "deliver_order");
+    await expect(getHandlers().deliver_order!(j!, new AbortController().signal)).rejects.toMatchObject({ message: RESEND_ERRORS.unreachable });
+    resendStatus = 200;
+    await getHandlers().deliver_order!(j!, new AbortController().signal);
+    expect(resendCalls).toHaveLength(2);
+    const [k1, k2] = resendCalls.map((c) => c.headers["Idempotency-Key"]!);
+    for (const k of [k1!, k2!]) expect(k).toMatch(new RegExp(`^${j!.id}:[0-9a-f]{64}$`));
+    expect(k1).not.toBe(k2);
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.providerMessageId])).toEqual([["failed", null], ["sent", "msg_2"]]);
+  }, HEAVY_TEST_MS);
+
+  test("notify_seller pelo Resend grava provider e id", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    const j = sellerJob(shop.storeId, { reason: "chave_asaas_invalida", httpStatus: 401 });
+    await getHandlers().notify_seller!(j, new AbortController().signal);
+    expect(resendCalls).toHaveLength(1);
+    expect(resendCalls[0]!.headers["Idempotency-Key"]).toMatch(new RegExp(`^${j.id}:[0-9a-f]{64}$`));
+    expect(resendCalls[0]!.body.to).toEqual(["dono@loja.com"]);
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "seller_notice");
+    expect(logs.map((l) => [l.status, l.provider, l.providerMessageId])).toEqual([["sent", "resend", "msg_1"]]);
+  });
 });

@@ -209,6 +209,20 @@ Os PDFs vão por e-mail, pelo SMTP da loja: **Conexões → E-mail (SMTP)**. O p
 O remetente precisa ser um endereço que o serviço aceite (no Gmail, o próprio e-mail; no Brevo, um remetente ou
 domínio verificado). Para cair menos no spam, configure SPF e DKIM do domínio do remetente conforme o serviço.
 
+### E-mail pelo Resend
+
+Em vez do SMTP, a loja pode enviar pelo Resend. A plataforma não fornece Resend: cada loja usa a própria conta
+(**Conexões → E-mail (Resend)**).
+
+1. **Chave de API:** no Resend, API Keys → Create API Key (só permissão de envio basta). Cole em `Chave de API`.
+2. **Domínio do remetente:** verifique o domínio em Domains no Resend e use um remetente desse domínio.
+3. **Webhook (entrega e devolução):** em Webhooks no Resend, crie um webhook com os eventos `email.delivered`,
+   `email.bounced` e `email.complained`, apontando para a URL mostrada no cartão do painel. Copie o segredo
+   (`whsec_…`) e cole em `Segredo do webhook`.
+4. **Usar este provedor:** com o SMTP já conectado, salvar o Resend não troca o envio (numa loja sem SMTP, o Resend
+   já fica ativo ao salvar). O botão **Usar este provedor** (no cartão do Resend ou do SMTP) passa os e-mails de acesso
+   e os avisos de venda a sair pelo provedor escolhido: só um provedor fica ativo; o outro deixa de ser usado.
+
 ## 8. Meta (Pixel e API de Conversões)
 
 No painel: **Conexões → Meta**.

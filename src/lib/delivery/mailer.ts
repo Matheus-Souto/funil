@@ -13,12 +13,13 @@ import { eq } from "drizzle-orm";
 import nodemailer from "nodemailer";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
-import { emailLog, store } from "@/lib/db/schema";
+import { store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
-import { log, safeErrorMessage } from "@/lib/log";
+import { log } from "@/lib/log";
+import { NOT_CONFIGURED, logEmail } from "./email-log";
+import { EMAIL, loadResend, sendViaResend } from "./resend";
 import { oneLine } from "./templates";
 
 export interface SmtpSettings {
@@ -69,8 +70,6 @@ let factory: TransportFactory = defaultFactory;
 export function setMailTransportForTests(f?: TransportFactory): void {
   factory = f ?? defaultFactory;
 }
-
-const NOT_CONFIGURED = "E-mail não configurado";
 
 // ---- Rede permitida (SSRF) -------------------------------------------------------------------------------------
 
@@ -173,6 +172,8 @@ export async function loadSmtp(tx: Tx, storeId: string): Promise<SmtpSettings | 
 
 const header = (s: string, max: number) => oneLine(s).trim().slice(0, max);
 
+export { logEmail, type EmailKind } from "./email-log";
+
 export interface MailMessage {
   to: string;
   subject: string;
@@ -211,36 +212,38 @@ async function deliver(s: SmtpSettings, storeName: string, msg: MailMessage, sig
   }
 }
 
+export type EmailProvider = "smtp" | "resend";
+
 /**
- * Envia um e-mail pela conexão SMTP da loja. Sem conexão: `provider_error("E-mail não configurado")`.
- * Não chamar dentro de transação (lê a conexão numa transação própria e só depois fala com o servidor).
+ * Envia um e-mail pelo provedor ativo da loja (`store.email_provider`: SMTP ou Resend; nunca cai para o outro). Sem conexão
+ * do provedor ativo (ou com o segredo ilegível): `provider_error("E-mail não configurado")`. O SMTP devolve
+ * `messageId: null`; `idempotencyKey` só vale para o Resend. `onProvider` avisa qual provedor é o ativo assim que se sabe
+ * (para o log de falha). Não chamar dentro de transação: lê tudo numa transação curta e só depois fala com a rede.
  */
-export async function sendMail(storeId: string, msg: MailMessage, opts: { signal?: AbortSignal } = {}): Promise<void> {
-  const { smtp, storeName } = await withStore(storeId, async (tx) => {
-    const [s] = await tx.select({ name: store.name }).from(store).where(eq(store.id, storeId));
-    return { smtp: await loadSmtp(tx, storeId), storeName: s?.name ?? "" };
+export async function sendMail(
+  storeId: string,
+  msg: MailMessage,
+  opts: { signal?: AbortSignal; idempotencyKey?: string; onProvider?: (p: EmailProvider) => void } = {},
+): Promise<{ provider: EmailProvider; messageId: string | null }> {
+  const cfg = await withStore(storeId, async (tx) => {
+    const [s] = await tx.select({ name: store.name, provider: store.emailProvider }).from(store).where(eq(store.id, storeId));
+    const provider: EmailProvider = s?.provider === "resend" ? "resend" : "smtp";
+    return {
+      provider,
+      storeName: s?.name ?? "",
+      smtp: provider === "smtp" ? await loadSmtp(tx, storeId) : null,
+      resend: provider === "resend" ? await loadResend(tx, storeId) : null,
+    };
   });
-  if (!smtp) throw new ActionError("provider_error", NOT_CONFIGURED);
-  await deliver(await pinSmtpTarget(smtp, storeId), storeName, msg, opts.signal);
-}
-
-export type EmailKind = "delivery" | "seller_notice" | "test";
-
-/** Registra um envio (destinatário só como sha256). Erro com no máximo 500 caracteres e sem dados de cartão. */
-export async function logEmail(
-  tx: Tx,
-  row: { storeId: string; orderId?: string | null; jobId?: string | null; to: string; kind: EmailKind; status: "sent" | "failed"; error?: unknown },
-): Promise<void> {
-  const error = row.error === undefined ? null : safeErrorMessage(row.error).slice(0, 500);
-  await tx.insert(emailLog).values({
-    storeId: row.storeId,
-    orderId: row.orderId ?? null,
-    jobId: row.jobId ?? null,
-    toHash: sha256(row.to.trim().toLowerCase()),
-    kind: row.kind,
-    status: row.status,
-    error,
-  });
+  opts.onProvider?.(cfg.provider);
+  if (cfg.provider === "resend") {
+    if (!cfg.resend) throw new ActionError("provider_error", NOT_CONFIGURED);
+    const { id } = await sendViaResend(cfg.resend, cfg.storeName, msg, { signal: opts.signal, idempotencyKey: opts.idempotencyKey });
+    return { provider: "resend", messageId: id };
+  }
+  if (!cfg.smtp) throw new ActionError("provider_error", NOT_CONFIGURED);
+  await deliver(await pinSmtpTarget(cfg.smtp, storeId), cfg.storeName, msg, opts.signal);
+  return { provider: "smtp", messageId: null };
 }
 
 /** Mensagem para o dono a partir do erro do nodemailer (sem ecoar a resposta do servidor inteira). */
@@ -254,8 +257,6 @@ function smtpProblem(e: unknown, s: SmtpSettings): string {
   }
   return "O servidor SMTP não aceitou a conexão. Confira os dados e tente de novo.";
 }
-
-const EMAIL = z.string().trim().toLowerCase().max(254).pipe(z.email());
 
 const smtpInput = z.object({
   host: z
@@ -340,7 +341,7 @@ export const testSmtp = defineAction({
     }
   },
   async run(ctx, { to }) {
-    await logEmail(ctx.tx, { storeId: ctx.storeId, to, kind: "test", status: "sent" });
+    await logEmail(ctx.tx, { storeId: ctx.storeId, to, kind: "test", status: "sent", provider: "smtp" });
     return { sent: true };
   },
 });

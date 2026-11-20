@@ -7,11 +7,21 @@ import { Badge } from "../../blocks";
 import { PIcon, type PanelIconName } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyField, Dialog, Live, SecretField, useActionRunner } from "../../ui";
-import { saveAsaasAction, saveMetaAction, savePixManualAction, saveSmtpAction, testMetaAction, testSmtpAction } from "../actions";
+import {
+  saveAsaasAction,
+  saveMetaAction,
+  savePixManualAction,
+  saveResendAction,
+  saveSmtpAction,
+  setEmailProviderAction,
+  testMetaAction,
+  testResendAction,
+  testSmtpAction,
+} from "../actions";
 
 type Runner = ReturnType<typeof useActionRunner>;
 
-function Head({ icon, title, sub, on, onLabel }: { icon: PanelIconName; title: string; sub: string; on: boolean; onLabel?: string }) {
+function Head({ icon, title, sub, on, onLabel, warn = false }: { icon: PanelIconName; title: string; sub: string; on: boolean; onLabel?: string; warn?: boolean }) {
   return (
     <div className={s.connHead}>
       <span className={s.connIcon}>
@@ -21,7 +31,7 @@ function Head({ icon, title, sub, on, onLabel }: { icon: PanelIconName; title: s
         <h2>{title}</h2>
         <p>{sub}</p>
       </div>
-      <Badge tone={on ? "success" : "neutral"}>{on ? (onLabel ?? "Conectado") : "Não conectado"}</Badge>
+      <Badge tone={on ? (warn ? "warning" : "success") : "neutral"}>{on ? (onLabel ?? "Conectado") : "Não conectado"}</Badge>
     </div>
   );
 }
@@ -43,7 +53,7 @@ const Configured = () => (
 );
 
 /** Diálogo de confirmação comum a todo "Salvar" de conexão. */
-function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "Salvar" }: { open: boolean; onClose: () => void; title: string; children: ReactNode; run: Runner; onConfirm: () => void; label?: string }) {
+function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "Salvar", pendingLabel = "Testando e salvando…" }: { open: boolean; onClose: () => void; title: string; children: ReactNode; run: Runner; onConfirm: () => void; label?: string; pendingLabel?: string }) {
   return (
     <Dialog
       open={open}
@@ -56,7 +66,7 @@ function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "
             Cancelar
           </button>
           <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={onConfirm} disabled={run.pending}>
-            {run.pending ? "Testando e salvando…" : label}
+            {run.pending ? pendingLabel : label}
           </button>
         </>
       }
@@ -64,6 +74,44 @@ function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "
       {children}
       {run.msg?.tone === "error" ? <Live msg={run.msg} /> : null}
     </Dialog>
+  );
+}
+
+type EmailProvider = "smtp" | "resend";
+const PROVIDER_LABEL: Record<EmailProvider, string> = { smtp: "SMTP", resend: "Resend" };
+
+/** Selo do cartão de e-mail: o ativo só fica verde quando consegue enviar; ativo inutilizável vira aviso. */
+const providerBadge = (active: boolean, usable: boolean) =>
+  active ? (usable ? { onLabel: "Ativo" } : { onLabel: "Ativo, com problema", warn: true }) : { onLabel: "Conectado" };
+
+/** Troca o provedor de e-mail ativo da loja. Só aparece para quem pode alterar conexões, com o provedor já configurado e ainda inativo. */
+function UseProvider({ provider }: { provider: EmailProvider }) {
+  const [confirm, setConfirm] = useState(false);
+  const run = useActionRunner();
+  const label = PROVIDER_LABEL[provider];
+  return (
+    <>
+      <button type="button" className={s.btn} onClick={() => setConfirm(true)}>
+        Usar este provedor
+      </button>
+      <div style={{ width: "100%" }}>
+        <Live msg={confirm ? null : run.msg} />
+      </div>
+      <ConfirmSave
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        title={`Enviar e-mails pelo ${label}?`}
+        run={run}
+        label="Usar este provedor"
+        pendingLabel="Trocando…"
+        onConfirm={async () => {
+          const r = await run.run(() => setEmailProviderAction(provider));
+          if (r.ok) setConfirm(false);
+        }}
+      >
+        <p>Os e-mails de acesso e os avisos de venda passam a sair pelo {label}.</p>
+      </ConfirmSave>
+    </>
   );
 }
 
@@ -339,10 +387,15 @@ export function SmtpCard({
   data,
   canWrite,
   defaultTo,
+  active,
+  usable,
 }: {
   data: { host: string; port: number; secure: boolean; user: string | null; from: string; password: "configured" | null } | null;
   canWrite: boolean;
   defaultTo: string;
+  active: boolean;
+  /** O provedor ativo consegue enviar (`connectionsStatus.emailUsable`). */
+  usable: boolean;
 }) {
   const [editing, setEditing] = useState(!data);
   const [f, setF] = useState({ host: data?.host ?? "", port: String(data?.port ?? 587), secure: data?.secure ?? false, user: data?.user ?? "", password: "", from: data?.from ?? "" });
@@ -352,7 +405,7 @@ export function SmtpCard({
   const test = useActionRunner();
   return (
     <section className={s.card} aria-label="E-mail (SMTP)" id="smtp">
-      <Head icon="mail" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" on={Boolean(data)} />
+      <Head icon="mail" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" on={Boolean(data)} {...providerBadge(active, usable)} />
       {editing && canWrite ? (
         <form
           className={s.stack}
@@ -445,6 +498,7 @@ export function SmtpCard({
               Editar
             </button>
           ) : null}
+          {active ? null : <UseProvider provider="smtp" />}
           <div style={{ width: "100%" }}>
             <Live msg={test.msg} />
           </div>
@@ -476,6 +530,193 @@ export function SmtpCard({
       >
         <p>
           Os e-mails de acesso e os avisos de venda passam a sair por <b>{f.host}</b> com o remetente <b>{f.from}</b>. A conexão é testada antes de salvar.
+        </p>
+      </ConfirmSave>
+    </section>
+  );
+}
+
+// ---- Resend -----------------------------------------------------------------------------------------------------
+
+type ResendData = {
+  fromEmail: string;
+  fromName: string | null;
+  /** `configured` para quem não tem connections.write (os finais só vão para quem pode alterar a conexão). */
+  apiKey: { last4: string } | "configured" | "unreadable" | null;
+  webhookSecret: { last4: string } | "configured" | null;
+  webhookUrl: string;
+};
+
+const RESEND_EVENTS = "email.delivered, email.bounced e email.complained";
+const last4Of = (v: { last4: string } | "configured" | "unreadable" | null | undefined) => (typeof v === "object" && v !== null ? v.last4 : null);
+
+/** Cada loja usa a própria conta do Resend. Chave e segredo do webhook nunca voltam do servidor: só os 4 últimos caracteres. */
+export function ResendCard({
+  data,
+  canWrite,
+  defaultTo,
+  storeName,
+  active,
+  usable,
+}: {
+  data: ResendData | null;
+  canWrite: boolean;
+  defaultTo: string;
+  storeName: string;
+  active: boolean;
+  /** O provedor ativo consegue enviar (`connectionsStatus.emailUsable`). */
+  usable: boolean;
+}) {
+  const [editing, setEditing] = useState(!data);
+  const [f, setF] = useState({ fromEmail: data?.fromEmail ?? "", fromName: data?.fromName ?? "", apiKey: "", webhookSecret: "" });
+  const [to, setTo] = useState(defaultTo);
+  const [confirm, setConfirm] = useState(false);
+  const run = useActionRunner();
+  const test = useActionRunner();
+  const keyLast4 = last4Of(data?.apiKey);
+  const needsKey = !data || data.apiKey === null || data.apiKey === "unreadable";
+  const keep = (last4: string | null) => (last4 ? `configurado (final ${last4}): deixe em branco para manter` : "");
+  return (
+    <section className={s.card} aria-label="E-mail (Resend)" id="resend">
+      <Head icon="mail" title="E-mail (Resend)" sub="Envia o acesso ao comprador e o aviso de venda pela sua conta do Resend" on={Boolean(data)} {...providerBadge(active, usable)} />
+      {editing && canWrite ? (
+        <form
+          className={s.stack}
+          style={{ marginTop: 16 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            setConfirm(true);
+          }}
+        >
+          <div className={s.grid2}>
+            <label className={s.field}>
+              <span className={s.label}>Remetente (e-mail)</span>
+              <input className={s.input} type="email" value={f.fromEmail} required onChange={(e) => setF({ ...f, fromEmail: e.target.value })} placeholder="vendas@seudominio.com.br" />
+            </label>
+            <label className={s.field}>
+              <span className={s.label}>Nome do remetente (opcional)</span>
+              <input className={s.input} value={f.fromName} maxLength={100} onChange={(e) => setF({ ...f, fromName: e.target.value })} placeholder={storeName} />
+            </label>
+          </div>
+          <label className={s.field}>
+            <span className={s.label}>Chave de API</span>
+            <input
+              className={`${s.input} ${s.mono}`}
+              type="password"
+              autoComplete="new-password"
+              value={f.apiKey}
+              required={needsKey}
+              placeholder={keep(keyLast4) || "re_…"}
+              onChange={(e) => setF({ ...f, apiKey: e.target.value })}
+            />
+            {data?.apiKey === "unreadable" ? <span className={s.hint}>A chave salva não pode ser lida: cole a chave de novo.</span> : null}
+            <span className={s.hint}>No Resend: API Keys → Create API Key, com permissão só de envio.</span>
+          </label>
+          <label className={s.field}>
+            <span className={s.label}>Segredo do webhook</span>
+            <input
+              className={`${s.input} ${s.mono}`}
+              type="password"
+              autoComplete="new-password"
+              value={f.webhookSecret}
+              placeholder={keep(last4Of(data?.webhookSecret)) || "whsec_…"}
+              onChange={(e) => setF({ ...f, webhookSecret: e.target.value })}
+            />
+            <span className={s.hint}>Opcional, mas sem ele o painel não recebe a entrega nem a devolução dos e-mails.</span>
+          </label>
+          <div className={s.formActions}>
+            {data ? (
+              <button type="button" className={s.btn} onClick={() => setEditing(false)}>
+                Cancelar
+              </button>
+            ) : null}
+            <button type="submit" className={`${s.btn} ${s.btnPrimary}`}>
+              Salvar
+            </button>
+          </div>
+        </form>
+      ) : data ? (
+        <div className={s.rows} style={{ marginTop: 12 }}>
+          <Row k="Remetente">{data.fromName ? `${data.fromName} <${data.fromEmail}>` : data.fromEmail}</Row>
+          <Row k="Chave">
+            {data.apiKey === "unreadable" ? "ilegível: cole a chave de novo" : data.apiKey === "configured" ? <Configured /> : data.apiKey ? `final ${data.apiKey.last4}` : "—"}
+          </Row>
+          <Row k="Webhook">{data.webhookSecret === "configured" ? <Configured /> : data.webhookSecret ? `final ${data.webhookSecret.last4}` : "não configurado"}</Row>
+        </div>
+      ) : (
+        <p className={s.muted}>Ainda não configurado.</p>
+      )}
+      {data && canWrite ? (
+        <div className={s.card} style={{ marginTop: 16, background: "var(--color-bg)" }}>
+          <h3 className={s.h2} style={{ marginBottom: 12 }}>
+            Cole no Resend: Webhooks
+          </h3>
+          <div className={s.stack} style={{ gap: 10 }}>
+            <div className={s.field}>
+              <span className={s.label}>URL do webhook</span>
+              <CopyField text={data.webhookUrl} />
+            </div>
+            <p className={s.hint} style={{ margin: 0 }}>
+              No Resend, crie um webhook com os eventos {RESEND_EVENTS} apontando para este endereço e cole aqui o segredo (whsec_…).
+            </p>
+          </div>
+        </div>
+      ) : null}
+      <Live msg={confirm ? null : run.msg} />
+      {canWrite && data ? (
+        <div className={s.cardFoot}>
+          <form
+            style={{ display: "flex", gap: 8, flex: 1, flexWrap: "wrap", alignItems: "center" }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void test.run(() => testResendAction(to.trim()), { refresh: false });
+            }}
+          >
+            <label className={s.srOnly} htmlFor="resend-test-to">
+              Enviar e-mail de teste para
+            </label>
+            <input id="resend-test-to" className={s.input} style={{ flex: "1 1 180px", minHeight: 36 }} type="email" value={to} onChange={(e) => setTo(e.target.value)} required />
+            <button type="submit" className={s.btn} disabled={test.pending || data.apiKey === "unreadable"}>
+              {test.pending ? "Enviando…" : "Enviar teste"}
+            </button>
+          </form>
+          {!editing ? (
+            <button type="button" className={s.btn} onClick={() => setEditing(true)}>
+              Editar
+            </button>
+          ) : null}
+          {active || data.apiKey === "unreadable" ? null : <UseProvider provider="resend" />}
+          <div style={{ width: "100%" }}>
+            <Live msg={test.msg} />
+          </div>
+        </div>
+      ) : null}
+      <ConfirmSave
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        title="Salvar o Resend da loja?"
+        run={run}
+        label="Salvar"
+        pendingLabel="Salvando…"
+        onConfirm={async () => {
+          const r = await run.run(() =>
+            saveResendAction({
+              fromEmail: f.fromEmail.trim(),
+              fromName: f.fromName.trim(),
+              ...(f.apiKey.trim() ? { apiKey: f.apiKey.trim() } : {}),
+              ...(f.webhookSecret.trim() ? { webhookSecret: f.webhookSecret.trim() } : {}),
+            }),
+          );
+          if (r.ok) {
+            setConfirm(false);
+            setEditing(false);
+            setF((x) => ({ ...x, apiKey: "", webhookSecret: "" }));
+          }
+        }}
+      >
+        <p>
+          Os e-mails enviados pelo Resend saem da sua conta, com o remetente <b>{f.fromEmail}</b>. O domínio do remetente precisa estar verificado no Resend.
+          Salvar não troca o provedor ativo: use <b>Usar este provedor</b> para isso.
         </p>
       </ConfirmSave>
     </section>

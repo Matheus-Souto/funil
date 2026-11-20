@@ -72,10 +72,10 @@ export function FailedDeliveries({ items }: { items: Array<{ orderId: string; co
       <PIcon name="mail" />
       <div>
         <b>
-          A entrega por e-mail falhou em {items.length} {items.length === 1 ? "pedido" : "pedidos"}.
+          A entrega por e-mail falhou ou voltou em {items.length} {items.length === 1 ? "pedido" : "pedidos"}.
         </b>
         <p>
-          O envio é re-tentado sozinho; confira o SMTP em Conexões ou reenvie o acesso.{" "}
+          Confira o endereço do comprador e a conexão de e-mail em Conexões, ou reenvie o acesso.{" "}
           {items.slice(0, 5).map((f, i) => (
             <span key={f.orderId}>
               {i > 0 ? ", " : ""}

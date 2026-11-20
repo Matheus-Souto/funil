@@ -1,7 +1,7 @@
 // Avisos operacionais ao vendedor: gravados em `store_alert` (painel) e enviados por e-mail (`notify_seller`) na MESMA
 // transação. Todo caminho que avisa o vendedor com um motivo passa por `alertSeller`. As entregas que falharam vêm do
 // `email_log` (último e-mail de entrega do pedido com falha), sem tabela própria.
-import { and, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
@@ -127,11 +127,11 @@ export const listAlerts = defineAction({
   },
 });
 
-/** Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou: o worker ainda re-tenta, mas o painel mostra. */
+/** Pedido pago cujo e-mail de entrega mais recente (últimos 7 dias) falhou ou voltou. Entram falhas de envio (que o worker ainda re-tenta) e e-mails devolvidos ou marcados como spam (que não são re-tentados); o painel mostra. */
 async function deliveryFailures(tx: Tx): Promise<Array<{ orderId: string; code: string; at: Date }>> {
   const since = new Date(Date.now() - FAILED_DELIVERY_WINDOW_MS);
   const latest = tx
-    .selectDistinctOn([emailLog.orderId], { orderId: emailLog.orderId, status: emailLog.status, at: emailLog.at })
+    .selectDistinctOn([emailLog.orderId], { orderId: emailLog.orderId, status: emailLog.status, deliveryStatus: emailLog.deliveryStatus, at: emailLog.at })
     .from(emailLog)
     .where(and(eq(emailLog.kind, "delivery"), gte(emailLog.at, since)))
     .orderBy(emailLog.orderId, desc(emailLog.at))
@@ -140,7 +140,7 @@ async function deliveryFailures(tx: Tx): Promise<Array<{ orderId: string; code: 
     .select({ orderId: latest.orderId, at: latest.at, publicId: orders.publicId })
     .from(latest)
     .innerJoin(orders, eq(orders.id, latest.orderId))
-    .where(and(eq(latest.status, "failed"), eq(orders.status, "paid")))
+    .where(and(or(eq(latest.status, "failed"), inArray(latest.deliveryStatus, ["bounced", "complained"])), eq(orders.status, "paid")))
     .orderBy(desc(latest.at))
     .limit(20);
   return failed.map((f) => ({ orderId: f.orderId!, code: orderCode(f.publicId), at: f.at }));

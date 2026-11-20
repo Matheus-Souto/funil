@@ -5,7 +5,7 @@ import { connectionsStatus } from "@/lib/connections";
 import { PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
-import { AsaasCard, MetaCard, PixManualCard, SmtpCard } from "./cards";
+import { AsaasCard, MetaCard, PixManualCard, ResendCard, SmtpCard } from "./cards";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Conexões" };
@@ -17,10 +17,21 @@ export default async function ConnectionsPage() {
   const canWrite = hasPermission(role, "connections.write");
   // Pixel/token da loja: só o dono (connections.write); o tráfego só testa a conexão.
   const canTestMeta = hasPermission(role, "tracking.write");
-  const { userEmail } = await getPanelIdentity(panel);
+  const { userEmail, storeName } = await getPanelIdentity(panel);
   return (
     <>
-      <PageHead title="Conexões" sub="Chaves e tokens ficam criptografados e nunca são exibidos de novo: só aparece “configurado”." />
+      <PageHead title="Conexões" sub="Chaves e tokens ficam criptografados e nunca são exibidos de novo: só aparece “configurado” ou o final da chave." />
+      {st.emailUsable ? null : (
+        <div className={s.alerts}>
+          <div className={s.banner} data-tone="danger" role="alert" id="email-inutilizavel">
+            <PIcon name="mail" />
+            <div>
+              <b>Nenhum provedor de e-mail utilizável: os e-mails de acesso e os avisos de venda vão falhar.</b>
+              <p>Configure o SMTP ou o Resend em Conexões e ative um deles.</p>
+            </div>
+          </div>
+        </div>
+      )}
       {st.turnstile.recommended ? (
         <div className={s.alerts}>
           <div className={s.banner} role="note" id="turnstile-recomendado">
@@ -39,7 +50,8 @@ export default async function ConnectionsPage() {
       <div className={s.grid2} style={{ alignItems: "start" }}>
         <div className={s.stack}>
           <PixManualCard data={st.pixManual} canWrite={canWrite} />
-          <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} />
+          <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} active={st.emailProvider === "smtp"} usable={st.emailUsable} />
+          <ResendCard data={st.resend} canWrite={canWrite} defaultTo={userEmail} storeName={storeName} active={st.emailProvider === "resend"} usable={st.emailUsable} />
         </div>
         <div className={s.stack}>
           <AsaasCard data={st.asaas} canWrite={canWrite} />

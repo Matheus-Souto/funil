@@ -20,6 +20,7 @@ const FLAG: Record<string, string> = {
   old_account_event: "movimento na conta anterior: conferir lá",
 };
 const REVOKED: Record<string, string> = { order_status: "desativado (reembolso ou contestação)", renewed: "substituído por links novos" };
+const DELIVERY_STATUS_LABEL: Record<string, string> = { delivered: "entregue", bounced: "devolvido", complained: "marcado como spam" };
 
 export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {
   const panel = await requirePanelActor();
@@ -307,6 +308,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                     <li key={i}>
                       <div>
                         {e.kind === "delivery" ? "Acesso ao comprador" : "Aviso ao vendedor"} · {e.status === "sent" ? "enviado" : "falhou"}
+                        {e.deliveryStatus ? ` · ${DELIVERY_STATUS_LABEL[e.deliveryStatus] ?? e.deliveryStatus}` : ""}
                         <small>
                           {shortWhenSP(e.at)}
                           {e.error ? ` · ${e.error}` : ""}

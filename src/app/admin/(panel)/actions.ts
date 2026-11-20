@@ -9,6 +9,7 @@ import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
+import { saveResend, setEmailProvider, testResend } from "@/lib/delivery/resend";
 import { resendOrder } from "@/lib/delivery/jobs";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
@@ -157,6 +158,21 @@ export async function saveSmtpAction(input: unknown) {
 export async function testSmtpAction(to: string) {
   const panel = await requirePanelActor();
   return call(panel, testSmtp, { to }, () => `E-mail de teste enviado para ${to}.`);
+}
+
+export async function saveResendAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, saveResend, input, (o) => (o.activated ? "Resend salvo e ativado." : "Resend salvo."));
+}
+
+export async function testResendAction(to: string) {
+  const panel = await requirePanelActor();
+  return call(panel, testResend, { to }, () => `E-mail de teste enviado para ${to}.`);
+}
+
+export async function setEmailProviderAction(provider: "smtp" | "resend") {
+  const panel = await requirePanelActor();
+  return call(panel, setEmailProvider, { provider }, () => `Provedor de e-mail trocado para ${provider === "resend" ? "Resend" : "SMTP"}.`);
 }
 
 export async function saveMetaAction(input: unknown) {
