@@ -64,8 +64,8 @@ $$;
 --                                            limites por IP/e-mail, recusas, disjuntor e a limpeza ocasional. Política
 --                                            `rate_limit_card`: só chaves `card:` (não lê nem apaga os limites do app,
 --                                            como `account:password:` ou os do checkout).
---   job             insert                   jobs da confirmação (deliver_order, meta_event, notify_seller) e o e-mail
---                                            do disjuntor (notify_seller). Política `job_card_insert`: só esses tipos e
+--   job             insert                   jobs da confirmação (deliver_order, meta_event, notify_seller, notify_telegram) e o
+--                                            e-mail do disjuntor (notify_seller). Política `job_card_insert`: só esses tipos e
 --                                            da loja fixada (nunca refund_order, revoke_downloads...). Sem select.
 --   store_alert     insert                   aviso do disjuntor ao vendedor (alertSeller).
 --   audit_log       insert                   a conferência liquida pelo runAction(applyAsaasPayment), que audita.
@@ -118,7 +118,7 @@ begin
   drop policy if exists job_card_insert on job;
   create policy job_card_insert on job for insert to card with check (
     store_id = nullif(current_setting('app.store_id', true), '')::uuid
-    and type in ('deliver_order', 'meta_event', 'notify_seller')
+    and type in ('deliver_order', 'meta_event', 'notify_seller', 'notify_telegram')
   );
 
   -- Pedidos: a regra de transição do `card` (orders_card_guard, abaixo). Criado uma vez, pelo nome (sem trava a cada

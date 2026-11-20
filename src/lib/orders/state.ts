@@ -59,6 +59,7 @@ export async function transitionOrder(
     await enqueue(ctx.tx, { storeId, type: "deliver_order", payload: { orderId } });
     await enqueue(ctx.tx, { storeId, type: "meta_event", payload: { event: "Purchase", orderId } });
     await enqueue(ctx.tx, { storeId, type: "notify_seller", payload: { orderId } });
+    await enqueue(ctx.tx, { storeId, type: "notify_telegram", payload: { event: "sale", orderId } });
   } else if (to === "refunded" || to === "disputed") {
     await enqueue(ctx.tx, { storeId, type: "revoke_downloads", payload: { orderId } });
   }

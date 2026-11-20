@@ -426,7 +426,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     expect([a!.status, a!.asaasPaymentId, a!.resolvedAt !== null]).toEqual(["approved", pays[0]!.providerId, true]);
     const [c] = await t.ownerDb.select().from(customer).where(eq(customer.id, o.cash.customerId));
     expect(c!.asaasCustomerId).toMatch(/^cus_/);
-    expect(await jobTypes(o.cash.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.cash.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("aprovado parcelado: installmentCount + totalValue e pedido pago", async () => {
@@ -435,7 +435,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     const body = paymentPosts(fake, o.parcel.id)[0]!.body as Record<string, unknown>;
     expect([body.installmentCount, body.totalValue, body.value]).toEqual([3, 10, undefined]);
     expect((await orderRow(o.parcel.id)).status).toBe("paid");
-    expect(await jobTypes(o.parcel.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.parcel.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("recusa: tentativa recusada, pedido pendente e recusa registrada nos limites", async () => {
@@ -471,7 +471,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
       .from(auditLog)
       .where(and(eq(auditLog.storeId, shop.storeId), eq(auditLog.action, "payments.applyAsaasPayment")));
     expect(audit.map((r) => r.ok)).toEqual([true]);
-    expect(await jobTypes(o.unknown.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.unknown.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("cobrança em análise na resposta; aprovada depois: a conferência atualiza o status do pagamento e libera o pedido", async () => {

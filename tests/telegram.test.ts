@@ -1,11 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
-import { runAction, type Actor } from "@/lib/actions/core";
+import { and, eq, sql } from "drizzle-orm";
+import { ackAlert, alertText } from "@/lib/alerts";
+import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
+import { createOffer } from "@/lib/catalog/offers";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, integration } from "@/lib/db/schema";
+import { orderCode } from "@/lib/format";
+import { auditLog, integration, job, orders, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { runDueJobs, type Job } from "@/lib/jobs";
+import { getHandlers } from "@/lib/jobs/handlers";
+import { createOrder } from "@/lib/orders/create";
+import { transitionOrder } from "@/lib/orders/state";
+import { releaseOrder, savePixManual } from "@/lib/payments/manual";
+import { notifyTelegramJob } from "@/lib/notify/telegram-job";
 import { loadTelegram, removeTelegram, saveTelegram, telegramSettings, testTelegram } from "@/lib/notify/telegram-connection";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import {
   TELEGRAM_CHAT_RE,
   TELEGRAM_TOKEN_RE,
@@ -377,5 +386,229 @@ describe("conexão Telegram", () => {
     expect(await withStore(b.storeId, (tx) => loadTelegram(tx, b.storeId))).toBeNull();
     expect(await withStore(b.storeId, (tx) => telegramSettings(tx, b.storeId))).toBeNull();
     await expect(runAction(testTelegram, panel(b.storeId), {})).rejects.toMatchObject({ code: "provider_error" });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+
+const BUYER = { name: "Maria Teste", email: "maria.teste@example.com", phone: "11987654321", cpf: "52998224725" };
+const systemCtx = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "system" }, origin: "system", tx });
+
+async function seedShop(opts: { telegram?: boolean; events?: Record<string, boolean>; twoMains?: boolean; label?: string | null } = {}) {
+  const { storeId } = await seedStore("Loja do Telegram");
+  await runAction(savePixManual, panel(storeId), { key: "contato@loja.com.br", name: "Loja", city: "Sao Paulo" });
+  if (opts.telegram !== false) {
+    fakeTg(okFor);
+    await runAction(saveTelegram, panel(storeId), { chatId: CHAT, token: BOT_TOKEN, ...(opts.events ? { events: opts.events } : {}) });
+  }
+  const main = await seedProduct(storeId, "Almanaque");
+  const main2 = await seedProduct(storeId, "Caderno");
+  const bump = await seedProduct(storeId, "Kit de adesivos");
+  const offer = await runAction(createOffer, panel(storeId), {
+    slug: `o-${Math.random().toString(36).slice(2, 10)}`,
+    name: "Combo da loja",
+    productIds: opts.twoMains ? [main.id, main2.id] : [main.id],
+    priceCents: 2700,
+    methods: ["pix"],
+    pixMode: "manual",
+    bump: { productIds: [bump.id], priceCents: 990, ...(opts.label === null ? {} : { label: opts.label ?? "5 Kits" }) },
+  });
+  return { storeId, offerId: offer.id };
+}
+type Shop = Awaited<ReturnType<typeof seedShop>>;
+
+async function pendingOrder(shop: Shop, withBump = true) {
+  return withStore(shop.storeId, (tx) =>
+    createOrder(systemCtx(shop.storeId, tx), {
+      offerId: shop.offerId,
+      withBump,
+      method: "pix_manual",
+      customer: BUYER,
+      touch: { first: null, last: {} },
+      clientIp: "203.0.113.7",
+      userAgent: "teste",
+    }),
+  );
+}
+async function paidOrder(shop: Shop, withBump = true) {
+  const o = await pendingOrder(shop, withBump);
+  await runAction(releaseOrder, panel(shop.storeId), { orderId: o.id });
+  return o;
+}
+const tgJobs = (orderId: string) => t.ownerDb.select().from(job).where(and(eq(job.type, "notify_telegram"), sql`${job.payload}->>'orderId' = ${orderId}`));
+const notices = (orderId: string) => t.ownerDb.select().from(telegramNotice).where(eq(telegramNotice.orderId, orderId));
+const openAlerts = (storeId: string) =>
+  t.ownerDb.select().from(storeAlert).where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, "telegram_falhou")));
+async function runJob(shop: Shop, event: string, orderId: string, signal = new AbortController().signal) {
+  const j = { id: crypto.randomUUID(), storeId: shop.storeId, type: "notify_telegram", payload: { event, orderId } } as unknown as Job;
+  await notifyTelegramJob(j, signal);
+}
+const sendCalls = (calls: TgCall[]) => calls.filter((c) => c.url.endsWith("/sendMessage"));
+
+describe("aviso de venda no Telegram", () => {
+  test("pedido pago enfileira notify_telegram sale; disputed → paid não enfileira; loja sem Telegram: o job pula sem chamar o fetch", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    const first = await tgJobs(o.id);
+    expect(first).toHaveLength(1);
+    expect(first[0]!.payload).toEqual({ event: "sale", orderId: o.id });
+    await withStore(shop.storeId, async (tx) => {
+      await transitionOrder(systemCtx(shop.storeId, tx), o.id, "disputed", "teste");
+      await transitionOrder(systemCtx(shop.storeId, tx), o.id, "paid", "teste");
+    });
+    expect(await tgJobs(o.id)).toHaveLength(1);
+
+    const bare = await seedShop({ telegram: false });
+    const o2 = await paidOrder(bare);
+    const calls = fakeTg(okFor);
+    await runJob(bare, "sale", o2.id);
+    expect(calls).toHaveLength(0);
+    expect(await notices(o2.id)).toHaveLength(0);
+  });
+
+  test("sale envia o texto exato e grava telegram_notice (sale) com o message_id", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    const sent = sendCalls(calls);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`);
+    const [row] = await t.ownerDb.select({ publicId: orders.publicId }).from(orders).where(eq(orders.id, o.id));
+    expect(sent[0]!.body.chat_id).toBe(CHAT);
+    expect(sent[0]!.body.text).toBe(`Venda: Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #${orderCode(row!.publicId)}`);
+    const marks = await notices(o.id);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toMatchObject({ event: "sale", messageId: 7, storeId: shop.storeId });
+  });
+
+  test("nenhuma mensagem contém nome, e-mail, CPF ou telefone do cliente", async () => {
+    const shop = await seedShop({ events: { pixGenerated: true, cardDeclined: true, abandoned: true } });
+    const paid = await paidOrder(shop);
+    const pend = await pendingOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", paid.id);
+    await runJob(shop, "pix_generated", pend.id);
+    await runJob(shop, "card_declined", pend.id);
+    await runJob(shop, "abandoned", pend.id);
+    const sent = sendCalls(calls);
+    expect(sent).toHaveLength(4);
+    const all = JSON.stringify(sent.map((c) => c.body));
+    for (const secret of ["Maria", "Teste", BUYER.email, BUYER.cpf, BUYER.phone, "maria.teste"]) expect(all).not.toContain(secret);
+  });
+
+  test("oferta com 2 produtos principais usa o nome da oferta", async () => {
+    const shop = await seedShop({ twoMains: true });
+    const o = await paidOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    expect(String(sendCalls(calls)[0]!.body.text)).toStartWith("Venda: Combo da loja + 5 Kits — ");
+  });
+
+  test("bump sem rótulo usa o nome do produto do bump", async () => {
+    const shop = await seedShop({ label: null });
+    const o = await paidOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    expect(String(sendCalls(calls)[0]!.body.text)).toStartWith("Venda: Almanaque + Kit de adesivos — ");
+  });
+
+  test("rodar o job duas vezes envia uma vez só; evento desligado na config → pula sem enviar", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    await runJob(shop, "sale", o.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+    expect(await notices(o.id)).toHaveLength(1);
+
+    const off = await seedShop({ events: { sale: false } });
+    const o2 = await paidOrder(off);
+    const calls2 = fakeTg(okFor);
+    await runJob(off, "sale", o2.id);
+    expect(calls2).toHaveLength(0);
+    expect(await notices(o2.id)).toHaveLength(0);
+  });
+
+  test("pedido reembolsado antes do envio: não envia", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    await withStore(shop.storeId, (tx) => transitionOrder(systemCtx(shop.storeId, tx), o.id, "refunded", "teste"));
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    expect(calls).toHaveLength(0);
+    expect(await notices(o.id)).toHaveLength(0);
+  });
+
+  test("regras dos outros eventos: Pix pago antes do envio, abandono com pagamento depois e cartão recusado", async () => {
+    const shop = await seedShop({ events: { pixGenerated: true, cardDeclined: true, abandoned: true } });
+    const calls = fakeTg(okFor);
+    const first = await pendingOrder(shop);
+    const second = await pendingOrder(shop);
+    await runJob(shop, "pix_generated", first.id);
+    expect(String(sendCalls(calls)[0]!.body.text)).toStartWith("Pix gerado: Almanaque + 5 Kits — R$ 36,90 — pedido #");
+    // O mesmo cliente pagou o segundo Pix: o primeiro não é abandono.
+    await runAction(releaseOrder, panel(shop.storeId), { orderId: second.id });
+    await runJob(shop, "abandoned", first.id);
+    await runJob(shop, "pix_generated", second.id);
+    await runJob(shop, "card_declined", second.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+    // Pedido pendente sem pagamento depois: abandono sai com o prazo configurado.
+    const lone = await seedShop({ events: { abandoned: true } });
+    const o = await pendingOrder(lone);
+    const calls2 = fakeTg(okFor);
+    await runJob(lone, "abandoned", o.id);
+    expect(String(sendCalls(calls2)[0]!.body.text)).toStartWith("Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 36,90 — Pix manual — pedido #");
+  });
+
+  test("falha definitiva (403): o job termina sem lançar e grava um aviso telegram_falhou com httpStatus 403; a segunda falha não cria outro; depois de alerts.ack, uma nova falha cria outro", async () => {
+    const shop = await seedShop();
+    const a = await paidOrder(shop);
+    const b = await paidOrder(shop);
+    const c = await paidOrder(shop);
+    fakeTg(() => json(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked" }));
+    await runJob(shop, "sale", a.id);
+    const one = await openAlerts(shop.storeId);
+    expect(one).toHaveLength(1);
+    expect(one[0]!.detail).toEqual({ httpStatus: 403 });
+    expect(await notices(a.id)).toHaveLength(0);
+    await runJob(shop, "sale", b.id);
+    expect(await openAlerts(shop.storeId)).toHaveLength(1);
+    await runAction(ackAlert, panel(shop.storeId), { id: one[0]!.id });
+    await runJob(shop, "sale", c.id);
+    expect(await openAlerts(shop.storeId)).toHaveLength(2);
+    // O e-mail ao vendedor leva os mesmos título e texto do painel.
+    const mails = await t.ownerDb.select().from(job).where(and(eq(job.type, "notify_seller"), eq(job.storeId, shop.storeId), sql`${job.payload}->>'reason' = 'telegram_falhou'`));
+    expect(mails).toHaveLength(2);
+  });
+
+  test("falha temporária (502): o job lança e não grava aviso", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    fakeTg(() => json(502, { ok: false, error_code: 502, description: "Bad Gateway" }));
+    await expect(runJob(shop, "sale", o.id)).rejects.toMatchObject({ kind: "temporary", httpStatus: 502 });
+    expect(await openAlerts(shop.storeId)).toHaveLength(0);
+    expect(await notices(o.id)).toHaveLength(0);
+  });
+
+  test("o token não aparece em job.last_error", async () => {
+    const shop = await seedShop();
+    const o = await paidOrder(shop);
+    setTelegramFetchForTests((async (url: string | URL | Request) => {
+      throw new Error(`fetch failed: ${String(url)}`);
+    }) as unknown as typeof fetch);
+    await runDueJobs({ notify_telegram: getHandlers().notify_telegram! }, 50, () => new Date(), { types: ["notify_telegram"] });
+    const [row] = await tgJobs(o.id);
+    expect(row!.status).toBe("queued");
+    expect(row!.lastError).toBeTruthy();
+    expect(JSON.stringify(row)).not.toContain(BOT_TOKEN);
+    expect(out).not.toContain(BOT_TOKEN);
+  });
+
+  test("alertText(\"telegram_falhou\") tem o título e o texto das restrições globais", () => {
+    expect(alertText("telegram_falhou", { httpStatus: 403 }, null)).toEqual({
+      title: "O Telegram recusou o aviso da loja",
+      body: "Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”.",
+    });
   });
 });

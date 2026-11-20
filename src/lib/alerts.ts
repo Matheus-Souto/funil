@@ -16,7 +16,8 @@ export type AlertReason =
   | "estorno_falhou"
   | "estorno_parcial"
   | "disjuntor_cartao"
-  | "monitor_pagina_pagamento";
+  | "monitor_pagina_pagamento"
+  | "telegram_falhou";
 
 /** Detalhes do aviso: só códigos e números (nunca texto de provedor nem dado de comprador). */
 export interface AlertExtra {
@@ -84,6 +85,11 @@ export function alertText(
       return {
         title: `A página de pagamento mudou${typeof detail.page === "string" ? ` (${detail.page})` : ""}${motivo}`,
         body: "A verificação semanal encontrou cabeçalho de segurança ou scripts diferentes do esperado na página do checkout, do pedido ou do formulário do cartão. Se você não atualizou o sistema, investigue antes de continuar vendendo com cartão.",
+      };
+    case "telegram_falhou":
+      return {
+        title: "O Telegram recusou o aviso da loja",
+        body: "Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”.",
       };
     case "disjuntor_cartao":
       return {

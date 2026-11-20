@@ -261,6 +261,12 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
         ],
       };
     }
+    case "telegram_falhou":
+      return {
+        subject: "O Telegram recusou o aviso da loja",
+        heading: "O Telegram recusou o aviso da loja",
+        paragraphs: ["Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”."],
+      };
     case "disjuntor_cartao":
       return {
         subject: "Muitas recusas de cartão na sua loja",
