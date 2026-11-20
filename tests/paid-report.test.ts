@@ -131,6 +131,14 @@ describe("orders.paidReport", () => {
     expect(JSON.stringify(r)).not.toMatch(/maria|11987654321|reembolse/);
   });
 
+  test("faixa de 8 a 14 dígitos é descartada; ids longos do Meta passam", async () => {
+    const s = await seedPanelStore();
+    const labels = ["11-98765-4321", "11.98765.4321", "529.982.247-25", "11987654321", "120212345678901234", "black-friday_2026"];
+    for (const [i, v] of labels.entries()) await seedOrder(s, { paidAt: new Date(Date.UTC(2026, 0, 10 + i)), ref: v });
+    const r = await runAction(paidReport, panelCall(s.storeId), WIDE);
+    expect(r.orders.map((o) => o.ref)).toEqual([null, null, null, null, "120212345678901234", "black-friday_2026"]);
+  });
+
   test("paginação com limit e cursor, inclusive empate de paid_at", async () => {
     const s = await seedPanelStore();
     const same = D("2026-01-10T15:00:00Z");
@@ -177,6 +185,9 @@ describe("orders.paidReport", () => {
     expect(await call({ ...WIDE, limit: 201 })).toBe("invalid_input");
     expect(await call({ ...WIDE, cursor: "lixo" })).toBe("invalid_input");
     expect(await call({ ...WIDE, cursor: Buffer.from("2026-99-99T10:00:00.000000Z|" + randomUUID()).toString("base64url") })).toBe("invalid_input");
+    for (const at of ["2026-02-30T10:00:00.000000Z", "2026-04-31T10:00:00.000000Z", "2026-01-10T24:00:00.000000Z"]) {
+      expect(await call({ ...WIDE, cursor: Buffer.from(`${at}|${randomUUID()}`).toString("base64url") })).toBe("invalid_input");
+    }
     expect(await call({ ...WIDE, cursor: Buffer.from("2026-01-01|nao-uuid").toString("base64url") })).toBe("invalid_input");
   });
 

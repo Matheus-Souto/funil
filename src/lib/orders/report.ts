@@ -23,15 +23,23 @@ const CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f]{8}-
 function parseCursor(cursor: string): { at: string; id: string } | null {
   const m = CURSOR_RE.exec(Buffer.from(cursor, "base64url").toString("utf8"));
   if (!m) return null;
-  // Date.parse confere a data e a hora (milissegundos); os 3 dígitos de microssegundos são só números.
-  if (Number.isNaN(Date.parse(m[1]!.slice(0, 23) + "Z"))) return null;
+  // Date.parse aceita 30/02 e 24:00 (rolam para o dia seguinte) e o Postgres não: a data reconstruída tem de ser a mesma.
+  // Os 3 dígitos de microssegundos são só números.
+  const ms = m[1]!.slice(0, 23);
+  const parsed = Date.parse(`${ms}Z`);
+  if (Number.isNaN(parsed) || new Date(parsed).toISOString().slice(0, 23) !== ms) return null;
   return { at: m[1]!, id: m[2]! };
 }
 
-/** Texto livre do visitante (UTM, src, ref) só passa se parecer um rótulo: nada de e-mail, telefone ou frase. */
+/**
+ * Texto livre do visitante (UTM, src, ref) só passa se parecer um rótulo: nada de e-mail, telefone ou frase.
+ * Total de 8 a 14 dígitos (em qualquer posição, com pontuação) é telefone ou CPF e é descartado; 15 ou mais passa,
+ * porque os ids de anúncio e campanha do Meta (ex.: 120212345678901234) são o principal uso do relatório.
+ */
 function safeLabel(v: unknown): string | null {
-  if (typeof v !== "string" || !LABEL_RE.test(v) || /\d{8,}/.test(v)) return null;
-  return v;
+  if (typeof v !== "string" || !LABEL_RE.test(v)) return null;
+  const digits = v.replace(/\D/g, "").length;
+  return digits >= 8 && digits <= 14 ? null : v;
 }
 
 const input = z
