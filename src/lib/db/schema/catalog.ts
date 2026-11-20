@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, foreignKey, index, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { store } from "./core";
 
 // Com RLS (enable_store_rls na migration).
@@ -80,7 +80,9 @@ export const offerProduct = pgTable(
     foreignKey({ columns: [t.storeId, t.offerId], foreignColumns: [offer.storeId, offer.id], name: "offer_product_offer_fk" }).onDelete("cascade"),
     foreignKey({ columns: [t.storeId, t.productId], foreignColumns: [product.storeId, product.id], name: "offer_product_product_fk" }),
     unique("offer_product_offer_product_unique").on(t.offerId, t.productId),
-    index("offer_product_offer_kind_position_idx").on(t.offerId, t.kind, t.position),
+    // Uma posição por grupo (também serve de índice para ler a lista em ordem): duas gravações concorrentes não
+    // conseguem juntar listas.
+    unique("offer_product_offer_kind_position_unique").on(t.offerId, t.kind, t.position),
     check("offer_product_kind_check", sql`${t.kind} in ('main','bump')`),
     check("offer_product_position_check", sql`${t.position} >= 0`),
   ],

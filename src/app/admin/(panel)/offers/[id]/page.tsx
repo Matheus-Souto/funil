@@ -43,6 +43,8 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
         thankYouText: o.thankYouText,
         pixelId: o.pixelId,
         active: o.active,
+        mainCount: o.products.length,
+        bumpCount: o.bump?.products.length ?? 0,
       };
     } catch (e) {
       if (e instanceof ActionError && e.code === "not_found") notFound();

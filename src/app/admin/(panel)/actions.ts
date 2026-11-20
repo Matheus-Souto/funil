@@ -7,7 +7,7 @@ import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { ackAlert } from "@/lib/alerts";
 import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
-import { createOffer, setOfferPixel, setOfferProducts, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
 import { resendOrder } from "@/lib/delivery/jobs";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
@@ -123,6 +123,11 @@ export async function updateOfferPriceAction(input: unknown) {
 export async function setOfferProductsAction(input: unknown) {
   const panel = await requirePanelActor();
   return call(panel, setOfferProducts, input, () => "Produtos da oferta salvos.");
+}
+
+export async function setOfferSlugAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, setOfferSlug, input, () => "Endereço salvo.");
 }
 
 export async function setOfferPixelAction(id: string, pixelId: string | null) {

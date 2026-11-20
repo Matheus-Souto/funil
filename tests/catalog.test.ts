@@ -9,7 +9,8 @@ import { createStorage, storage } from "@/lib/storage";
 import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
-import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { editorCanEditProducts } from "@/lib/catalog/offer-editing";
 import { env } from "@/lib/env";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
@@ -297,7 +298,7 @@ describe("offers", () => {
     const { storeId } = await seedStore();
     const p = await mkProduct(storeId);
     const o = await call(createOffer, storeId, owner, offerInput(p.id));
-    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }, { productId: p.id }, { productIds: [p.id] }, { bumpLabel: "x" }]) {
+    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }, { productId: p.id }, { productIds: [p.id] }, { bumpLabel: "x" }, { slug: "outro-endereco" }]) {
       expect(await code(call(updateOffer, storeId, owner, { id: o.id, ...f }))).toBe("invalid_input");
     }
     const u = await call(updateOffer, storeId, owner, { id: o.id, name: "Novo nome", methods: ["pix"], maxInstallments: 3 });
@@ -486,5 +487,73 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
     // O painel ainda vê o produto apagado na oferta (para corrigir).
     const got = await call(getOffer, storeId, owner, { id: completo.id });
     expect(got.products.map((p) => p.deletedAt !== null)).toEqual([false, false, false, true, false, false]);
+  });
+});
+
+describe("rodada de correção 1 (concorrência, slug sensível, editor com N produtos)", () => {
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+
+  test("setProducts concorrente na mesma oferta: fica exatamente uma das listas, sem posição repetida, colunas antigas iguais", async () => {
+    const { storeId } = await seedStore();
+    const ps = await Promise.all(Array.from({ length: 7 }, (_, i) => seedProduct(storeId, `C${i}`)));
+    const [p0, a1, a2, a3, b1, b2, b3] = ps.map((p) => p.id) as [string, string, string, string, string, string, string];
+    const listA = [a1, a2, a3];
+    const listB = [b1, b2, b3];
+    for (let i = 0; i < 10; i++) {
+      const o = await call(createOffer, storeId, owner, offerInput(p0, { slug: `corrida-${i}` }));
+      const results = await Promise.allSettled([
+        call(setOfferProducts, storeId, owner, { id: o.id, productIds: listA, bump: null }),
+        call(setOfferProducts, storeId, owner, { id: o.id, productIds: listB, bump: null }),
+      ]);
+      expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+      const rows = await rowsOf(storeId, o.id);
+      const ids = rows.map((r) => r.productId);
+      expect([JSON.stringify(listA), JSON.stringify(listB)]).toContain(JSON.stringify(ids));
+      expect(rows.map((r) => [r.kind, r.position])).toEqual([["main", 0], ["main", 1], ["main", 2]]);
+      const [legacy] = await withStore(storeId, (tx) => tx.select({ productId: offer.productId, bumpProductId: offer.bumpProductId }).from(offer).where(eq(offer.id, o.id)));
+      expect(legacy).toEqual({ productId: ids[0]!, bumpProductId: null });
+    }
+  }, HEAVY_TEST_MS);
+
+  test("offers.setSlug é sensível; offers.update recusa slug; a troca de slug entre ofertas não passa sem aprovação", async () => {
+    const { storeId } = await seedStore();
+    const p = await seedProduct(storeId, "Original");
+    const x = await seedProduct(storeId, "Outro");
+    const a = await call(createOffer, storeId, owner, offerInput(p.id, { slug: "oferta-a" }));
+    expect(listActions().find((ac) => ac.name === "offers.setSlug")?.sensitive).toBe(true);
+    for (const origin of ["mcp", "ai"] as const) {
+      expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-velha" }, origin))).toBe("approval_required");
+    }
+    expect(await code(call(setOfferSlug, storeId, support, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
+    expect(await code(call(setOfferSlug, storeId, traffic, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
+    // O contorno do revisor (S1): criar outra oferta e trocar os slugs só com ações não sensíveis.
+    const b = await call(createOffer, storeId, owner, offerInput(x.id, { slug: "oferta-tmp", priceCents: 5 }), "mcp");
+    expect(await code(call(updateOffer, storeId, owner, { id: a.id, slug: "oferta-velha" }, "mcp"))).toBe("invalid_input");
+    expect(await code(call(updateOffer, storeId, owner, { id: b.id, slug: "oferta-a" }, "mcp"))).toBe("invalid_input");
+    const pubA = await call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public");
+    expect([pubA.products, pubA.priceCents]).toEqual([[{ name: "Original" }], 990]);
+    // Pelo painel, o dono troca direto; slug ocupado é conflict; inválido é invalid_input; inexistente not_found.
+    expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-tmp" }))).toBe("conflict");
+    expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "Com Espaco" }))).toBe("invalid_input");
+    expect(await code(call(setOfferSlug, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", slug: "livre" }))).toBe("not_found");
+    expect((await call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-nova" })).slug).toBe("oferta-nova");
+    expect((await call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-nova" })).slug).toBe("oferta-nova"); // mesmo slug: ok
+    expect((await call(getPublicOffer, storeId, pub, { slug: "oferta-nova" }, "public")).products).toEqual([{ name: "Original" }]);
+    expect(await code(call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public"))).toBe("not_found");
+  });
+
+  test("editor (até a Task 4): só edita produtos e bump com no máximo 1 em cada grupo", () => {
+    expect(editorCanEditProducts(null)).toBe(true);
+    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 0 })).toBe(true);
+    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 1 })).toBe(true);
+    expect(editorCanEditProducts({ mainCount: 6, bumpCount: 0 })).toBe(false);
+    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 5 })).toBe(false);
   });
 });

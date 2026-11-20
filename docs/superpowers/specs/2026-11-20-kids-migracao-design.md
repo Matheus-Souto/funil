@@ -121,7 +121,9 @@ Na prática, o item 1 muda:
   - `store.updateSettings`;
   - `account.changePassword`, `team.revokeSessions`.
 
-  Entram também as conexões novas (Resend e Telegram), a edição dos produtos de uma oferta e a gestão de tokens. O PR 5 expõe só as ações não sensíveis por essa marcação.
+  Entram também as conexões novas (Resend e Telegram), a edição dos produtos de uma oferta (`offers.setProducts`), a
+  troca do endereço de uma oferta (`offers.setSlug`: trocar slugs entre ofertas mudaria o que o link dos anúncios vende)
+  e a gestão de tokens. O PR 5 expõe só as ações não sensíveis por essa marcação.
 - **Upload de PDF pelo MCP:**
   - a ferramenta `products.createUploadLink` recebe o nome do produto e do arquivo e devolve uma URL de upload de **uso único**, válida por 15 minutos e presa à loja;
   - o agente faz `PUT` do PDF nela;

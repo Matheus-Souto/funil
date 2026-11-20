@@ -86,6 +86,9 @@ test("restrições: produto repetido, kind e posição inválidos (causa conferi
   expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, kind: "bump", position: 1 }))).toEqual({ code: "23505", constraint: "offer_product_offer_product_unique" });
   expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, kind: "x" }))).toEqual({ code: "23514", constraint: "offer_product_kind_check" });
   expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, position: -1 }))).toEqual({ code: "23514", constraint: "offer_product_position_check" });
+  // Posição única por grupo: duas gravações concorrentes não podem juntar listas (rede de segurança do setProducts).
+  expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id }))).toEqual({ code: "23505", constraint: "offer_product_offer_kind_position_unique" });
+  await t.ownerDb.insert(offerProduct).values({ ...row, productId: q.id, kind: "bump" }); // mesma posição em outro grupo passa
   await t.ownerDb.delete(offer).where(sql`id = ${o!.id}`);
   expect(await t.ownerDb.select().from(offerProduct).where(sql`offer_id = ${o!.id}`)).toHaveLength(0);
 });

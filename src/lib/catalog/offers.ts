@@ -38,8 +38,9 @@ async function withProducts(tx: Tx, rows: OfferRow[]): Promise<OfferView[]> {
 }
 
 /**
- * Colunas antigas da oferta (product_id, bump_*) gravadas a partir do primeiro principal e do primeiro do bump, para os
- * leitores ainda não migrados para offer_product (pedido, entrega, painel). Saem na Task 5.
+ * Colunas da oferta ligadas à lista. `product_id` e `bump_product_id` são as antigas, gravadas a partir do primeiro
+ * principal e do primeiro do bump para os leitores ainda não migrados para offer_product (pedido, entrega, painel); só
+ * elas saem na Task 5. `bump_price_cents` e `bump_label` continuam (preço e rótulo do bump).
  */
 function legacyColumns(productIds: string[], bump: BumpInput | null) {
   return {
@@ -124,7 +125,9 @@ export const setOfferProducts = defineAction({
   permission: "offers.write",
   sensitive: true,
   async run(ctx, input) {
-    const [current] = await ctx.tx.select({ id: offer.id }).from(offer).where(eq(offer.id, input.id));
+    // Trava a linha da oferta: duas chamadas simultâneas rodam uma depois da outra (sem a trava, o delete de uma não vê
+    // as linhas novas da outra e as listas se juntam). O unique (offer_id, kind, position) é a rede de segurança.
+    const [current] = await ctx.tx.select({ id: offer.id }).from(offer).where(eq(offer.id, input.id)).for("update");
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
     // Lista primeiro (valida os produtos); depois as colunas antigas, que têm FK simples para product.
     await writeOfferProducts(ctx, input.id, input.productIds, input.bump?.productIds ?? []);
@@ -159,13 +162,36 @@ export const setOfferPixel = defineAction({
   },
 });
 
-// strictObject: preço (offers.updatePrice), produtos e bump (offers.setProducts) são rejeitados aqui.
+/**
+ * Troca o endereço público (/c/<slug>) de uma oferta existente. Sensível: trocar slugs entre ofertas faria o link dos
+ * anúncios vender outros produtos ou outro preço sem passar por offers.setProducts/updatePrice.
+ */
+export const setOfferSlug = defineAction({
+  name: "offers.setSlug",
+  description: "Troca o endereço público (slug) de uma oferta existente.",
+  input: z.strictObject({ id, slug }),
+  permission: "offers.write",
+  sensitive: true,
+  async run(ctx, input) {
+    await ensureSlugFree(ctx, input.slug, input.id);
+    try {
+      const [row] = await ctx.tx.update(offer).set({ slug: input.slug }).where(eq(offer.id, input.id)).returning(offerCols);
+      if (!row) throw new ActionError("not_found", "Oferta não encontrada");
+      return row;
+    } catch (e) {
+      if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
+      throw e;
+    }
+  },
+});
+
+// strictObject: slug (offers.setSlug), preço (offers.updatePrice), produtos e bump (offers.setProducts) são rejeitados.
 export const updateOffer = defineAction({
   name: "offers.update",
-  description: "Atualiza dados da oferta, exceto preço (use offers.updatePrice) e produtos/bump (use offers.setProducts).",
+  description:
+    "Atualiza dados da oferta, exceto endereço (use offers.setSlug), preço (use offers.updatePrice) e produtos/bump (use offers.setProducts).",
   input: z.strictObject({
     id,
-    slug: slug.optional(),
     name: name.optional(),
     methods: methods.optional(),
     pixMode: pixMode.optional(),
@@ -178,16 +204,10 @@ export const updateOffer = defineAction({
     const { id: offerId, ...changes } = input;
     const [current] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, offerId));
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
-    if (changes.slug !== undefined) await ensureSlugFree(ctx, changes.slug, offerId);
     const set = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
     if (Object.keys(set).length === 0) return current;
-    try {
-      const [row] = await ctx.tx.update(offer).set(set).where(eq(offer.id, offerId)).returning(offerCols);
-      return row!;
-    } catch (e) {
-      if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
-      throw e;
-    }
+    const [row] = await ctx.tx.update(offer).set(set).where(eq(offer.id, offerId)).returning(offerCols);
+    return row!;
   },
 });
 

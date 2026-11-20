@@ -643,35 +643,7 @@
           "notNull": true
         }
       },
-      "indexes": {
-        "offer_product_offer_kind_position_idx": {
-          "name": "offer_product_offer_kind_position_idx",
-          "columns": [
-            {
-              "expression": "offer_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "kind",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "position",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "offer_product_store_id_store_id_fk": {
           "name": "offer_product_store_id_store_id_fk",
@@ -725,6 +697,15 @@
           "columns": [
             "offer_id",
             "product_id"
+          ]
+        },
+        "offer_product_offer_kind_position_unique": {
+          "name": "offer_product_offer_kind_position_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "offer_id",
+            "kind",
+            "position"
           ]
         }
       },

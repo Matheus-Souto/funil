@@ -1,19 +1,21 @@
 "use client";
 
 // Editor de oferta (P12). Preço por offers.updatePrice e produto/bump por offers.setProducts (ações sensíveis: diálogo de
-// confirmação); os demais campos por offers.update; pixel próprio por offers.setPixel (tracking.write, com diálogo).
-// Prévia no celular ao lado. Por ora edita 1 produto principal e 1 no bump (N produtos no editor: Task 4).
+// confirmação); endereço por offers.setSlug (sensível; o dono no painel executa direto); os demais campos por
+// offers.update; pixel próprio por offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado.
+// Por ora edita 1 produto principal e 1 no bump; oferta com mais não tem produtos/bump editáveis aqui (Task 4).
 import { useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { brandVars } from "@/lib/brand";
+import { editorCanEditProducts } from "@/lib/catalog/offer-editing";
 import { brl, centsToInput, parseBrl } from "@/lib/format";
 import { cardToggle } from "@/lib/payments/card-messages";
 import { Badge } from "../../../blocks";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
 import { CopyButton, Dialog, Live, useActionRunner } from "../../../ui";
-import { createOfferAction, setOfferPixelAction, setOfferProductsAction, updateOfferAction, updateOfferPriceAction } from "../../actions";
+import { createOfferAction, setOfferPixelAction, setOfferProductsAction, setOfferSlugAction, updateOfferAction, updateOfferPriceAction } from "../../actions";
 
 export interface OfferData {
   id: string;
@@ -30,7 +32,12 @@ export interface OfferData {
   thankYouText: string | null;
   pixelId: string | null;
   active: boolean;
+  /** Quantos produtos principais e do bump a oferta tem (offer_product). */
+  mainCount: number;
+  bumpCount: number;
 }
+
+const MULTI_NOTICE = "Esta oferta tem vários produtos; edite os produtos e o bump pelo painel novo (em breve).";
 
 const slugify = (t: string) =>
   t
@@ -84,9 +91,13 @@ export function OfferEditor(props: {
   const bumpCents = f.bumpOn ? parseBrl(f.bumpPrice) : null;
   const bumpLabel = f.bumpLabel.trim() || null;
   const bump = f.bumpOn && f.bumpProductId && bumpCents ? { productId: f.bumpProductId, priceCents: bumpCents, label: bumpLabel } : null;
+  // Oferta com vários produtos: este editor não mexe em produtos nem no bump (salvar reduziria a lista a 1 por grupo).
+  const productsEditable = editorCanEditProducts(offer && { mainCount: offer.mainCount, bumpCount: offer.bumpCount });
   const priceChanged = offer !== null && priceCents !== offer.priceCents;
-  const productChanged = offer !== null && f.productId !== offer.productId;
+  const slugChanged = offer !== null && f.slug !== offer.slug;
+  const productChanged = productsEditable && offer !== null && f.productId !== offer.productId;
   const bumpChanged =
+    productsEditable &&
     offer !== null &&
     JSON.stringify(bump) !==
       JSON.stringify(offer.bumpProductId && offer.bumpPriceCents ? { productId: offer.bumpProductId, priceCents: offer.bumpPriceCents, label: offer.bumpLabel } : null);
@@ -101,17 +112,16 @@ export function OfferEditor(props: {
   function problem(): string | null {
     if (!f.name.trim()) return "Informe o nome da oferta.";
     if (!/^[a-z0-9-]{3,60}$/.test(f.slug)) return "Endereço: use 3 a 60 caracteres (letras minúsculas, números e hífen).";
-    if (!f.productId) return "Escolha o produto entregue (envie o PDF em Produtos).";
+    if (productsEditable && !f.productId) return "Escolha o produto entregue (envie o PDF em Produtos).";
     if (!priceCents || priceCents <= 0) return "Preço inválido. Use o formato 9,90.";
     if (methods.length === 0) return "Escolha ao menos um método de pagamento.";
-    if (f.bumpOn && (!f.bumpProductId || !bumpCents)) return "Bump: escolha o produto e o preço do acréscimo.";
-    if (f.bumpOn && f.bumpProductId === f.productId) return "O produto do bump deve ser diferente do principal.";
+    if (productsEditable && f.bumpOn && (!f.bumpProductId || !bumpCents)) return "Bump: escolha o produto e o preço do acréscimo.";
+    if (productsEditable && f.bumpOn && f.bumpProductId === f.productId) return "O produto do bump deve ser diferente do principal.";
     return null;
   }
 
   const common = () => ({
     name: f.name.trim(),
-    slug: f.slug,
     methods,
     pixMode: f.pixMode,
     maxInstallments: f.maxInstallments,
@@ -130,6 +140,7 @@ export function OfferEditor(props: {
         () =>
           createOfferAction({
             ...common(),
+            slug: f.slug,
             productIds: [f.productId],
             priceCents,
             bump: bumpInput,
@@ -142,7 +153,17 @@ export function OfferEditor(props: {
       setDialog("price");
       return;
     }
-    await save.run(() => updateOfferAction({ id: offer.id, ...common() }));
+    await saveRest();
+  }
+
+  /** Endereço (offers.setSlug, se mudou) e os demais campos (offers.update). */
+  async function saveRest(ok?: string) {
+    if (!offer) return;
+    if (slugChanged) {
+      const r = await save.run(() => setOfferSlugAction({ id: offer.id, slug: f.slug }), { refresh: false });
+      if (!r.ok) return;
+    }
+    await save.run(() => updateOfferAction({ id: offer.id, ...common() }), ok ? { ok } : {});
   }
 
   async function confirmPrice() {
@@ -156,7 +177,7 @@ export function OfferEditor(props: {
       if (!r.ok) return;
     }
     setDialog(null);
-    await save.run(() => updateOfferAction({ id: offer.id, ...common() }), { ok: "Oferta e preço salvos." });
+    await saveRest("Oferta e preço salvos.");
   }
 
   const ro = !canWrite;
@@ -225,17 +246,24 @@ export function OfferEditor(props: {
                 </div>
               </div>
               <div className={s.formGrid}>
-                <label className={s.field}>
-                  <span className={s.label}>Produto entregue</span>
-                  <select className={s.select} value={f.productId} onChange={(e) => set("productId", e.target.value)}>
-                    {products.length === 0 ? <option value="">Envie um PDF em Produtos</option> : null}
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {productsEditable ? (
+                  <label className={s.field}>
+                    <span className={s.label}>Produto entregue</span>
+                    <select className={s.select} value={f.productId} onChange={(e) => set("productId", e.target.value)}>
+                      {products.length === 0 ? <option value="">Envie um PDF em Produtos</option> : null}
+                      {products.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <div className={s.field}>
+                    <span className={s.label}>Produtos entregues</span>
+                    <span className={s.hint}>{MULTI_NOTICE}</span>
+                  </div>
+                )}
                 <div className={s.field}>
                   <label className={s.field}>
                   <span className={s.label}>Endereço (slug)</span>
@@ -328,15 +356,17 @@ export function OfferEditor(props: {
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
             <div className={s.cardHead} style={{ marginBottom: 4 }}>
               <legend className={s.sectionTitle}>Order bump</legend>
-              <label className={s.switch}>
-                <span className={s.srOnly}>Oferecer order bump</span>
-                <input type="checkbox" checked={f.bumpOn} onChange={(e) => set("bumpOn", e.target.checked)} />
-              </label>
+              {productsEditable ? (
+                <label className={s.switch}>
+                  <span className={s.srOnly}>Oferecer order bump</span>
+                  <input type="checkbox" checked={f.bumpOn} onChange={(e) => set("bumpOn", e.target.checked)} />
+                </label>
+              ) : null}
             </div>
             <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
-              Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
+              {productsEditable ? "Uma caixa extra antes do botão de pagar. Sempre começa desmarcada." : MULTI_NOTICE}
             </p>
-            {f.bumpOn ? (
+            {productsEditable && f.bumpOn ? (
               <div className={s.stack}>
                 <div className={s.grid2}>
                   <label className={s.field}>
