@@ -26,6 +26,8 @@ export const connectionsStatus = defineAction({
   async run(ctx) {
     // Só usuário do painel: um token MCP (qualquer papel) nunca vê o token do webhook nem os finais das chaves.
     const canWrite = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.write");
+    // Token MCP também não vê a chave Pix (costuma ser CPF ou telefone do vendedor) nem o usuário do SMTP.
+    const isToken = ctx.actor.kind === "token";
     const [pix, smtp, meta] = await Promise.all((["pix_manual", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)));
     // Chave do Asaas que não abre (ASAAS_SEAL_KEY trocada, removida ou rollback) não derruba a tela: aparece como
     // ilegível para o dono colar a chave de novo.
@@ -52,7 +54,13 @@ export const connectionsStatus = defineAction({
     const emailUsable =
       provider === "smtp" ? smtp !== null && smtpConfigUsable(smtp.config) : resend !== null && !resend.unreadable && (await loadResend(ctx.tx, ctx.storeId)) !== null;
     return {
-      pixManual: pix ? { key: str(cfg(pix).key) ?? "", name: str(cfg(pix).name) ?? "", city: str(cfg(pix).city) ?? "" } : null,
+      pixManual: pix
+        ? {
+            key: isToken && str(cfg(pix).key) ? "configured" : (str(cfg(pix).key) ?? ""),
+            name: str(cfg(pix).name) ?? "",
+            city: str(cfg(pix).city) ?? "",
+          }
+        : null,
       asaas: asaas
         ? {
             env: cfg(asaas).env === "production" ? ("production" as const) : ("sandbox" as const),
@@ -66,7 +74,7 @@ export const connectionsStatus = defineAction({
             host: str(cfg(smtp).host) ?? "",
             port: typeof cfg(smtp).port === "number" ? (cfg(smtp).port as number) : 0,
             secure: cfg(smtp).secure === true,
-            user: str(cfg(smtp).user),
+            user: isToken ? null : str(cfg(smtp).user),
             from: str(cfg(smtp).from) ?? "",
             password: smtp.secret ? ("configured" as const) : null,
           }

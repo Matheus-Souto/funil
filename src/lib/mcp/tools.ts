@@ -13,6 +13,7 @@ import { cleanTouch, safeLabel } from "@/lib/orders/report";
 import { maskEmail, maskName, maskPhone } from "@/lib/privacy";
 
 const SENDS_TO_CALLER_ADDRESS = "enviam a endereço escolhido por quem chama; revisão no PR 6";
+const AWAITS_APPROVAL_QUEUE = "aguarda a fila de aprovação (PR 6)";
 
 /** Ações que não saem pelo MCP neste PR (nome → motivo). Públicas e de sistema ficam de fora pela permissão. */
 export const MCP_EXCLUDED: Record<string, string> = {
@@ -22,6 +23,11 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "connections.testResend": SENDS_TO_CALLER_ADDRESS,
   "connections.testTelegram": SENDS_TO_CALLER_ADDRESS,
   "alerts.ack": "some com o aviso para toda a loja (inclusive o de segurança da página de pagamento); revisão no PR 6",
+  // Criar/alterar oferta contorna updatePrice/setProducts/setSlug (sensíveis): preço, ativa, métodos, texto ao comprador.
+  "offers.create": AWAITS_APPROVAL_QUEUE,
+  "offers.update": AWAITS_APPROVAL_QUEUE,
+  // Reenvia ao comprador sem limite por pedido e, com renew, gira os links de download.
+  "orders.resend": AWAITS_APPROVAL_QUEUE,
 };
 
 export interface McpTool {
@@ -31,9 +37,9 @@ export interface McpTool {
   description: string;
   inputSchema: object;
   permission: Permission;
-  /** Saída da ação → o que o agente recebe. */
+  /** Saída da ação → o que o agente recebe. `callMcpTool` usa sempre a do catálogo (pelo nome da ação), não esta. */
   project(out: unknown): unknown;
-  /** Argumentos do agente → entrada da ação (ex.: descarta campos que o MCP não expõe). */
+  /** Argumentos do agente → entrada da ação (ex.: descarta campos que o MCP não expõe). Idem: vale a do catálogo. */
   input?(raw: unknown): unknown;
 }
 
@@ -213,15 +219,19 @@ export function mcpTools(role: Role): McpTool[] {
   return tools.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Executa a ferramenta como o token (`runAction` decide permissão e auditoria) e aplica a projeção na saída. */
+/**
+ * Executa a ferramenta como o token (`runAction` decide permissão e auditoria) e aplica a projeção na saída.
+ * Entrada e projeção vêm do catálogo pelo nome da ação, nunca do objeto recebido: ferramenta forjada (ação fora do
+ * catálogo, `project` identidade, sem `input`) não muda o que sai.
+ */
 export async function callMcpTool(tool: McpTool, call: { storeId: string; tokenId: string; role: Role }, args: unknown): Promise<unknown> {
   const action = registry.get(tool.action);
-  // Ferramenta montada à mão para uma ação fora do catálogo (ex.: orders.export) não passa.
   if (!action || exposedPermission(action) === null) throw new ActionError("forbidden", `Ferramenta indisponível: ${tool.name}`);
+  const o = OVERRIDES[action.name] ?? {};
   const out = await runAction(
     action,
     { storeId: call.storeId, actor: { kind: "token", tokenId: call.tokenId, role: call.role }, origin: "mcp" },
-    tool.input ? tool.input(args) : args,
+    o.input ? o.input(args) : args,
   );
-  return tool.project(out);
+  return (o.project ?? identity)(out);
 }

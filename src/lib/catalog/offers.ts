@@ -222,6 +222,7 @@ export const listOffers = defineAction({
   description: "Lista as ofertas da loja.",
   input: z.object({}),
   permission: "offers.read",
+  audit: false,
   run: async (ctx) => withProducts(ctx.tx, await ctx.tx.select(offerCols).from(offer).orderBy(desc(offer.createdAt))),
 });
 
@@ -230,6 +231,7 @@ export const getOffer = defineAction({
   description: "Busca uma oferta pelo id.",
   input: z.object({ id }),
   permission: "offers.read",
+  audit: false,
   async run(ctx, input) {
     const [row] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, input.id));
     if (!row) throw new ActionError("not_found", "Oferta não encontrada");

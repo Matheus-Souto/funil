@@ -7,8 +7,8 @@ import { eq, sql } from "drizzle-orm";
 import { runAction, type Actor } from "@/lib/actions/core";
 import { ROLE_PERMISSIONS, type Role } from "@/lib/actions/permissions";
 import { changePassword, listTeam } from "@/lib/auth/account";
-import { listOffers } from "@/lib/catalog/offers";
-import { listProducts } from "@/lib/catalog/products";
+import { getOffer, listOffers } from "@/lib/catalog/offers";
+import { listProducts, updateProduct } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { seal, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
@@ -17,7 +17,7 @@ import { authenticateMcpToken, createMcpToken, listMcpTokens, mintMcpToken, revo
 import { metricsSummary } from "@/lib/metrics";
 import { removeTelegram } from "@/lib/notify/telegram-connection";
 import { exportOrders, getOrderDetail, listOrders } from "@/lib/orders/panel";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
@@ -222,19 +222,32 @@ describe("ator token no runAction", () => {
     await expect(runAction(listMcpTokens, call, {})).rejects.toMatchObject({ code: "forbidden" });
   });
 
-  test("ação feita com ator token grava o tokenId e o papel no ator da auditoria", async () => {
+  test("ação feita com ator token grava o tokenId e o papel no ator da auditoria; leitura do catálogo não grava", async () => {
     const { storeId } = await ownerStore();
-    const actor = tokenActor("reader");
-    await runAction(listProducts, { storeId, actor, origin: "mcp" }, {});
-    const [audit] = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "products.list")));
+    const { id } = await seedProduct(storeId);
+    const actor = tokenActor("owner");
+    await runAction(updateProduct, { storeId, actor, origin: "mcp" }, { id, name: "Renomeado" });
+    const [audit] = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "products.update")));
     expect(audit).toMatchObject({ actor, origin: "mcp", ok: true });
+    // Leituras (audit: false): pelo MCP não viram uma linha de auditoria por chamada.
+    const reader = { storeId, actor: tokenActor("reader"), origin: "mcp" as const };
+    await runAction(listProducts, reader, {});
+    await runAction(listOffers, reader, {});
+    await expect(runAction(getOffer, reader, { id: randomUUID() })).rejects.toMatchObject({ code: "not_found" });
+    const reads = await withStore(storeId, (tx) =>
+      tx.select().from(auditLog).where(sql`${auditLog.action} in ('products.list', 'offers.list', 'offers.get')`),
+    );
+    expect(reads).toEqual([]);
   });
 
   test("connections.status: token (mesmo de dono) nunca recebe o token do webhook do Asaas nem os finais das chaves", async () => {
     const { storeId, panel } = await ownerStore();
     const hook = randomBytes(16).toString("hex");
     const [apiLast4, whLast4, botLast4] = ["Wq7z", "Kp3m", "Rt9x"];
+    const [pixKey, smtpUser] = ["52998224725", "dona.ana.smtp@exemplo.com"];
     await t.ownerDb.insert(integration).values([
+      { storeId, kind: "pix_manual", config: { key: pixKey, name: "Ana", city: "Rio" }, secret: null },
+      { storeId, kind: "smtp", config: { host: "smtp.exemplo.com", port: 587, secure: false, user: smtpUser, from: "vendas@loja.com" }, secret: seal("senha") },
       { storeId, kind: "asaas", config: { env: "sandbox", webhookToken: hook }, secret: "a1.selado" },
       { storeId, kind: "resend", config: { fromEmail: "vendas@loja.com", apiKeyLast4: apiLast4, webhookSecretLast4: whLast4 }, secret: seal("chave-resend") },
       { storeId, kind: "telegram", config: { chatId: "12345", tokenLast4: botLast4 }, secret: seal("token-bot") },
@@ -244,8 +257,10 @@ describe("ator token no runAction", () => {
       expect(st.asaas?.webhookToken).toBeNull();
       expect(st.resend).toMatchObject({ apiKey: "configured", webhookSecret: "configured" });
       expect(st.telegram?.token).toBe("configured");
+      expect(st.pixManual?.key).toBe("configured");
+      expect(st.smtp?.user).toBeNull();
       const json = JSON.stringify(st);
-      for (const secret of [hook, apiLast4, whLast4, botLast4]) expect(json).not.toContain(secret);
+      for (const secret of [hook, apiLast4, whLast4, botLast4, pixKey, smtpUser]) expect(json).not.toContain(secret);
     }
     await expect(runAction(connectionsStatus, { storeId, actor: tokenActor("reader"), origin: "mcp" }, {})).rejects.toMatchObject({ code: "forbidden" });
     // Controle: o dono no painel vê.
@@ -253,6 +268,8 @@ describe("ator token no runAction", () => {
     expect(own.asaas?.webhookToken).toBe(hook);
     expect(own.resend?.apiKey).toEqual({ last4: apiLast4 });
     expect(own.telegram?.token).toEqual({ last4: botLast4 });
+    expect(own.pixManual?.key).toBe(pixKey);
+    expect(own.smtp?.user).toBe(smtpUser);
   });
 
   test("orders.get: token (mesmo de dono) recebe só \"falha no envio\", nunca o erro cru do SMTP", async () => {

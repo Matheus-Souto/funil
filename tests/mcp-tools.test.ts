@@ -70,7 +70,17 @@ describe("classificação", () => {
       expect(reason.length).toBeGreaterThan(5);
     }
     expect(Object.keys(MCP_EXCLUDED)).toEqual(
-      expect.arrayContaining(["orders.export", "products.create", "connections.testSmtp", "connections.testResend", "connections.testTelegram"]),
+      expect.arrayContaining([
+        "orders.export",
+        "products.create",
+        "connections.testSmtp",
+        "connections.testResend",
+        "connections.testTelegram",
+        "alerts.ack",
+        "offers.create",
+        "offers.update",
+        "orders.resend",
+      ]),
     );
   });
 
@@ -88,7 +98,18 @@ describe("classificação", () => {
       }
     }
     const owner = mcpTools("owner").map((x) => x.action);
-    for (const name of ["orders.export", "products.create", "connections.testSmtp", "connections.removeTelegram", "orders.refund", "team.list"]) {
+    for (const name of [
+      "orders.export",
+      "products.create",
+      "connections.testSmtp",
+      "connections.removeTelegram",
+      "orders.refund",
+      "team.list",
+      "alerts.ack",
+      "offers.create",
+      "offers.update",
+      "orders.resend",
+    ]) {
       expect(owner).not.toContain(name);
     }
   });
@@ -179,9 +200,9 @@ describe("callMcpTool", () => {
 
   test("grava auditoria com origin mcp e actor.kind token", async () => {
     const c = call(s.storeId);
-    const out = await callMcpTool(tool("owner", "orders_resend"), c, { orderId: order.id });
-    expect(out).toMatchObject({ orderId: order.id });
-    const rows = await t.ownerDb.select().from(auditLog).where(eq(auditLog.action, "orders.resend"));
+    const out = await callMcpTool(tool("owner", "products_update"), c, { id: s.mainId, name: "Maná básica" });
+    expect(out).toMatchObject({ id: s.mainId });
+    const rows = await t.ownerDb.select().from(auditLog).where(eq(auditLog.action, "products.update"));
     const row = rows.find((r) => (r.actor as { tokenId?: string }).tokenId === c.tokenId);
     expect(row).toMatchObject({ origin: "mcp", ok: true, actor: { kind: "token", tokenId: c.tokenId, role: "owner" } });
   });
@@ -193,6 +214,17 @@ describe("callMcpTool", () => {
   test("ferramenta montada à mão para ação fora do catálogo é forbidden", async () => {
     const fake: McpTool = { ...tool("owner", "orders_list"), name: "orders_export", action: "orders.export", permission: "orders.export" };
     expect(await callMcpTool(fake, call(s.storeId), {}).then(() => "ok", codeOf)).toBe("forbidden");
+  });
+
+  test("ferramenta forjada com project identidade e sem input continua com a projeção e o input do catálogo", async () => {
+    const forge = (name: string): McpTool => ({ ...tool("owner", name), project: (x) => x, input: undefined });
+    const d = (await callMcpTool(forge("orders_get"), call(s.storeId), { id: order.id })) as Record<string, unknown>;
+    expect(leaks(d)).toEqual([]);
+    expect(d).not.toHaveProperty("publicId");
+    expect(d.buyer).toMatchObject({ name: "Z***", email: "z***@exemplo.com" });
+    const l = (await callMcpTool(forge("orders_list"), call(s.storeId), { q: "nao-existe-ninguem" })) as { total: number };
+    expect(l.total).toBeGreaterThan(0);
+    expect(leaks(l)).toEqual([]);
   });
 
   test("orders_get: lista branca com comprador mascarado, CPF estrito e sem IP, user agent, fbc, fbp nem fbclid", async () => {
