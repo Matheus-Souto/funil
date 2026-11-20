@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { ActionError, runAction } from "@/lib/actions/core";
+import { randomUUID } from "node:crypto";
+import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, seedViews } from "./panel-helpers";
@@ -111,6 +112,34 @@ describe("metrics.breakdown", () => {
     expect(b.byDay.slice(0, 6).every((d) => d.revenueCents === 0)).toBe(true);
     expect(b.bumpPaid).toBe(1);
     expect(b.byOffer).toEqual([{ offerId: s.offerId, views: 4, orders: 3, paid: 2, bumpPaid: 1, revenueCents: 3690 }]);
+  });
+});
+
+describe("teto de período para tokens MCP", () => {
+  const DAY = 24 * HOUR;
+  const tokenCall = (storeId: string) => ({ storeId, actor: { kind: "token" as const, tokenId: randomUUID(), role: "reader" as const }, origin: "mcp" as const });
+  const days = (n: number) => {
+    const to = new Date();
+    return { from: new Date(to.getTime() - n * DAY), to };
+  };
+  const codeOf = (p: Promise<unknown>) => p.then(() => "ok", (e: unknown) => (e instanceof ActionError ? `${e.code}: ${e.message}` : String(e)));
+
+  test("token: 401 dias → invalid_input; 400 dias → ok (summary e breakdown)", async () => {
+    const s = await seedPanelStore();
+    for (const action of [metricsSummary, metricsBreakdown] as Action<unknown, unknown>[]) {
+      expect([action.name, await codeOf(runAction(action, tokenCall(s.storeId), days(401)))]).toEqual([
+        action.name,
+        "invalid_input: Período de no máximo 400 dias",
+      ]);
+      expect([action.name, await codeOf(runAction(action, tokenCall(s.storeId), days(400)))]).toEqual([action.name, "ok"]);
+    }
+  });
+
+  test("painel (ator user): período desde 1970 continua aceito", async () => {
+    const s = await seedPanelStore();
+    for (const action of [metricsSummary, metricsBreakdown] as Action<unknown, unknown>[]) {
+      expect([action.name, await codeOf(runAction(action, panelCall(s.storeId), { from: new Date(0), to: new Date() }))]).toEqual([action.name, "ok"]);
+    }
   });
 });
 
