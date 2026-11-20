@@ -498,7 +498,7 @@ gerenciador de senhas, nunca com os backups:
 
    Uma vez só: confira antes com `grep -c 'import card/' deploy/Caddyfile.local` (deve mostrar `0` para acrescentar;
    `1` = já está). Sem a linha, o Caddy não serve o `pagar.` (o checkout mostra "Pagamento com cartão indisponível
-   agora"); com ela duas vezes, o Caddy não sobe (problemas comuns, seção 13). Confira também que cada site do app na
+   agora"); com ela duas vezes, o Caddy não sobe (problemas comuns, seção 14). Confira também que cada site do app na
    sua cópia tem o bloco `@legacyCard` do `deploy/Caddyfile` (ele corta a rota antiga do cartão antes do app):
 
    ```
@@ -575,7 +575,69 @@ capabilities, 192 MB de memória e sem core dump.
   app (um bloco antigo com a linha `expression ... CARD_ISOLATED ...` deixa de valer: tire essa linha); sem ele, o app
   responde 404 sem ler o corpo, mas os bytes chegam ao processo dele.
 
-## 13. Problemas comuns
+## 13. Agentes de IA (MCP)
+
+O painel deixa um agente de IA (Claude, por exemplo) consultar a loja pelo protocolo MCP, sem nunca receber dado
+pessoal de comprador.
+
+**Criar o token.** No painel: **Loja → Agentes (MCP)** (só quem gerencia a equipe, o dono). Dê um nome, escolha o
+papel e clique em **Criar token**. O token (`fnl_...`) aparece **uma única vez**, num quadro com o botão Copiar:
+guarde-o agora (cofre de senhas ou o segredo do cliente MCP). Se perder, revogue e crie outro.
+
+**Configurar o cliente MCP.** O endereço é `<BASE_URL>/api/mcp` (por exemplo `https://checkout.minhaloja.com.br/api/mcp`;
+o painel mostra o endereço certo ao criar o token) e a autenticação é o cabeçalho `Authorization: Bearer <token>`.
+Em um cliente MCP genérico (HTTP), a configuração fica assim:
+
+```json
+{
+  "mcpServers": {
+    "minha-loja": {
+      "url": "https://checkout.minhaloja.com.br/api/mcp",
+      "headers": { "Authorization": "Bearer COLE_O_TOKEN_AQUI" }
+    }
+  }
+}
+```
+
+O nome do bloco e o formato exato do arquivo variam de cliente para cliente; o que importa é a URL e o cabeçalho.
+Token ausente, errado ou revogado dá sempre o mesmo erro 401, sem dizer qual foi o caso.
+
+**O que cada papel vê:**
+
+| Papel | Acesso |
+| --- | --- |
+| Leitor | lê produtos, ofertas, métricas e o relatório de vendas pagas |
+| Tráfego | Leitor + métricas e testar o Pixel |
+| Suporte | consulta pedidos (com comprador mascarado) |
+| Admin | tudo que o painel permite, menos equipe e conexões |
+| Dono | tudo que um agente pode fazer pelo MCP |
+
+Comece pelo menor papel que resolve o que o agente precisa (Leitor, na dúvida).
+
+**O que nunca sai pelo MCP, em nenhum papel:**
+
+- Dado pessoal do comprador: nome, e-mail, telefone e CPF saem mascarados (`M***`, `m***@gmail.com`,
+  `(**) *****-1234`, `***.***.***-12`) ou não saem; não há busca por e-mail ou nome, nem exportação de pedidos (CSV).
+  IP, user agent e e-mails da equipe também não saem.
+- Ações sensíveis: reembolso, liberar pedido, chaves e conexões (inclusive desligar o Telegram), preço, produtos e
+  endereço da oferta, apagar produto, configurações da loja, senha e equipe (inclusive criar e revogar tokens).
+- Por enquanto, também ficam de fora: criar e editar oferta, reenviar acesso, criar produto (envio de arquivo),
+  "Enviar teste" das conexões e confirmar avisos.
+
+**Revogar.** Em **Agentes (MCP)**, clique em **Revogar** ao lado do token e confirme. O agente perde o acesso na hora.
+O token revogado continua na lista, marcado como revogado, para o histórico.
+
+**Quem sai da equipe.** O token não pertence a quem o criou: ele continua válido mesmo que essa pessoa saia da equipe
+ou perca o acesso ao painel. Ao tirar alguém da equipe, revogue os tokens que ela criou (a lista mostra quem criou cada
+um) e crie outros, se ainda forem necessários.
+
+**Em produção, confira o `TRUST_PROXY`** (seção 2). O MCP limita as requisições por IP (300 por minuto) e as
+tentativas com token inválido por IP (30 por minuto). Com `TRUST_PROXY` errado, todo mundo parece ter o mesmo IP: o
+limite bloqueia agentes legítimos junto com quem erra. Com `TRUST_PROXY=0`, o IP é desconhecido: o limite por IP não
+vale e as falhas de autenticação caem num balde único para o servidor todo. Além disso, cada token tem o limite próprio
+de 120 requisições por minuto.
+
+## 14. Problemas comuns
 
 - **O checkout não mostra o cartão e o painel avisa "falta configurar o serviço de cartão"**: a instalação está sem
   `CARD_ORIGIN` (ou o `.env` não foi relido). Configure a seção 12 e rode `docker compose up -d`.
