@@ -1,12 +1,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
+import fc from "fast-check";
 import { z } from "zod";
-import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
-import { createOffer } from "@/lib/catalog/offers";
+import { createOffer, setOfferProducts } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
-import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
+import { auditLog, checkoutView, customer, orderItem, orders, product } from "@/lib/db/schema";
 import {
   ASAAS_LIMITS,
   CARD_UNAVAILABLE_MESSAGE,
@@ -27,11 +28,12 @@ import {
 } from "@/lib/checkout";
 import { CARD_TICKET_RENEW_WINDOW_MS, CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket } from "@/lib/payments/card-ticket";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { createOrder, type Method } from "@/lib/orders/create";
 import { payWithCard } from "@/lib/payments/asaas/card";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { savePixManual } from "@/lib/payments/manual";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
-import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeAsaas, type FakeAsaas } from "./fakes/asaas";
 
 let t: TestDb;
@@ -716,5 +718,188 @@ describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
     expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY))).code).toBe("conflict");
 
     expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "../x y", ticket: card.cardTicket }, KEY))).code).toBe("invalid_input");
+  });
+});
+
+// ---- Oferta com N produtos: rateio, ordem e produto apagado -------------------------------------------------------
+
+/** Loja com Pix manual e `n` produtos semeados (nomes "PDF 1".."PDF n"). */
+async function seedCatalog(n: number) {
+  const s = await seed({ bump: false });
+  const products: { id: string; name: string }[] = [];
+  for (let i = 1; i <= n; i++) products.push({ name: `PDF ${i}`, ...(await seedProduct(s.storeId, `PDF ${i}`)) });
+  return { storeId: s.storeId, products };
+}
+
+type KitOpts = { name?: string; main: string[]; priceCents: number; bump?: { ids: string[]; priceCents: number; label?: string } };
+async function kitOffer(storeId: string, k: KitOpts) {
+  const slug = `k-${Math.random().toString(36).slice(2, 10)}`;
+  const o = await runAction(createOffer, { storeId, actor: owner, origin: "panel" as const }, {
+    slug,
+    name: k.name ?? "Almanaque Completo",
+    productIds: k.main,
+    priceCents: k.priceCents,
+    methods: ["pix", "card"],
+    pixMode: "manual",
+    ...(k.bump ? { bump: { productIds: k.bump.ids, priceCents: k.bump.priceCents, label: k.bump.label ?? (k.bump.ids.length > 1 ? "Kits extras" : null) } } : {}),
+  });
+  return { slug, offerId: o.id };
+}
+
+const itemsOf = (storeId: string, orderId: string) =>
+  withStore(storeId, (tx) =>
+    tx
+      .select({ productId: orderItem.productId, kind: orderItem.kind, position: orderItem.position, priceCents: orderItem.priceCents })
+      .from(orderItem)
+      .where(eq(orderItem.orderId, orderId))
+      .orderBy(desc(orderItem.kind), asc(orderItem.position)),
+  );
+
+const sysCtx = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "system" }, origin: "system", tx });
+const directOrder = (storeId: string, offerId: string, withBump: boolean, method: Method = "pix_manual") =>
+  withStore(storeId, (tx) =>
+    createOrder(sysCtx(storeId, tx), {
+      offerId,
+      withBump,
+      method,
+      customer: { name: "Maria Souza", email: email(), phone: "11987654321", ...(method === "pix_manual" ? {} : { cpf: CPF }) },
+      touch: { first: null, last: null },
+      clientIp: nextIp(),
+      userAgent: "bun-test",
+    }),
+  );
+
+describe("pedido com N itens: rateio em centavos", () => {
+  test("Completo (6 principais) por R$ 27,00: 6 itens de 450 na ordem da oferta, soma 2.700", async () => {
+    const c = await seedCatalog(6);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids, priceCents: 2700 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const o = await orderBy(c.storeId, r.publicId);
+    expect(o.totalCents).toBe(2700);
+    expect(o.hasBump).toBe(false);
+    const items = await itemsOf(c.storeId, o.id);
+    expect(items).toEqual(ids.map((productId, position) => ({ productId, kind: "main", position, priceCents: 450 })));
+  });
+
+  test("Almanaque (990) + bump de 5 produtos (1.710): 1 item de 990 e 5 de 342; sem o bump, só 1 item", async () => {
+    const c = await seedCatalog(6);
+    const [main, ...kits] = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { name: "Almanaque", main: [main!], priceCents: 990, bump: { ids: kits, priceCents: 1710, label: "5 Kits Extras" } });
+    const withBump = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }))).publicId);
+    expect(withBump.totalCents).toBe(2700);
+    expect(withBump.hasBump).toBe(true);
+    expect(await itemsOf(c.storeId, withBump.id)).toEqual([
+      { productId: main!, kind: "main", position: 0, priceCents: 990 },
+      ...kits.map((productId, position) => ({ productId, kind: "bump", position, priceCents: 342 })),
+    ]);
+    const noBump = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug))).publicId);
+    expect(noBump.totalCents).toBe(990);
+    expect(await itemsOf(c.storeId, noBump.id)).toEqual([{ productId: main!, kind: "main", position: 0, priceCents: 990 }]);
+  });
+
+  test("total com sobra: a sobra fica no primeiro item do grupo (1.000 em 3 = 334, 333, 333)", async () => {
+    const c = await seedCatalog(3);
+    const k = await kitOffer(c.storeId, { main: c.products.map((p) => p.id), priceCents: 1000 });
+    const o = await directOrder(c.storeId, k.offerId, false);
+    expect((await itemsOf(c.storeId, o.id)).map((i) => i.priceCents)).toEqual([334, 333, 333]);
+  });
+
+  test(
+    "propriedade: 1 a 20 itens por grupo, com e sem bump, Pix manual e cartão: soma dos itens = total_cents",
+    async () => {
+      const c = await seedCatalog(40);
+      const ids = c.products.map((p) => p.id);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 20 }),
+          fc.integer({ min: 0, max: 20 }),
+          fc.integer({ min: 1, max: 500_000 }),
+          fc.integer({ min: 1, max: 500_000 }),
+          fc.boolean(),
+          fc.constantFrom<Method>("pix_manual", "card_asaas"),
+          async (nMain, nBump, price, bumpPrice, withBump, method) => {
+            const k = await kitOffer(c.storeId, {
+              main: ids.slice(0, nMain),
+              priceCents: price,
+              ...(nBump > 0 ? { bump: { ids: ids.slice(20, 20 + nBump), priceCents: bumpPrice } } : {}),
+            });
+            const bumped = withBump && nBump > 0;
+            const o = await directOrder(c.storeId, k.offerId, bumped, method);
+            const items = await itemsOf(c.storeId, o.id);
+            expect(o.totalCents).toBe(price + (bumped ? bumpPrice : 0));
+            expect(items.reduce((sum, i) => sum + i.priceCents, 0)).toBe(o.totalCents);
+            expect(items.filter((i) => i.kind === "main")).toHaveLength(nMain);
+            expect(items.filter((i) => i.kind === "bump")).toHaveLength(bumped ? nBump : 0);
+            for (const i of items) expect(Number.isInteger(i.priceCents) && i.priceCents >= 0).toBe(true);
+            if (method === "pix_manual") {
+              // O valor único do Pix manual não entra no rateio: os itens somam o total, não o valor a pagar.
+              expect(o.manualAmountCents!).toBeGreaterThan(o.totalCents);
+              expect(o.manualAmountCents!).toBeLessThanOrEqual(o.totalCents + 99);
+            }
+          },
+        ),
+        { numRuns: 25 },
+      );
+    },
+    HEAVY_TEST_MS * 3,
+  );
+
+  test("reordenar ou trocar os produtos da oferta depois do pedido não muda os itens do pedido", async () => {
+    const c = await seedCatalog(5);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids.slice(0, 3), priceCents: 1000 });
+    const before = await directOrder(c.storeId, k.offerId, false);
+    const snapshot = await itemsOf(c.storeId, before.id);
+    const call = { storeId: c.storeId, actor: owner, origin: "panel" as const };
+    await runAction(setOfferProducts, call, { id: k.offerId, productIds: [ids[2]!, ids[0]!, ids[1]!], bump: null });
+    expect(await itemsOf(c.storeId, before.id)).toEqual(snapshot);
+    await runAction(setOfferProducts, call, { id: k.offerId, productIds: [ids[3]!, ids[4]!], bump: null });
+    expect(await itemsOf(c.storeId, before.id)).toEqual(snapshot);
+    // Pedido novo segue a lista atual.
+    const after = await directOrder(c.storeId, k.offerId, false);
+    expect((await itemsOf(c.storeId, after.id)).map((i) => [i.productId, i.position, i.priceCents])).toEqual([
+      [ids[3]!, 0, 500],
+      [ids[4]!, 1, 500],
+    ]);
+  });
+
+  test("qualquer principal apagado: a oferta não vende (not_found); qualquer produto do bump apagado: pedido sai sem bump", async () => {
+    const c = await seedCatalog(6);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids.slice(0, 3), priceCents: 2700, bump: { ids: ids.slice(3), priceCents: 1710 } });
+    // Apaga o 3º produto do bump (não o 1º).
+    await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[5]!));
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }));
+    const o = await orderBy(c.storeId, r.publicId);
+    expect(o.hasBump).toBe(false);
+    expect(o.totalCents).toBe(2700);
+    expect((await itemsOf(c.storeId, o.id)).map((i) => i.kind)).toEqual(["main", "main", "main"]);
+    // Apaga o 2º principal (não o 1º).
+    await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[1]!));
+    const e = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug)));
+    expect(e.code).toBe("not_found");
+  });
+});
+
+describe("página do pedido: sem preço rateado", () => {
+  test("Completo de 6: uma linha com o nome da oferta e o preço dela; nunca R$ 4,50", async () => {
+    const c = await seedCatalog(6);
+    const k = await kitOffer(c.storeId, { name: "Almanaque Completo", main: c.products.map((p) => p.id), priceCents: 2700 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([{ name: "Almanaque Completo", priceCents: 2700 }]);
+  });
+
+  test("1 principal + bump de 5: o principal e o rótulo do bump, cada um com o preço do grupo", async () => {
+    const c = await seedCatalog(6);
+    const [main, ...kits] = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { name: "Almanaque", main: [main!], priceCents: 990, bump: { ids: kits, priceCents: 1710, label: "5 Kits Extras" } });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([
+      { name: "PDF 1", priceCents: 990 },
+      { name: "5 Kits Extras", priceCents: 1710 },
+    ]);
   });
 });

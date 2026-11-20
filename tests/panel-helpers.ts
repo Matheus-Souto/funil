@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { ownerDb } from "@/lib/db/client";
-import { checkoutView, customer, offer, orderItem, orders, product } from "@/lib/db/schema";
+import { checkoutView, customer, offer, offerProduct, orderItem, orders, product } from "@/lib/db/schema";
 import { seedStore } from "./db";
 
 export const actorOf = (role: Role): Extract<Actor, { kind: "user" }> => ({ kind: "user", userId: randomUUID(), role });
@@ -40,6 +40,11 @@ export async function seedPanelStore(name = "Loja"): Promise<PanelStore> {
       bumpPriceCents: 1710,
     })
     .returning({ id: offer.id });
+  // A lista da oferta (offer_product) é a fonte de quem lê os produtos; as colunas antigas acima saem na Task 5.
+  await ownerDb.insert(offerProduct).values([
+    { storeId, offerId: o!.id, productId: main!.id, kind: "main", position: 0 },
+    { storeId, offerId: o!.id, productId: bump!.id, kind: "bump", position: 0 },
+  ]);
   return { storeId, offerId: o!.id, mainId: main!.id, bumpId: bump!.id };
 }
 

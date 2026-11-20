@@ -10,7 +10,7 @@
 // - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
 //   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
 import { createHash } from "node:crypto";
-import { and, asc, count, desc, eq, gt, or, sql } from "drizzle-orm";
+import { and, count, eq, gt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
@@ -20,6 +20,7 @@ import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, 
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createOrder, type Order } from "@/lib/orders/create";
+import { itemOrder } from "@/lib/orders/items";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { issueCardTicket, verifyCardTicketForRenewal } from "@/lib/payments/card-ticket";
@@ -415,7 +416,7 @@ const orderPublicView = defineAction({
       .from(orderItem)
       .innerJoin(product, eq(product.id, orderItem.productId))
       .where(eq(orderItem.orderId, o.id))
-      .orderBy(desc(orderItem.kind), asc(orderItem.id)); // "main" antes de "bump"
+      .orderBy(...itemOrder);
     let manual: { copyPaste: string; receiver: string; txid: string } | null = null;
     if (o.method === "pix_manual" && o.status === "pending") {
       const brCode = await manualPixBrCode(ctx, o);
@@ -454,6 +455,7 @@ export interface OrderPublic {
   createdAt: string;
   paidAt: string | null;
   expiresAt: string | null;
+  /** Uma linha por grupo (principal, bump) com o preço do grupo: o comprador nunca vê o preço rateado por PDF. */
   items: { name: string; priceCents: number }[];
   thankYouText: string | null;
   buyerFirstName: string;
@@ -471,6 +473,21 @@ export interface OrderPublic {
   pixUnavailable?: boolean;
   /** Meta Pixel da oferta (ou da loja); null = sem Pixel na página. */
   pixelId: string | null;
+}
+
+/**
+ * Resumo do pedido para o comprador: uma linha por grupo (principal e bump) com o preço do grupo, nunca o preço rateado
+ * de cada PDF. Grupo de 1 produto mostra o nome dele (como antes); principal com N mostra o nome da oferta; bump com N,
+ * o rótulo do bump.
+ */
+function summaryLines(items: { name: string; priceCents: number; kind: string }[], of: { name: string; bumpLabel: string | null }): OrderPublic["items"] {
+  const line = (kind: "main" | "bump") => {
+    const group = items.filter((i) => i.kind === kind);
+    if (group.length === 0) return [];
+    const name = group.length === 1 ? group[0]!.name : kind === "main" ? of.name : (of.bumpLabel ?? group.map((i) => i.name).join(" · "));
+    return [{ name, priceCents: group.reduce((sum, i) => sum + i.priceCents, 0) }];
+  };
+  return [...line("main"), ...line("bump")];
 }
 
 /**
@@ -495,7 +512,7 @@ export async function getOrderPublic(storeId: string, publicId: string): Promise
     createdAt: o.createdAt.toISOString(),
     paidAt: o.paidAt?.toISOString() ?? null,
     expiresAt: o.expiresAt?.toISOString() ?? null,
-    items: v.items.map((i) => ({ name: i.name, priceCents: i.priceCents })),
+    items: summaryLines(v.items, v.offer),
     thankYouText: v.offer.thankYouText,
     buyerFirstName: v.buyerFirstName,
     offer: { slug: v.offer.slug, name: v.offer.name, methods: v.offer.methods },

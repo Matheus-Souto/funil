@@ -6,6 +6,7 @@ import { randomToken, sha256 } from "@/lib/crypto";
 import type { Tx } from "@/lib/db/client";
 import { downloadLink, downloadToken, orderItem, product } from "@/lib/db/schema";
 import { env } from "@/lib/env";
+import { itemOrder } from "@/lib/orders/items";
 
 export const LINK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_DOWNLOADS = 5;
@@ -27,22 +28,21 @@ export interface DeliveryLink {
   productId: string;
   productName: string;
   kind: "main" | "bump";
-  priceCents: number;
 }
 
 /**
- * Os links do pedido para uma entrega, na transação do chamador (que já conferiu que o pedido está pago): o link não
- * revogado de cada item é reaproveitado (mesmo esgotado ou vencido: o reenvio não ganha downloads; para isso existe o
- * renew); item sem link não revogado ganha um link novo (sem token ainda).
+ * Os links do pedido para uma entrega, na ordem dos itens (principal antes do bump, depois a posição na oferta), na
+ * transação do chamador (que já conferiu que o pedido está pago): o link não revogado de cada item é reaproveitado
+ * (mesmo esgotado ou vencido: o reenvio não ganha downloads; para isso existe o renew); item sem link não revogado ganha
+ * um link novo (sem token ainda).
  */
 export async function deliveryLinks(tx: Tx, order: { id: string; storeId: string }, now: Date = new Date()): Promise<DeliveryLink[]> {
   const items = await tx
-    .select({ productId: orderItem.productId, kind: orderItem.kind, priceCents: orderItem.priceCents, name: product.name })
+    .select({ productId: orderItem.productId, kind: orderItem.kind, name: product.name })
     .from(orderItem)
     .innerJoin(product, eq(product.id, orderItem.productId))
-    .where(eq(orderItem.orderId, order.id));
-  // Principal primeiro, depois o bump.
-  items.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "main" ? -1 : 1));
+    .where(eq(orderItem.orderId, order.id))
+    .orderBy(...itemOrder);
   const existing = await tx
     .select({ id: downloadLink.id, productId: downloadLink.productId })
     .from(downloadLink)
@@ -64,7 +64,7 @@ export async function deliveryLinks(tx: Tx, order: { id: string; storeId: string
         .returning({ id: downloadLink.id });
       linkId = row!.id;
     }
-    out.push({ linkId, productId: item.productId, productName: item.name, kind: item.kind as "main" | "bump", priceCents: item.priceCents });
+    out.push({ linkId, productId: item.productId, productName: item.name, kind: item.kind as "main" | "bump" });
   }
   return out;
 }

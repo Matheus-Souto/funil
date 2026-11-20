@@ -6,11 +6,12 @@ import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { txidOf } from "@/lib/checkout";
 import { db, withStore, type Tx } from "@/lib/db/client";
-import { customer, downloadLink, emailLog, orderItem, orders, product, store } from "@/lib/db/schema";
+import { customer, downloadLink, emailLog, offer, orderItem, orders, product, store } from "@/lib/db/schema";
 import { brl, dateTimeSP } from "@/lib/format";
 import { enqueue, hasOpenJob, type Job, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { LINK_TTL_MS, MAX_DOWNLOADS, deliveryLinks, newTokens, restoreLinks, revokeLinks, saveTokens, storeBaseUrl } from "./links";
+import { itemOrder } from "@/lib/orders/items";
 import { logEmail, sendMail } from "./mailer";
 import { deliveryEmail, methodLabel, sellerEmail } from "./templates";
 import { deleteWatermarks, ensureWatermarkedPdf, watermarkText } from "./watermark";
@@ -74,6 +75,7 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     const [c] = await tx.select().from(customer).where(eq(customer.id, o.customerId));
     const [s] = await tx.select().from(store).where(eq(store.id, storeId));
     if (!c || !s) throw new Error("pedido sem cliente ou loja");
+    const [of] = await tx.select({ name: offer.name }).from(offer).where(eq(offer.id, o.offerId));
     const links = await deliveryLinks(tx, { id: o.id, storeId });
     const files = links.length
       ? await tx
@@ -81,7 +83,7 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
           .from(product)
           .where(inArray(product.id, links.map((l) => l.productId)))
       : [];
-    return { o, c, s, links, files } as const;
+    return { o, c, s, offerName: of?.name ?? s.name, links, files } as const;
   });
   if ("skip" in prep) {
     log.info("deliver_order: nada a enviar", { orderId, reason: prep.skip });
@@ -101,7 +103,8 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     paidAt: o.paidAt ?? new Date(),
     method: o.method,
     totalCents: o.totalCents,
-    items: links.map((l) => ({ name: l.productName, kind: l.kind, priceCents: l.priceCents, url: l.url })),
+    offerName: prep.offerName,
+    items: links.map((l) => ({ name: l.productName, kind: l.kind, url: l.url })),
     maxDownloads: MAX_DOWNLOADS,
     ttlDays: Math.round(LINK_TTL_MS / 86_400_000),
   });
@@ -297,23 +300,26 @@ export const notifySellerJob: JobHandler = async (j, signal) => {
         .select({ name: product.name, kind: orderItem.kind, priceCents: orderItem.priceCents })
         .from(orderItem)
         .innerJoin(product, eq(product.id, orderItem.productId))
-        .where(eq(orderItem.orderId, o.id));
-      items.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === "main" ? -1 : 1));
+        .where(eq(orderItem.orderId, o.id))
+        .orderBy(...itemOrder);
       const [c] = await tx.select().from(customer).where(eq(customer.id, o.customerId));
-      return { s, o, items, buyer: { name: o.buyerName ?? c?.name ?? "", email: c?.email ?? "" } } as const;
+      const [of] = await tx.select({ name: offer.name }).from(offer).where(eq(offer.id, o.offerId));
+      return { s, o, items, offerName: of?.name ?? s.name, buyer: { name: o.buyerName ?? c?.name ?? "", email: c?.email ?? "" } } as const;
     }
-    return { s, o: o ?? null, items: null, buyer: null } as const;
+    return { s, o: o ?? null, items: null, offerName: null, buyer: null } as const;
   });
   if ("skip" in prep) {
     log.info("notify_seller: nada a enviar", { storeId, orderId, reason: prep.skip });
     return;
   }
-  const { s, o, items, buyer } = prep;
+  const { s, o, items, offerName, buyer } = prep;
   const code = o ? orderCode(o.publicId) : null;
   let notice: Notice;
   if (reason) notice = noticeFor(reason, p, code);
   else {
-    const main = items!.find((i) => i.kind === "main")?.name ?? items![0]?.name ?? "pedido";
+    // Mesmo critério do assunto do comprador: 1 principal -> o produto; mais de 1 -> a oferta.
+    const mains = items!.filter((i) => i.kind === "main");
+    const main = mains.length > 1 ? offerName! : (mains[0]?.name ?? items![0]?.name ?? "pedido");
     notice = {
       subject: `Nova venda: ${main} — ${brl(o!.totalCents)}`,
       heading: `Nova venda de ${brl(o!.totalCents)}`,

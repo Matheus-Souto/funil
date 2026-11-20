@@ -4,7 +4,7 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, integration, job, offer, payment, rateLimit, store, storeAlert } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, integration, job, offer, offerProduct, orderItem, payment, product, rateLimit, store, storeAlert } from "@/lib/db/schema";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { createIntegrationSecrets, getIntegration, saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
@@ -18,7 +18,7 @@ import { releaseOrder } from "@/lib/payments/manual";
 import { getStoreSettings, updateStoreSettings } from "@/lib/store-settings";
 import { createTestDb, type TestDb } from "./db";
 import { createFakeAsaas } from "./fakes/asaas";
-import { panelCall, seedManyOrders, seedOrder, seedPanelStore } from "./panel-helpers";
+import { panelCall, seedManyOrders, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -240,6 +240,82 @@ describe("exportação CSV", () => {
     expect(line).toContain("\"'=HYPERLINK(\"\"x\"\")\"");
     // Todo campo entre aspas: nenhuma vírgula ou ponto e vírgula vira separador em nenhuma configuração do Excel.
     expect(line!.split(";").every((f) => f.startsWith('"') && f.endsWith('"'))).toBe(true);
+  });
+});
+
+describe("pedido com N itens no painel", () => {
+  /** Troca os itens do pedido por `names` (produtos novos), na ordem dada, como `createOrder` grava (rateio de 2.700). */
+  async function kitOrder(s: PanelStore, names: string[]) {
+    const ids: string[] = [];
+    for (const n of names) {
+      const [p] = await t.ownerDb
+        .insert(product)
+        .values({ storeId: s.storeId, name: n, fileKey: `products/${s.storeId}/${crypto.randomUUID()}.pdf`, fileName: `${n}.pdf`, fileSize: 1000 })
+        .returning({ id: product.id });
+      ids.push(p!.id);
+    }
+    const o = await seedOrder(s, { status: "paid", totalCents: 2700 });
+    await t.ownerDb.delete(orderItem).where(eq(orderItem.orderId, o.id));
+    // Inserção na ordem inversa: a leitura tem que ordenar por posição, não pela ordem de gravação.
+    const rows = ids.map((productId, position) => ({ storeId: s.storeId, orderId: o.id, productId, priceCents: 450, kind: "main", position }));
+    for (const r of rows.reverse()) await t.ownerDb.insert(orderItem).values(r);
+    return o;
+  }
+  const SIX = ["Almanaque", "Kit 1", "Kit 2", "Kit 3", "Kit 4", "Kit 5"];
+
+  test("CSV: a coluna produto(s) traz os 6 nomes, na ordem da oferta, unidos por ' + '", async () => {
+    const s = await seedPanelStore();
+    await kitOrder(s, SIX);
+    const csv = ordersCsv(await runAction(exportOrders, panelCall(s.storeId), {}));
+    const [, line] = csv.trim().split("\r\n");
+    expect(line).toContain(`"${SIX.join(" + ")}"`);
+    expect(line).toContain('"27,00"');
+  });
+
+  test("detalhe: itens na ordem da oferta (kind, depois posição)", async () => {
+    const s = await seedPanelStore();
+    const o = await kitOrder(s, SIX);
+    const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(d.items.map((i) => i.name)).toEqual(SIX);
+  });
+
+  test("detalhe: links criados na mesma entrega (mesmo created_at) aparecem na ordem dos itens", async () => {
+    const s = await seedPanelStore();
+    const o = await kitOrder(s, SIX);
+    const items = await t.ownerDb.select().from(orderItem).where(eq(orderItem.orderId, o.id));
+    const at = new Date();
+    for (const i of [...items].sort((a, b) => b.position - a.position)) {
+      await t.ownerDb.insert(downloadLink).values({ storeId: s.storeId, orderId: o.id, productId: i.productId, expiresAt: new Date(Date.now() + 86_400_000), createdAt: at });
+    }
+    const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(d.links.map((l) => l.productName)).toEqual(SIX);
+  });
+
+  test("pedido antigo (principal e bump com position 0): principal antes do bump no detalhe e no CSV", async () => {
+    const s = await seedPanelStore();
+    const o = await seedOrder(s, { status: "paid", hasBump: true });
+    // Regrava na ordem bump -> principal, as duas com a posição padrão (como os pedidos de antes da coluna).
+    await t.ownerDb.delete(orderItem).where(eq(orderItem.orderId, o.id));
+    await t.ownerDb.insert(orderItem).values({ storeId: s.storeId, orderId: o.id, productId: s.bumpId, priceCents: 1710, kind: "bump" });
+    await t.ownerDb.insert(orderItem).values({ storeId: s.storeId, orderId: o.id, productId: s.mainId, priceCents: 990, kind: "main" });
+    const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(d.items.map((i) => [i.name, i.kind])).toEqual([
+      ["Maná básica", "main"],
+      ["Maná completa", "bump"],
+    ]);
+    const csv = ordersCsv(await runAction(exportOrders, panelCall(s.storeId), {}));
+    expect(csv).toContain('"Maná básica + Maná completa"');
+  });
+
+  test("seedPanelStore grava a lista da oferta em offer_product", async () => {
+    const s = await seedPanelStore();
+    const rows = await t.ownerDb.select().from(offerProduct).where(eq(offerProduct.offerId, s.offerId));
+    expect(rows.map((r) => [r.productId, r.kind, r.position]).sort()).toEqual(
+      [
+        [s.mainId, "main", 0],
+        [s.bumpId, "bump", 0],
+      ].sort(),
+    );
   });
 });
 

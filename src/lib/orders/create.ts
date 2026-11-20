@@ -1,8 +1,10 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { ActionError, type Ctx } from "@/lib/actions/core";
+import { loadOfferProducts, type ProductRef } from "@/lib/catalog/offer-products";
 import { randomToken } from "@/lib/crypto";
+import { customer, offer, orderItem, orders } from "@/lib/db/schema";
+import { splitCents } from "@/lib/money";
 import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
-import { customer, offer, orderItem, orders, product } from "@/lib/db/schema";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
 export type Touch = { first: Record<string, string> | null; last: Record<string, string> | null };
@@ -35,23 +37,27 @@ function methodAllowed(method: Method, methods: string[], pixMode: string, asaas
   return methods.includes("pix") && pixMode === (method === "pix_manual" ? "manual" : "asaas");
 }
 
-/** Cria o pedido recalculando preços a partir do banco (nunca do cliente). Roda na transação de `ctx`. */
+/**
+ * Cria o pedido recalculando preços a partir do banco (nunca do cliente). Roda na transação de `ctx`.
+ * Um `order_item` por produto da oferta (`offer_product`), na ordem da oferta: os principais dividem o preço da oferta e
+ * os do bump (se marcado) o preço do bump (`splitCents`: sobra no primeiro item do grupo), e a soma dá `total_cents`.
+ * Nunca vende combo incompleto: qualquer principal apagado -> a oferta não vende; qualquer produto do bump apagado ->
+ * o pedido sai sem o bump.
+ */
 export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Order> {
-  const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.id, input.offerId), eq(offer.active, true)));
+  // FOR SHARE: espera um offers.setProducts em andamento (FOR UPDATE na mesma linha) e lê preço e lista do mesmo estado.
+  const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.id, input.offerId), eq(offer.active, true))).for("share");
   if (!o) throw new ActionError("not_found", "Oferta não encontrada");
   if (!methodAllowed(input.method, o.methods, o.pixMode, input.asaasPixFallback)) throw new ActionError("invalid_input", "Método de pagamento indisponível nesta oferta");
 
-  const live = async (id: string) => {
-    const [p] = await ctx.tx.select({ id: product.id }).from(product).where(and(eq(product.id, id), isNull(product.deletedAt)));
-    return p !== undefined;
-  };
-  if (!(await live(o.productId))) throw new ActionError("not_found", "Oferta não encontrada");
-  let bump: { productId: string; priceCents: number } | null = null;
+  const list = (await loadOfferProducts(ctx.tx, [o.id])).get(o.id)!;
+  const live = (ps: ProductRef[]) => ps.length > 0 && ps.every((p) => p.deletedAt === null);
+  if (!live(list.main)) throw new ActionError("not_found", "Oferta não encontrada");
+  let bump: { products: ProductRef[]; priceCents: number } | null = null;
   if (input.withBump) {
-    if (!o.bumpProductId || o.bumpPriceCents === null || !(await live(o.bumpProductId))) {
-      throw new ActionError("invalid_input", "Esta oferta não tem order bump");
-    }
-    bump = { productId: o.bumpProductId, priceCents: o.bumpPriceCents };
+    if (list.bump.length === 0 || o.bumpPriceCents === null) throw new ActionError("invalid_input", "Esta oferta não tem order bump");
+    // Produto do bump apagado: o checkout já esconde o bump; quem o marcou numa página antiga compra sem ele.
+    if (live(list.bump)) bump = { products: list.bump, priceCents: o.bumpPriceCents };
   }
   const total = o.priceCents + (bump?.priceCents ?? 0);
 
@@ -118,9 +124,10 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
   } else {
     order = await insertOrder(ctx.tx, null);
   }
-  await ctx.tx.insert(orderItem).values([
-    { storeId: ctx.storeId, orderId: order.id, productId: o.productId, priceCents: o.priceCents, kind: "main" },
-    ...(bump ? [{ storeId: ctx.storeId, orderId: order.id, productId: bump.productId, priceCents: bump.priceCents, kind: "bump" }] : []),
-  ]);
+  const items = (kind: "main" | "bump", products: ProductRef[], priceCents: number) => {
+    const prices = splitCents(priceCents, products.length);
+    return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
+  };
+  await ctx.tx.insert(orderItem).values([...items("main", list.main, o.priceCents), ...(bump ? items("bump", bump.products, bump.priceCents) : [])]);
   return order;
 }

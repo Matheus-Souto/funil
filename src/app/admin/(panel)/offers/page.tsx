@@ -3,7 +3,6 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
-import { listProducts } from "@/lib/catalog/products";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { brl } from "@/lib/format";
 import { metricsBreakdown, periodRange } from "@/lib/metrics";
@@ -22,8 +21,7 @@ export default async function OffersPage() {
   const call = { ...panel, origin: "panel" as const };
   const role = panel.actor.role;
   const offers = await runAction(listOffers, call, {});
-  const products = hasPermission(role, "products.read") ? await runAction(listProducts, call, {}) : [];
-  const nameOf = (id: string | null) => products.find((p) => p.id === id)?.name ?? "";
+  const names = (ps: { name: string }[]) => ps.map((p) => p.name).join(" · ");
   const stats = hasPermission(role, "metrics.read") ? (await runAction(metricsBreakdown, call, periodRange("7d"))).byOffer : null;
   const base = storeBaseUrl((await getPanelIdentity(panel)).store);
 
@@ -64,7 +62,7 @@ export default async function OffersPage() {
                   <Badge tone={o.active ? "success" : "neutral"}>{o.active ? "Ativa" : "Inativa"}</Badge>
                 </div>
                 <p className={s.muted} style={{ margin: 0 }}>
-                  {nameOf(o.productId)} · <b style={{ color: "var(--color-text)" }}>{brl(o.priceCents)}</b>
+                  {names(o.products)} · <b style={{ color: "var(--color-text)" }}>{brl(o.priceCents)}</b>
                 </p>
                 <div className={s.chips}>
                   {o.methods.includes("pix") ? <span className={s.chip}>Pix · {o.pixMode === "manual" ? "Manual" : "Asaas"}</span> : null}
@@ -74,10 +72,10 @@ export default async function OffersPage() {
                       Cartão · {o.maxInstallments > 1 ? `até ${o.maxInstallments}x` : "1x"}
                     </span>
                   ) : null}
-                  {o.bumpProductId && o.bumpPriceCents ? (
+                  {o.bump ? (
                     <span className={s.chip} data-tone="primary">
                       <PIcon name="gift" size={14} />
-                      Bump: {nameOf(o.bumpProductId) || "produto"} + {brl(o.bumpPriceCents)}
+                      Bump: {o.bump.products.length > 1 ? (o.bump.label ?? names(o.bump.products)) : names(o.bump.products)} + {brl(o.bump.priceCents)}
                     </span>
                   ) : (
                     <span className={s.chip}>Sem bump</span>
@@ -104,7 +102,7 @@ export default async function OffersPage() {
                     </div>
                     <div>
                       <span>Bump aceito</span>
-                      <b>{o.bumpProductId ? pct(st?.bumpPaid ?? 0, st?.paid ?? 0) : "—"}</b>
+                      <b>{o.bump ? pct(st?.bumpPaid ?? 0, st?.paid ?? 0) : "—"}</b>
                     </div>
                   </div>
                 ) : null}

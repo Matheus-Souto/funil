@@ -20,7 +20,9 @@ export default async function ProductsPage() {
   const products = await runAction(listProducts, call, {});
   const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
   const usedIn = (id: string) =>
-    offers.flatMap((o) => (o.productId === id ? [o.name] : o.bumpProductId === id ? [`${o.name} · bump`] : [])).join(", ") || "—";
+    offers
+      .flatMap((o) => (o.products.some((p) => p.id === id) ? [o.name] : o.bump?.products.some((p) => p.id === id) ? [`${o.name} · bump`] : []))
+      .join(", ") || "—";
   const canWrite = hasPermission(panel.actor.role, "products.write");
 
   return (

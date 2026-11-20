@@ -10,6 +10,7 @@ import { getIntegration } from "@/lib/integrations";
 import { hasOpenJob } from "@/lib/jobs";
 import { refundMarkerOf } from "@/lib/payments/asaas/refunds";
 import { hasOldAccountEvent } from "@/lib/payments/asaas/webhook";
+import { itemOrder } from "./items";
 import { METHOD_LABEL, ORDER_METHODS, ORDER_STATUSES, STATUS_LABEL, type OrderMethod, type OrderStatus, type RefundState } from "./labels";
 
 export { allowedOrderActions } from "./labels";
@@ -168,7 +169,7 @@ export const getOrderDetail = defineAction({
       .from(orderItem)
       .innerJoin(product, eq(product.id, orderItem.productId))
       .where(eq(orderItem.orderId, o.id))
-      .orderBy(desc(orderItem.kind), asc(orderItem.id));
+      .orderBy(...itemOrder);
     const pays = await ctx.tx.select().from(payment).where(eq(payment.orderId, o.id)).orderBy(asc(payment.id));
     const links = await ctx.tx
       .select({
@@ -184,8 +185,10 @@ export const getOrderDetail = defineAction({
       })
       .from(downloadLink)
       .innerJoin(product, eq(product.id, downloadLink.productId))
+      // Os links de uma entrega nascem na mesma transação (mesmo created_at): desempata pela ordem dos itens do pedido.
+      .innerJoin(orderItem, and(eq(orderItem.orderId, downloadLink.orderId), eq(orderItem.productId, downloadLink.productId)))
       .where(eq(downloadLink.orderId, o.id))
-      .orderBy(asc(downloadLink.createdAt));
+      .orderBy(asc(downloadLink.createdAt), ...itemOrder);
     const emails = await ctx.tx
       .select({ kind: emailLog.kind, status: emailLog.status, error: emailLog.error, at: emailLog.at })
       .from(emailLog)
@@ -301,7 +304,7 @@ export const exportOrders = defineAction({
           .from(orderItem)
           .innerJoin(product, eq(product.id, orderItem.productId))
           .where(inArray(orderItem.orderId, ids))
-          .orderBy(desc(orderItem.kind), asc(orderItem.id))
+          .orderBy(...itemOrder)
       : [];
     const names = new Map<string, string[]>();
     for (const i of items) names.set(i.orderId, [...(names.get(i.orderId) ?? []), i.name]);

@@ -39,18 +39,27 @@ export interface DeliveryEmailData {
   paidAt: Date;
   method: string;
   totalCents: number;
-  items: Array<{ name: string; kind: "main" | "bump"; priceCents: number; url: string }>;
+  /** Nome da oferta: vai no assunto quando o pedido tem mais de um produto principal. */
+  offerName: string;
+  /** Na ordem da oferta. Sem preço por item: o comprador só vê o total (o rateio é interno). */
+  items: Array<{ name: string; kind: "main" | "bump"; url: string }>;
   maxDownloads: number;
   ttlDays: number;
 }
 
 export const methodLabel = (method: string) => (method === "card_asaas" ? "cartão" : "Pix");
 
-/** E-mail "Seu acesso: <produto>" com um botão por PDF (dois quando o bump foi comprado). */
+/** Assunto "Seu acesso: <produto>" com 1 produto principal e "Seu acesso: <oferta>" com mais de 1. */
+export function deliverySubject(d: Pick<DeliveryEmailData, "offerName" | "storeName" | "items">): string {
+  const main = d.items.filter((i) => i.kind === "main");
+  return `Seu acesso: ${main.length > 1 ? d.offerName : (main[0]?.name ?? d.items[0]?.name ?? d.storeName)}`;
+}
+
+/** E-mail "Seu acesso" com um botão por PDF, na ordem da oferta, e só o total do pedido (nunca preço por item). */
 export function deliveryEmail(d: DeliveryEmailData): { subject: string; html: string; text: string } {
   const b = brandVars(d.brandColor);
   const brand = b["--color-brand-strong"];
-  const subject = `Seu acesso: ${d.items[0]?.name ?? d.storeName}`;
+  const subject = deliverySubject(d);
   const hello = firstName(d.buyerName);
   const itemLabel = (i: { kind: string }) => (i.kind === "bump" ? "Adicional · PDF" : "PDF");
 
@@ -66,7 +75,7 @@ export function deliveryEmail(d: DeliveryEmailData): { subject: string; html: st
   const rows = d.items
     .map(
       (i) =>
-        `<tr><td style="padding:6px 0;color:${C.muted}">${esc(i.name)}${i.kind === "bump" ? " (acréscimo)" : ""}</td><td align="right" style="padding:6px 0">${brl(i.priceCents)}</td></tr>`,
+        `<tr><td colspan="2" style="padding:6px 0;color:${C.muted}">${esc(i.name)}${i.kind === "bump" ? " (acréscimo)" : ""}</td></tr>`,
     )
     .join("");
 
@@ -102,7 +111,7 @@ ${d.items.map((i) => `<p style="margin:0;word-break:break-all">${esc(i.name)}: $
     `Os links valem por ${d.ttlDays} dias e até ${d.maxDownloads} downloads. Cada PDF leva o seu nome e e-mail no rodapé: é um material pessoal, por favor não compartilhe.`,
     "",
     `Resumo do pedido #${d.orderCode}`,
-    ...d.items.map((i) => `${i.name}${i.kind === "bump" ? " (acréscimo)" : ""}: ${brl(i.priceCents)}`),
+    ...d.items.map((i) => `${i.name}${i.kind === "bump" ? " (acréscimo)" : ""}`),
     `Total pago (${methodLabel(d.method)}): ${brl(d.totalCents)}`,
     "",
     "Algum problema para baixar? É só responder este e-mail.",
