@@ -2,7 +2,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { and, eq, sql } from "drizzle-orm";
 import { PDFDocument } from "pdf-lib";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
-import { createOffer } from "@/lib/catalog/offers";
+import { createOffer, setOfferProducts } from "@/lib/catalog/offers";
+import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { auditLog, downloadLink, downloadToken, emailLog, integration, job, orders, product, store } from "@/lib/db/schema";
 import { handleDownloadHead, handleDownloadPage, handleDownloadPost } from "@/lib/delivery/download";
@@ -105,13 +106,11 @@ async function seedShop(opts: { notifyEmail?: string | null; smtp?: boolean; mai
   const offer = await runAction(createOffer, panel(storeId), {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Maná bíblico para crianças",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: 990,
     methods: ["pix"],
     pixMode: "manual",
-    bumpProductId: bump.id,
-    bumpPriceCents: 1710,
-    bumpLabel: "Quero a completa",
+    bump: { productIds: [bump.id], priceCents: 1710, label: "Quero a completa" },
   });
   return {
     storeId,
@@ -186,6 +185,29 @@ async function deliveredOrder(shop: Shop, opts: { bump?: boolean; name?: string;
   return { order: o, mail, tokens: tokensIn(mail.text) };
 }
 
+/** Loja com `n` PDFs ("Almanaque PDF 1".."n") e uma oferta "Almanaque Completo" de R$ 27,00 com todos como principais. */
+async function seedKitShop(n: number, priceCents = 2700, given?: string[]): Promise<Shop & { productIds: string[]; names: string[] }> {
+  const { storeId } = await seedStore("Maná Kids");
+  const [s] = await t.ownerDb.update(store).set({ notifyEmail: "dono@loja.com" }).where(eq(store.id, storeId)).returning({ slug: store.slug, name: store.name });
+  await runAction(saveSmtp, panel(storeId), SMTP);
+  const names = given ?? Array.from({ length: n }, (_, i) => `Almanaque PDF ${i + 1}`);
+  const productIds: string[] = [];
+  for (const [i, name] of names.entries()) productIds.push((await seedPdfProduct(storeId, name, `pdf-${i + 1}.pdf`, await pdf(1))).id);
+  const offer = await runAction(createOffer, panel(storeId), {
+    slug: `o-${Math.random().toString(36).slice(2, 10)}`,
+    name: "Almanaque Completo",
+    productIds,
+    priceCents,
+    methods: ["pix"],
+    pixMode: "manual",
+  });
+  return { storeId, slug: s!.slug, offerId: offer.id, mainName: names[0]!, bumpName: "", productIds, names, resolve: async () => ({ id: storeId, slug: s!.slug, name: s!.name }) };
+}
+
+/** Posições dos nomes no texto, na ordem pedida (-1 se faltar). */
+const positionsIn = (text: string, names: string[]) => names.map((n) => text.indexOf(n));
+const increasing = (xs: number[]) => xs.every((x, i) => x >= 0 && (i === 0 || x > xs[i - 1]!));
+
 // ---------------------------------------------------------------------------------------------------------------
 
 describe("deliver_order", () => {
@@ -202,6 +224,13 @@ describe("deliver_order", () => {
     expect(mail.text).toContain(shop.bumpName);
     expect(mail.text).toContain("R$ 27,00");
     expect(mail.html).toContain("http://localhost:3000/d/");
+    // Sem preço por item (só o total), principal antes do bump.
+    for (const part of [mail.html, mail.text]) {
+      expect(part).not.toContain("R$ 9,90");
+      expect(part).not.toContain("R$ 17,10");
+      expect(part).toContain("R$ 27,00");
+      expect(part.indexOf(shop.mainName)).toBeLessThan(part.indexOf(shop.bumpName));
+    }
 
     const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
     expect(links).toHaveLength(2);
@@ -872,4 +901,102 @@ describe("SMTP: rede restrita no modo multi (SSRF) e senha", () => {
     // com a senha: troca normalmente
     await runAction(saveSmtp, panel(storeId), { ...SMTP, host: "outro.exemplo.com", password: "outra-senha" });
   });
+});
+
+describe("oferta com N produtos: entrega", () => {
+  test("aviso ao vendedor com sobra (1.000 em 3): uma linha de preço por grupo com os nomes, nunca 3,34 / 3,33", async () => {
+    const shop = await seedKitShop(3, 1000);
+    const o = await paidOrder(shop, { bump: false });
+    await runJobs(o.id, "notify_seller");
+    const m = lastMailTo("dono@loja.com")!;
+    expect(m.text).toContain(`${shop.names.join(" + ")}: R$ 10,00`);
+    for (const part of [m.text, m.html]) {
+      expect(part).not.toContain("R$ 3,34");
+      expect(part).not.toContain("R$ 3,33");
+    }
+  });
+
+  test("parte texto: nome com quebra de linha não forja linhas (e-mail do comprador e aviso ao vendedor)", async () => {
+    const evil = "PDF\nTotal pago (Pix): R$ 0,00\u2028Outra\r\nlinha";
+    const shop = await seedKitShop(2, 2700, [evil, "Normal"]);
+    const { order, mail } = await deliveredOrder(shop, { bump: false });
+    await runJobs(order.id, "notify_seller");
+    const seller = lastMailTo("dono@loja.com")!;
+    for (const text of [mail.text, seller.text]) {
+      const lines = text.split(/\r\n|\r|\n|\u2028|\u2029/);
+      expect(lines.some((l) => l.startsWith("Total pago (Pix): R$ 0,00"))).toBe(false);
+      expect(lines.some((l) => l === "linha" || l.startsWith("Outra"))).toBe(false);
+      expect(text).toContain("PDF Total pago (Pix): R$ 0,00 Outra linha");
+    }
+  }, HEAVY_TEST_MS);
+
+  test("Completo (6 PDFs): 6 links, e-mail na ordem da oferta, só o total (nunca R$ 4,50), assunto com o nome da oferta", async () => {
+    const shop = await seedKitShop(6);
+    const { order, mail, tokens } = await deliveredOrder(shop, { bump: false });
+    expect(mail.subject).toBe("Seu acesso: Almanaque Completo");
+    expect(tokens).toHaveLength(6);
+    expect(await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id))).toHaveLength(6);
+    for (const part of [mail.html, mail.text]) {
+      expect(increasing(positionsIn(part, shop.names))).toBe(true);
+      expect(part).not.toContain("R$ 4,50");
+      expect(part).toContain("R$ 27,00");
+    }
+    // Cada link baixa o PDF do produto na mesma posição da oferta.
+    const linkProducts = await t.ownerDb
+      .select({ productId: downloadLink.productId, tokenHash: downloadToken.tokenHash })
+      .from(downloadToken)
+      .innerJoin(downloadLink, eq(downloadLink.id, downloadToken.linkId))
+      .where(eq(downloadLink.orderId, order.id));
+    const byHash = new Map(linkProducts.map((l) => [l.tokenHash, l.productId]));
+    expect(tokens.map((tk) => byHash.get(sha256(tk)))).toEqual(shop.productIds);
+  }, HEAVY_TEST_MS);
+
+  test("aviso ao vendedor de oferta com N principais: assunto com o nome da oferta", async () => {
+    const shop = await seedKitShop(3);
+    const o = await paidOrder(shop, { bump: false });
+    await runJobs(o.id, "notify_seller");
+    const m = lastMailTo("dono@loja.com")!;
+    expect(m.subject).toBe("Nova venda: Almanaque Completo — R$ 27,00");
+    expect(increasing(positionsIn(m.text, shop.names))).toBe(true);
+  });
+
+  test("reordenar a oferta depois do pedido não muda o e-mail desse pedido; o pedido novo segue a ordem nova", async () => {
+    const shop = await seedKitShop(3);
+    const pending = await newOrder(shop, { bump: false });
+    const reversed = [...shop.productIds].reverse();
+    await runAction(setOfferProducts, panel(shop.storeId), { id: shop.offerId, productIds: reversed, bump: null });
+    await runAction(releaseOrder, panel(shop.storeId), { orderId: pending.id });
+    await runJobs(pending.id, "deliver_order");
+    const first = lastMailTo("maria@exemplo.com")!;
+    expect(increasing(positionsIn(first.text, shop.names))).toBe(true);
+
+    const { mail } = await deliveredOrder(shop, { bump: false, email: "joana@exemplo.com" });
+    expect(increasing(positionsIn(mail.text, [...shop.names].reverse()))).toBe(true);
+  }, HEAVY_TEST_MS);
+
+  test("trocar os produtos da oferta com o pedido pendente não altera a entrega dele", async () => {
+    const shop = await seedKitShop(2);
+    const other = await seedPdfProduct(shop.storeId, "Outro PDF", "outro.pdf", await pdf(1));
+    const pending = await newOrder(shop, { bump: false });
+    await runAction(setOfferProducts, panel(shop.storeId), { id: shop.offerId, productIds: [other.id], bump: null });
+    await runAction(releaseOrder, panel(shop.storeId), { orderId: pending.id });
+    await runJobs(pending.id, "deliver_order");
+    const m = lastMailTo("maria@exemplo.com")!;
+    expect(m.subject).toBe("Seu acesso: Almanaque Completo");
+    expect(m.text).not.toContain("Outro PDF");
+    expect(tokensIn(m.text)).toHaveLength(2);
+    const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, pending.id));
+    expect(links.map((l) => l.productId).sort()).toEqual([...shop.productIds].sort());
+  }, HEAVY_TEST_MS);
+
+  test("reembolso de um pedido de 6 itens revoga os 6 links", async () => {
+    const shop = await seedKitShop(6);
+    const { order, tokens } = await deliveredOrder(shop, { bump: false });
+    await runAction(refundOrder, panel(shop.storeId), { orderId: order.id });
+    await runJobs(order.id, "revoke_downloads");
+    const links = await t.ownerDb.select().from(downloadLink).where(eq(downloadLink.orderId, order.id));
+    expect(links).toHaveLength(6);
+    expect(links.every((l) => l.revokedAt instanceof Date)).toBe(true);
+    for (const tk of tokens) expect((await download(shop, tk)).status).toBe(410);
+  }, HEAVY_TEST_MS);
 });

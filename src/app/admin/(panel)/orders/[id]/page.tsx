@@ -149,13 +149,13 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
               <small>{d.offer.name}</small>
             </div>
             <div className={s.rows}>
-              {d.items.map((i, n) => (
-                <div key={n} className={s.row}>
+              {d.items.map((g) => (
+                <div key={g.kind} className={s.row}>
                   <span style={{ color: "var(--color-text)" }}>
-                    {i.name}
-                    {i.kind === "bump" ? " (bump)" : ""}
+                    {g.names.join(" + ")}
+                    {g.kind === "bump" ? " (bump)" : ""}
                   </span>
-                  <span>{brl(i.priceCents)}</span>
+                  <span>{brl(g.priceCents)}</span>
                 </div>
               ))}
               {manual && amount !== d.totalCents ? (

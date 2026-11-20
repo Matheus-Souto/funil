@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
+import { checkoutOffer } from "@/lib/catalog/checkout-offer";
 import { getPublicOffer } from "@/lib/catalog/offers";
 import { checkoutMethods } from "@/lib/checkout";
 import { cardServiceConfigured, env } from "@/lib/env";
@@ -56,16 +57,7 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
       {offer.pixelId ? <CheckoutPixel pixelId={offer.pixelId} eventId={eventId} valueCents={offer.priceCents} /> : null}
       <CheckoutForm
         storeName={store.name}
-        offer={{
-          slug: offer.slug,
-          name: offer.name,
-          productName: offer.productName,
-          priceCents: offer.priceCents,
-          methods,
-          pixMode: offer.pixMode as "manual" | "asaas",
-          maxInstallments: offer.maxInstallments,
-          bump: offer.bump,
-        }}
+        offer={checkoutOffer(offer, methods)}
         initialMethod={wantsCard ? "card" : methods.includes("pix") ? "pix" : "card"}
         touch={touch}
         refCode={ref}

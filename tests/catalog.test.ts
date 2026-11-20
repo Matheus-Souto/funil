@@ -2,16 +2,32 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
-import { auditLog, product } from "@/lib/db/schema";
+import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
-import { createOffer, getOffer, getPublicOffer, listOffers, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import {
+  changeDialog,
+  emptyOptionLabel,
+  fillBumpLines,
+  focusAfterMove,
+  focusAfterRemove,
+  moveAnnouncement,
+  moveItem,
+  offerChanges,
+  productsProblem,
+  removeAnnouncement,
+  removeAt,
+  runSaveSteps,
+  saveCall,
+  saveOutcome,
+} from "@/lib/catalog/offer-editing";
 import { env } from "@/lib/env";
-import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
 
 let t: TestDb;
@@ -39,7 +55,7 @@ async function mkProduct(storeId: string, name = "Produto") {
 const offerInput = (productId: string, over: Record<string, unknown> = {}) => ({
   slug: "oferta-1",
   name: "Oferta",
-  productId,
+  productIds: [productId],
   priceCents: 990,
   methods: ["pix", "card"],
   pixMode: "manual",
@@ -171,7 +187,7 @@ describe("products", () => {
     const [row] = await withStore(storeId, (tx) => tx.select().from(product).where(eq(product.id, p.id)));
     expect(row!.deletedAt).not.toBeNull();
     expect(await storage.get(row!.fileKey)).not.toBeNull();
-    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "outra" })))).toBe("not_found");
+    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "outra" })))).toBe("invalid_input");
   });
 
   test("produto de outra loja não é visível", async () => {
@@ -179,7 +195,18 @@ describe("products", () => {
     const b = await seedStore();
     const p = await mkProduct(a.storeId);
     expect(await code(call(updateProduct, b.storeId, owner, { id: p.id, name: "x" }))).toBe("not_found");
-    expect(await code(call(createOffer, b.storeId, owner, offerInput(p.id)))).toBe("not_found");
+    expect(await code(call(createOffer, b.storeId, owner, offerInput(p.id)))).toBe("invalid_input");
+  });
+});
+
+describe("colunas antigas da oferta", () => {
+  test("offer.product_id e offer.bump_product_id não existem mais; bump_price_cents e bump_label continuam", async () => {
+    const rows = await t.ownerDb.execute(sql`select column_name from information_schema.columns where table_name = 'offer'`);
+    const cols = rows.map((r) => (r as { column_name: string }).column_name);
+    expect(cols).not.toContain("product_id");
+    expect(cols).not.toContain("bump_product_id");
+    expect(cols).toContain("bump_price_cents");
+    expect(cols).toContain("bump_label");
   });
 });
 
@@ -190,9 +217,7 @@ describe("offers", () => {
     const full = await mkProduct(storeId, "Completo");
     const o = await call(createOffer, storeId, owner, {
       ...offerInput(main.id),
-      bumpProductId: full.id,
-      bumpPriceCents: 1710,
-      bumpLabel: "Leve o completo",
+      bump: { productIds: [full.id], priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
     });
     const res = await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public");
@@ -200,12 +225,12 @@ describe("offers", () => {
       id: o.id,
       slug: "oferta-1",
       name: "Oferta",
-      productName: "Principal",
+      products: [{ name: "Principal" }],
       priceCents: 990,
       methods: ["pix", "card"],
       pixMode: "manual",
       maxInstallments: 1,
-      bump: { productName: "Completo", priceCents: 1710, label: "Leve o completo" },
+      bump: { products: [{ name: "Completo" }], priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
       pixelId: null,
     });
@@ -273,10 +298,14 @@ describe("offers", () => {
       { pixMode: "x" },
       { maxInstallments: 0 },
       { maxInstallments: 13 },
-      { bumpProductId: q.id },
-      { bumpPriceCents: 100 },
-      { bumpProductId: q.id, bumpPriceCents: 0 },
-      { bumpProductId: p.id, bumpPriceCents: 100 },
+      { productIds: [] },
+      { productIds: [p.id, p.id] },
+      { productId: p.id },
+      { bumpProductId: q.id, bumpPriceCents: 100 },
+      { bump: { productIds: [q.id] } },
+      { bump: { productIds: [], priceCents: 100 } },
+      { bump: { productIds: [q.id], priceCents: 0 } },
+      { bump: { productIds: [p.id], priceCents: 100 } },
     ];
     for (const over of bad) expect(await code(call(createOffer, storeId, owner, offerInput(p.id, over)))).toBe("invalid_input");
     const ok = await call(createOffer, storeId, owner, offerInput(p.id, { slug: "abc", maxInstallments: 12, methods: ["card"] }));
@@ -288,14 +317,14 @@ describe("offers", () => {
     const b = await seedStore();
     const pa = await mkProduct(a.storeId);
     const pb = await mkProduct(b.storeId);
-    expect(await code(call(createOffer, a.storeId, owner, offerInput(pa.id, { bumpProductId: pb.id, bumpPriceCents: 500 })))).toBe("not_found");
+    expect(await code(call(createOffer, a.storeId, owner, offerInput(pa.id, { bump: { productIds: [pb.id], priceCents: 500 } })))).toBe("invalid_input");
   });
 
   test("offers.update não aceita campos de preço e atualiza o resto", async () => {
     const { storeId } = await seedStore();
     const p = await mkProduct(storeId);
     const o = await call(createOffer, storeId, owner, offerInput(p.id));
-    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }]) {
+    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }, { productId: p.id }, { productIds: [p.id] }, { bumpLabel: "x" }, { slug: "outro-endereco" }]) {
       expect(await code(call(updateOffer, storeId, owner, { id: o.id, ...f }))).toBe("invalid_input");
     }
     const u = await call(updateOffer, storeId, owner, { id: o.id, name: "Novo nome", methods: ["pix"], maxInstallments: 3 });
@@ -305,7 +334,7 @@ describe("offers", () => {
     expect(await code(call(updateOffer, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", name: "x" }))).toBe("not_found");
   });
 
-  test("offers.updatePrice é sensível, muda preço e bump", async () => {
+  test("offers.updatePrice é sensível e muda só o preço (o bump vai por offers.setProducts)", async () => {
     const { storeId } = await seedStore();
     const p = await mkProduct(storeId);
     const q = await mkProduct(storeId, "Completo");
@@ -316,23 +345,407 @@ describe("offers", () => {
       expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1 }, origin))).toBe("approval_required");
     }
     expect((await call(getOffer, storeId, owner, { id: o.id })).priceCents).toBe(990);
-    const u = await call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990, bump: { productId: q.id, priceCents: 1710 } });
+    const u = await call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990 });
     expect(u.priceCents).toBe(1990);
-    expect(u.bumpPriceCents).toBe(1710);
-    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, bump: { productId: p.id, priceCents: 5 } }))).toBe("invalid_input");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990, bump: { productId: q.id, priceCents: 1710 } }))).toBe("invalid_input");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, bump: null }))).toBe("invalid_input");
     expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 0 }))).toBe("invalid_input");
     expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id }))).toBe("invalid_input");
-    const removed = await call(updateOfferPrice, storeId, owner, { id: o.id, bump: null });
-    expect(removed.bumpProductId).toBeNull();
-    expect(removed.bumpPriceCents).toBeNull();
     expect(await code(call(updateOfferPrice, storeId, traffic, { id: o.id, priceCents: 5 }))).toBe("forbidden");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", priceCents: 5 }))).toBe("not_found");
+  });
+});
+
+describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
+  const KIDS = ["Almanaque Bíblico Kids", "Pack de jogos", "Datas especiais", "Cartões de versículos", "Diário de oração", "Escola dominical"];
+  const mkMany = async (storeId: string, names: string[]) => Promise.all(names.map((n) => seedProduct(storeId, n)));
+  const ids = (ps: { id: string }[]) => ps.map((p) => p.id);
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+  const legacyOf = async (storeId: string, offerId: string) => {
+    const [o] = await withStore(storeId, (tx) =>
+      tx
+        .select({ bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel })
+        .from(offer)
+        .where(eq(offer.id, offerId)),
+    );
+    return o!;
+  };
+
+  test("Completo: 6 principais por R$ 27,00, gravados em ordem; get, list e getPublic devolvem a lista", async () => {
+    const { storeId } = await seedStore();
+    const six = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, { ...offerInput(six[0]!.id, { slug: "completo", name: "Completo", priceCents: 2700 }), productIds: ids(six) });
+    expect(await rowsOf(storeId, o.id)).toEqual(six.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
+    // Colunas antigas (leitores ainda não migrados): o primeiro principal, sem bump.
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: null, bumpLabel: null });
+    const got = await call(getOffer, storeId, support, { id: o.id });
+    expect(got.products.map((p) => p.name)).toEqual(KIDS);
+    expect(got.products.every((p) => p.deletedAt === null)).toBe(true);
+    expect(got.bump).toBeNull();
+    const [listed] = await call(listOffers, storeId, traffic, {});
+    expect(listed!.products.map((p) => p.id)).toEqual(ids(six));
+    const pubOffer = await call(getPublicOffer, storeId, pub, { slug: "completo" }, "public");
+    expect(pubOffer.products).toEqual(KIDS.map((name) => ({ name })));
+    expect(pubOffer.priceCents).toBe(2700);
+    expect(pubOffer.bump).toBeNull();
   });
 
-  test("mudar o produto principal para o do bump é recusado", async () => {
+  test("Almanaque: 1 principal por R$ 9,90 e bump de 5 produtos por R$ 17,10 com rótulo \"5 Kits Extras\"", async () => {
     const { storeId } = await seedStore();
-    const p = await mkProduct(storeId);
-    const q = await mkProduct(storeId, "Completo");
-    const o = await call(createOffer, storeId, owner, offerInput(p.id, { bumpProductId: q.id, bumpPriceCents: 100 }));
-    expect(await code(call(updateOffer, storeId, owner, { id: o.id, productId: q.id }))).toBe("invalid_input");
+    const [alm, ...kits] = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, {
+      ...offerInput(alm!.id, { slug: "almanaque", name: "Almanaque" }),
+      bump: { productIds: ids(kits), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    expect(await rowsOf(storeId, o.id)).toEqual([
+      ...kits.map((p, i) => ({ productId: p.id, kind: "bump", position: i })),
+      { productId: alm!.id, kind: "main", position: 0 },
+    ]);
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect(got.bump?.products.map((p) => p.name)).toEqual(KIDS.slice(1));
+    expect(got.bump?.priceCents).toBe(1710);
+    expect(got.bump?.label).toBe("5 Kits Extras");
+    const res = await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public");
+    expect(res.products).toEqual([{ name: KIDS[0] }]);
+    expect(res.bump).toEqual({ products: KIDS.slice(1).map((name) => ({ name })), priceCents: 1710, label: "5 Kits Extras" });
+  });
+
+  test("recusas: duplicado (no grupo e entre principal e bump), bump de 2 sem rótulo, 21 produtos, inexistente, apagado e de outra loja", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    const ps = await mkMany(a.storeId, Array.from({ length: 21 }, (_, i) => `P${i}`));
+    const [p0, p1, p2] = ps;
+    const foreign = await seedProduct(b.storeId, "Da outra loja");
+    const gone = await seedProduct(a.storeId, "Apagado");
+    await withStore(a.storeId, (tx) => tx.update(product).set({ deletedAt: new Date() }).where(eq(product.id, gone.id)));
+    const base = offerInput(p0!.id);
+    const bad: Record<string, unknown>[] = [
+      { productIds: [p0!.id, p1!.id, p0!.id] },
+      { bump: { productIds: [p1!.id, p1!.id], priceCents: 100, label: "Kits" } },
+      { productIds: [p0!.id, p1!.id], bump: { productIds: [p2!.id, p1!.id], priceCents: 100, label: "Kits" } },
+      { bump: { productIds: [p1!.id, p2!.id], priceCents: 100 } },
+      { bump: { productIds: [p1!.id, p2!.id], priceCents: 100, label: "   " } },
+      { productIds: ids(ps) },
+      { productIds: [p0!.id], bump: { productIds: ids(ps.slice(1)).concat(foreign.id), priceCents: 100, label: "Kits" } },
+      { productIds: [p0!.id, "00000000-0000-4000-8000-000000000000"] },
+      { productIds: [p0!.id, gone.id] },
+      { bump: { productIds: [gone.id], priceCents: 100 } },
+      { productIds: [p0!.id, foreign.id] },
+      { bump: { productIds: [foreign.id], priceCents: 100 } },
+    ];
+    for (const over of bad) {
+      expect({ over, code: await code(call(createOffer, a.storeId, owner, { ...base, ...over })) }).toEqual({ over, code: "invalid_input" });
+    }
+    expect(await call(listOffers, a.storeId, owner, {})).toEqual([]);
+    // Limites: 20 por grupo passam.
+    const ok = await call(createOffer, a.storeId, owner, { ...base, productIds: ids(ps.slice(0, 20)) });
+    expect((await rowsOf(a.storeId, ok.id)).length).toBe(20);
+    // As mesmas regras valem para offers.setProducts, e a recusa não muda nada.
+    for (const over of bad) {
+      const input = { id: ok.id, productIds: base.productIds, bump: null, ...over };
+      expect({ over, code: await code(call(setOfferProducts, a.storeId, owner, input)) }).toEqual({ over, code: "invalid_input" });
+    }
+    expect((await rowsOf(a.storeId, ok.id)).length).toBe(20);
+  });
+
+  test("offers.setProducts é sensível (MCP pede aprovação; support não pode), troca a lista e regrava preço e rótulo do bump", async () => {
+    const { storeId } = await seedStore();
+    const [alm, ...kits] = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, offerInput(alm!.id, { slug: "almanaque" }));
+    expect(listActions().find((x) => x.name === "offers.setProducts")?.sensitive).toBe(true);
+    const input = { id: o.id, productIds: [alm!.id], bump: { productIds: ids(kits), priceCents: 1710, label: "5 Kits Extras" } };
+    expect(await code(call(setOfferProducts, storeId, owner, input, "mcp"))).toBe("approval_required");
+    expect(await code(call(setOfferProducts, storeId, support, input))).toBe("forbidden");
+    expect(await code(call(setOfferProducts, storeId, traffic, input))).toBe("forbidden");
+    expect((await call(getOffer, storeId, owner, { id: o.id })).bump).toBeNull();
+
+    const withBump = await call(setOfferProducts, storeId, owner, input);
+    expect(withBump.bump?.products.map((p) => p.id)).toEqual(ids(kits));
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+
+    // Reordena e troca: principal vira os 6 do Completo (ordem nova), sem bump.
+    const order = [kits[2]!, alm!, kits[0]!, kits[4]!, kits[1]!, kits[3]!];
+    const swapped = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: ids(order), bump: null });
+    expect(swapped.products.map((p) => p.id)).toEqual(ids(order));
+    expect(swapped.bump).toBeNull();
+    expect(await rowsOf(storeId, o.id)).toEqual(order.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: null, bumpLabel: null });
+    expect((await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public")).products.map((p) => p.name)).toEqual(order.map((p) => KIDS[[alm, ...kits].indexOf(p)]));
+
+    // Bump de 1 produto: o rótulo é opcional.
+    const one = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [alm!.id], bump: { productIds: [kits[0]!.id], priceCents: 500 } });
+    expect(one.bump).toEqual({ products: [{ id: kits[0]!.id, name: KIDS[1], deletedAt: null }], priceCents: 500, label: null });
+    expect(await code(call(setOfferProducts, storeId, owner, { ...input, id: "00000000-0000-4000-8000-000000000000" }))).toBe("not_found");
+  });
+
+  test("getPublic: um principal apagado esconde a oferta; um produto do bump apagado esconde só o bump", async () => {
+    const { storeId } = await seedStore();
+    const six = await mkMany(storeId, KIDS);
+    const extras = await mkMany(storeId, ["Kit 1", "Kit 2", "Kit 3", "Kit 4", "Kit 5"]);
+    const completo = await call(createOffer, storeId, owner, { ...offerInput(six[0]!.id, { slug: "completo", priceCents: 2700 }), productIds: ids(six) });
+    const almanaque = await call(createOffer, storeId, owner, {
+      ...offerInput(six[0]!.id, { slug: "almanaque" }),
+      bump: { productIds: ids(extras), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    // products.delete enxerga o produto em qualquer posição de oferta ativa (não só no primeiro).
+    expect(await code(call(deleteProduct, storeId, owner, { id: six[3]!.id }))).toBe("conflict");
+    expect(await code(call(deleteProduct, storeId, owner, { id: extras[3]!.id }))).toBe("conflict");
+
+    await call(updateOffer, storeId, owner, { id: completo.id, active: false });
+    await call(updateOffer, storeId, owner, { id: almanaque.id, active: false });
+    await call(deleteProduct, storeId, owner, { id: six[3]!.id });
+    await call(deleteProduct, storeId, owner, { id: extras[3]!.id });
+    await call(updateOffer, storeId, owner, { id: completo.id, active: true });
+    await call(updateOffer, storeId, owner, { id: almanaque.id, active: true });
+
+    expect(await code(call(getPublicOffer, storeId, pub, { slug: "completo" }, "public"))).toBe("not_found");
+    const alm = await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public");
+    expect(alm.products).toEqual([{ name: KIDS[0] }]);
+    expect(alm.bump).toBeNull();
+    // O painel ainda vê o produto apagado na oferta (para corrigir).
+    const got = await call(getOffer, storeId, owner, { id: completo.id });
+    expect(got.products.map((p) => p.deletedAt !== null)).toEqual([false, false, false, true, false, false]);
+  });
+});
+
+describe("rodada de correção 1 (concorrência, slug sensível, editor com N produtos)", () => {
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+
+  test("setProducts concorrente na mesma oferta: fica exatamente uma das listas, sem posição repetida, preço e rótulo do bump coerentes", async () => {
+    const { storeId } = await seedStore();
+    const ps = await Promise.all(Array.from({ length: 7 }, (_, i) => seedProduct(storeId, `C${i}`)));
+    const [p0, a1, a2, a3, b1, b2, b3] = ps.map((p) => p.id) as [string, string, string, string, string, string, string];
+    const listA = [a1, a2, a3];
+    const listB = [b1, b2, b3];
+    for (let i = 0; i < 10; i++) {
+      const o = await call(createOffer, storeId, owner, offerInput(p0, { slug: `corrida-${i}` }));
+      const results = await Promise.allSettled([
+        call(setOfferProducts, storeId, owner, { id: o.id, productIds: listA, bump: null }),
+        call(setOfferProducts, storeId, owner, { id: o.id, productIds: listB, bump: null }),
+      ]);
+      expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+      const rows = await rowsOf(storeId, o.id);
+      const ids = rows.map((r) => r.productId);
+      expect([JSON.stringify(listA), JSON.stringify(listB)]).toContain(JSON.stringify(ids));
+      expect(rows.map((r) => [r.kind, r.position])).toEqual([["main", 0], ["main", 1], ["main", 2]]);
+      const [bumpCols] = await withStore(storeId, (tx) => tx.select({ bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel }).from(offer).where(eq(offer.id, o.id)));
+      expect(bumpCols).toEqual({ bumpPriceCents: null, bumpLabel: null });
+    }
+  }, HEAVY_TEST_MS);
+
+  test("offers.setSlug é sensível; offers.update recusa slug; a troca de slug entre ofertas não passa sem aprovação", async () => {
+    const { storeId } = await seedStore();
+    const p = await seedProduct(storeId, "Original");
+    const x = await seedProduct(storeId, "Outro");
+    const a = await call(createOffer, storeId, owner, offerInput(p.id, { slug: "oferta-a" }));
+    expect(listActions().find((ac) => ac.name === "offers.setSlug")?.sensitive).toBe(true);
+    for (const origin of ["mcp", "ai"] as const) {
+      expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-velha" }, origin))).toBe("approval_required");
+    }
+    expect(await code(call(setOfferSlug, storeId, support, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
+    expect(await code(call(setOfferSlug, storeId, traffic, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
+    // O contorno do revisor (S1): criar outra oferta e trocar os slugs só com ações não sensíveis.
+    const b = await call(createOffer, storeId, owner, offerInput(x.id, { slug: "oferta-tmp", priceCents: 5 }), "mcp");
+    expect(await code(call(updateOffer, storeId, owner, { id: a.id, slug: "oferta-velha" }, "mcp"))).toBe("invalid_input");
+    expect(await code(call(updateOffer, storeId, owner, { id: b.id, slug: "oferta-a" }, "mcp"))).toBe("invalid_input");
+    const pubA = await call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public");
+    expect([pubA.products, pubA.priceCents]).toEqual([[{ name: "Original" }], 990]);
+    // Pelo painel, o dono troca direto; slug ocupado é conflict; inválido é invalid_input; inexistente not_found.
+    expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-tmp" }))).toBe("conflict");
+    expect(await code(call(setOfferSlug, storeId, owner, { id: a.id, slug: "Com Espaco" }))).toBe("invalid_input");
+    expect(await code(call(setOfferSlug, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", slug: "livre" }))).toBe("not_found");
+    expect((await call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-nova" })).slug).toBe("oferta-nova");
+    expect((await call(setOfferSlug, storeId, owner, { id: a.id, slug: "oferta-nova" })).slug).toBe("oferta-nova"); // mesmo slug: ok
+    expect((await call(getPublicOffer, storeId, pub, { slug: "oferta-nova" }, "public")).products).toEqual([{ name: "Original" }]);
+    expect(await code(call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public"))).toBe("not_found");
+  });
+
+  test("offers.setProducts com priceCents: produtos, bump e preço mudam juntos; uma recusa não muda nenhum dos dois", async () => {
+    const { storeId } = await seedStore();
+    const ps = await Promise.all(["A", "B", "C", "D"].map((n) => seedProduct(storeId, n)));
+    const [a, b, c, d] = ps.map((p) => p.id) as [string, string, string, string];
+    const o = await call(createOffer, storeId, owner, offerInput(a, { slug: "atomica" }));
+    // Sensível como antes, também com o preço.
+    const input = { id: o.id, productIds: [a, b], bump: { productIds: [c], priceCents: 500 }, priceCents: 2700 };
+    expect(await code(call(setOfferProducts, storeId, owner, input, "mcp"))).toBe("approval_required");
+    const r = await call(setOfferProducts, storeId, owner, input);
+    expect([r.priceCents, r.products.map((p) => p.id), r.bump?.priceCents]).toEqual([2700, [a, b], 500]);
+    // Sem priceCents, o preço fica como está.
+    expect((await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [b, a], bump: null })).priceCents).toBe(2700);
+    // Recusa (produto apagado) depois de passar pela validação de entrada: nem lista nem preço mudam.
+    await withStore(storeId, (tx) => tx.update(product).set({ deletedAt: new Date() }).where(eq(product.id, d)));
+    expect(await code(call(setOfferProducts, storeId, owner, { id: o.id, productIds: [a, d], bump: null, priceCents: 100 }))).toBe("invalid_input");
+    expect(await code(call(setOfferProducts, storeId, owner, { id: o.id, productIds: [a], bump: null, priceCents: 0 }))).toBe("invalid_input");
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect([got.priceCents, got.products.map((p) => p.id), got.bump]).toEqual([2700, [b, a], null]);
+  });
+
+  test("editor: mover e remover linhas", () => {
+    expect(moveItem(["a", "b", "c"], 1, -1)).toEqual(["b", "a", "c"]);
+    expect(moveItem(["a", "b", "c"], 1, 1)).toEqual(["a", "c", "b"]);
+    expect(moveItem(["a", "b", "c"], 0, -1)).toEqual(["a", "b", "c"]); // já no topo
+    expect(moveItem(["a", "b", "c"], 2, 1)).toEqual(["a", "b", "c"]); // já no fim
+    expect(removeAt(["a", "b", "c"], 1)).toEqual(["a", "c"]);
+  });
+
+  test("editor: problemas nas listas (vazio, repetido, rótulo do bump com N, limite de 20)", () => {
+    const ok = { productIds: ["a"], bumpOn: false, bumpProductIds: [], bumpPriceCents: null, bumpLabel: null };
+    expect(productsProblem(ok)).toBeNull();
+    expect(productsProblem({ ...ok, productIds: [""] })).toBe("Escolha o produto entregue (envie o PDF em Produtos).");
+    expect(productsProblem({ ...ok, productIds: ["a", ""] })).toBe("Escolha um produto em cada linha ou remova a linha vazia.");
+    expect(productsProblem({ ...ok, productIds: ["a", "b", "a"] })).toBe("O mesmo produto aparece mais de uma vez na oferta.");
+    expect(productsProblem({ ...ok, productIds: Array.from({ length: 21 }, (_, i) => `p${i}`) })).toBe("No máximo 20 produtos em cada lista.");
+    const bump = { ...ok, bumpOn: true, bumpProductIds: ["b"], bumpPriceCents: 1710 };
+    expect(productsProblem(bump)).toBeNull();
+    expect(productsProblem({ ...bump, bumpPriceCents: null })).toBe("Bump: escolha o produto e o preço do acréscimo.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", ""] })).toBe("Bump: escolha o produto e o preço do acréscimo.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["a"] })).toBe("O mesmo produto aparece mais de uma vez na oferta.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", "c"] })).toBe("Bump com mais de um produto: preencha o título da caixa.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", "c"], bumpLabel: "5 Kits Extras" })).toBeNull();
+    // Bump desligado: as linhas do bump não contam.
+    expect(productsProblem({ ...bump, bumpOn: false, bumpProductIds: ["a", ""] })).toBeNull();
+  });
+
+  test("editor: o que mudou, a ação que salva e o diálogo de confirmação", () => {
+    const before = { priceCents: 990, productIds: ["a"], bump: { productIds: ["b"], priceCents: 1710, label: "Quero" } };
+    const none = { price: false, products: false, bump: false, label: false };
+    expect(offerChanges(before, structuredClone(before))).toEqual(none);
+    expect(saveCall(none)).toBeNull();
+    // Só o preço: updatePrice, com o título que o E2E procura.
+    const price = offerChanges(before, { ...before, priceCents: 1290 });
+    expect(price).toEqual({ ...none, price: true });
+    expect(saveCall(price)).toEqual({ action: "updatePrice" });
+    expect(changeDialog(price)).toEqual({ title: "Alterar o preço desta oferta?", confirm: "Salvar novo preço" });
+    // Só o rótulo: não fala de preço.
+    const label = offerChanges(before, { ...before, bump: { ...before.bump, label: "Quero tudo" } });
+    expect(label).toEqual({ ...none, label: true });
+    expect(saveCall(label)).toEqual({ action: "setProducts", withPrice: false });
+    expect(changeDialog(label).title).toBe("Alterar o título do bump desta oferta?");
+    // Reordenar principais é mudança de produtos; produtos + preço vão juntos no setProducts.
+    const both = offerChanges({ ...before, productIds: ["a", "c"] }, { ...before, productIds: ["c", "a"], priceCents: 2700 });
+    expect(both).toEqual({ ...none, price: true, products: true });
+    expect(saveCall(both)).toEqual({ action: "setProducts", withPrice: true });
+    expect(changeDialog(both)).toEqual({ title: "Alterar o preço e os produtos desta oferta?", confirm: "Salvar alterações" });
+    // Bump: ligar/desligar, preço ou lista. Rótulo junto com o bump é "o order bump".
+    expect(offerChanges(before, { ...before, bump: null })).toEqual({ ...none, bump: true });
+    expect(offerChanges(before, { ...before, bump: { ...before.bump, priceCents: 1000 } })).toEqual({ ...none, bump: true });
+    const all = offerChanges(before, { priceCents: 2700, productIds: ["a", "c"], bump: { productIds: ["b", "d"], priceCents: 1710, label: "Kits" } });
+    expect(all).toEqual({ price: true, products: true, bump: true, label: true });
+    expect(changeDialog(all).title).toBe("Alterar o preço, os produtos e o order bump desta oferta?");
+    expect(changeDialog({ ...none, products: true }).title).toBe("Alterar os produtos desta oferta?");
+    expect(changeDialog({ ...none, bump: true }).title).toBe("Alterar o order bump desta oferta?");
+  });
+});
+
+describe("Task 4, rodada de correção 1 (editor: gravação parcial, foco, bump religado; rollback do setProducts)", () => {
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+
+  test("setProducts com priceCents: falha do banco DEPOIS de regravar a lista desfaz lista e preço juntos", async () => {
+    const { storeId } = await seedStore();
+    const [a, b, c] = (await Promise.all(["A", "B", "C"].map((n) => seedProduct(storeId, n)))).map((p) => p.id) as [string, string, string];
+    const o = await call(createOffer, storeId, owner, { ...offerInput(a, { slug: "rollback" }), bump: { productIds: [b], priceCents: 500 } });
+    const before = await rowsOf(storeId, o.id);
+    // Gatilho só deste teste: o UPDATE do preço da oferta (que vem depois do delete/insert em offer_product) falha.
+    await t.ownerDb.execute(sql.raw(`
+      create function t4_recusa_preco() returns trigger language plpgsql as $$ begin raise exception 't4: preço recusado pelo banco'; end $$;
+      create trigger t4_recusa_preco before update of price_cents on offer for each row when (new.price_cents = 4242) execute function t4_recusa_preco();
+    `));
+    try {
+      const err = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [c, a], bump: null, priceCents: 4242 }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(String(err?.message ?? err) + String((err as { cause?: Error } | null)?.cause?.message ?? "")).toContain("t4: preço recusado pelo banco");
+    } finally {
+      await t.ownerDb.execute(sql.raw("drop trigger t4_recusa_preco on offer; drop function t4_recusa_preco();"));
+    }
+    expect(await rowsOf(storeId, o.id)).toEqual(before);
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect([got.priceCents, got.products.map((p) => p.id), got.bump?.products.map((p) => p.id)]).toEqual([990, [a], [b]]);
+  });
+
+  test("editor: sequência de gravação para no primeiro erro e diz o que foi salvo e o que falhou", async () => {
+    const ran: string[] = [];
+    const step = (label: string, error?: string) => ({
+      label,
+      run: async () => {
+        ran.push(label);
+        return error ? { ok: false as const, error } : { ok: true as const };
+      },
+    });
+    const all = await runSaveSteps([step("preço"), step("endereço"), step("demais dados")]);
+    expect([all, ran]).toEqual([{ saved: ["preço", "endereço", "demais dados"], failed: null }, ["preço", "endereço", "demais dados"]]);
+    expect(saveOutcome(all, "Oferta salva.")).toEqual({ tone: "ok", text: "Oferta salva." });
+
+    ran.length = 0;
+    const mid = await runSaveSteps([step("produtos e preço"), step("endereço", "Já existe uma oferta com esse endereço"), step("demais dados")]);
+    expect(ran).toEqual(["produtos e preço", "endereço"]); // depois da falha, nada mais roda
+    expect(mid).toEqual({ saved: ["produtos e preço"], failed: { label: "endereço", error: "Já existe uma oferta com esse endereço" } });
+    expect(saveOutcome(mid, "Oferta salva.")).toEqual({
+      tone: "error",
+      text: "Salvo: produtos e preço. Não foi salvo: endereço. Já existe uma oferta com esse endereço",
+    });
+    const two = await runSaveSteps([step("preço"), step("endereço"), step("demais dados", "Falhou")]);
+    expect(saveOutcome(two, "x").text).toBe("Salvo: preço e endereço. Não foi salvo: demais dados. Falhou");
+
+    // Falha na primeira: nada salvo, só o erro (como antes).
+    const first = await runSaveSteps([step("preço", "Preço inválido"), step("endereço")]);
+    expect(first).toEqual({ saved: [], failed: { label: "preço", error: "Preço inválido" } });
+    expect(saveOutcome(first, "x")).toEqual({ tone: "error", text: "Preço inválido" });
+  });
+
+  test("editor: religar o bump não repete produto (vazias e repetidas ganham produtos livres diferentes)", () => {
+    const avail = ["p1", "p2", "b1", "b2", "b3"];
+    // O cenário da revisão: o bump era [p1, p2], que foram para os principais; religar dá dois produtos distintos.
+    expect(fillBumpLines(["p1", "p2"], ["p1", "p2"], avail)).toEqual(["b1", "b2"]);
+    // Linhas válidas ficam; vazias não roubam o produto de uma linha válida mais abaixo.
+    expect(fillBumpLines(["p1"], ["", "b1"], avail)).toEqual(["p2", "b1"]);
+    expect(fillBumpLines(["p1"], ["b2", "b2", ""], avail)).toEqual(["b2", "p2", "b1"]);
+    // Sem produto livre: a linha fica vazia (o salvar pede para escolher).
+    expect(fillBumpLines(["p1"], ["p1", ""], ["p1", "p2"])).toEqual(["p2", ""]);
+  });
+
+  test("editor: foco depois de mover e remover; anúncios", () => {
+    // Subiu para o meio: o foco fica no ↑ do item na posição nova; chegou no topo: vai para o ↓.
+    expect(focusAfterMove(2, -1, 4)).toEqual({ index: 1, target: "up" });
+    expect(focusAfterMove(1, -1, 4)).toEqual({ index: 0, target: "down" });
+    expect(focusAfterMove(1, 1, 4)).toEqual({ index: 2, target: "down" });
+    expect(focusAfterMove(2, 1, 4)).toEqual({ index: 3, target: "up" });
+    // Remover: o select vizinho (o que ocupou a posição, ou o anterior se era o último).
+    expect(focusAfterRemove(1, 3)).toBe(1);
+    expect(focusAfterRemove(3, 3)).toBe(2);
+    expect(focusAfterRemove(0, 1)).toBe(0);
+    expect(moveAnnouncement("Pack de jogos", 1)).toBe("Pack de jogos movido para a posição 1");
+    expect(removeAnnouncement("Pack de jogos")).toBe("Pack de jogos removido");
+  });
+
+  test("editor: a opção vazia aparece sempre que o valor é vazio (o select mostra exatamente o estado)", () => {
+    expect(emptyOptionLabel({ firstMain: true, value: "", hasProducts: false })).toBe("Envie um PDF em Produtos");
+    expect(emptyOptionLabel({ firstMain: true, value: "", hasProducts: true })).toBe("Escolha…");
+    expect(emptyOptionLabel({ firstMain: true, value: "p1", hasProducts: true })).toBeNull(); // 1 produto, como hoje
+    expect(emptyOptionLabel({ firstMain: false, value: "p1", hasProducts: true })).toBe("Escolha…");
+    expect(emptyOptionLabel({ firstMain: false, value: "", hasProducts: true })).toBe("Escolha…");
   });
 });

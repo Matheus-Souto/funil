@@ -30,7 +30,7 @@ async function seedOffer(storeId: string, priceCents = 990, pixMode: "manual" | 
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
-    productId: main.id,
+    productIds: [main.id],
     priceCents,
     methods: ["pix", "card"],
     pixMode,

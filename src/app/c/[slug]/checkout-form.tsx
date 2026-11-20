@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { fieldsMessage } from "@/lib/card-frame/protocol";
+import type { CheckoutMethod as Method, CheckoutOffer } from "@/lib/catalog/checkout-offer";
 import { brl } from "@/lib/format";
 import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 import s from "../../(design)/buyer.module.css";
@@ -31,19 +32,7 @@ import {
 } from "./card-frame";
 import { checkoutTracking } from "./tracking";
 
-type Method = "pix" | "card";
 type Touch = { first: Record<string, string> | null; last: Record<string, string> | null };
-
-export interface CheckoutOffer {
-  slug: string;
-  name: string;
-  productName: string;
-  priceCents: number;
-  methods: Method[];
-  pixMode: "manual" | "asaas";
-  maxInstallments: number;
-  bump: { productName: string; priceCents: number; label: string | null } | null;
-}
 
 type FieldKey = "name" | "email" | "phone" | "cpf";
 
@@ -460,7 +449,7 @@ export function CheckoutForm(props: {
       <div className={s.productText}>
         <p className={`${s.p0} ${s.muted} ${s.small}`}>Você está comprando</p>
         <p className={s.productTitle}>{offer.name}</p>
-        <p className={s.productSub}>{offer.productName} · PDF para baixar</p>
+        <p className={s.productSub}>{offer.includes ?? `${offer.productName} · PDF para baixar`}</p>
       </div>
       <p className={`${s.productPrice} ${s.money}`}>{brl(offer.priceCents)}</p>
     </>
@@ -584,7 +573,9 @@ export function CheckoutForm(props: {
                   <span className={s.bumpTitle}>{offer.bump.label?.trim() || `Adicionar ${offer.bump.productName}`}</span>
                   <span className={`${s.bumpPrice} ${s.money}`}>+ {brl(offer.bump.priceCents)}</span>
                 </span>
-                <span className={s.bumpText}>Leve também {offer.bump.productName}. Os dois arquivos chegam juntos no seu e-mail.</span>
+                <span className={s.bumpText}>
+                  {offer.bump.contents ? `Leve também: ${offer.bump.contents}.` : `Leve também ${offer.bump.productName}.`} Tudo chega junto no seu e-mail.
+                </span>
               </label>
             ) : null}
             <section className={s.totals} aria-label="Total">

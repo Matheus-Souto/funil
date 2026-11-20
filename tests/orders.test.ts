@@ -28,11 +28,11 @@ async function seedOffer(storeId: string, withBump = true) {
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: 990,
     methods: ["pix", "card"],
     pixMode: "manual",
-    ...(withBump ? { bumpProductId: bump.id, bumpPriceCents: 1710 } : {}),
+    ...(withBump ? { bump: { productIds: [bump.id], priceCents: 1710 } } : {}),
   });
 }
 
@@ -75,11 +75,12 @@ describe("createOrder", () => {
     expect(items.map((i) => [i.kind, i.priceCents]).sort()).toEqual([["bump", 1710], ["main", 990]]);
   });
 
-  test("bump pedido sem bump na oferta é recusado; método fora da oferta também", async () => {
+  test("bump pedido sem bump na oferta é recusado (conflict); método fora da oferta também", async () => {
     const { storeId } = await seedStore();
     const offer = await seedOffer(storeId, false);
     const e1 = await newOrder(storeId, offer.id, { withBump: true }).catch((e) => e);
-    expect((e1 as ActionError).code).toBe("invalid_input");
+    // Ruling R4: bump marcado e indisponível -> conflict com a mensagem para o comprador atualizar a página.
+    expect([(e1 as ActionError).code, (e1 as ActionError).message]).toEqual(["conflict", "O acréscimo não está mais disponível. Atualize a página."]);
     const e2 = await newOrder(storeId, offer.id, { method: "pix_asaas" }).catch((e) => e);
     expect((e2 as ActionError).code).toBe("invalid_input");
   });

@@ -7,7 +7,8 @@ import { listProducts } from "@/lib/catalog/products";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { firstParam } from "@/lib/panel-params";
-import { OfferEditor, type OfferData } from "./editor";
+import type { ProductRef } from "@/lib/catalog/offer-products";
+import { OfferEditor, type OfferData, type ProductOption } from "./editor";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Oferta" };
@@ -25,6 +26,7 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
   if (isNew && !hasPermission(role, "offers.write")) notFound();
 
   let offer: OfferData | null = null;
+  let offerProducts: ProductRef[] = [];
   if (!isNew) {
     try {
       const o = await runAction(getOffer, call, { id });
@@ -32,30 +34,34 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
         id: o.id,
         slug: o.slug,
         name: o.name,
-        productId: o.productId,
+        productIds: o.products.map((p) => p.id),
         priceCents: o.priceCents,
         methods: o.methods,
         pixMode: o.pixMode as "manual" | "asaas",
         maxInstallments: o.maxInstallments,
-        bumpProductId: o.bumpProductId,
-        bumpPriceCents: o.bumpPriceCents,
-        bumpLabel: o.bumpLabel,
+        bump: o.bump ? { productIds: o.bump.products.map((p) => p.id), priceCents: o.bump.priceCents, label: o.bump.label } : null,
         thankYouText: o.thankYouText,
         pixelId: o.pixelId,
         active: o.active,
       };
+      offerProducts = [...o.products, ...(o.bump?.products ?? [])];
     } catch (e) {
       if (e instanceof ActionError && e.code === "not_found") notFound();
       throw e;
     }
   }
-  const products = hasPermission(role, "products.read") ? await runAction(listProducts, call, {}) : [];
+  const live = hasPermission(role, "products.read") ? await runAction(listProducts, call, {}) : [];
+  // Os produtos da oferta entram nos selects mesmo fora da lista (excluídos, ou quem não lê Produtos).
+  const products: ProductOption[] = [
+    ...live.map((p) => ({ id: p.id, name: p.name })),
+    ...offerProducts.filter((p) => !live.some((l) => l.id === p.id)).map((p) => ({ id: p.id, name: p.name, deleted: p.deletedAt !== null })),
+  ];
   const ident = await getPanelIdentity(panel);
   return (
     <OfferEditor
       key={offer?.id ?? "nova"}
       offer={offer}
-      products={products.map((p) => ({ id: p.id, name: p.name }))}
+      products={products}
       checkoutBase={storeBaseUrl(ident.store)}
       storeName={ident.storeName}
       brandColor={ident.store.brandColor}

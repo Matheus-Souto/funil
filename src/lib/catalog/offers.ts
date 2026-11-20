@@ -1,8 +1,9 @@
-import { and, desc, eq, getTableColumns, isNull } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
+import { and, desc, eq, getTableColumns } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { offer, product } from "@/lib/db/schema";
+import type { Tx } from "@/lib/db/client";
+import { offer } from "@/lib/db/schema";
+import { checkOfferProducts, loadOfferProducts, productsFields, refineProducts, writeOfferProducts, type ProductRef } from "./offer-products";
 import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
 const id = z.uuid();
@@ -17,9 +18,23 @@ const text = z.string().trim().max(2000);
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const { storeId: _omit, ...offerCols } = getTableColumns(offer);
 
-async function activeProduct(ctx: Ctx, productId: string): Promise<void> {
-  const [p] = await ctx.tx.select({ id: product.id }).from(product).where(and(eq(product.id, productId), isNull(product.deletedAt)));
-  if (!p) throw new ActionError("not_found", "Produto não encontrado");
+type OfferRow = Omit<typeof offer.$inferSelect, "storeId">;
+export type OfferView = OfferRow & {
+  products: ProductRef[];
+  bump: { products: ProductRef[]; priceCents: number; label: string | null } | null;
+};
+
+/** Oferta com a lista de produtos (offer_product), na ordem; inclui apagados (o painel mostra para corrigir). */
+async function withProducts(tx: Tx, rows: OfferRow[]): Promise<OfferView[]> {
+  const lists = await loadOfferProducts(
+    tx,
+    rows.map((r) => r.id),
+  );
+  return rows.map((r) => {
+    const g = lists.get(r.id)!;
+    const bump = g.bump.length > 0 && r.bumpPriceCents !== null ? { products: g.bump, priceCents: r.bumpPriceCents, label: r.bumpLabel } : null;
+    return { ...r, products: g.main, bump };
+  });
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -33,63 +48,84 @@ async function ensureSlugFree(ctx: Ctx, s: string, exceptId?: string): Promise<v
 }
 
 const createInput = z
-  .object({
+  .strictObject({
     slug,
     name,
-    productId: id,
+    ...productsFields,
+    bump: productsFields.bump.optional().transform((v) => v ?? null),
     priceCents,
     methods,
     pixMode,
     maxInstallments: maxInstallments.default(1),
-    bumpProductId: id.nullish(),
-    bumpPriceCents: priceCents.nullish(),
-    bumpLabel: text.nullish(),
     thankYouText: text.nullish(),
     active: z.boolean().default(true),
   })
-  .superRefine((v, ctx) => {
-    const hasProduct = v.bumpProductId != null;
-    if (hasProduct !== (v.bumpPriceCents != null)) {
-      ctx.addIssue({ code: "custom", path: ["bumpPriceCents"], message: "Bump exige produto e preço juntos" });
-    }
-    if (hasProduct && v.bumpProductId === v.productId) {
-      ctx.addIssue({ code: "custom", path: ["bumpProductId"], message: "O bump deve ser diferente do produto principal" });
-    }
-  });
+  .superRefine(refineProducts);
 
 export const createOffer = defineAction({
   name: "offers.create",
-  description: "Cria uma oferta (preço em centavos) com order bump opcional.",
+  description:
+    "Cria uma oferta (preço em centavos) com os produtos entregues (productIds, 1 a 20, em ordem) e order bump opcional (bump: productIds, priceCents e label, obrigatório com mais de 1 produto).",
   input: createInput,
   permission: "offers.write",
   async run(ctx, input) {
-    await activeProduct(ctx, input.productId);
-    if (input.bumpProductId) await activeProduct(ctx, input.bumpProductId);
+    const bumpIds = input.bump?.productIds ?? [];
+    // Antes do insert: valida os produtos (loja, apagados, repetidos) com erro legível.
+    await checkOfferProducts(ctx, input.productIds, bumpIds);
     await ensureSlugFree(ctx, input.slug);
+    let row: OfferRow;
     try {
-      const [row] = await ctx.tx
+      [row] = (await ctx.tx
         .insert(offer)
         .values({
           storeId: ctx.storeId,
           slug: input.slug,
           name: input.name,
-          productId: input.productId,
+          bumpPriceCents: input.bump?.priceCents ?? null,
+          bumpLabel: input.bump?.label ?? null,
           priceCents: input.priceCents,
           methods: input.methods,
           pixMode: input.pixMode,
           maxInstallments: input.maxInstallments,
-          bumpProductId: input.bumpProductId ?? null,
-          bumpPriceCents: input.bumpPriceCents ?? null,
-          bumpLabel: input.bumpLabel ?? null,
           thankYouText: input.thankYouText ?? null,
           active: input.active,
         })
-        .returning(offerCols);
-      return row!;
+        .returning(offerCols)) as [OfferRow];
     } catch (e) {
       if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
       throw e;
     }
+    await writeOfferProducts(ctx, row.id, input.productIds, bumpIds);
+    return (await withProducts(ctx.tx, [row]))[0]!;
+  },
+});
+
+/**
+ * Troca o que a oferta entrega: produtos principais (em ordem) e o bump (produtos, preço e rótulo), ou remove o bump
+ * com `null`. `priceCents` opcional muda o preço da oferta na mesma transação (o editor salva produtos e preço juntos,
+ * sem ficar pela metade). Sensível como o preço (muda o que é entregue): MCP/IA pedem aprovação.
+ */
+export const setOfferProducts = defineAction({
+  name: "offers.setProducts",
+  description:
+    "Define os produtos entregues pela oferta (productIds, 1 a 20, em ordem) e o order bump (productIds, priceCents em centavos e label, obrigatório com mais de 1 produto), ou remove o bump com null. priceCents (opcional, centavos) muda também o preço da oferta, junto.",
+  input: z.strictObject({ id, ...productsFields, priceCents: priceCents.optional() }).superRefine(refineProducts),
+  permission: "offers.write",
+  sensitive: true,
+  async run(ctx, input) {
+    // Trava a linha da oferta: duas chamadas simultâneas rodam uma depois da outra (sem a trava, o delete de uma não vê
+    // as linhas novas da outra e as listas se juntam). O unique (offer_id, kind, position) é a rede de segurança.
+    const [current] = await ctx.tx.select({ id: offer.id }).from(offer).where(eq(offer.id, input.id)).for("update");
+    if (!current) throw new ActionError("not_found", "Oferta não encontrada");
+    // Lista primeiro (valida os produtos); depois o preço e o rótulo do bump.
+    await writeOfferProducts(ctx, input.id, input.productIds, input.bump?.productIds ?? []);
+    const price = input.priceCents === undefined ? {} : { priceCents: input.priceCents };
+    const [row] = await ctx.tx
+      .update(offer)
+      .set({ bumpPriceCents: input.bump?.priceCents ?? null, bumpLabel: input.bump?.label ?? null, ...price })
+      .where(eq(offer.id, input.id))
+      .returning(offerCols);
+    return (await withProducts(ctx.tx, [row!]))[0]!;
   },
 });
 
@@ -119,19 +155,40 @@ export const setOfferPixel = defineAction({
   },
 });
 
-// strictObject: campos de preço (priceCents, bumpPriceCents, bumpProductId) são rejeitados aqui.
+/**
+ * Troca o endereço público (/c/<slug>) de uma oferta existente. Sensível: trocar slugs entre ofertas faria o link dos
+ * anúncios vender outros produtos ou outro preço sem passar por offers.setProducts/updatePrice.
+ */
+export const setOfferSlug = defineAction({
+  name: "offers.setSlug",
+  description: "Troca o endereço público (slug) de uma oferta existente.",
+  input: z.strictObject({ id, slug }),
+  permission: "offers.write",
+  sensitive: true,
+  async run(ctx, input) {
+    await ensureSlugFree(ctx, input.slug, input.id);
+    try {
+      const [row] = await ctx.tx.update(offer).set({ slug: input.slug }).where(eq(offer.id, input.id)).returning(offerCols);
+      if (!row) throw new ActionError("not_found", "Oferta não encontrada");
+      return row;
+    } catch (e) {
+      if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
+      throw e;
+    }
+  },
+});
+
+// strictObject: slug (offers.setSlug), preço (offers.updatePrice), produtos e bump (offers.setProducts) são rejeitados.
 export const updateOffer = defineAction({
   name: "offers.update",
-  description: "Atualiza dados da oferta, exceto preços e produto do bump (use offers.updatePrice).",
+  description:
+    "Atualiza dados da oferta, exceto endereço (use offers.setSlug), preço (use offers.updatePrice) e produtos/bump (use offers.setProducts).",
   input: z.strictObject({
     id,
-    slug: slug.optional(),
     name: name.optional(),
-    productId: id.optional(),
     methods: methods.optional(),
     pixMode: pixMode.optional(),
     maxInstallments: maxInstallments.optional(),
-    bumpLabel: text.nullable().optional(),
     thankYouText: text.nullable().optional(),
     active: z.boolean().optional(),
   }),
@@ -140,55 +197,23 @@ export const updateOffer = defineAction({
     const { id: offerId, ...changes } = input;
     const [current] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, offerId));
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
-    if (changes.productId !== undefined) {
-      if (changes.productId === current.bumpProductId) {
-        throw new ActionError("invalid_input", "O produto principal não pode ser o do bump");
-      }
-      await activeProduct(ctx, changes.productId);
-    }
-    if (changes.slug !== undefined) await ensureSlugFree(ctx, changes.slug, offerId);
     const set = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
     if (Object.keys(set).length === 0) return current;
-    try {
-      const [row] = await ctx.tx.update(offer).set(set).where(eq(offer.id, offerId)).returning(offerCols);
-      return row!;
-    } catch (e) {
-      if (isUniqueViolation(e)) throw new ActionError("conflict", "Já existe uma oferta com esse endereço");
-      throw e;
-    }
+    const [row] = await ctx.tx.update(offer).set(set).where(eq(offer.id, offerId)).returning(offerCols);
+    return row!;
   },
 });
 
 export const updateOfferPrice = defineAction({
   name: "offers.updatePrice",
-  description: "Altera o preço da oferta e/ou define ou remove o bump (produto e preço em centavos).",
-  input: z
-    .strictObject({
-      id,
-      priceCents: priceCents.optional(),
-      bump: z.strictObject({ productId: id, priceCents }).nullable().optional(),
-    })
-    .refine((v) => v.priceCents !== undefined || v.bump !== undefined, "Informe priceCents e/ou bump"),
+  description: "Altera o preço da oferta (centavos). O bump (produtos, preço e rótulo) muda por offers.setProducts, que também aceita o preço junto.",
+  input: z.strictObject({ id, priceCents }),
   permission: "offers.write",
   sensitive: true,
   async run(ctx, input) {
-    const [current] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, input.id));
-    if (!current) throw new ActionError("not_found", "Oferta não encontrada");
-    const set: Partial<typeof offer.$inferInsert> = {};
-    if (input.priceCents !== undefined) set.priceCents = input.priceCents;
-    if (input.bump === null) {
-      set.bumpProductId = null;
-      set.bumpPriceCents = null;
-    } else if (input.bump) {
-      if (input.bump.productId === current.productId) {
-        throw new ActionError("invalid_input", "O bump deve ser diferente do produto principal");
-      }
-      await activeProduct(ctx, input.bump.productId);
-      set.bumpProductId = input.bump.productId;
-      set.bumpPriceCents = input.bump.priceCents;
-    }
-    const [row] = await ctx.tx.update(offer).set(set).where(eq(offer.id, input.id)).returning(offerCols);
-    return row!;
+    const [row] = await ctx.tx.update(offer).set({ priceCents: input.priceCents }).where(eq(offer.id, input.id)).returning(offerCols);
+    if (!row) throw new ActionError("not_found", "Oferta não encontrada");
+    return row;
   },
 });
 
@@ -197,7 +222,7 @@ export const listOffers = defineAction({
   description: "Lista as ofertas da loja.",
   input: z.object({}),
   permission: "offers.read",
-  run: (ctx) => ctx.tx.select(offerCols).from(offer).orderBy(desc(offer.createdAt)),
+  run: async (ctx) => withProducts(ctx.tx, await ctx.tx.select(offerCols).from(offer).orderBy(desc(offer.createdAt))),
 });
 
 export const getOffer = defineAction({
@@ -208,7 +233,7 @@ export const getOffer = defineAction({
   async run(ctx, input) {
     const [row] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, input.id));
     if (!row) throw new ActionError("not_found", "Oferta não encontrada");
-    return row;
+    return (await withProducts(ctx.tx, [row]))[0]!;
   },
 });
 
@@ -219,26 +244,23 @@ export const getPublicOffer = defineAction({
   permission: "public",
   audit: false,
   async run(ctx, input) {
-    const bumpProduct = alias(product, "bump_product");
-    const [row] = await ctx.tx
-      .select({ o: offer, productName: product.name, bumpName: bumpProduct.name, bumpDeleted: bumpProduct.deletedAt, mainDeleted: product.deletedAt })
-      .from(offer)
-      .innerJoin(product, eq(product.id, offer.productId))
-      .leftJoin(bumpProduct, eq(bumpProduct.id, offer.bumpProductId))
-      .where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
-    if (!row || row.mainDeleted) throw new ActionError("not_found", "Oferta não encontrada");
-    const o = row.o;
-    const hasBump = o.bumpProductId !== null && o.bumpPriceCents !== null && row.bumpName !== null && !row.bumpDeleted;
+    const [o] = await ctx.tx.select(offerCols).from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
+    if (!o) throw new ActionError("not_found", "Oferta não encontrada");
+    const { main, bump } = (await loadOfferProducts(ctx.tx, [o.id])).get(o.id)!;
+    // Nunca vende combo incompleto: principal apagado esconde a oferta; produto do bump apagado esconde o bump.
+    if (main.length === 0 || main.some((p) => p.deletedAt)) throw new ActionError("not_found", "Oferta não encontrada");
+    const hasBump = bump.length > 0 && o.bumpPriceCents !== null && !bump.some((p) => p.deletedAt);
+    const names = (ps: ProductRef[]) => ps.map((p) => ({ name: p.name }));
     return {
       id: o.id,
       slug: o.slug,
       name: o.name,
-      productName: row.productName,
+      products: names(main),
       priceCents: o.priceCents,
       methods: o.methods,
       pixMode: o.pixMode,
       maxInstallments: o.maxInstallments,
-      bump: hasBump ? { productName: row.bumpName!, priceCents: o.bumpPriceCents!, label: o.bumpLabel } : null,
+      bump: hasBump ? { products: names(bump), priceCents: o.bumpPriceCents!, label: o.bumpLabel } : null,
       thankYouText: o.thankYouText,
       pixelId: await pixelIdFor(ctx.tx, ctx.storeId, o.pixelId),
     };

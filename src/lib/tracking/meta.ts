@@ -12,7 +12,7 @@
 // mantidos (UTF-8); country = código ISO de 2 letras minúsculo; tudo em SHA-256. external_id = SHA-256 do id do cliente.
 // client_ip_address, client_user_agent, fbc e fbp vão sem hash.
 import { createHash } from "node:crypto";
-import { and, desc, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { withStore, type Tx } from "@/lib/db/client";
@@ -22,6 +22,7 @@ import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { enqueue, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
+import { itemOrder } from "@/lib/orders/items";
 import { META_EVENT_ID_RE } from "./touch";
 
 export const META_GRAPH_VERSION = "v27.0";
@@ -345,7 +346,7 @@ export const metaEventJob: JobHandler = async (j, signal) => {
       .select({ productId: orderItem.productId })
       .from(orderItem)
       .where(eq(orderItem.orderId, o.id))
-      .orderBy(desc(orderItem.kind), orderItem.id); // "main" antes de "bump"
+      .orderBy(...itemOrder); // ordem do pedido: principais e depois o bump, cada grupo na ordem da oferta
 
     const base = storeBaseUrl(s);
     const event = {

@@ -7,6 +7,15 @@ export function esc(v: string): string {
   return v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+/**
+ * Uma linha só: controles (inclusive \r, \n e tab), NEL e os separadores de linha/parágrafo do Unicode viram um espaço.
+ * Todo valor dinâmico da parte texto passa por aqui: um nome com quebra de linha não forja linhas (ex.: um falso
+ * "Total pago").
+ */
+export function oneLine(v: string): string {
+  return v.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ");
+}
+
 const C = { bg: "#EEF0EC", surface: "#FFFFFF", soft: "#F5F6F3", border: "#DDE1DB", text: "#15201B", muted: "#56615B" };
 const FONT = "Helvetica,Arial,sans-serif";
 
@@ -39,18 +48,27 @@ export interface DeliveryEmailData {
   paidAt: Date;
   method: string;
   totalCents: number;
-  items: Array<{ name: string; kind: "main" | "bump"; priceCents: number; url: string }>;
+  /** Nome da oferta: vai no assunto quando o pedido tem mais de um produto principal. */
+  offerName: string;
+  /** Na ordem da oferta. Sem preço por item: o comprador só vê o total (o rateio é interno). */
+  items: Array<{ name: string; kind: "main" | "bump"; url: string }>;
   maxDownloads: number;
   ttlDays: number;
 }
 
 export const methodLabel = (method: string) => (method === "card_asaas" ? "cartão" : "Pix");
 
-/** E-mail "Seu acesso: <produto>" com um botão por PDF (dois quando o bump foi comprado). */
+/** Assunto "Seu acesso: <produto>" com 1 produto principal e "Seu acesso: <oferta>" com mais de 1. */
+export function deliverySubject(d: Pick<DeliveryEmailData, "offerName" | "storeName" | "items">): string {
+  const main = d.items.filter((i) => i.kind === "main");
+  return `Seu acesso: ${main.length > 1 ? d.offerName : (main[0]?.name ?? d.items[0]?.name ?? d.storeName)}`;
+}
+
+/** E-mail "Seu acesso" com um botão por PDF, na ordem da oferta, e só o total do pedido (nunca preço por item). */
 export function deliveryEmail(d: DeliveryEmailData): { subject: string; html: string; text: string } {
   const b = brandVars(d.brandColor);
   const brand = b["--color-brand-strong"];
-  const subject = `Seu acesso: ${d.items[0]?.name ?? d.storeName}`;
+  const subject = deliverySubject(d);
   const hello = firstName(d.buyerName);
   const itemLabel = (i: { kind: string }) => (i.kind === "bump" ? "Adicional · PDF" : "PDF");
 
@@ -66,7 +84,7 @@ export function deliveryEmail(d: DeliveryEmailData): { subject: string; html: st
   const rows = d.items
     .map(
       (i) =>
-        `<tr><td style="padding:6px 0;color:${C.muted}">${esc(i.name)}${i.kind === "bump" ? " (acréscimo)" : ""}</td><td align="right" style="padding:6px 0">${brl(i.priceCents)}</td></tr>`,
+        `<tr><td colspan="2" style="padding:6px 0;color:${C.muted}">${esc(i.name)}${i.kind === "bump" ? " (acréscimo)" : ""}</td></tr>`,
     )
     .join("");
 
@@ -93,20 +111,21 @@ export function deliveryEmail(d: DeliveryEmailData): { subject: string; html: st
 <p style="margin:0">Se o botão não funcionar, copie o link:</p>
 ${d.items.map((i) => `<p style="margin:0;word-break:break-all">${esc(i.name)}: ${esc(i.url)}</p>`).join("\n")}`;
 
+  const t = { ...d, storeName: oneLine(d.storeName), orderCode: oneLine(d.orderCode), items: d.items.map((i) => ({ ...i, name: oneLine(i.name) })) };
   const text = [
-    `${hello ? `Olá, ${hello}! ` : ""}Seu acesso chegou.`,
+    `${hello ? `Olá, ${oneLine(hello)}! ` : ""}Seu acesso chegou.`,
     "",
     "Obrigado pela compra. Baixe seus arquivos pelos links abaixo:",
     "",
-    ...d.items.flatMap((i) => [`${i.name} (${itemLabel(i)})`, i.url, ""]),
+    ...t.items.flatMap((i) => [`${i.name} (${itemLabel(i)})`, i.url, ""]),
     `Os links valem por ${d.ttlDays} dias e até ${d.maxDownloads} downloads. Cada PDF leva o seu nome e e-mail no rodapé: é um material pessoal, por favor não compartilhe.`,
     "",
-    `Resumo do pedido #${d.orderCode}`,
-    ...d.items.map((i) => `${i.name}${i.kind === "bump" ? " (acréscimo)" : ""}: ${brl(i.priceCents)}`),
+    `Resumo do pedido #${t.orderCode}`,
+    ...t.items.map((i) => `${i.name}${i.kind === "bump" ? " (acréscimo)" : ""}`),
     `Total pago (${methodLabel(d.method)}): ${brl(d.totalCents)}`,
     "",
     "Algum problema para baixar? É só responder este e-mail.",
-    `Equipe ${d.storeName}`,
+    `Equipe ${t.storeName}`,
   ].join("\n");
 
   return { subject, html: layout({ title: subject, storeName: d.storeName, brand, body, footer }), text };
@@ -127,6 +146,6 @@ ${d.paragraphs.map((p) => `<p style="margin:12px 0 0;font-size:15px;color:${C.mu
   return {
     subject: d.subject,
     html: layout({ title: d.subject, storeName: d.storeName, brand, body, footer }),
-    text: [d.heading, "", ...d.paragraphs.flatMap((p) => [p, ""]), `Aviso automático da sua loja ${d.storeName}.`].join("\n"),
+    text: [oneLine(d.heading), "", ...d.paragraphs.flatMap((p) => [oneLine(p), ""]), `Aviso automático da sua loja ${oneLine(d.storeName)}.`].join("\n"),
   };
 }

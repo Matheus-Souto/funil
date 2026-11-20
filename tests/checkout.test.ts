@@ -1,12 +1,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
+import fc from "fast-check";
 import { z } from "zod";
-import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
-import { createOffer } from "@/lib/catalog/offers";
+import { checkoutOffer } from "@/lib/catalog/checkout-offer";
+import { createOffer, getPublicOffer, setOfferProducts } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
-import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
+import { auditLog, checkoutView, customer, orderItem, orders, product } from "@/lib/db/schema";
 import {
   ASAAS_LIMITS,
   CARD_UNAVAILABLE_MESSAGE,
@@ -27,11 +29,12 @@ import {
 } from "@/lib/checkout";
 import { CARD_TICKET_RENEW_WINDOW_MS, CARD_TICKET_TTL_MS, issueCardTicket, verifyCardTicket } from "@/lib/payments/card-ticket";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { createOrder, type Method } from "@/lib/orders/create";
 import { payWithCard } from "@/lib/payments/asaas/card";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { savePixManual } from "@/lib/payments/manual";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
-import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeAsaas, type FakeAsaas } from "./fakes/asaas";
 
 let t: TestDb;
@@ -98,11 +101,11 @@ async function seed(opts: SeedOpts = {}) {
   const offer = await runAction(createOffer, call, {
     slug,
     name: "Maná bíblico para crianças",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: opts.priceCents ?? 990,
     methods: opts.methods ?? ["pix", "card"],
     pixMode: opts.pixMode ?? "manual",
-    ...(opts.bump === false ? {} : { bumpProductId: extra.id, bumpPriceCents: 1710, bumpLabel: "Quero a versão completa" }),
+    ...(opts.bump === false ? {} : { bump: { productIds: [extra.id], priceCents: 1710, label: "Quero a versão completa" } }),
     thankYouText: "Que essas histórias tragam momentos especiais em família!",
     ...(opts.maxInstallments ? { maxInstallments: opts.maxInstallments } : {}),
   });
@@ -414,6 +417,58 @@ describe("cartão: CPF do titular e validade", () => {
   });
 });
 
+describe("página do checkout: \"Inclui:\" e cartão do bump (dados de offers.getPublic)", () => {
+  const KIDS = ["Almanaque Bíblico Kids", "Pack de jogos", "Datas especiais", "Cartões de versículos", "Diário de oração", "Escola dominical"];
+  const pageData = async (storeId: string, slug: string) =>
+    checkoutOffer(await runAction(getPublicOffer, pub(storeId), { slug }), ["pix", "card"]);
+
+  test("Completo (6 principais): nome da oferta e a linha \"Inclui:\" com os 6 nomes na ordem", async () => {
+    const { storeId } = await seedStore("Kids");
+    const six = [];
+    for (const n of KIDS) six.push(await seedProduct(storeId, n));
+    await runAction(createOffer, { storeId, actor: owner, origin: "panel" }, {
+      slug: "completo",
+      name: "Completo",
+      productIds: six.map((p) => p.id),
+      priceCents: 2700,
+      methods: ["pix"],
+      pixMode: "manual",
+    });
+    const v = await pageData(storeId, "completo");
+    expect(v.name).toBe("Completo");
+    expect(v.includes).toBe(`Inclui: ${KIDS.join(" · ")}`);
+    expect(v.productName).toBe("Completo");
+    expect(v.priceCents).toBe(2700);
+    expect(v.bump).toBeNull();
+  });
+
+  test("1 principal: sem linha \"Inclui\" e o nome do produto (como antes); bump de 1 produto mostra o nome dele", async () => {
+    const s = await seed();
+    const v = await pageData(s.storeId, s.slug);
+    expect(v.includes).toBeNull();
+    expect(v.productName).toBe("Maná básica");
+    expect(v.bump).toEqual({ productName: "Maná completa", contents: null, priceCents: 1710, label: "Quero a versão completa" });
+  });
+
+  test("Almanaque com bump de 5: o cartão do bump mostra o rótulo e a lista dos 5", async () => {
+    const { storeId } = await seedStore("Kids");
+    const [alm, ...kits] = await Promise.all(KIDS.map((n) => seedProduct(storeId, n)));
+    await runAction(createOffer, { storeId, actor: owner, origin: "panel" }, {
+      slug: "almanaque",
+      name: "Almanaque",
+      productIds: [alm!.id],
+      priceCents: 990,
+      methods: ["pix"],
+      pixMode: "manual",
+      bump: { productIds: kits.map((p) => p.id), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    const v = await pageData(storeId, "almanaque");
+    expect(v.includes).toBeNull();
+    expect(v.productName).toBe(KIDS[0]);
+    expect(v.bump).toEqual({ productName: "5 Kits Extras", contents: KIDS.slice(1).join(" · "), priceCents: 1710, label: "5 Kits Extras" });
+  });
+});
+
 describe("página do pedido", () => {
   test("getOrderPublic nunca contém e-mail, CPF, celular nem ids internos", async () => {
     const s = await seed({ pixMode: "asaas", asaas: createFakeAsaas() });
@@ -717,4 +772,289 @@ describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
 
     expect((await fail(renewCardTicket({ storeId: s.storeId }, { publicId: "../x y", ticket: card.cardTicket }, KEY))).code).toBe("invalid_input");
   });
+});
+
+// ---- Oferta com N produtos: rateio, ordem e produto apagado -------------------------------------------------------
+
+/** Loja com Pix manual e `n` produtos semeados (nomes "PDF 1".."PDF n"). */
+async function seedCatalog(n: number) {
+  const s = await seed({ bump: false });
+  const products: { id: string; name: string }[] = [];
+  for (let i = 1; i <= n; i++) products.push({ name: `PDF ${i}`, ...(await seedProduct(s.storeId, `PDF ${i}`)) });
+  return { storeId: s.storeId, products };
+}
+
+type KitOpts = { name?: string; main: string[]; priceCents: number; bump?: { ids: string[]; priceCents: number; label?: string } };
+async function kitOffer(storeId: string, k: KitOpts) {
+  const slug = `k-${Math.random().toString(36).slice(2, 10)}`;
+  const o = await runAction(createOffer, { storeId, actor: owner, origin: "panel" as const }, {
+    slug,
+    name: k.name ?? "Almanaque Completo",
+    productIds: k.main,
+    priceCents: k.priceCents,
+    methods: ["pix", "card"],
+    pixMode: "manual",
+    ...(k.bump ? { bump: { productIds: k.bump.ids, priceCents: k.bump.priceCents, label: k.bump.label ?? (k.bump.ids.length > 1 ? "Kits extras" : null) } } : {}),
+  });
+  return { slug, offerId: o.id };
+}
+
+const itemsOf = (storeId: string, orderId: string) =>
+  withStore(storeId, (tx) =>
+    tx
+      .select({ productId: orderItem.productId, kind: orderItem.kind, position: orderItem.position, priceCents: orderItem.priceCents })
+      .from(orderItem)
+      .where(eq(orderItem.orderId, orderId))
+      .orderBy(desc(orderItem.kind), asc(orderItem.position)),
+  );
+
+const sysCtx = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind: "system" }, origin: "system", tx });
+const directOrder = (storeId: string, offerId: string, withBump: boolean, method: Method = "pix_manual") =>
+  withStore(storeId, (tx) =>
+    createOrder(sysCtx(storeId, tx), {
+      offerId,
+      withBump,
+      method,
+      customer: { name: "Maria Souza", email: email(), phone: "11987654321", ...(method === "pix_manual" ? {} : { cpf: CPF }) },
+      touch: { first: null, last: null },
+      clientIp: nextIp(),
+      userAgent: "bun-test",
+    }),
+  );
+
+const BUMP_GONE = "O acréscimo não está mais disponível. Atualize a página.";
+
+describe("pedido com N itens: rateio em centavos", () => {
+  test("Completo (6 principais) por R$ 27,00: 6 itens de 450 na ordem da oferta, soma 2.700", async () => {
+    const c = await seedCatalog(6);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids, priceCents: 2700 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const o = await orderBy(c.storeId, r.publicId);
+    expect(o.totalCents).toBe(2700);
+    expect(o.hasBump).toBe(false);
+    const items = await itemsOf(c.storeId, o.id);
+    expect(items).toEqual(ids.map((productId, position) => ({ productId, kind: "main", position, priceCents: 450 })));
+  });
+
+  test("Almanaque (990) + bump de 5 produtos (1.710): 1 item de 990 e 5 de 342; sem o bump, só 1 item", async () => {
+    const c = await seedCatalog(6);
+    const [main, ...kits] = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { name: "Almanaque", main: [main!], priceCents: 990, bump: { ids: kits, priceCents: 1710, label: "5 Kits Extras" } });
+    const withBump = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }))).publicId);
+    expect(withBump.totalCents).toBe(2700);
+    expect(withBump.hasBump).toBe(true);
+    expect(await itemsOf(c.storeId, withBump.id)).toEqual([
+      { productId: main!, kind: "main", position: 0, priceCents: 990 },
+      ...kits.map((productId, position) => ({ productId, kind: "bump", position, priceCents: 342 })),
+    ]);
+    const noBump = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug))).publicId);
+    expect(noBump.totalCents).toBe(990);
+    expect(await itemsOf(c.storeId, noBump.id)).toEqual([{ productId: main!, kind: "main", position: 0, priceCents: 990 }]);
+  });
+
+  test("total com sobra: a sobra fica no primeiro item do grupo (1.000 em 3 = 334, 333, 333)", async () => {
+    const c = await seedCatalog(3);
+    const k = await kitOffer(c.storeId, { main: c.products.map((p) => p.id), priceCents: 1000 });
+    const o = await directOrder(c.storeId, k.offerId, false);
+    expect((await itemsOf(c.storeId, o.id)).map((i) => i.priceCents)).toEqual([334, 333, 333]);
+  });
+
+  test(
+    "propriedade: 1 a 20 itens por grupo, com e sem bump, Pix manual e cartão: soma dos itens = total_cents",
+    async () => {
+      const c = await seedCatalog(40);
+      const ids = c.products.map((p) => p.id);
+      await fc.assert(
+        fc.asyncProperty(
+          fc.integer({ min: 1, max: 20 }),
+          fc.integer({ min: 0, max: 20 }),
+          fc.integer({ min: 1, max: 500_000 }),
+          fc.integer({ min: 1, max: 500_000 }),
+          fc.boolean(),
+          fc.constantFrom<Method>("pix_manual", "card_asaas"),
+          async (nMain, nBump, price, bumpPrice, withBump, method) => {
+            const k = await kitOffer(c.storeId, {
+              main: ids.slice(0, nMain),
+              priceCents: price,
+              ...(nBump > 0 ? { bump: { ids: ids.slice(20, 20 + nBump), priceCents: bumpPrice } } : {}),
+            });
+            const bumped = withBump && nBump > 0;
+            const o = await directOrder(c.storeId, k.offerId, bumped, method);
+            const items = await itemsOf(c.storeId, o.id);
+            expect(o.totalCents).toBe(price + (bumped ? bumpPrice : 0));
+            expect(items.reduce((sum, i) => sum + i.priceCents, 0)).toBe(o.totalCents);
+            expect(items.filter((i) => i.kind === "main")).toHaveLength(nMain);
+            expect(items.filter((i) => i.kind === "bump")).toHaveLength(bumped ? nBump : 0);
+            for (const i of items) expect(Number.isInteger(i.priceCents) && i.priceCents >= 0).toBe(true);
+            if (method === "pix_manual") {
+              // O valor único do Pix manual não entra no rateio: os itens somam o total, não o valor a pagar.
+              expect(o.manualAmountCents!).toBeGreaterThan(o.totalCents);
+              expect(o.manualAmountCents!).toBeLessThanOrEqual(o.totalCents + 99);
+            }
+          },
+        ),
+        { numRuns: 25 },
+      );
+    },
+    HEAVY_TEST_MS * 3,
+  );
+
+  test("reordenar ou trocar os produtos da oferta depois do pedido não muda os itens do pedido", async () => {
+    const c = await seedCatalog(5);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids.slice(0, 3), priceCents: 1000 });
+    const before = await directOrder(c.storeId, k.offerId, false);
+    const snapshot = await itemsOf(c.storeId, before.id);
+    const call = { storeId: c.storeId, actor: owner, origin: "panel" as const };
+    await runAction(setOfferProducts, call, { id: k.offerId, productIds: [ids[2]!, ids[0]!, ids[1]!], bump: null });
+    expect(await itemsOf(c.storeId, before.id)).toEqual(snapshot);
+    await runAction(setOfferProducts, call, { id: k.offerId, productIds: [ids[3]!, ids[4]!], bump: null });
+    expect(await itemsOf(c.storeId, before.id)).toEqual(snapshot);
+    // Pedido novo segue a lista atual.
+    const after = await directOrder(c.storeId, k.offerId, false);
+    expect((await itemsOf(c.storeId, after.id)).map((i) => [i.productId, i.position, i.priceCents])).toEqual([
+      [ids[3]!, 0, 500],
+      [ids[4]!, 1, 500],
+    ]);
+  });
+
+  test("qualquer principal apagado: a oferta não vende (not_found); bump marcado e indisponível: conflict e nenhum pedido (R4)", async () => {
+    const c = await seedCatalog(6);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: ids.slice(0, 3), priceCents: 2700, bump: { ids: ids.slice(3), priceCents: 1710 } });
+    const countOrders = async () => (await withStore(c.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).length;
+    // Apaga o 3º produto do bump (não o 1º): bump marcado -> recusa; sem o bump o pedido sai normal.
+    await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[5]!));
+    const e1 = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true })));
+    expect([e1.code, e1.message]).toEqual(["conflict", BUMP_GONE]);
+    expect(await countOrders()).toBe(0);
+    const ok = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug))).publicId);
+    expect([ok.hasBump, ok.totalCents]).toEqual([false, 2700]);
+    // Apaga o 2º principal (não o 1º).
+    await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[1]!));
+    const e = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug)));
+    expect(e.code).toBe("not_found");
+    expect(await countOrders()).toBe(1);
+  });
+
+  test("bump retirado da oferta depois de a página carregar: bump marcado -> conflict, nenhum pedido (R4)", async () => {
+    const c = await seedCatalog(3);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: [ids[0]!], priceCents: 990, bump: { ids: ids.slice(1), priceCents: 1710 } });
+    await runAction(setOfferProducts, { storeId: c.storeId, actor: owner, origin: "panel" as const }, { id: k.offerId, productIds: [ids[0]!], bump: null });
+    const e = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true })));
+    expect([e.code, e.message]).toEqual(["conflict", BUMP_GONE]);
+    expect(await withStore(c.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).toHaveLength(0);
+  });
+});
+
+describe("página do pedido: sem preço rateado", () => {
+  test("Completo de 6: uma linha com o nome da oferta e o preço dela; nunca R$ 4,50", async () => {
+    const c = await seedCatalog(6);
+    const k = await kitOffer(c.storeId, { name: "Almanaque Completo", main: c.products.map((p) => p.id), priceCents: 2700 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([{ name: "Almanaque Completo", priceCents: 2700 }]);
+  });
+
+  test("total com sobra (1.000 em 3): uma linha de R$ 10,00, nunca 3,34 / 3,33", async () => {
+    const c = await seedCatalog(3);
+    const k = await kitOffer(c.storeId, { name: "Trio", main: c.products.map((p) => p.id), priceCents: 1000 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([{ name: "Trio", priceCents: 1000 }]);
+    expect(JSON.stringify(view)).not.toMatch(/\b33[34]\b/);
+  });
+
+  test("1 principal + bump de 5: o principal e o rótulo do bump, cada um com o preço do grupo", async () => {
+    const c = await seedCatalog(6);
+    const [main, ...kits] = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { name: "Almanaque", main: [main!], priceCents: 990, bump: { ids: kits, priceCents: 1710, label: "5 Kits Extras" } });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([
+      { name: "PDF 1", priceCents: 990 },
+      { name: "5 Kits Extras", priceCents: 1710 },
+    ]);
+  });
+});
+
+describe("setProducts e checkout concorrentes na mesma oferta", () => {
+  /** Espera (por condição, sem tempo fixo) até outra sessão deste banco ficar bloqueada numa trava, ou `done` virar true. */
+  async function blockedOnLock(done: () => boolean): Promise<boolean> {
+    for (let i = 0; i < 20_000; i++) {
+      if (done()) return false;
+      const [row] = (await t.ownerDb.execute(
+        sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+      )) as unknown as { n: number }[];
+      if (row!.n > 0) return true;
+    }
+    return false;
+  }
+
+  async function setup() {
+    const c = await seedCatalog(7);
+    const ids = c.products.map((p) => p.id);
+    const old = { main: ids.slice(0, 2), bump: [ids[2]!], bumpPrice: 1000 };
+    const neu = { main: ids.slice(3, 6), bump: [ids[6]!, ids[2]!], bumpPrice: 2000 };
+    const k = await kitOffer(c.storeId, { main: old.main, priceCents: 1200, bump: { ids: old.bump, priceCents: old.bumpPrice } });
+    const setNew = (tx: Ctx["tx"]) =>
+      setOfferProducts.run({ storeId: c.storeId, actor: owner, origin: "panel", tx }, { id: k.offerId, productIds: neu.main, bump: { productIds: neu.bump, priceCents: neu.bumpPrice, label: "Extras" } }, undefined, undefined);
+    const shape = (s: typeof old) => [
+      ...splitOf(1200, s.main).map(([productId, priceCents], position) => ({ productId, kind: "main", position, priceCents })),
+      ...splitOf(s.bumpPrice, s.bump).map(([productId, priceCents], position) => ({ productId, kind: "bump", position, priceCents })),
+    ];
+    return { c, k, old, neu, setNew, oldItems: shape(old), newItems: shape(neu) };
+  }
+  const splitOf = (total: number, ids: string[]) => ids.map((id, i) => [id, Math.floor(total / ids.length) + (i === 0 ? total % ids.length : 0)] as const);
+
+  test("setProducts com a trava: o checkout espera e sai inteiro com a lista e o preço novos", async () => {
+    const { c, k, setNew, newItems } = await setup();
+    let order: Promise<{ id: string }> | undefined;
+    let finished = false;
+    await withStore(c.storeId, async (tx) => {
+      await setNew(tx);
+      order = directOrder(c.storeId, k.offerId, true, "card_asaas").finally(() => {
+        finished = true;
+      });
+      // O pedido não pode terminar enquanto a lista nova não foi gravada (commit): fica bloqueado na trava da oferta.
+      expect(await blockedOnLock(() => finished)).toBe(true);
+    });
+    const o = await order!;
+    expect(await itemsOf(c.storeId, o.id)).toEqual(newItems);
+  });
+
+  test("pedido com a trava: o setProducts espera; o pedido sai inteiro com a lista e o preço antigos", async () => {
+    const { c, k, setNew, oldItems } = await setup();
+    let change: Promise<unknown> | undefined;
+    let finished = false;
+    const o = await withStore(c.storeId, async (tx) => {
+      const created = await createOrder(sysCtx(c.storeId, tx), {
+        offerId: k.offerId,
+        withBump: true,
+        method: "card_asaas",
+        customer: { name: "Maria Souza", email: email(), phone: "11987654321", cpf: CPF },
+        touch: { first: null, last: null },
+        clientIp: nextIp(),
+        userAgent: "bun-test",
+      });
+      change = withStore(c.storeId, (tx2) => setNew(tx2)).finally(() => {
+        finished = true;
+      });
+      expect(await blockedOnLock(() => finished)).toBe(true);
+      return created;
+    });
+    await change;
+    expect(await itemsOf(c.storeId, o.id)).toEqual(oldItems);
+  });
+
+  test("corrida sem ordem combinada (10 rodadas): cada pedido é inteiro antigo ou inteiro novo", async () => {
+    for (let i = 0; i < 10; i++) {
+      const { c, k, setNew, oldItems, newItems } = await setup();
+      const [, o] = await Promise.all([withStore(c.storeId, (tx) => setNew(tx)), directOrder(c.storeId, k.offerId, true, "card_asaas")]);
+      const items = await itemsOf(c.storeId, o.id);
+      expect([JSON.stringify(oldItems), JSON.stringify(newItems)]).toContain(JSON.stringify(items));
+    }
+  }, HEAVY_TEST_MS);
 });

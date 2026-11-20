@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, or } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import { offer, product } from "@/lib/db/schema";
+import { offer, offerProduct, product } from "@/lib/db/schema";
 import { sha256Bytes } from "@/lib/crypto";
 import type { PdfInspection } from "@/lib/pdf/core";
 import { PdfBusyError, inspectInSandbox } from "@/lib/pdf/sandbox";
@@ -122,10 +122,12 @@ export const deleteProduct = defineAction({
   async run(ctx, input) {
     const [found] = await ctx.tx.select({ id: product.id }).from(product).where(and(eq(product.id, input.id), isNull(product.deletedAt)));
     if (!found) throw new ActionError("not_found", "Produto não encontrado");
+    // Em qualquer posição da oferta (principal ou bump).
     const [inUse] = await ctx.tx
       .select({ id: offer.id })
-      .from(offer)
-      .where(and(eq(offer.active, true), or(eq(offer.productId, input.id), eq(offer.bumpProductId, input.id))))
+      .from(offerProduct)
+      .innerJoin(offer, eq(offer.id, offerProduct.offerId))
+      .where(and(eq(offer.active, true), eq(offerProduct.productId, input.id)))
       .limit(1);
     if (inUse) throw new ActionError("conflict", "Produto usado por uma oferta ativa");
     await ctx.tx.update(product).set({ deletedAt: new Date() }).where(eq(product.id, input.id));
