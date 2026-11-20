@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError } from "@/lib/actions/core";
 import { cardFormCsp, cardFormHtml } from "@/card-service/page";
-import { cacheOrigins, createCardServer, type CardServerOptions } from "@/card-service/server";
+import { cacheOrigins, cardBindHost, createCardServer, type CardServerOptions } from "@/card-service/server";
 import { db, setDbForTests } from "@/lib/db/client";
 import { integration, orders } from "@/lib/db/schema";
 import { env, requireSecret } from "@/lib/env";
@@ -727,6 +727,43 @@ describe("main.ts: subida do serviço", () => {
       "TRUST_PROXY=0 com CARD_ORIGIN https: todo pagamento seria recusado; defina TRUST_PROXY (atrás do Caddy: 1)",
     );
     expect(r.out).not.toContain("ASAAS_SEAL_KEY");
+  }, HEAVY_TEST_MS);
+
+  test("bind (R17): 127.0.0.1 com CARD_ORIGIN http em loopback (verify/dev); 0.0.0.0 nos outros casos (container, atrás do Caddy)", () => {
+    expect(cardBindHost("http://127.0.0.1:3100")).toBe("127.0.0.1");
+    expect(cardBindHost("http://localhost:3100")).toBe("127.0.0.1");
+    expect(cardBindHost("https://pagar.example.com")).toBe("0.0.0.0");
+    expect(cardBindHost("https://pagar.localhost:8443")).toBe("0.0.0.0");
+    expect(cardBindHost(undefined)).toBe("0.0.0.0");
+  });
+
+  test("sem CARD_ORIGIN (instalação sem o cartão): sobe desligado, só /healthz 200, sem banco; SIGTERM encerra com 0", async () => {
+    const proc = Bun.spawn([process.execPath, MAIN], {
+      cwd: mkdtempSync(join(tmpdir(), "card-main-")),
+      env: { PATH: process.env.PATH ?? "", SERVICE: "card", CARD_PORT: "0", CARD_ORIGIN: "", DATABASE_URL: "", CARD_TICKET_KEY: "", ASAAS_SEAL_KEY: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Primeira linha do log: o aviso, com a porta efêmera.
+    const reader = proc.stdout.getReader();
+    let text = "";
+    while (!text.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += new TextDecoder().decode(value);
+    }
+    const line = JSON.parse(text.split("\n")[0]!) as { msg: string; data: { port: number; host: string } };
+    expect(line.msg).toBe("serviço de cartão desligado: CARD_ORIGIN não definida (docs/instalacao.md, seção 12)");
+    expect(line.data.host).toBe("0.0.0.0");
+    const base = `http://127.0.0.1:${line.data.port}`;
+    const health = await fetch(`${base}/healthz`);
+    expect([health.status, await health.text()]).toEqual([200, "desligado"]);
+    for (const [method, path] of [["GET", `/form/${randomUUID()}`], ["GET", "/form.js"], ["POST", "/api/card"], ["GET", "/"]] as const) {
+      const res = await fetch(`${base}${path}`, { method, ...(method === "POST" ? { body: "{}" } : {}) });
+      expect([method, path, res.status, await res.text()]).toEqual([method, path, 404, ""]);
+    }
+    proc.kill("SIGTERM");
+    expect(await proc.exited).toBe(0);
   }, HEAVY_TEST_MS);
 
   test("SERVICE=app: não sobe (exit 1)", async () => {
