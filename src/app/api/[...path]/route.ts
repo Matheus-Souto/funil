@@ -4,7 +4,9 @@
 // As rotas reais de /api têm prioridade sobre esta.
 export const dynamic = "force-dynamic";
 
-const notFound = (): Response => new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
+// Recebe a requisição (assinatura do Next) e nunca toca no corpo dela.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const notFound = async (_req: Request): Promise<Response> => new Response(null, { status: 404, headers: { "cache-control": "no-store" } });
 
 export const GET = notFound;
 export const HEAD = notFound;
