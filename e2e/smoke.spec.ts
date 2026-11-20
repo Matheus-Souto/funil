@@ -1024,7 +1024,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   ].map((p, i) => ({ ...p, width: 200 + 10 * i }));
   const KITS = KIDS.slice(1);
   const INCLUI = `Inclui: ${KIDS.map((p) => p.name).join(" · ")}`;
-  // Número próprio (o serviço limita 3 tentativas por cartão por hora). CVV da lista E2E_CVVS do verify.
+  // Número próprio (o serviço limita 3 tentativas por cartão por hora); número e CVV nas listas E2E_CARDS e E2E_CVVS do verify.
   const KITS_CARD = { number: "5500 0000 0000 0004", cvv: "123" };
 
   type DeliveryItem = { name: string; label: string; url: string };
