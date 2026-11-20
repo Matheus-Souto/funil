@@ -260,7 +260,7 @@ describe("expire_orders", () => {
   async function seedOffer(storeId: string) {
     const call = { storeId, actor: { kind: "user", userId: "u", role: "owner" } as const, origin: "panel" as const };
     const p = await seedProduct(storeId, "P");
-    return runAction(createOffer, call, { slug: "oferta", name: "O", productId: p.id, priceCents: 990, methods: ["pix"], pixMode: "manual" });
+    return runAction(createOffer, call, { slug: "oferta", name: "O", productIds: [p.id], priceCents: 990, methods: ["pix"], pixMode: "manual" });
   }
   const mk = async (storeId: string, offerId: string, expiresAt: Date | null, status: string) => {
     const o = await withStore(storeId, (tx) =>

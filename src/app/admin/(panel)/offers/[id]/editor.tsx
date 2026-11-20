@@ -1,7 +1,8 @@
 "use client";
 
-// Editor de oferta (P12). Preço e bump só por offers.updatePrice (ação sensível: diálogo de confirmação); os demais
-// campos por offers.update; pixel próprio por offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado.
+// Editor de oferta (P12). Preço por offers.updatePrice e produto/bump por offers.setProducts (ações sensíveis: diálogo de
+// confirmação); os demais campos por offers.update; pixel próprio por offers.setPixel (tracking.write, com diálogo).
+// Prévia no celular ao lado. Por ora edita 1 produto principal e 1 no bump (N produtos no editor: Task 4).
 import { useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -12,7 +13,7 @@ import { Badge } from "../../../blocks";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
 import { CopyButton, Dialog, Live, useActionRunner } from "../../../ui";
-import { createOfferAction, setOfferPixelAction, updateOfferAction, updateOfferPriceAction } from "../../actions";
+import { createOfferAction, setOfferPixelAction, setOfferProductsAction, updateOfferAction, updateOfferPriceAction } from "../../actions";
 
 export interface OfferData {
   id: string;
@@ -81,11 +82,16 @@ export function OfferEditor(props: {
 
   const priceCents = parseBrl(f.price);
   const bumpCents = f.bumpOn ? parseBrl(f.bumpPrice) : null;
-  const bump = f.bumpOn && f.bumpProductId && bumpCents ? { productId: f.bumpProductId, priceCents: bumpCents } : null;
+  const bumpLabel = f.bumpLabel.trim() || null;
+  const bump = f.bumpOn && f.bumpProductId && bumpCents ? { productId: f.bumpProductId, priceCents: bumpCents, label: bumpLabel } : null;
   const priceChanged = offer !== null && priceCents !== offer.priceCents;
+  const productChanged = offer !== null && f.productId !== offer.productId;
   const bumpChanged =
     offer !== null &&
-    JSON.stringify(bump) !== JSON.stringify(offer.bumpProductId && offer.bumpPriceCents ? { productId: offer.bumpProductId, priceCents: offer.bumpPriceCents } : null);
+    JSON.stringify(bump) !==
+      JSON.stringify(offer.bumpProductId && offer.bumpPriceCents ? { productId: offer.bumpProductId, priceCents: offer.bumpPriceCents, label: offer.bumpLabel } : null);
+  /** Entrada de offers.setProducts / do bump de offers.create (1 produto em cada grupo neste editor). */
+  const bumpInput = bump ? { productIds: [bump.productId], priceCents: bump.priceCents, label: bump.label } : null;
   const methods = [...(f.pix ? ["pix"] : []), ...(f.card ? ["card"] : [])];
   const cardBox = cardToggle(props.cardAvailable, f.card);
   const link = `${props.checkoutBase}/c/${f.slug || "endereco-da-oferta"}`;
@@ -106,11 +112,9 @@ export function OfferEditor(props: {
   const common = () => ({
     name: f.name.trim(),
     slug: f.slug,
-    productId: f.productId,
     methods,
     pixMode: f.pixMode,
     maxInstallments: f.maxInstallments,
-    bumpLabel: f.bumpLabel.trim() || null,
     thankYouText: f.thankYouText.trim() || null,
     active: f.active,
   });
@@ -126,14 +130,15 @@ export function OfferEditor(props: {
         () =>
           createOfferAction({
             ...common(),
+            productIds: [f.productId],
             priceCents,
-            ...(bump ? { bumpProductId: bump.productId, bumpPriceCents: bump.priceCents } : {}),
+            bump: bumpInput,
           }),
         { refresh: false, onOk: (o: { id: string }) => router.push(`/admin/offers/${o.id}?criada=1`) },
       );
       return;
     }
-    if (priceChanged || bumpChanged) {
+    if (priceChanged || productChanged || bumpChanged) {
       setDialog("price");
       return;
     }
@@ -142,16 +147,14 @@ export function OfferEditor(props: {
 
   async function confirmPrice() {
     if (!offer) return;
-    const r = await save.run(
-      () =>
-        updateOfferPriceAction({
-          id: offer.id,
-          ...(priceChanged ? { priceCents } : {}),
-          ...(bumpChanged ? { bump } : {}),
-        }),
-      { refresh: false },
-    );
-    if (!r.ok) return;
+    if (priceChanged) {
+      const r = await save.run(() => updateOfferPriceAction({ id: offer.id, priceCents }), { refresh: false });
+      if (!r.ok) return;
+    }
+    if (productChanged || bumpChanged) {
+      const r = await save.run(() => setOfferProductsAction({ id: offer.id, productIds: [f.productId], bump: bumpInput }), { refresh: false });
+      if (!r.ok) return;
+    }
     setDialog(null);
     await save.run(() => updateOfferAction({ id: offer.id, ...common() }), { ok: "Oferta e preço salvos." });
   }
@@ -473,6 +476,14 @@ export function OfferEditor(props: {
               <PIcon name="tag" size={16} />
               <span>
                 Preço: {brl(offer.priceCents)} → <b>{priceCents ? brl(priceCents) : "—"}</b>
+              </span>
+            </li>
+          ) : null}
+          {productChanged && offer ? (
+            <li>
+              <PIcon name="file-text" size={16} />
+              <span>
+                Produto entregue: {products.find((p) => p.id === offer.productId)?.name ?? "produto"} → <b>{productName}</b>
               </span>
             </li>
           ) : null}

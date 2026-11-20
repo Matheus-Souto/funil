@@ -28,11 +28,11 @@ async function seedOffer(storeId: string, withBump = true) {
   return runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: 990,
     methods: ["pix", "card"],
     pixMode: "manual",
-    ...(withBump ? { bumpProductId: bump.id, bumpPriceCents: 1710 } : {}),
+    ...(withBump ? { bump: { productIds: [bump.id], priceCents: 1710 } } : {}),
   });
 }
 

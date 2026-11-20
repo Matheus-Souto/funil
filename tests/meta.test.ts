@@ -60,13 +60,11 @@ async function seedShop(opts: { meta?: boolean; testEventCode?: string } = {}) {
   const offer = await runAction(createOffer, panel(storeId), {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Maná bíblico para crianças",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: 990,
     methods: ["pix"],
     pixMode: "manual",
-    bumpProductId: bump.id,
-    bumpPriceCents: 1710,
-    bumpLabel: "Quero a completa",
+    bump: { productIds: [bump.id], priceCents: 1710, label: "Quero a completa" },
   });
   return { storeId, offerId: offer.id, slug: offer.slug, mainId: main.id, bumpId: bump.id };
 }

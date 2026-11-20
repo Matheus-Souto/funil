@@ -6,12 +6,12 @@ import { eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
-import { auditLog, product } from "@/lib/db/schema";
+import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
-import { createOffer, getOffer, getPublicOffer, listOffers, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
+import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { env } from "@/lib/env";
-import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
 
 let t: TestDb;
@@ -39,7 +39,7 @@ async function mkProduct(storeId: string, name = "Produto") {
 const offerInput = (productId: string, over: Record<string, unknown> = {}) => ({
   slug: "oferta-1",
   name: "Oferta",
-  productId,
+  productIds: [productId],
   priceCents: 990,
   methods: ["pix", "card"],
   pixMode: "manual",
@@ -171,7 +171,7 @@ describe("products", () => {
     const [row] = await withStore(storeId, (tx) => tx.select().from(product).where(eq(product.id, p.id)));
     expect(row!.deletedAt).not.toBeNull();
     expect(await storage.get(row!.fileKey)).not.toBeNull();
-    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "outra" })))).toBe("not_found");
+    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "outra" })))).toBe("invalid_input");
   });
 
   test("produto de outra loja não é visível", async () => {
@@ -179,7 +179,7 @@ describe("products", () => {
     const b = await seedStore();
     const p = await mkProduct(a.storeId);
     expect(await code(call(updateProduct, b.storeId, owner, { id: p.id, name: "x" }))).toBe("not_found");
-    expect(await code(call(createOffer, b.storeId, owner, offerInput(p.id)))).toBe("not_found");
+    expect(await code(call(createOffer, b.storeId, owner, offerInput(p.id)))).toBe("invalid_input");
   });
 });
 
@@ -190,9 +190,7 @@ describe("offers", () => {
     const full = await mkProduct(storeId, "Completo");
     const o = await call(createOffer, storeId, owner, {
       ...offerInput(main.id),
-      bumpProductId: full.id,
-      bumpPriceCents: 1710,
-      bumpLabel: "Leve o completo",
+      bump: { productIds: [full.id], priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
     });
     const res = await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public");
@@ -200,12 +198,12 @@ describe("offers", () => {
       id: o.id,
       slug: "oferta-1",
       name: "Oferta",
-      productName: "Principal",
+      products: [{ name: "Principal" }],
       priceCents: 990,
       methods: ["pix", "card"],
       pixMode: "manual",
       maxInstallments: 1,
-      bump: { productName: "Completo", priceCents: 1710, label: "Leve o completo" },
+      bump: { products: [{ name: "Completo" }], priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
       pixelId: null,
     });
@@ -273,10 +271,14 @@ describe("offers", () => {
       { pixMode: "x" },
       { maxInstallments: 0 },
       { maxInstallments: 13 },
-      { bumpProductId: q.id },
-      { bumpPriceCents: 100 },
-      { bumpProductId: q.id, bumpPriceCents: 0 },
-      { bumpProductId: p.id, bumpPriceCents: 100 },
+      { productIds: [] },
+      { productIds: [p.id, p.id] },
+      { productId: p.id },
+      { bumpProductId: q.id, bumpPriceCents: 100 },
+      { bump: { productIds: [q.id] } },
+      { bump: { productIds: [], priceCents: 100 } },
+      { bump: { productIds: [q.id], priceCents: 0 } },
+      { bump: { productIds: [p.id], priceCents: 100 } },
     ];
     for (const over of bad) expect(await code(call(createOffer, storeId, owner, offerInput(p.id, over)))).toBe("invalid_input");
     const ok = await call(createOffer, storeId, owner, offerInput(p.id, { slug: "abc", maxInstallments: 12, methods: ["card"] }));
@@ -288,14 +290,14 @@ describe("offers", () => {
     const b = await seedStore();
     const pa = await mkProduct(a.storeId);
     const pb = await mkProduct(b.storeId);
-    expect(await code(call(createOffer, a.storeId, owner, offerInput(pa.id, { bumpProductId: pb.id, bumpPriceCents: 500 })))).toBe("not_found");
+    expect(await code(call(createOffer, a.storeId, owner, offerInput(pa.id, { bump: { productIds: [pb.id], priceCents: 500 } })))).toBe("invalid_input");
   });
 
   test("offers.update não aceita campos de preço e atualiza o resto", async () => {
     const { storeId } = await seedStore();
     const p = await mkProduct(storeId);
     const o = await call(createOffer, storeId, owner, offerInput(p.id));
-    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }]) {
+    for (const f of [{ priceCents: 1 }, { bumpPriceCents: 1 }, { bumpProductId: p.id }, { productId: p.id }, { productIds: [p.id] }, { bumpLabel: "x" }]) {
       expect(await code(call(updateOffer, storeId, owner, { id: o.id, ...f }))).toBe("invalid_input");
     }
     const u = await call(updateOffer, storeId, owner, { id: o.id, name: "Novo nome", methods: ["pix"], maxInstallments: 3 });
@@ -305,7 +307,7 @@ describe("offers", () => {
     expect(await code(call(updateOffer, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", name: "x" }))).toBe("not_found");
   });
 
-  test("offers.updatePrice é sensível, muda preço e bump", async () => {
+  test("offers.updatePrice é sensível e muda só o preço (o bump vai por offers.setProducts)", async () => {
     const { storeId } = await seedStore();
     const p = await mkProduct(storeId);
     const q = await mkProduct(storeId, "Completo");
@@ -316,23 +318,173 @@ describe("offers", () => {
       expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1 }, origin))).toBe("approval_required");
     }
     expect((await call(getOffer, storeId, owner, { id: o.id })).priceCents).toBe(990);
-    const u = await call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990, bump: { productId: q.id, priceCents: 1710 } });
+    const u = await call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990 });
     expect(u.priceCents).toBe(1990);
-    expect(u.bumpPriceCents).toBe(1710);
-    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, bump: { productId: p.id, priceCents: 5 } }))).toBe("invalid_input");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1990, bump: { productId: q.id, priceCents: 1710 } }))).toBe("invalid_input");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, bump: null }))).toBe("invalid_input");
     expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 0 }))).toBe("invalid_input");
     expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id }))).toBe("invalid_input");
-    const removed = await call(updateOfferPrice, storeId, owner, { id: o.id, bump: null });
-    expect(removed.bumpProductId).toBeNull();
-    expect(removed.bumpPriceCents).toBeNull();
     expect(await code(call(updateOfferPrice, storeId, traffic, { id: o.id, priceCents: 5 }))).toBe("forbidden");
+    expect(await code(call(updateOfferPrice, storeId, owner, { id: "00000000-0000-4000-8000-000000000000", priceCents: 5 }))).toBe("not_found");
+  });
+});
+
+describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
+  const KIDS = ["Almanaque Bíblico Kids", "Pack de jogos", "Datas especiais", "Cartões de versículos", "Diário de oração", "Escola dominical"];
+  const mkMany = async (storeId: string, names: string[]) => Promise.all(names.map((n) => seedProduct(storeId, n)));
+  const ids = (ps: { id: string }[]) => ps.map((p) => p.id);
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+  const legacyOf = async (storeId: string, offerId: string) => {
+    const [o] = await withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offer.productId, bumpProductId: offer.bumpProductId, bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel })
+        .from(offer)
+        .where(eq(offer.id, offerId)),
+    );
+    return o!;
+  };
+
+  test("Completo: 6 principais por R$ 27,00, gravados em ordem; get, list e getPublic devolvem a lista", async () => {
+    const { storeId } = await seedStore();
+    const six = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, { ...offerInput(six[0]!.id, { slug: "completo", name: "Completo", priceCents: 2700 }), productIds: ids(six) });
+    expect(await rowsOf(storeId, o.id)).toEqual(six.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
+    // Colunas antigas (leitores ainda não migrados): o primeiro principal, sem bump.
+    expect(await legacyOf(storeId, o.id)).toEqual({ productId: six[0]!.id, bumpProductId: null, bumpPriceCents: null, bumpLabel: null });
+    const got = await call(getOffer, storeId, support, { id: o.id });
+    expect(got.products.map((p) => p.name)).toEqual(KIDS);
+    expect(got.products.every((p) => p.deletedAt === null)).toBe(true);
+    expect(got.bump).toBeNull();
+    const [listed] = await call(listOffers, storeId, traffic, {});
+    expect(listed!.products.map((p) => p.id)).toEqual(ids(six));
+    const pubOffer = await call(getPublicOffer, storeId, pub, { slug: "completo" }, "public");
+    expect(pubOffer.products).toEqual(KIDS.map((name) => ({ name })));
+    expect(pubOffer.priceCents).toBe(2700);
+    expect(pubOffer.bump).toBeNull();
   });
 
-  test("mudar o produto principal para o do bump é recusado", async () => {
+  test("Almanaque: 1 principal por R$ 9,90 e bump de 5 produtos por R$ 17,10 com rótulo \"5 Kits Extras\"", async () => {
     const { storeId } = await seedStore();
-    const p = await mkProduct(storeId);
-    const q = await mkProduct(storeId, "Completo");
-    const o = await call(createOffer, storeId, owner, offerInput(p.id, { bumpProductId: q.id, bumpPriceCents: 100 }));
-    expect(await code(call(updateOffer, storeId, owner, { id: o.id, productId: q.id }))).toBe("invalid_input");
+    const [alm, ...kits] = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, {
+      ...offerInput(alm!.id, { slug: "almanaque", name: "Almanaque" }),
+      bump: { productIds: ids(kits), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    expect(await rowsOf(storeId, o.id)).toEqual([
+      ...kits.map((p, i) => ({ productId: p.id, kind: "bump", position: i })),
+      { productId: alm!.id, kind: "main", position: 0 },
+    ]);
+    expect(await legacyOf(storeId, o.id)).toEqual({ productId: alm!.id, bumpProductId: kits[0]!.id, bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect(got.bump?.products.map((p) => p.name)).toEqual(KIDS.slice(1));
+    expect(got.bump?.priceCents).toBe(1710);
+    expect(got.bump?.label).toBe("5 Kits Extras");
+    const res = await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public");
+    expect(res.products).toEqual([{ name: KIDS[0] }]);
+    expect(res.bump).toEqual({ products: KIDS.slice(1).map((name) => ({ name })), priceCents: 1710, label: "5 Kits Extras" });
+  });
+
+  test("recusas: duplicado (no grupo e entre principal e bump), bump de 2 sem rótulo, 21 produtos, inexistente, apagado e de outra loja", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    const ps = await mkMany(a.storeId, Array.from({ length: 21 }, (_, i) => `P${i}`));
+    const [p0, p1, p2] = ps;
+    const foreign = await seedProduct(b.storeId, "Da outra loja");
+    const gone = await seedProduct(a.storeId, "Apagado");
+    await withStore(a.storeId, (tx) => tx.update(product).set({ deletedAt: new Date() }).where(eq(product.id, gone.id)));
+    const base = offerInput(p0!.id);
+    const bad: Record<string, unknown>[] = [
+      { productIds: [p0!.id, p1!.id, p0!.id] },
+      { bump: { productIds: [p1!.id, p1!.id], priceCents: 100, label: "Kits" } },
+      { productIds: [p0!.id, p1!.id], bump: { productIds: [p2!.id, p1!.id], priceCents: 100, label: "Kits" } },
+      { bump: { productIds: [p1!.id, p2!.id], priceCents: 100 } },
+      { bump: { productIds: [p1!.id, p2!.id], priceCents: 100, label: "   " } },
+      { productIds: ids(ps) },
+      { productIds: [p0!.id], bump: { productIds: ids(ps.slice(1)).concat(foreign.id), priceCents: 100, label: "Kits" } },
+      { productIds: [p0!.id, "00000000-0000-4000-8000-000000000000"] },
+      { productIds: [p0!.id, gone.id] },
+      { bump: { productIds: [gone.id], priceCents: 100 } },
+      { productIds: [p0!.id, foreign.id] },
+      { bump: { productIds: [foreign.id], priceCents: 100 } },
+    ];
+    for (const over of bad) {
+      expect({ over, code: await code(call(createOffer, a.storeId, owner, { ...base, ...over })) }).toEqual({ over, code: "invalid_input" });
+    }
+    expect(await call(listOffers, a.storeId, owner, {})).toEqual([]);
+    // Limites: 20 por grupo passam.
+    const ok = await call(createOffer, a.storeId, owner, { ...base, productIds: ids(ps.slice(0, 20)) });
+    expect((await rowsOf(a.storeId, ok.id)).length).toBe(20);
+    // As mesmas regras valem para offers.setProducts, e a recusa não muda nada.
+    for (const over of bad) {
+      const input = { id: ok.id, productIds: base.productIds, bump: null, ...over };
+      expect({ over, code: await code(call(setOfferProducts, a.storeId, owner, input)) }).toEqual({ over, code: "invalid_input" });
+    }
+    expect((await rowsOf(a.storeId, ok.id)).length).toBe(20);
+  });
+
+  test("offers.setProducts é sensível (MCP pede aprovação; support não pode), troca a lista e regrava as colunas antigas", async () => {
+    const { storeId } = await seedStore();
+    const [alm, ...kits] = await mkMany(storeId, KIDS);
+    const o = await call(createOffer, storeId, owner, offerInput(alm!.id, { slug: "almanaque" }));
+    expect(listActions().find((x) => x.name === "offers.setProducts")?.sensitive).toBe(true);
+    const input = { id: o.id, productIds: [alm!.id], bump: { productIds: ids(kits), priceCents: 1710, label: "5 Kits Extras" } };
+    expect(await code(call(setOfferProducts, storeId, owner, input, "mcp"))).toBe("approval_required");
+    expect(await code(call(setOfferProducts, storeId, support, input))).toBe("forbidden");
+    expect(await code(call(setOfferProducts, storeId, traffic, input))).toBe("forbidden");
+    expect((await call(getOffer, storeId, owner, { id: o.id })).bump).toBeNull();
+
+    const withBump = await call(setOfferProducts, storeId, owner, input);
+    expect(withBump.bump?.products.map((p) => p.id)).toEqual(ids(kits));
+    expect(await legacyOf(storeId, o.id)).toEqual({ productId: alm!.id, bumpProductId: kits[0]!.id, bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+
+    // Reordena e troca: principal vira os 6 do Completo (ordem nova), sem bump.
+    const order = [kits[2]!, alm!, kits[0]!, kits[4]!, kits[1]!, kits[3]!];
+    const swapped = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: ids(order), bump: null });
+    expect(swapped.products.map((p) => p.id)).toEqual(ids(order));
+    expect(swapped.bump).toBeNull();
+    expect(await rowsOf(storeId, o.id)).toEqual(order.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
+    expect(await legacyOf(storeId, o.id)).toEqual({ productId: kits[2]!.id, bumpProductId: null, bumpPriceCents: null, bumpLabel: null });
+    expect((await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public")).products.map((p) => p.name)).toEqual(order.map((p) => KIDS[[alm, ...kits].indexOf(p)]));
+
+    // Bump de 1 produto: o rótulo é opcional.
+    const one = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [alm!.id], bump: { productIds: [kits[0]!.id], priceCents: 500 } });
+    expect(one.bump).toEqual({ products: [{ id: kits[0]!.id, name: KIDS[1], deletedAt: null }], priceCents: 500, label: null });
+    expect(await code(call(setOfferProducts, storeId, owner, { ...input, id: "00000000-0000-4000-8000-000000000000" }))).toBe("not_found");
+  });
+
+  test("getPublic: um principal apagado esconde a oferta; um produto do bump apagado esconde só o bump", async () => {
+    const { storeId } = await seedStore();
+    const six = await mkMany(storeId, KIDS);
+    const extras = await mkMany(storeId, ["Kit 1", "Kit 2", "Kit 3", "Kit 4", "Kit 5"]);
+    const completo = await call(createOffer, storeId, owner, { ...offerInput(six[0]!.id, { slug: "completo", priceCents: 2700 }), productIds: ids(six) });
+    const almanaque = await call(createOffer, storeId, owner, {
+      ...offerInput(six[0]!.id, { slug: "almanaque" }),
+      bump: { productIds: ids(extras), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    // products.delete enxerga o produto em qualquer posição de oferta ativa (não só no primeiro).
+    expect(await code(call(deleteProduct, storeId, owner, { id: six[3]!.id }))).toBe("conflict");
+    expect(await code(call(deleteProduct, storeId, owner, { id: extras[3]!.id }))).toBe("conflict");
+
+    await call(updateOffer, storeId, owner, { id: completo.id, active: false });
+    await call(updateOffer, storeId, owner, { id: almanaque.id, active: false });
+    await call(deleteProduct, storeId, owner, { id: six[3]!.id });
+    await call(deleteProduct, storeId, owner, { id: extras[3]!.id });
+    await call(updateOffer, storeId, owner, { id: completo.id, active: true });
+    await call(updateOffer, storeId, owner, { id: almanaque.id, active: true });
+
+    expect(await code(call(getPublicOffer, storeId, pub, { slug: "completo" }, "public"))).toBe("not_found");
+    const alm = await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public");
+    expect(alm.products).toEqual([{ name: KIDS[0] }]);
+    expect(alm.bump).toBeNull();
+    // O painel ainda vê o produto apagado na oferta (para corrigir).
+    const got = await call(getOffer, storeId, owner, { id: completo.id });
+    expect(got.products.map((p) => p.deletedAt !== null)).toEqual([false, false, false, true, false, false]);
   });
 });

@@ -59,12 +59,20 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
         offer={{
           slug: offer.slug,
           name: offer.name,
-          productName: offer.productName,
+          // Lista completa ("Inclui:") é da Task 4; por ora, o nome do primeiro principal.
+          productName: offer.products[0]!.name,
           priceCents: offer.priceCents,
           methods,
           pixMode: offer.pixMode as "manual" | "asaas",
           maxInstallments: offer.maxInstallments,
-          bump: offer.bump,
+          // Bump de 1 produto: o nome dele (como antes); com mais de 1, o rótulo (obrigatório nesse caso).
+          bump: offer.bump
+            ? {
+                productName: offer.bump.products.length === 1 ? offer.bump.products[0]!.name : (offer.bump.label ?? offer.bump.products.map((p) => p.name).join(" + ")),
+                priceCents: offer.bump.priceCents,
+                label: offer.bump.label,
+              }
+            : null,
         }}
         initialMethod={wantsCard ? "card" : methods.includes("pix") ? "pix" : "card"}
         touch={touch}

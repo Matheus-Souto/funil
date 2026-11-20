@@ -98,11 +98,11 @@ async function seed(opts: SeedOpts = {}) {
   const offer = await runAction(createOffer, call, {
     slug,
     name: "Maná bíblico para crianças",
-    productId: main.id,
+    productIds: [main.id],
     priceCents: opts.priceCents ?? 990,
     methods: opts.methods ?? ["pix", "card"],
     pixMode: opts.pixMode ?? "manual",
-    ...(opts.bump === false ? {} : { bumpProductId: extra.id, bumpPriceCents: 1710, bumpLabel: "Quero a versão completa" }),
+    ...(opts.bump === false ? {} : { bump: { productIds: [extra.id], priceCents: 1710, label: "Quero a versão completa" } }),
     thankYouText: "Que essas histórias tragam momentos especiais em família!",
     ...(opts.maxInstallments ? { maxInstallments: opts.maxInstallments } : {}),
   });

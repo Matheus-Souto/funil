@@ -22,7 +22,7 @@ export async function seedAsaasStore(fake: FakeAsaas, priceCents = 990, opts: { 
   const offer = await runAction(createOffer, call, {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Oferta",
-    productId: main.id,
+    productIds: [main.id],
     priceCents,
     methods: ["pix", "card"],
     pixMode: "asaas",
