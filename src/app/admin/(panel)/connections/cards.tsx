@@ -777,8 +777,8 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
           }}
         >
           <p className={s.hint} style={{ margin: 0 }}>
-            Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo começa com -100 (você pode vê-lo
-            adicionando o @RawDataBot ao grupo). As mensagens levam só a oferta, o valor, a forma de pagamento e o código do pedido: nenhum dado do
+            Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo começa com -100: para vê-lo,
+            adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. As mensagens levam só a oferta, o valor, a forma de pagamento e o código do pedido: nenhum dado do
             comprador.
           </p>
           <label className={s.field}>
@@ -850,7 +850,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
       ) : (
         <p className={s.muted}>Ainda não configurado.</p>
       )}
-      <Live msg={confirm || disconnect ? null : run.msg} />
+      <Live msg={confirm || disconnect ? null : (run.msg ?? drop.msg)} />
       {canWrite && data ? (
         <div className={s.cardFoot}>
           <button type="button" className={s.btn} disabled={test.pending || data.token === "unreadable"} onClick={() => void test.run(() => testTelegramAction(), { refresh: false })}>

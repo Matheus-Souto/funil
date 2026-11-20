@@ -231,8 +231,8 @@ A plataforma não fornece bot: cada loja cria o seu e recebe os avisos num chat 
 1. **Criar o bot:** no Telegram, converse com o @BotFather, envie `/newbot` e siga os passos. Copie o token que ele
    entrega.
 2. **Adicionar ao grupo:** crie (ou escolha) o grupo da equipe e adicione o bot a ele.
-3. **Achar o chat id:** o id de um grupo começa com `-100`. Para vê-lo, adicione o @RawDataBot ao grupo (ele mostra o
-   `id` do chat) e remova-o depois. Um canal público também aceita `@nomedocanal`.
+3. **Achar o chat id:** o id de um grupo começa com `-100`: para vê-lo, adicione o @RawDataBot ao grupo, copie o id e
+   remova esse bot em seguida. Um canal público também aceita `@nomedocanal`.
 4. **Colar em Conexões:** informe o token e o chat id, escolha os eventos e salve. O token é conferido no Telegram antes
    de salvar e nunca volta ao painel (só os 4 últimos caracteres).
 5. **Enviar teste:** o botão **Enviar teste** manda uma mensagem ao chat. Se o Telegram recusar o token ou não achar o
@@ -249,6 +249,10 @@ O que vai em cada mensagem (texto puro, uma linha, sem link):
 
 `<itens>` é o produto (ou o nome da oferta, com mais de um produto principal), mais o bump quando houver. **Nunca** vão
 nome, e-mail, CPF ou telefone do comprador, nem links.
+
+Segurança: o token do bot é segredo. Não cole em chat, ticket ou captura de tela; se vazar, use `/revoke` no
+@BotFather e salve o novo token em Conexões. O bot do funil não precisa ser administrador do grupo. Todo membro do
+grupo vê os valores e os produtos das vendas: adicione só quem pode ver esses números.
 
 Nesta versão, **abandono** é o pedido criado e não pago dentro do prazo escolhido (de 10 a 1440 minutos; padrão 30):
 o aviso só sai se o pedido continuar sem pagamento e o mesmo comprador não tiver pago a mesma oferta depois. O
