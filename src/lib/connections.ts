@@ -10,6 +10,7 @@ import { env } from "@/lib/env";
 import { offer, store } from "@/lib/db/schema";
 import { loadResend, smtpConfigUsable } from "@/lib/delivery/resend";
 import { getIntegration, readIntegration } from "@/lib/integrations";
+import { parseTelegramConfig } from "@/lib/notify/telegram-connection";
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const baseUrl = () => env.BASE_URL.replace(/\/+$/, "");
@@ -18,7 +19,7 @@ const resendWebhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/resend/
 
 export const connectionsStatus = defineAction({
   name: "connections.status",
-  description: "Conexões da loja (Pix manual, Asaas, SMTP, Resend, Meta) sem segredos: segredos aparecem só como configurados.",
+  description: "Conexões da loja (Pix manual, Asaas, SMTP, Resend, Telegram, Meta) sem segredos: segredos aparecem só como configurados.",
   input: z.object({}),
   permission: "connections.read",
   audit: false,
@@ -30,6 +31,8 @@ export const connectionsStatus = defineAction({
     const asaas = await readIntegration(ctx.tx, ctx.storeId, "asaas");
     // Idem para a chave do Resend (SECRET trocado): aparece como ilegível, nunca derruba a tela.
     const resend = await readIntegration(ctx.tx, ctx.storeId, "resend");
+    // Idem para o token do Telegram.
+    const telegram = await readIntegration(ctx.tx, ctx.storeId, "telegram");
     const [{ emailProvider } = { emailProvider: "smtp" }] = await ctx.tx
       .select({ emailProvider: store.emailProvider })
       .from(store)
@@ -83,6 +86,22 @@ export const connectionsStatus = defineAction({
             webhookSecret: webhookLast4 ? (canWrite ? { last4: webhookLast4 } : ("configured" as const)) : null,
             webhookUrl: resendWebhookUrl(ctx.storeId),
           }
+        : null,
+      telegram: telegram
+        ? (() => {
+            const c = parseTelegramConfig(telegram.config);
+            return {
+              chatId: c.chatId ?? "",
+              botUsername: c.botUsername,
+              token: telegram.unreadable
+                ? ("unreadable" as const)
+                : canWrite
+                  ? { last4: str(cfg(telegram).tokenLast4) ?? "" }
+                  : ("configured" as const),
+              events: c.events,
+              abandonAfterMinutes: c.abandonAfterMinutes,
+            };
+          })()
         : null,
       meta: meta
         ? { pixelId: str(cfg(meta).pixelId) ?? "", testEventCode: str(cfg(meta).testEventCode), accessToken: meta.secret ? ("configured" as const) : null }

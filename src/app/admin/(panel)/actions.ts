@@ -9,6 +9,7 @@ import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
+import { removeTelegram, saveTelegram, testTelegram } from "@/lib/notify/telegram-connection";
 import { saveResend, setEmailProvider, testResend } from "@/lib/delivery/resend";
 import { resendOrder } from "@/lib/delivery/jobs";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
@@ -173,6 +174,21 @@ export async function testResendAction(to: string) {
 export async function setEmailProviderAction(provider: "smtp" | "resend") {
   const panel = await requirePanelActor();
   return call(panel, setEmailProvider, { provider }, () => `Provedor de e-mail trocado para ${provider === "resend" ? "Resend" : "SMTP"}.`);
+}
+
+export async function saveTelegramAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, saveTelegram, input, () => "Telegram salvo.");
+}
+
+export async function testTelegramAction() {
+  const panel = await requirePanelActor();
+  return call(panel, testTelegram, {}, () => "Mensagem de teste enviada.");
+}
+
+export async function removeTelegramAction() {
+  const panel = await requirePanelActor();
+  return call(panel, removeTelegram, {}, () => "Telegram desconectado.");
 }
 
 export async function saveMetaAction(input: unknown) {

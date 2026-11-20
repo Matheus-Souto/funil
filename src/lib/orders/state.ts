@@ -59,6 +59,12 @@ export async function transitionOrder(
     await enqueue(ctx.tx, { storeId, type: "deliver_order", payload: { orderId } });
     await enqueue(ctx.tx, { storeId, type: "meta_event", payload: { event: "Purchase", orderId } });
     await enqueue(ctx.tx, { storeId, type: "notify_seller", payload: { orderId } });
+    // Num savepoint: o aviso do Telegram nunca desfaz o pagamento (ex.: o card com a política antiga do `job`).
+    try {
+      await ctx.tx.transaction((sp) => enqueue(sp as Ctx["tx"], { storeId, type: "notify_telegram", payload: { event: "sale", orderId } }));
+    } catch (error) {
+      log.error("aviso do Telegram não enfileirado", { orderId, event: "sale", error });
+    }
   } else if (to === "refunded" || to === "disputed") {
     await enqueue(ctx.tx, { storeId, type: "revoke_downloads", payload: { orderId } });
   }

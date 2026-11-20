@@ -3,7 +3,9 @@ import { ActionError, type Ctx } from "@/lib/actions/core";
 import { loadOfferProducts, type ProductRef } from "@/lib/catalog/offer-products";
 import { randomToken } from "@/lib/crypto";
 import { customer, offer, orderItem, orders } from "@/lib/db/schema";
+import { enqueue } from "@/lib/jobs";
 import { splitCents } from "@/lib/money";
+import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
@@ -132,5 +134,23 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
   };
   await ctx.tx.insert(orderItem).values([...items("main", list.main, o.priceCents), ...(bump ? items("bump", bump.products, bump.priceCents) : [])]);
+  await enqueueTelegramNotices(ctx, order);
   return order;
+}
+
+/**
+ * Avisos do Telegram da loja na criação do pedido (mesma transação), só para os eventos ligados agora (lê só a config
+ * pública, sem abrir o token); o job confere de novo no envio. "Pix gerado" em pedido Pix; abandono agendado para
+ * criado + prazo, com o prazo no payload (o vendedor pode mudá-lo depois).
+ */
+async function enqueueTelegramNotices(ctx: Ctx, order: Order): Promise<void> {
+  const tg = await telegramSettings(ctx.tx, ctx.storeId);
+  if (!tg) return;
+  const notice = (payload: { event: "pix_generated" } | { event: "abandoned"; afterMinutes: number }, runAt?: Date) =>
+    enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_telegram", payload: { ...payload, orderId: order.id }, runAt });
+  if (tg.events.pixGenerated && (order.method === "pix_asaas" || order.method === "pix_manual")) await notice({ event: "pix_generated" });
+  if (tg.events.abandoned) {
+    const afterMinutes = tg.abandonAfterMinutes;
+    await notice({ event: "abandoned", afterMinutes }, new Date(order.createdAt.getTime() + afterMinutes * 60_000));
+  }
 }

@@ -5,7 +5,7 @@ import { createAsaasSealer, createSealer, type Sealer } from "@/lib/crypto";
 import { env, requireSecret } from "@/lib/env";
 import { log } from "@/lib/log";
 
-export type IntegrationKind = "pix_manual" | "asaas" | "smtp" | "meta" | "resend";
+export type IntegrationKind = "pix_manual" | "asaas" | "smtp" | "meta" | "resend" | "telegram";
 export type IntegrationConfig = Record<string, unknown>;
 
 /**

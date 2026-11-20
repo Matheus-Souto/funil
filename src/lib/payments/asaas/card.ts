@@ -16,15 +16,16 @@
 // permitir, conferimos no Asaas (GET /payments?externalReference=<pedido>): paga -> liquida pelo caminho do webhook;
 // em análise -> recusa; nenhuma -> segue; consulta falhou -> recusa (fail closed).
 import { createHash } from "node:crypto";
-import { and, eq, gt, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, lte, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { alertSeller } from "@/lib/alerts";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { UNKNOWN_IP } from "@/lib/client-ip";
-import { withStore } from "@/lib/db/client";
+import { withStore, type Tx } from "@/lib/db/client";
 import { cardAttempt, customer, integration, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { IntegrationSecretUnreadable } from "@/lib/integrations";
+import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
@@ -317,7 +318,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     const d = (e instanceof ActionError ? e.details : undefined) as Partial<AsaasErrorDetails> | undefined;
     const asaas = { status: d?.status ?? 0, errorCodes: d?.errorCodes ?? [] };
     if (asaas.status === 400 && asaas.errorCodes.some((c) => DECLINE_CODES.has(c))) {
-      await closeAttempt(storeId, attempt.id, { status: "declined" }, now());
+      await closeAttempt(storeId, attempt.id, { status: "declined" }, now(), (tx) => enqueueDeclineNotice(tx, storeId, order.id, attempt.id));
       if (knownIp) await recordEvent(`card:decline:ip:${ipKey}`, t);
       await recordEvent(`card:decline:email:${emailHash}`, t);
       await countStoreDecline(storeId, t);
@@ -482,18 +483,45 @@ async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged
   return approved();
 }
 
+/** Fecha a tentativa ainda em andamento; `onClosed` roda na mesma transação, só se o UPDATE mudou a linha. */
 async function closeAttempt(
   storeId: string,
   id: string,
   set: { status: "declined" | "error"; errorMessage?: string },
   resolvedAt: Date,
+  onClosed?: (tx: Tx) => Promise<void>,
 ): Promise<void> {
-  await withStore(storeId, (tx) =>
-    tx
+  await withStore(storeId, async (tx) => {
+    const closed = await tx
       .update(cardAttempt)
       .set({ status: set.status, errorMessage: set.errorMessage ?? null, resolvedAt })
-      .where(and(eq(cardAttempt.id, id), eq(cardAttempt.status, "processing"))),
-  );
+      .where(and(eq(cardAttempt.id, id), eq(cardAttempt.status, "processing")))
+      .returning({ id: cardAttempt.id });
+    if (closed.length > 0 && onClosed) await onClosed(tx);
+  });
+}
+
+/**
+ * Aviso "cartão recusado" no Telegram da loja: só na primeira recusa do pedido (um teste de cartões com muitas recusas
+ * gera no máximo um job por pedido; a marca em `telegram_notice` garante um envio). Vai sempre para a fila: o papel
+ * `card` não lê a conexão do Telegram, e o job confere no envio se o evento está ligado e se o pedido segue sem pagar.
+ * Num savepoint: se o enfileiramento falhar (ex.: política antiga do `job` enquanto o app não aplicou o rls.sql), a
+ * recusa continua registrada e contada; só o aviso se perde, com log.
+ */
+async function enqueueDeclineNotice(tx: Tx, storeId: string, orderId: string, attemptId: string): Promise<void> {
+  try {
+    await tx.transaction(async (sp) => {
+      const [earlier] = await sp
+        .select({ id: cardAttempt.id })
+        .from(cardAttempt)
+        .where(and(eq(cardAttempt.orderId, orderId), eq(cardAttempt.status, "declined"), ne(cardAttempt.id, attemptId)))
+        .limit(1);
+      if (earlier) return;
+      await enqueue(sp as Tx, { storeId, type: "notify_telegram", payload: { event: "card_declined", orderId } });
+    });
+  } catch (error) {
+    log.error("aviso do Telegram não enfileirado", { orderId, event: "card_declined", error });
+  }
 }
 
 function resultOf(a: Attempt): CardResult {

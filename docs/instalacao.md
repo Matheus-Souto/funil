@@ -223,6 +223,51 @@ Em vez do SMTP, a loja pode enviar pelo Resend. A plataforma não fornece Resend
    já fica ativo ao salvar). O botão **Usar este provedor** (no cartão do Resend ou do SMTP) passa os e-mails de acesso
    e os avisos de venda a sair pelo provedor escolhido: só um provedor fica ativo; o outro deixa de ser usado.
 
+### Avisos no Telegram
+
+A plataforma não fornece bot: cada loja cria o seu e recebe os avisos num chat ou grupo da equipe
+(**Conexões → Avisos no Telegram**).
+
+1. **Criar o bot:** no Telegram, converse com o @BotFather, envie `/newbot` e siga os passos. Copie o token que ele
+   entrega.
+2. **Adicionar ao grupo:** crie (ou escolha) o grupo da equipe e adicione o bot a ele.
+3. **Achar o chat id:** o id de um grupo é um número negativo (supergrupos começam com `-100`; um grupo comum, não, ex.:
+   `-4012345678`): para vê-lo, adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. Se o grupo
+   virar supergrupo (o Telegram faz isso sozinho em alguns casos, como ao ligar o histórico para novos membros), o id
+   muda e é preciso salvar o novo: o painel avisa quando isso acontece. Um canal público também aceita
+   `@nomedocanal`; num canal, o bot precisa ser **administrador** para postar.
+4. **Colar em Conexões:** informe o token e o chat id, escolha os eventos e salve. O token é conferido no Telegram antes
+   de salvar e nunca volta ao painel (só os 4 últimos caracteres).
+5. **Enviar teste:** o botão **Enviar teste** manda uma mensagem ao chat. Se o Telegram recusar o token ou não achar o
+   chat, o painel diz qual dos dois conferir.
+
+O que vai em cada mensagem (texto puro, uma linha, sem link):
+
+| Evento | Mensagem |
+|---|---|
+| Venda aprovada (ligado por padrão) | `Venda: <itens> — <valor> — <forma> — pedido #<código>` |
+| Pix gerado | `Pix gerado: <itens> — <valor> — pedido #<código>` |
+| Cartão recusado | `Cartão recusado: <itens> — <valor> — pedido #<código>` |
+| Carrinho abandonado | `Carrinho abandonado (<N> min sem pagamento): <itens> — <valor> — <forma> — pedido #<código>` |
+
+`<itens>` é o produto (ou o nome da oferta, com mais de um produto principal), mais o bump quando houver. **Nunca** vão
+nome, e-mail, CPF ou telefone do comprador, nem links.
+
+Segurança: o token do bot é segredo. Não cole em chat, ticket ou captura de tela; se vazar, use `/revoke` no
+@BotFather e salve o novo token em Conexões. O bot do funil não precisa ser administrador do grupo. Todo membro do
+grupo vê os valores e os produtos das vendas: adicione só quem pode ver esses números.
+
+Nesta versão, **abandono** é o pedido criado e não pago dentro do prazo escolhido (de 10 a 1440 minutos; padrão 30):
+o aviso só sai se o pedido continuar sem pagamento e o mesmo comprador não tiver pago a mesma oferta depois. No **Pix
+manual**, o pedido só conta como pago quando você o libera no painel: pedido pago e ainda não liberado dentro do prazo
+aparece como abandono. O abandono antes de o comprador criar o pedido ainda não existe.
+
+Se o Telegram passar a recusar os avisos (token revogado, bot removido do grupo), o painel mostra um aviso na tela
+inicial: confira o token e o grupo, salve em Conexões e use **Enviar teste**. O aviso some sozinho quando o teste dá
+certo ou quando você salva um token ou chat id novos. Falhas temporárias (limite de envios, instabilidade) são tentadas
+de novo sozinhas por cerca de 14 horas; depois disso, aquele aviso é descartado. Raramente (queda do servidor logo
+depois do envio) um aviso pode chegar duplicado.
+
 ## 8. Meta (Pixel e API de Conversões)
 
 No painel: **Conexões → Meta**.

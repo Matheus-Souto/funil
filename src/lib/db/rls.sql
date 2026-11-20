@@ -64,9 +64,11 @@ $$;
 --                                            limites por IP/e-mail, recusas, disjuntor e a limpeza ocasional. Política
 --                                            `rate_limit_card`: só chaves `card:` (não lê nem apaga os limites do app,
 --                                            como `account:password:` ou os do checkout).
---   job             insert                   jobs da confirmação (deliver_order, meta_event, notify_seller) e o e-mail
---                                            do disjuntor (notify_seller). Política `job_card_insert`: só esses tipos e
---                                            da loja fixada (nunca refund_order, revoke_downloads...). Sem select.
+--   job             insert                   jobs da confirmação (deliver_order, meta_event, notify_seller, notify_telegram
+--                                            `sale`), o e-mail do disjuntor (notify_seller) e o aviso de recusa
+--                                            (notify_telegram `card_declined`). Política `job_card_insert`: só esses tipos (e,
+--                                            no notify_telegram, só esses dois eventos) e da loja fixada (nunca refund_order,
+--                                            revoke_downloads, pix_generated, abandoned...). Sem select.
 --   store_alert     insert                   aviso do disjuntor ao vendedor (alertSeller).
 --   audit_log       insert                   a conferência liquida pelo runAction(applyAsaasPayment), que audita.
 --   store           select (id, slug, domain) origens da loja para o frame-ancestors do iframe (storeCheckoutOrigins);
@@ -74,9 +76,11 @@ $$;
 --
 -- Segurança: a política por loja depende de `app.store_id`, que quem tem a conexão escolhe; não é barreira contra um
 -- serviço `card` comprometido. Esse serviço AINDA consegue, em qualquer loja: marcar pedido de cartão (`card_asaas`)
--- pendente/expirado como pago e enfileirar a entrega; ler pedidos e clientes (PII) e a chave de API do Asaas; gravar auditoria e avisos falsos;
--- mudar status de cobrança e o cliente Asaas guardado. NÃO consegue: tirar pedido de pago, reembolsar ou revogar
--- (fila), mexer nos limites do app, ler usuários, sessões, produtos, a fila e as conexões SMTP/Meta.
+-- pendente/expirado como pago e enfileirar a entrega; enfileirar avisos do Telegram de pedidos da loja (venda e cartão
+-- recusado), com texto montado do banco pelo job e no máximo um envio por pedido e evento; ler pedidos e clientes (PII)
+-- e a chave de API do Asaas; gravar auditoria e avisos falsos; mudar status de cobrança e o cliente Asaas guardado. NÃO
+-- consegue: tirar pedido de pago, reembolsar ou revogar (fila), mexer nos limites do app, ler usuários, sessões,
+-- produtos, a fila e as conexões SMTP/Meta.
 create or replace function card_role_grants() returns void
 language plpgsql as $$
 begin
@@ -118,7 +122,10 @@ begin
   drop policy if exists job_card_insert on job;
   create policy job_card_insert on job for insert to card with check (
     store_id = nullif(current_setting('app.store_id', true), '')::uuid
-    and type in ('deliver_order', 'meta_event', 'notify_seller')
+    and (
+      type in ('deliver_order', 'meta_event', 'notify_seller')
+      or (type = 'notify_telegram' and payload->>'event' in ('sale', 'card_declined'))
+    )
   );
 
   -- Pedidos: a regra de transição do `card` (orders_card_guard, abaixo). Criado uma vez, pelo nome (sem trava a cada

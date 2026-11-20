@@ -3,14 +3,14 @@
 //  2. os casos de `payWithCard` (à vista, parcelado, recusa, desconhecido + liquidação, limite e disjuntor) com o `db`
 //     do app apontado para o papel, num describe parametrizado (`app` é o controle: o mesmo caso com o papel completo).
 // O preparo (loja, oferta, pedido, conexão) roda com o papel `app`, antes de trocar o `db`; as conferências, com o dono.
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { ActionError } from "@/lib/actions/core";
 import { setDbForTests, withStore } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
-import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert } from "@/lib/db/schema";
+import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
@@ -86,20 +86,32 @@ describe("papel card: atributos e o que fica de fora", () => {
     }
   });
 
-  test("conexões: só a asaas da loja aparece (smtp, meta e resend não); sem loja fixada, nenhuma", async () => {
+  test("conexões: só a asaas da loja aparece (smtp, meta, resend e telegram não); sem loja fixada, nenhuma", async () => {
     const { storeId } = await seedStore("Conexões");
     await t.ownerDb.insert(integration).values([
       { storeId, kind: "asaas", config: { env: "sandbox" }, secret: "a1.selado" },
       { storeId, kind: "smtp", config: { host: "smtp.example.com" }, secret: "v1.senha-smtp" },
       { storeId, kind: "meta", config: {}, secret: "v1.token-meta" },
       { storeId, kind: "resend", config: {}, secret: "v1.chave-resend" },
+      { storeId, kind: "telegram", config: {}, secret: "v1.token-telegram" },
     ]);
     const kinds = await asCardIn(storeId, (tx) => tx`select kind from integration order by kind`);
     expect(kinds.map((r) => r.kind)).toEqual(["asaas"]);
     // Nem pedindo a smtp explicitamente.
     expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'smtp'`)).toHaveLength(0);
     expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'resend'`)).toHaveLength(0);
+    expect(await asCardIn(storeId, (tx) => tx`select secret from integration where kind = 'telegram'`)).toHaveLength(0);
     expect(await card`select kind from integration`).toHaveLength(0);
+  });
+
+  test("telegram_notice: select, insert e delete dão permission denied", async () => {
+    const { shop, order } = await pendingOrder();
+    await t.ownerDb.insert(telegramNotice).values({ storeId: shop.storeId, orderId: order.id, event: "sale", messageId: 1 });
+    await expect(asCardIn(shop.storeId, (tx) => tx`select 1 from telegram_notice`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(shop.storeId, (tx) => tx`insert into telegram_notice (store_id, order_id, event, message_id) values (${shop.storeId}, ${order.id}, 'abandoned', 2)`),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from telegram_notice`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {
@@ -208,6 +220,25 @@ describe("papel card: atributos e o que fica de fora", () => {
     await expect(card`select id from job limit 1`).rejects.toThrow(PERMISSION_DENIED);
     const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, a.storeId));
     expect(jobs.map((j) => j.type)).toEqual(["notify_seller"]);
+  });
+
+  test("fila: notify_telegram só com os eventos sale e card_declined (pix_generated, abandoned e sem evento são recusados)", async () => {
+    const { storeId } = await seedStore("Fila Telegram");
+    const insert = (event: string) =>
+      asCardIn(
+        storeId,
+        (tx) =>
+          tx`insert into job (store_id, type, payload)
+             values (${storeId}, 'notify_telegram', jsonb_build_object('event', ${event}::text, 'orderId', ${randomUUID()}::text))`,
+      );
+    await insert("card_declined");
+    await insert("sale");
+    for (const event of ["pix_generated", "abandoned"]) await expect(insert(event)).rejects.toThrow(RLS_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`insert into job (store_id, type, payload) values (${storeId}, 'notify_telegram', '{}')`)).rejects.toThrow(
+      RLS_DENIED,
+    );
+    const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+    expect(jobs.map((j) => (j.payload as { event: string }).event).sort()).toEqual(["card_declined", "sale"]);
   });
 
   test("limites: só as chaves card: (não lê, não grava e não apaga os limites do app)", async () => {
@@ -414,7 +445,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     expect([a!.status, a!.asaasPaymentId, a!.resolvedAt !== null]).toEqual(["approved", pays[0]!.providerId, true]);
     const [c] = await t.ownerDb.select().from(customer).where(eq(customer.id, o.cash.customerId));
     expect(c!.asaasCustomerId).toMatch(/^cus_/);
-    expect(await jobTypes(o.cash.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.cash.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("aprovado parcelado: installmentCount + totalValue e pedido pago", async () => {
@@ -423,7 +454,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     const body = paymentPosts(fake, o.parcel.id)[0]!.body as Record<string, unknown>;
     expect([body.installmentCount, body.totalValue, body.value]).toEqual([3, 10, undefined]);
     expect((await orderRow(o.parcel.id)).status).toBe("paid");
-    expect(await jobTypes(o.parcel.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.parcel.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("recusa: tentativa recusada, pedido pendente e recusa registrada nos limites", async () => {
@@ -459,7 +490,7 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
       .from(auditLog)
       .where(and(eq(auditLog.storeId, shop.storeId), eq(auditLog.action, "payments.applyAsaasPayment")));
     expect(audit.map((r) => r.ok)).toEqual([true]);
-    expect(await jobTypes(o.unknown.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(await jobTypes(o.unknown.id)).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
   });
 
   test("cobrança em análise na resposta; aprovada depois: a conferência atualiza o status do pagamento e libera o pedido", async () => {
@@ -527,4 +558,99 @@ describe.each(["app", "card"] as const)("payWithCard com o papel %s", (role) => 
     expect(ok.status).toBe("approved");
     expect((await orderRow(o.after.id)).status).toBe("paid");
   }, HEAVY_TEST_MS);
+});
+
+describe("aviso de cartão recusado no Telegram com o papel card", () => {
+  const fake = createFakeAsaas();
+  let shop: { storeId: string; offerId: string };
+  let order: Order;
+  beforeAll(async () => {
+    shop = await seedAsaasStore(fake);
+    order = await newCardOrder(shop.storeId, shop.offerId, email());
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+  }, HEAVY_TEST_MS);
+  afterAll(async () => {
+    await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+  });
+
+  test("o papel card enfileira o job na recusa: um card_declined por pedido, mesmo com 3 recusas", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    try {
+      for (let i = 0; i < 3; i++) {
+        const r = await payWithCard(
+          { storeId: shop.storeId },
+          input(order.publicId, { number: luhn(`4520000000${String(i).padStart(5, "0")}`) }),
+          { ...fastDeps, verifyTurnstile: async () => true },
+        );
+        expect(r.status).toBe("declined");
+      }
+    } finally {
+      fake.clearFailures();
+    }
+    const attempts = await t.ownerDb.select().from(cardAttempt).where(eq(cardAttempt.orderId, order.id));
+    expect(attempts.map((a) => a.status)).toEqual(["declined", "declined", "declined"]);
+    const jobs = await t.ownerDb.select().from(job).where(sql`${job.payload}->>'orderId' = ${order.id}`);
+    expect(jobs.map((j) => [j.type, j.payload, j.storeId])).toEqual([["notify_telegram", { event: "card_declined", orderId: order.id }, shop.storeId]]);
+  });
+});
+
+describe("aviso do Telegram nunca derruba o pagamento (política antiga do job, sem notify_telegram)", () => {
+  const fake = createFakeAsaas();
+  let shop: { storeId: string; offerId: string };
+  let declined: Order;
+  let approvedOrder: Order;
+  let out = "";
+  let stdout: ReturnType<typeof spyOn>;
+  beforeAll(async () => {
+    shop = await seedAsaasStore(fake);
+    declined = await newCardOrder(shop.storeId, shop.offerId, email());
+    approvedOrder = await newCardOrder(shop.storeId, shop.offerId, email());
+    // O card sobe antes de o app aplicar o rls.sql novo: a política ainda recusa notify_telegram.
+    await t.ownerDb.execute(sql`drop policy job_card_insert on job`);
+    await t.ownerDb.execute(sql`create policy job_card_insert on job for insert to card with check (
+      store_id = nullif(current_setting('app.store_id', true), '')::uuid and type in ('deliver_order', 'meta_event', 'notify_seller'))`);
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+  }, HEAVY_TEST_MS);
+  afterAll(async () => {
+    await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+    await t.ownerDb.execute(sql`select card_role_grants()`);
+  });
+  beforeEach(() => {
+    out = "";
+    stdout = spyOn(process.stdout, "write").mockImplementation(((s: string) => ((out += String(s)), true)) as never);
+  });
+  afterEach(() => {
+    stdout.mockRestore();
+    setAsaasFetchForTests();
+  });
+
+  test("recusa: a tentativa fecha como recusada e a recusa é contada, sem o job do Telegram", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    try {
+      const r = await payWithCard({ storeId: shop.storeId }, input(declined.publicId, { number: luhn("453000000000001") }), {
+        ...fastDeps,
+        verifyTurnstile: async () => true,
+      });
+      expect(r.status).toBe("declined");
+    } finally {
+      fake.clearFailures();
+    }
+    const attempts = await t.ownerDb.select().from(cardAttempt).where(eq(cardAttempt.orderId, declined.id));
+    expect(attempts.map((a) => a.status)).toEqual(["declined"]);
+    const counted = await t.ownerDb.select().from(rateLimit).where(eq(rateLimit.key, `card:decline:store:${shop.storeId}`));
+    expect(counted).toHaveLength(1);
+    expect(await jobTypes(declined.id)).toEqual([]);
+    expect(out).toContain("aviso do Telegram não enfileirado");
+  });
+
+  test("aprovação: o pedido fica pago e os jobs da confirmação saem, sem o do Telegram", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    const r = await payWithCard({ storeId: shop.storeId }, input(approvedOrder.publicId), fastDeps);
+    expect(r).toEqual({ status: "approved" });
+    expect((await orderRow(approvedOrder.id)).status).toBe("paid");
+    expect(await jobTypes(approvedOrder.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(out).toContain("aviso do Telegram não enfileirado");
+  });
 });

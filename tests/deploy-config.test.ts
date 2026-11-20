@@ -161,7 +161,10 @@ describe("compose.yaml: serviço de cartão isolado (sobe sempre)", () => {
     expect(card.memswap_limit).toBe(card.mem_limit);
     expect(card.ulimits?.core).toEqual({ soft: 0, hard: 0 });
     expect(card.stop_grace_period).toBe("90s");
-    expect(card.depends_on).toEqual({ postgres: { condition: "service_healthy" } });
+  });
+
+  test("sobe depois do app saudável (o app aplica as migrações e as permissões do papel card antes)", () => {
+    expect(card.depends_on).toEqual({ postgres: { condition: "service_healthy" }, app: { condition: "service_healthy" } });
   });
 
   test("rede própria: o card só alcança Postgres e Caddy (nunca o app)", () => {
