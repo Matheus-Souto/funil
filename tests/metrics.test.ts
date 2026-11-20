@@ -101,7 +101,10 @@ describe("metrics.breakdown", () => {
     await seedOrder(s, { status: "paid", totalCents: 990 });
     await seedOrder(s, { status: "pending", totalCents: 990 });
     await seedViews(s, 4);
-    const range = periodRange("7d");
+    // O fim do período é exclusivo (`paid_at < to`) e o Postgres grava microssegundos, mas `Date` só tem milissegundos:
+    // um pedido pago no mesmo milissegundo do "agora" (ex.: 01:13:52.123456 contra to = 01:13:52.123) ficava de fora.
+    // +1 ms garante que tudo o que foi gravado antes desta linha cai dentro do período.
+    const range = periodRange("7d", new Date(Date.now() + 1));
     const b = await runAction(metricsBreakdown, panelCall(s.storeId), range);
     expect(b.byDay).toHaveLength(7);
     expect(b.byDay.at(-1)!.revenueCents).toBe(3690);
