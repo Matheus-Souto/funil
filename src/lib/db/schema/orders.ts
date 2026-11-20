@@ -92,6 +92,8 @@ export const orderItem = pgTable(
       .references(() => product.id),
     priceCents: integer("price_cents").notNull(),
     kind: text("kind").notNull(),
+    /** Ordem do item dentro do grupo (`kind`); pedidos anteriores à coluna ficam em 0 (principal antes do bump). */
+    position: integer("position").notNull().default(0),
   },
   (t) => [check("order_item_kind_check", sql`${t.kind} in ('main','bump')`), index("order_item_order_idx").on(t.orderId)],
 );

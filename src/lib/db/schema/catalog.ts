@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, index, integer, pgTable, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { store } from "./core";
 
 // Com RLS (enable_store_rls na migration).
@@ -53,5 +53,33 @@ export const offer = pgTable(
       "offer_bump_check",
       sql`(${t.bumpProductId} is null and ${t.bumpPriceCents} is null) or (${t.bumpProductId} is not null and ${t.bumpPriceCents} > 0 and ${t.bumpProductId} <> ${t.productId})`,
     ),
+  ],
+);
+
+/**
+ * Produtos (PDFs) de uma oferta: `main` é o que a oferta vende, `bump` o que o order bump acrescenta. `position` ordena
+ * dentro do grupo (0, 1, 2...). Com RLS (enable_store_rls na migration).
+ */
+export const offerProduct = pgTable(
+  "offer_product",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "cascade" }),
+    offerId: uuid("offer_id")
+      .notNull()
+      .references(() => offer.id, { onDelete: "cascade" }),
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => product.id),
+    kind: text("kind").notNull(),
+    position: integer("position").notNull(),
+  },
+  (t) => [
+    unique("offer_product_offer_product_unique").on(t.offerId, t.productId),
+    index("offer_product_offer_kind_position_idx").on(t.offerId, t.kind, t.position),
+    check("offer_product_kind_check", sql`${t.kind} in ('main','bump')`),
+    check("offer_product_position_check", sql`${t.position} >= 0`),
   ],
 );
