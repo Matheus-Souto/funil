@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Verificação ponta a ponta: lint/tipos/testes, build, app de produção + Playwright mobile.
+# Verificação ponta a ponta: lint/tipos/testes, build, app de produção com o cartão isolado (serviço `card` empacotado)
+# + Playwright mobile.
 # Uso: bash scripts/verify.sh [--deploy]
 # Grava .verify/<sha>.json (carimbo) e .verify/state.json (contador de rodadas falhas).
 set -uo pipefail
@@ -68,6 +69,7 @@ T0="$(date +%s.%N)"
 STEPS=()
 APP_PID=""
 FAKE_PID=""
+CARD_PID=""
 DB_NAME="verify_${SHORT}"
 DB_CREATED=0
 FINISHED=0
@@ -80,6 +82,14 @@ stop_app() {
     kill "$APP_PID" 2>/dev/null
     wait "$APP_PID" 2>/dev/null
     APP_PID=""
+  fi
+}
+
+stop_card() {
+  if [ -n "$CARD_PID" ]; then
+    kill "$CARD_PID" 2>/dev/null
+    wait "$CARD_PID" 2>/dev/null
+    CARD_PID=""
   fi
 }
 
@@ -105,6 +115,7 @@ finish() {
   [ "$FINISHED" = 1 ] && return
   FINISHED=1
   stop_app
+  stop_card
   stop_fake
   drop_db
 
@@ -180,18 +191,31 @@ run_step() {
 
 free_port() { node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})'; }
 
-# Sobe o app. O ambiente dele (BASE_URL, SECRET, DATABASE_URL...) vai só para os processos que precisam, via `env`
-# inline: nada é exportado, então não vaza para docker compose nem para o smoke de deploy.
+# Marcador do E2E: com e2e/.card-isolated, o app sobe com o cartão isolado (CARD_ISOLATED=1 e CARD_ORIGIN) e o
+# Playwright recebe CARD_ORIGIN. Sem ele, o app sobe como antes (formulário de cartão no próprio app). O CI roda o
+# verify.sh do main contra o e2e/ do branch: o marcador chega junto com o E2E que precisa dele.
+card_isolated() { [ -f e2e/.card-isolated ]; }
+
+# Sobe o app e o serviço de cartão isolado. O ambiente de cada um (BASE_URL, SECRET, DATABASE_URL...) vai só para o
+# processo que precisa, via `env` inline: nada é exportado, então não vaza para docker compose nem para o smoke de deploy.
+# Serviço de cartão (dist/card/server.js, empacotado na etapa card-build): sobe sempre, em outra origem (CARD_ORIGIN =
+# 127.0.0.1 em outra porta; http só vale em loopback), com `env -i` e a lista mínima de variáveis: sem SECRET, papel
+# dono nem APP_DB_PASSWORD (ele recusa subir com elas). O app só embute o iframe dele com o marcador (card_isolated).
 start_app() {
   local port; port="$(free_port)" || { INFRA=1; return 1; }
+  local card_port; card_port="$(free_port)" || { INFRA=1; return 1; }
   echo "$port" > "$RUN_DIR/port"
+  echo "$card_port" > "$RUN_DIR/card-port"
   docker compose -f compose.dev.yaml exec -T db psql -U owner -d postgres -q -v ON_ERROR_STOP=1 \
     -c "drop database if exists \"$DB_NAME\" with (force)" \
     -c "create database \"$DB_NAME\"" || { INFRA=1; return 1; }
   DB_CREATED=1
   local owner_url="postgres://owner:owner@localhost:5433/$DB_NAME"
   local app_url="postgres://app:app@localhost:5433/$DB_NAME"
-  env OWNER_DATABASE_URL="$owner_url" DATABASE_URL="$app_url" APP_DB_PASSWORD=app bun run migrate || return 1
+  # Papel `card` com login (CARD_DB_PASSWORD): o serviço de cartão entra com ele. Papéis valem para o cluster inteiro;
+  # a senha de desenvolvimento `card` é a mesma dos testes (tests/card-role.test.ts), como `app` para o papel `app`.
+  local card_url="postgres://card:card@localhost:5433/$DB_NAME"
+  env OWNER_DATABASE_URL="$owner_url" DATABASE_URL="$app_url" APP_DB_PASSWORD=app CARD_DB_PASSWORD=card bun run migrate || return 1
   # Dependências externas de teste: Mailpit real; Asaas falso (o servidor falso entra com os pagamentos).
   # E2E_SEED_ROUTES=1 liga a rota só do smoke (/api/test-only); o app a recusa fora de BASE_URL em loopback.
   # META_GRAPH_BASE_URL: API de Conversões do Meta falsa (mesmo servidor falso, em /meta); também só em loopback.
@@ -202,20 +226,65 @@ start_app() {
     FAKE_PID=$!
     asaas_url="http://127.0.0.1:$fake_port"
   fi
+  # Três chaves diferentes entre si (o app e o serviço recusam subir com repetidas).
   local secret; secret="$(openssl rand -hex 32)"
+  local ticket_key; ticket_key="$(openssl rand -hex 32)"
+  local seal_key; seal_key="$(openssl rand -hex 32)"
+  local base_url="http://127.0.0.1:$port"
+  local card_origin="http://127.0.0.1:$card_port"
   # Código do primeiro acesso (/admin/setup): aleatório por rodada; o e2e recebe o mesmo valor (arquivo do run).
   openssl rand -hex 24 > "$RUN_DIR/setup-token" || { INFRA=1; return 1; }
+  env -i PATH="$PATH" HOME="$HOME" SERVICE=card NODE_ENV=production MODE=single BASE_URL="$base_url" \
+    DATABASE_URL="$card_url" CARD_ORIGIN="$card_origin" CARD_TICKET_KEY="$ticket_key" ASAAS_SEAL_KEY="$seal_key" \
+    CARD_PORT="$card_port" TRUST_PROXY=0 ASAAS_BASE_URL="$asaas_url" \
+    node dist/card/server.js > "$RUN_DIR/card.log" 2>&1 &
+  CARD_PID=$!
+  local isolated=()
+  if card_isolated; then
+    isolated=(CARD_ISOLATED=1 CARD_ORIGIN="$card_origin" CARD_TICKET_KEY="$ticket_key" ASAAS_SEAL_KEY="$seal_key")
+  fi
   env OWNER_DATABASE_URL="$owner_url" DATABASE_URL="$app_url" APP_DB_PASSWORD=app \
     SMTP_HOST=localhost SMTP_PORT=1025 ASAAS_BASE_URL="$asaas_url" META_GRAPH_BASE_URL="$asaas_url/meta" \
-    BASE_URL="http://127.0.0.1:$port" SECRET="$secret" MODE=single E2E_SEED_ROUTES=1 SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" \
-    PORT="$port" HOSTNAME=127.0.0.1 NODE_ENV=production bun run start > "$RUN_DIR/app.log" 2>&1 &
+    BASE_URL="$base_url" SECRET="$secret" MODE=single E2E_SEED_ROUTES=1 SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" \
+    "${isolated[@]}" PORT="$port" HOSTNAME=127.0.0.1 NODE_ENV=production bun run start > "$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
-  curl -fs --retry 40 --retry-delay 1 --retry-connrefused "http://127.0.0.1:$port/api/health" > /dev/null
+  curl -fs --retry 40 --retry-delay 1 --retry-connrefused "$base_url/api/health" > /dev/null || return 1
+  curl -fs --retry 40 --retry-delay 1 --retry-connrefused "$card_origin/healthz" > /dev/null
 }
 
+# E2E_OWNER_DATABASE_URL: banco descartável desta rodada (papel dono, loopback), para o E2E conferir o que o painel
+# gravou (ex.: segredo da conexão Asaas em `a1.` com o cartão isolado).
 e2e() {
   local port; port="$(cat "$RUN_DIR/port")"
-  BASE_URL="http://127.0.0.1:$port" SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" PW_OUTPUT_DIR="$RUN_DIR/playwright" bunx playwright test e2e/
+  local card_port; card_port="$(cat "$RUN_DIR/card-port")"
+  local card_origin=""
+  card_isolated && card_origin="http://127.0.0.1:$card_port"
+  BASE_URL="http://127.0.0.1:$port" CARD_ORIGIN="$card_origin" SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" \
+    E2E_OWNER_DATABASE_URL="postgres://owner:owner@localhost:5433/$DB_NAME" \
+    PW_OUTPUT_DIR="$RUN_DIR/playwright" bunx playwright test e2e/
+}
+
+# Cartões e CVVs que o E2E usa (e2e/smoke.spec.ts usa só estes): nenhum pode aparecer no log do app nem no do serviço
+# de cartão (o Asaas falso ecoa número e CVV na recusa, como o real às vezes faz). Número com ou sem espaços; CVV como
+# valor de uma chave cvv/ccv, ou sozinho entre aspas/espaços (não dentro de número, hora ou id: `:123` de uma duração
+# não conta).
+E2E_CARDS="4444444444444444 5184019740373151 4111111111111111 5555555555554444 4012888888881881"
+E2E_CVVS="123 987 321 737 582 604 739"
+logs_no_card() {
+  local f n cvv pat found=0
+  for f in "$RUN_DIR/app.log" "$RUN_DIR/card.log"; do
+    [ -f "$f" ] || { echo "log ausente: $f"; return 1; }
+    for n in $E2E_CARDS; do
+      pat="${n:0:4} ?${n:4:4} ?${n:8:4} ?${n:12:4}"
+      if grep -Eq "$pat" "$f"; then echo "número de cartão de teste ${n:0:4}…${n:12:4} em $f"; found=1; fi
+    done
+    for cvv in $E2E_CVVS; do
+      if grep -Eiq "(c[cv]v|cvc)[\"' :=]*$cvv([^0-9]|\$)|(^|[\"' ])$cvv([\"' ]|\$)" "$f"; then echo "CVV de teste $cvv em $f"; found=1; fi
+    done
+    if grep -Eiq '"(ccv|cvv)"' "$f"; then echo "chave ccv/cvv em $f"; found=1; fi
+  done
+  [ "$found" = 0 ] && echo "logs do app e do serviço de cartão sem número nem CVV de teste"
+  [ "$found" = 0 ]
 }
 
 wants_deploy() {
@@ -237,8 +306,10 @@ run_step install bun install --frozen-lockfile
 run_step compose docker compose -f compose.dev.yaml up -d --wait
 run_step check bun run check
 run_step build bun run build
+run_step card-build bun run card:build
 run_step app-start start_app
 run_step e2e e2e
+run_step logs-no-card logs_no_card
 if wants_deploy; then run_step smoke-deploy smoke_deploy; fi
 
 finish true
