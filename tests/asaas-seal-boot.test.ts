@@ -49,19 +49,20 @@ test("checkAsaasSealKey conta as conexões asaas em a1, quantas a chave não abr
   expect(await checkAsaasSealKey()).toEqual({ sealed: 2, unreadable: 2, legacy: 1 });
 });
 
-test("boot: a re-selagem só roda com CARD_ISOLATED=1; a checagem roda sempre", async () => {
+test("boot: a re-selagem roda sempre que há ASAAS_SEAL_KEY (sem flag); sem a chave, nada muda; a checagem roda sempre", async () => {
   const { storeId } = await seedStore();
   await withStore(storeId, (tx) => saveIntegration(tx, storeId, "asaas", {}, "chave-antiga"));
   const antes = (await rawAsaas(storeId))!;
   expect(antes.startsWith("v1.")).toBe(true);
 
-  expect(await prepareAsaasSealOnBoot({ cardIsolated: false }, withKey())).toEqual({ resealed: 0, sealed: 2, unreadable: 0, legacy: 2 });
+  // Sem a chave (instalação ainda sem o serviço de cartão): não re-sela.
+  expect(await prepareAsaasSealOnBoot(createIntegrationSecrets({ secret: requireSecret() }))).toEqual({ resealed: 0, sealed: 2, unreadable: 2, legacy: 2 });
   expect(await rawAsaas(storeId)).toBe(antes);
 
-  // Re-sela esta e a v1 do teste anterior.
-  expect(await prepareAsaasSealOnBoot({ cardIsolated: true }, withKey())).toEqual({ resealed: 2, sealed: 4, unreadable: 0, legacy: 0 });
+  // Com a chave: re-sela esta e a v1 do teste anterior.
+  expect(await prepareAsaasSealOnBoot(withKey())).toEqual({ resealed: 2, sealed: 4, unreadable: 0, legacy: 0 });
   expect((await rawAsaas(storeId))!.startsWith("a1.")).toBe(true);
-  expect(await prepareAsaasSealOnBoot({ cardIsolated: true }, withKey())).toEqual({ resealed: 0, sealed: 4, unreadable: 0, legacy: 0 });
+  expect(await prepareAsaasSealOnBoot(withKey())).toEqual({ resealed: 0, sealed: 4, unreadable: 0, legacy: 0 });
 });
 
 test("register(): conexão asaas em a1 que a chave do processo não abre derruba a subida, sem valores na mensagem", async () => {

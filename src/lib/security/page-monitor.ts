@@ -3,7 +3,7 @@
 // `pci_page_monitor`: para cada loja, busca no PRÓPRIO domínio da loja o checkout de uma oferta ativa (/c/<slug>) e a
 // página do pedido mais recente (/o/<publicId>), confere o cabeçalho Content-Security-Policy contra a política que o app
 // gera (src/proxy.ts) e o inventário de scripts do HTML (só origens autorizadas; inline só com o nonce da resposta), e
-// avisa o vendedor (store_alert + e-mail) quando o resultado muda. Com o cartão isolado (CARD_ISOLATED=1), confere
+// avisa o vendedor (store_alert + e-mail) quando o resultado muda. Com o serviço de cartão configurado (CARD_ORIGIN), confere
 // também a página do iframe no domínio do cartão (CARD_ORIGIN/form/<loja>, page "/form") contra `cardFormCsp` e o
 // inventário do serviço (só /form.js; o Turnstile fica no checkout), com o sha256 do conteúdo do /form.js (troca do
 // conteúdo no mesmo caminho também avisa) comparado ao sha256 gravado pelo build da mesma revisão
@@ -18,7 +18,7 @@ import { alertSeller } from "@/lib/alerts";
 import { db, withStore } from "@/lib/db/client";
 import { offer, orders, pageCheck, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
-import { env } from "@/lib/env";
+import { cardServiceConfigured, env } from "@/lib/env";
 import type { JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { storeCheckoutOrigins } from "@/lib/stores";
@@ -210,7 +210,7 @@ async function record(storeId: string, page: Page, r: { problems: string[]; inve
 
 /**
  * Handler do job global `pci_page_monitor`. `fetch` e `storeIds` (só estas lojas) existem para os testes; `card`
- * (origem do serviço de cartão; `null` = não conferir o iframe) vem do ambiente (CARD_ISOLATED=1 e CARD_ORIGIN). Falha
+ * (origem do serviço de cartão; `null` = não conferir o iframe) vem do ambiente (CARD_ORIGIN, se configurado). Falha
  * de rede ou resposta não 200 não avisam (não é mudança de página) e não mudam o estado guardado; o job segue para as
  * demais lojas e falha no fim se alguma loja deu erro inesperado (o worker re-tenta). `expectedFormJsSha256` (testes)
  * substitui a leitura do `card-form.sha256` do build.
@@ -221,7 +221,7 @@ export function createPciPageMonitorHandler(
   return async (_j, signal) => {
     const doFetch = deps.fetch ?? fetch;
     const turnstile = Boolean(env.TURNSTILE_SITE_KEY);
-    const card = deps.card !== undefined ? deps.card : env.CARD_ISOLATED && env.CARD_ORIGIN ? { origin: env.CARD_ORIGIN } : null;
+    const card = deps.card !== undefined ? deps.card : cardServiceConfigured(env) ? { origin: env.CARD_ORIGIN } : null;
     const expectedFormJsSha256 = card ? await (deps.expectedFormJsSha256 ?? builtFormJsSha256)() : null;
     const stores = await db.select({ id: store.id, slug: store.slug, domain: store.domain }).from(store);
     let failed = 0;

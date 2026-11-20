@@ -6,13 +6,13 @@ import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { clientIpFrom } from "@/lib/client-ip";
 import { NEEDS_CPF, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
-import { env } from "@/lib/env";
+import { cardServiceConfigured, env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { resolveStore } from "@/lib/stores";
 import { fbcFromFbclid } from "@/lib/tracking/touch";
 
 export type StartResult =
-  // `cardTicket`: só com CARD_ISOLATED=1 e cartão; o checkout o repassa ao iframe do cartão no `pay`.
+  // `cardTicket`: só no cartão; o checkout o repassa ao iframe do cartão no `pay`.
   | { ok: true; publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }
   | { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean };
 
@@ -50,7 +50,7 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
     fbp: jar.get("_fbp")?.value?.slice(0, 500),
   };
   try {
-    const r = await startCheckout({ storeId: store.id }, raw, env.CARD_ISOLATED ? { cardTicketKey: env.CARD_TICKET_KEY } : {});
+    const r = await startCheckout({ storeId: store.id }, raw, cardServiceConfigured(env) ? { cardTicketKey: env.CARD_TICKET_KEY } : {});
     return { ok: true, publicId: r.publicId, method: r.method, ...(r.cardTicket ? { cardTicket: r.cardTicket } : {}) };
   } catch (e) {
     if (e instanceof ActionError) {
@@ -65,7 +65,7 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
 }
 
 /**
- * Bilhete novo do mesmo pedido de cartão (CARD_ISOLATED=1): o anterior venceu ou está perto de vencer. Exige o bilhete
+ * Bilhete novo do mesmo pedido de cartão: o anterior venceu ou está perto de vencer. Exige o bilhete
  * anterior; só para pedido `card_asaas` pendente da loja do host (regra em `renewCardTicket` / `checkout.renewCardTicket`).
  * `definitive`: o pedido não serve mais (outro estado, outro tipo, bilhete recusado) e o checkout cria outro; erro
  * passageiro (`false`) mantém o pedido para a próxima tentativa.
@@ -74,7 +74,7 @@ export async function renewCardTicketAction(input: {
   publicId: string;
   ticket: string;
 }): Promise<{ ok: true; ticket: string } | { ok: false; message: string; definitive: boolean }> {
-  if (!env.CARD_ISOLATED || !env.CARD_TICKET_KEY) return { ok: false, message: GENERIC, definitive: false };
+  if (!cardServiceConfigured(env)) return { ok: false, message: GENERIC, definitive: false };
   const h = await headers();
   const store = await resolveStore(h.get("host") ?? "");
   if (!store) return { ok: false, message: GENERIC, definitive: false };

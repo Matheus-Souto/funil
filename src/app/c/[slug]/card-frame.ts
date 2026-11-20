@@ -1,4 +1,4 @@
-// Lado do app da conversa com o iframe do cartão (CARD_ISOLATED=1). Lógica pura, sem DOM e sem React: o componente
+// Lado do app da conversa com o iframe do cartão (serviço isolado, CARD_ORIGIN). Lógica pura, sem DOM e sem React: o componente
 // do checkout liga isto ao <iframe> e ao `window.addEventListener("message")`.
 //
 // - `acceptFrameMessage`: só aceita mensagem com `origin === CARD_ORIGIN` E `source === iframe.contentWindow`, e só se

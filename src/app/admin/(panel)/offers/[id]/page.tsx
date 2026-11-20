@@ -5,6 +5,7 @@ import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { getOffer } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { storeBaseUrl } from "@/lib/delivery/links";
+import { cardServiceConfigured, env } from "@/lib/env";
 import { firstParam } from "@/lib/panel-params";
 import { OfferEditor, type OfferData } from "./editor";
 
@@ -60,6 +61,7 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
       brandColor={ident.store.brandColor}
       canWrite={hasPermission(role, "offers.write")}
       canPixel={hasPermission(role, "tracking.write")}
+      cardAvailable={cardServiceConfigured(env)}
       created={!isNew && firstParam((await searchParams).criada) === "1"}
     />
   );

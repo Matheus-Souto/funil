@@ -233,13 +233,16 @@ async function enforceEmailLimit(ctx: Ctx, email: string): Promise<void> {
  * `checkout.start` + cobrança Pix do Asaas criada na hora, com o QR guardado (HTTP fora da transação). Celular
  * recusado pelo Asaas volta como `invalid_input` para o comprador corrigir (o pedido sem cobrança expira sozinho em
  * 24 h); outras falhas deixam a página do pedido com o botão "Gerar novo código Pix" (`orders.regeneratePix`).
- * `cardTicketKey` (só com CARD_ISOLATED=1): pedido de cartão volta com o bilhete que o iframe do cartão apresenta.
+ * `cardTicketKey` (CARD_TICKET_KEY): pedido de cartão volta com o bilhete que o iframe do cartão apresenta. Sem ela (serviço
+ * de cartão não configurado), cartão é recusado antes de criar o pedido.
  */
 export async function startCheckout(
   call: { storeId: string },
   raw: unknown,
   opts: { cardTicketKey?: string; now?: Date } = {},
 ): Promise<{ publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }> {
+  const method = raw !== null && typeof raw === "object" ? (raw as { method?: unknown }).method : undefined;
+  if (method === "card" && !opts.cardTicketKey) throw new ActionError("conflict", CARD_UNAVAILABLE_MESSAGE);
   const out = await runAction(checkoutStart, publicCall(call.storeId), raw);
   if (out.method === "card_asaas" && opts.cardTicketKey) {
     const cardTicket = issueCardTicket(
@@ -258,6 +261,11 @@ export async function startCheckout(
     }
   }
   return { publicId: out.publicId, method: out.method };
+}
+
+/** Métodos que o checkout mostra: sem o serviço de cartão configurado, só Pix. Vazio = nenhum método disponível. */
+export function checkoutMethods(methods: readonly string[], cardOn: boolean): ("pix" | "card")[] {
+  return methods.filter((m): m is "pix" | "card" => m === "pix" || (m === "card" && cardOn));
 }
 
 // ---------------------------------------------------------------------------------------------------------------

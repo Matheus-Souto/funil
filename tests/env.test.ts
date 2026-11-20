@@ -1,5 +1,5 @@
 import { requireOwnerUrl } from "@/lib/db/client";
-import { parseEnv, requireSecret } from "@/lib/env";
+import { cardServiceConfigured, parseEnv, requireSecret } from "@/lib/env";
 
 const base = {
   BASE_URL: "http://localhost:3000",
@@ -133,7 +133,6 @@ test("SERVICE=app (padrão) sem SECRET falha", () => {
   expect(() => parseEnv(baseSemSecret)).toThrow(/SECRET/);
   expect(() => parseEnv({ ...baseSemSecret, SERVICE: "app" })).toThrow(/SECRET/);
   expect(parseEnv(base).SERVICE).toBe("app");
-  expect(parseEnv(base).CARD_ISOLATED).toBe(false);
 });
 
 test("SERVICE inválido falha", () => {
@@ -172,17 +171,24 @@ test("SERVICE=card exige CARD_TICKET_KEY, ASAAS_SEAL_KEY e CARD_ORIGIN", () => {
   }
 });
 
-test("CARD_ISOLATED=1 no app exige CARD_ORIGIN, CARD_TICKET_KEY e ASAAS_SEAL_KEY", () => {
-  expect(parseEnv({ ...base, CARD_ISOLATED: "1", ...cardKeys }).CARD_ISOLATED).toBe(true);
-  expect(parseEnv({ ...base, CARD_ISOLATED: "0" }).CARD_ISOLATED).toBe(false);
-  for (const k of Object.keys(cardKeys)) {
-    expect(() => parseEnv({ ...base, CARD_ISOLATED: "1", ...cardKeys, [k]: undefined })).toThrow(new RegExp(k));
+test("CARD_ISOLATED (obsoleta): aceita e ignorada com qualquer valor, sem efeito nem campo no env", () => {
+  // O verify.sh do main ainda a passa; o isolamento é sempre ligado agora.
+  for (const v of ["0", "1", "sim", ""]) {
+    const e = parseEnv({ ...base, CARD_ISOLATED: v });
+    expect("CARD_ISOLATED" in e).toBe(false);
+    expect(e.CARD_ORIGIN).toBeUndefined();
   }
-  expect(() => parseEnv({ ...base, CARD_ISOLATED: "sim" })).toThrow(/CARD_ISOLATED/);
+  expect(parseEnv({ ...base, CARD_ISOLATED: "1", ...cardKeys }).CARD_ORIGIN).toBe(cardKeys.CARD_ORIGIN);
 });
 
-test("CARD_ISOLATED=0 não exige as variáveis do cartão", () => {
-  expect(parseEnv({ ...base, CARD_ISOLATED: "0" }).CARD_ORIGIN).toBeUndefined();
+test("app sem CARD_ORIGIN sobe (cartão indisponível); com CARD_ORIGIN, exige CARD_TICKET_KEY e ASAAS_SEAL_KEY", () => {
+  expect(cardServiceConfigured(parseEnv(base))).toBe(false);
+  // Chave do Asaas sozinha (conexões já seladas, cartão ainda sem domínio): sobe, e o cartão segue indisponível.
+  expect(cardServiceConfigured(parseEnv({ ...base, ASAAS_SEAL_KEY: cardKeys.ASAAS_SEAL_KEY }))).toBe(false);
+  expect(cardServiceConfigured(parseEnv({ ...base, ...cardKeys }))).toBe(true);
+  for (const k of ["CARD_TICKET_KEY", "ASAAS_SEAL_KEY"]) {
+    expect(() => parseEnv({ ...base, ...cardKeys, [k]: undefined })).toThrow(new RegExp(`${k} \\(faltando; obrigatória com CARD_ORIGIN\\)`));
+  }
 });
 
 test("CARD_ORIGIN: origem https sem caminho, query nem barra final; http só em loopback", () => {

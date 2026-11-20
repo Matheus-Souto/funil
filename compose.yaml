@@ -31,9 +31,9 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-1}
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
-      # Cartão isolado: 1 = o checkout embute o iframe do serviço `card` (profile card). As chaves só valem com ele
-      # ligado; CARD_DB_PASSWORD é usada só pela migração (dá login ao papel `card`) e sai do ambiente antes do app.
-      CARD_ISOLATED: ${CARD_ISOLATED:-0}
+      # Cartão: o checkout embute o iframe do serviço `card` em CARD_ORIGIN. Sem CARD_ORIGIN, o cartão fica indisponível
+      # (o checkout mostra só Pix). CARD_DB_PASSWORD é usada só pela migração (dá login ao papel `card`) e sai do
+      # ambiente antes do app.
       CARD_ORIGIN: ${CARD_ORIGIN:-}
       CARD_TICKET_KEY: ${CARD_TICKET_KEY:-}
       ASAAS_SEAL_KEY: ${ASAAS_SEAL_KEY:-}

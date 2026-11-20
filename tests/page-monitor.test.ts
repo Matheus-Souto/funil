@@ -188,7 +188,7 @@ describe("job pci_page_monitor", () => {
     expect(await t.ownerDb.select().from(storeAlert).where(eq(storeAlert.storeId, shop.storeId))).toHaveLength(0);
   });
 
-  test("CARD_ISOLATED: confere também a página do iframe no domínio do cartão; script de outro host avisa com page /form", async () => {
+  test("cartão isolado: confere também a página do iframe no domínio do cartão; script de outro host avisa com page /form", async () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
     const good = cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins });
@@ -220,7 +220,7 @@ describe("job pci_page_monitor", () => {
     expect(notices.map((n) => (n.payload as { page?: string }).page)).toEqual(["/form"]);
   });
 
-  test("CARD_ISOLATED: conteúdo do /form.js trocado no mesmo caminho avisa (inventario_mudou) uma vez; form.js fora do ar não muda nada", async () => {
+  test("cartão isolado: conteúdo do /form.js trocado no mesmo caminho avisa (inventario_mudou) uma vez; form.js fora do ar não muda nada", async () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
     const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };
@@ -252,7 +252,7 @@ describe("job pci_page_monitor", () => {
     expect(await alerts()).toHaveLength(1);
   });
 
-  test("CARD_ISOLATED: form.js diferente do build desta revisão avisa já na 1ª conferência e sai em log.error (sem valores)", async () => {
+  test("cartão isolado: form.js diferente do build desta revisão avisa já na 1ª conferência e sai em log.error (sem valores)", async () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
     const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };
@@ -279,7 +279,7 @@ describe("job pci_page_monitor", () => {
     expect(JSON.stringify(errors)).not.toContain(BUILT);
   });
 
-  test("CARD_ISOLATED: qualquer mudança na conferência do /form (inclusive voltar ao normal) sai em log.error; /c não", async () => {
+  test("cartão isolado: qualquer mudança na conferência do /form (inclusive voltar ao normal) sai em log.error; /c não", async () => {
     const shop = await seedShop();
     const origins = await storeCheckoutOrigins(shop.storeId);
     const page = { html: cardFormHtml({ storeId: shop.storeId, allowedOrigins: origins }), csp: cardFormCsp(origins) };

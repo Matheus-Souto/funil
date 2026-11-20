@@ -7,11 +7,13 @@ import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
 import {
   ASAAS_LIMITS,
+  CARD_UNAVAILABLE_MESSAGE,
   CHECKOUT_LIMIT_MESSAGE,
   PIX_REGEN_PER_HOUR,
   PIX_UNAVAILABLE_MESSAGE,
   TOUCH_MAX_BYTES,
   VIEW_LIMIT_PER_HOUR,
+  checkoutMethods,
   checkoutRenewCardTicket,
   checkoutStart,
   checkoutView as checkoutViewAction,
@@ -600,7 +602,7 @@ describe("fix 1: checkout.view (gravação anônima)", () => {
   });
 });
 
-describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
+describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
   const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
 
   test("startCheckout com a chave: cartão devolve um bilhete que verifyCardTicket aceita para aquele pedido; Pix não", async () => {
@@ -622,10 +624,20 @@ describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
     expect(verifyCardTicket(renewed, KEY)).toMatchObject({ publicId: card.publicId, totalCents: 990 + 1710, maxInstallments: 4 });
   });
 
-  test("startCheckout sem a chave (flag desligada): cartão sem bilhete, como hoje", async () => {
+  test("startCheckout sem a chave (serviço de cartão não configurado): cartão recusado sem criar pedido; Pix segue", async () => {
     const s = await seed({ asaas: createFakeAsaas() });
-    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }));
-    expect(card).toEqual({ publicId: card.publicId, method: "card_asaas" });
+    const before = await withStore(s.storeId, (tx) => tx.select({ id: orders.id }).from(orders));
+    const e = await fail(startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } })));
+    expect([e.code, e.message]).toEqual(["conflict", CARD_UNAVAILABLE_MESSAGE]);
+    expect(await withStore(s.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).toEqual(before);
+    expect((await startCheckout({ storeId: s.storeId }, startInput(s.slug))).method).toBe("pix_manual");
+  });
+
+  test("checkoutMethods: sem o serviço de cartão, o checkout mostra só Pix (oferta só de cartão fica sem método)", () => {
+    expect(checkoutMethods(["pix", "card"], true)).toEqual(["pix", "card"]);
+    expect(checkoutMethods(["pix", "card"], false)).toEqual(["pix"]);
+    expect(checkoutMethods(["card"], false)).toEqual([]);
+    expect(checkoutMethods(["card", "boleto"], true)).toEqual(["card"]);
   });
 
   test("renewCardTicket: com o bilhete anterior (mesmo vencido), pedido de cartão pendente ganha bilhete novo do mesmo pedido", async () => {

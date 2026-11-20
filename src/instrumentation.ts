@@ -12,12 +12,12 @@ export async function register(): Promise<void> {
     process.exit(1);
   }
   if (parsed.SERVICE === "app") {
-    // Re-sela as conexões Asaas na chave própria (só com CARD_ISOLATED=1) e confere se a ASAAS_SEAL_KEY abre as que já
-    // estão em a1: chave trocada, removida ou rollback trancaria o Asaas de todas as lojas sem aviso.
+    // Re-sela as conexões Asaas na chave própria (com a ASAAS_SEAL_KEY) e confere se ela abre as que já estão em a1:
+    // chave trocada, removida ou rollback trancaria o Asaas de todas as lojas sem aviso.
     const { prepareAsaasSealOnBoot } = await import("@/lib/integrations");
     let unreadable = 0;
     try {
-      unreadable = (await prepareAsaasSealOnBoot({ cardIsolated: parsed.CARD_ISOLATED })).unreadable;
+      unreadable = (await prepareAsaasSealOnBoot()).unreadable;
     } catch (e) {
       // Banco fora no boot: o healthcheck acusa; a conferência fica para a próxima subida.
       const { log } = await import("@/lib/log");

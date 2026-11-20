@@ -29,8 +29,7 @@ const PRODUCTION = [
   "TRUST_PROXY",
   "SETUP_TOKEN",
   // Cartão isolado: o app emite o bilhete (CARD_TICKET_KEY), re-sela a conexão Asaas (ASAAS_SEAL_KEY) e a migração cria
-  // o papel `card` com login (CARD_DB_PASSWORD).
-  "CARD_ISOLATED",
+  // o papel `card` com login (CARD_DB_PASSWORD). CARD_ISOLATED é obsoleta (o env a ignora) e não vai ao app.
   "CARD_ORIGIN",
   "CARD_TICKET_KEY",
   "ASAAS_SEAL_KEY",
@@ -172,9 +171,9 @@ describe("compose.yaml: serviço de cartão isolado (profile card)", () => {
     expect(networksOf("app")).not.toContain("card");
   });
 
-  test("o app recebe as variáveis do cartão isolado (desligado por padrão)", () => {
+  test("o app recebe as variáveis do cartão isolado (vazias por padrão: sem CARD_ORIGIN, cartão indisponível); CARD_ISOLATED não", () => {
     const appEnv = compose.services.app!.environment!;
-    expect(appEnv.CARD_ISOLATED).toBe("${CARD_ISOLATED:-0}");
+    expect("CARD_ISOLATED" in appEnv).toBe(false);
     for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY", "CARD_DB_PASSWORD"]) expect(appEnv[k]).toBe(`\${${k}:-}`);
   });
 });
