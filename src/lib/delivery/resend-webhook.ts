@@ -41,6 +41,8 @@ export const applyResendEvent = defineAction({
       .set({ deliveryStatus: status, deliveryStatusAt: p.at })
       .where(
         and(
+          // Defesa em profundidade: além da RLS, só e-mails da loja do webhook.
+          eq(emailLog.storeId, ctx.storeId),
           eq(emailLog.provider, "resend"),
           eq(emailLog.providerMessageId, p.emailId),
           status === "delivered" ? sql`${emailLog.deliveryStatus} is null` : undefined,

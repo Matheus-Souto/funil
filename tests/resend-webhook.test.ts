@@ -5,7 +5,7 @@ import { withStore } from "@/lib/db/client";
 import { emailLog } from "@/lib/db/schema";
 import { saveResend } from "@/lib/delivery/resend";
 import { POST } from "@/app/api/webhooks/resend/[storeId]/route";
-import { handleResendWebhook } from "@/lib/delivery/resend-webhook";
+import { applyResendEvent, handleResendWebhook } from "@/lib/delivery/resend-webhook";
 import { svixSignature, verifySvix } from "@/lib/delivery/svix";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -67,8 +67,8 @@ const send = (storeId: string, secret: string, type: string, emailId = ID) => {
   return handleResendWebhook(storeId, headers, body);
 };
 const rowsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(emailLog));
-async function seedMail(storeId: string, orderId: string | null, messageId = ID) {
-  await t.ownerDb.insert(emailLog).values({ storeId, orderId, toHash: "x", kind: "delivery", status: "sent", provider: "resend", providerMessageId: messageId });
+async function seedMail(storeId: string, orderId: string | null, messageId = ID, at?: Date) {
+  await t.ownerDb.insert(emailLog).values({ storeId, orderId, toHash: "x", kind: "delivery", status: "sent", provider: "resend", providerMessageId: messageId, ...(at ? { at } : {}) });
 }
 
 describe("status de entrega do Resend", () => {
@@ -92,6 +92,18 @@ describe("status de entrega do Resend", () => {
     expect((await runAction(listAlerts, panelCall(p.storeId), {})).failedDeliveries.map((f) => f.orderId)).toEqual([o.id]);
     const d = await runAction(getOrderDetail, panelCall(p.storeId), { id: o.id });
     expect(d.emails[0]!.deliveryStatus).toBe("bounced");
+  });
+
+  test("bounced entra no aviso; um reenvio entregue depois (nova linha sent) tira o pedido de failedDeliveries", async () => {
+    const p = await seedPanelStore();
+    const secret = secretOf();
+    await runAction(saveResend, panelCall(p.storeId), { fromEmail: "v@loja.com", apiKey: "re_chave_1234", webhookSecret: secret });
+    const o = await seedOrder(p, { status: "paid" });
+    await seedMail(p.storeId, o.id, ID, new Date(Date.now() - 60_000));
+    await send(p.storeId, secret, "email.bounced");
+    expect((await runAction(listAlerts, panelCall(p.storeId), {})).failedDeliveries.map((f) => f.orderId)).toEqual([o.id]);
+    await seedMail(p.storeId, o.id, "msg_reenvio", new Date());
+    expect((await runAction(listAlerts, panelCall(p.storeId), {})).failedDeliveries).toEqual([]);
   });
 
   test("delivered depois de bounced mantém bounced; complained depois de delivered vira complained", async () => {
@@ -121,6 +133,20 @@ describe("status de entrega do Resend", () => {
     const b = await seedResendStore();
     await seedMail(b.storeId, null, "msg_da_loja_b");
     expect(await send(a.storeId, a.secret, "email.bounced", "msg_da_loja_b")).toEqual({ status: 200 });
+    expect((await rowsOf(b.storeId))[0]!.deliveryStatus).toBeNull();
+  });
+});
+
+describe("applyResendEvent", () => {
+  test("filtra pela loja do contexto além da RLS (conexão sem RLS não altera e-mail de outra loja)", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    await seedMail(b.storeId, null, "msg_da_loja_b");
+    // ownerDb não passa pela RLS: só o filtro explícito por loja protege aqui.
+    const out = await t.ownerDb.transaction((tx) =>
+      applyResendEvent.run({ storeId: a.storeId, actor: { kind: "system" }, origin: "webhook", tx }, { type: "email.bounced", emailId: "msg_da_loja_b", at: new Date() }, undefined, undefined),
+    );
+    expect(out).toEqual({ updated: 0 });
     expect((await rowsOf(b.storeId))[0]!.deliveryStatus).toBeNull();
   });
 });
