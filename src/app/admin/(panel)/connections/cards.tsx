@@ -13,10 +13,13 @@ import {
   savePixManualAction,
   saveResendAction,
   saveSmtpAction,
+  saveTelegramAction,
   setEmailProviderAction,
   testMetaAction,
   testResendAction,
+  removeTelegramAction,
   testSmtpAction,
+  testTelegramAction,
 } from "../actions";
 
 type Runner = ReturnType<typeof useActionRunner>;
@@ -718,6 +721,198 @@ export function ResendCard({
           Os e-mails enviados pelo Resend saem da sua conta, com o remetente <b>{f.fromEmail}</b>. O domínio do remetente precisa estar verificado no Resend.
           Salvar não troca o provedor ativo: use <b>Usar este provedor</b> para isso.
         </p>
+      </ConfirmSave>
+    </section>
+  );
+}
+
+// ---- Telegram ---------------------------------------------------------------------------------------------------
+
+type TelegramData = {
+  chatId: string;
+  botUsername: string | null;
+  token: { last4: string } | "configured" | "unreadable";
+  events: { sale: boolean; pixGenerated: boolean; cardDeclined: boolean; abandoned: boolean };
+  abandonAfterMinutes: number;
+};
+
+// Mesmos limites de `saveTelegram` (o servidor valida de novo); o módulo dele usa o banco e não vai ao navegador.
+const MIN_ABANDON = 10;
+const MAX_ABANDON = 1440;
+
+const TELEGRAM_EVENT_OPTIONS = [
+  { key: "sale", label: "Venda aprovada" },
+  { key: "pixGenerated", label: "Pix gerado" },
+  { key: "cardDeclined", label: "Cartão recusado" },
+  { key: "abandoned", label: "Carrinho abandonado" },
+] as const;
+
+/** Cada loja usa o próprio bot. O token nunca volta do servidor: só os 4 últimos caracteres (ou "configurado"). */
+export function TelegramCard({ data, canWrite }: { data: TelegramData | null; canWrite: boolean }) {
+  const [editing, setEditing] = useState(!data);
+  const [f, setF] = useState({
+    token: "",
+    chatId: data?.chatId ?? "",
+    events: data?.events ?? { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false },
+    minutes: String(data?.abandonAfterMinutes ?? 30),
+  });
+  const [confirm, setConfirm] = useState(false);
+  const [disconnect, setDisconnect] = useState(false);
+  const run = useActionRunner();
+  const test = useActionRunner();
+  const drop = useActionRunner();
+  const tokenLast4 = last4Of(data?.token);
+  const needsToken = !data || data.token === "unreadable";
+  const enabled = data ? TELEGRAM_EVENT_OPTIONS.filter((o) => data.events[o.key]).map((o) => o.label) : [];
+  return (
+    <section className={s.card} aria-label="Avisos no Telegram" id="telegram">
+      <Head icon="send" title="Avisos no Telegram" sub="Envia os avisos da loja ao grupo da equipe pelo seu próprio bot" on={Boolean(data)} />
+      {editing && canWrite ? (
+        <form
+          className={s.stack}
+          style={{ marginTop: 16 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            setConfirm(true);
+          }}
+        >
+          <p className={s.hint} style={{ margin: 0 }}>
+            Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo começa com -100 (você pode vê-lo
+            adicionando o @RawDataBot ao grupo). As mensagens levam só a oferta, o valor, a forma de pagamento e o código do pedido: nenhum dado do
+            comprador.
+          </p>
+          <label className={s.field}>
+            <span className={s.label}>Token do bot</span>
+            <input
+              className={`${s.input} ${s.mono}`}
+              type="password"
+              autoComplete="new-password"
+              value={f.token}
+              required={needsToken}
+              placeholder={tokenLast4 ? `configurado (final ${tokenLast4}): deixe em branco para manter` : data?.token === "configured" ? "configurado: deixe em branco para manter" : ""}
+              onChange={(e) => setF({ ...f, token: e.target.value })}
+            />
+            {data?.token === "unreadable" ? <span className={s.hint}>O token salvo não pode ser lido: cole o token de novo.</span> : null}
+          </label>
+          <label className={s.field}>
+            <span className={s.label}>Chat id</span>
+            <input className={`${s.input} ${s.mono}`} value={f.chatId} required onChange={(e) => setF({ ...f, chatId: e.target.value })} placeholder="-100…" />
+          </label>
+          <fieldset className={s.field} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+            <legend className={s.label}>Avisar quando</legend>
+            <div className={s.stack} style={{ gap: 8 }}>
+              {TELEGRAM_EVENT_OPTIONS.map((o) => (
+                <label key={o.key} className={s.switch} style={{ fontWeight: 500 }}>
+                  <input type="checkbox" checked={f.events[o.key]} onChange={(e) => setF({ ...f, events: { ...f.events, [o.key]: e.target.checked } })} />
+                  {o.label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          {f.events.abandoned ? (
+            <label className={s.field}>
+              <span className={s.label}>Avisar abandono depois de (minutos)</span>
+              <input
+                className={s.input}
+                type="number"
+                inputMode="numeric"
+                min={MIN_ABANDON}
+                max={MAX_ABANDON}
+                step={1}
+                required
+                value={f.minutes}
+                onChange={(e) => setF({ ...f, minutes: e.target.value })}
+              />
+              <span className={s.hint}>De {MIN_ABANDON} a {MAX_ABANDON} minutos.</span>
+            </label>
+          ) : null}
+          <div className={s.formActions}>
+            {data ? (
+              <button type="button" className={s.btn} onClick={() => setEditing(false)}>
+                Cancelar
+              </button>
+            ) : null}
+            <button type="submit" className={`${s.btn} ${s.btnPrimary}`}>
+              Salvar
+            </button>
+          </div>
+        </form>
+      ) : data ? (
+        <div className={s.rows} style={{ marginTop: 12 }}>
+          <Row k="Bot">{data.botUsername ? `@${data.botUsername}` : "—"}</Row>
+          <Row k="Chat">{data.chatId}</Row>
+          <Row k="Token">
+            {data.token === "unreadable" ? "ilegível: cole o token de novo" : data.token === "configured" ? <Configured /> : `final ${data.token.last4}`}
+          </Row>
+          <Row k="Avisos">{enabled.length > 0 ? enabled.join(", ") : "nenhum ligado"}</Row>
+          {data.events.abandoned ? <Row k="Abandono">depois de {data.abandonAfterMinutes} min</Row> : null}
+        </div>
+      ) : (
+        <p className={s.muted}>Ainda não configurado.</p>
+      )}
+      <Live msg={confirm || disconnect ? null : run.msg} />
+      {canWrite && data ? (
+        <div className={s.cardFoot}>
+          <button type="button" className={s.btn} disabled={test.pending || data.token === "unreadable"} onClick={() => void test.run(() => testTelegramAction(), { refresh: false })}>
+            {test.pending ? "Enviando…" : "Enviar teste"}
+          </button>
+          {!editing ? (
+            <button type="button" className={s.btn} onClick={() => setEditing(true)}>
+              Editar
+            </button>
+          ) : null}
+          <button type="button" className={`${s.btn} ${s.btnDangerGhost}`} onClick={() => setDisconnect(true)}>
+            Desconectar
+          </button>
+          <div style={{ width: "100%" }}>
+            <Live msg={test.msg} />
+          </div>
+        </div>
+      ) : null}
+      <ConfirmSave
+        open={confirm}
+        onClose={() => setConfirm(false)}
+        title="Salvar o Telegram da loja?"
+        run={run}
+        label="Salvar"
+        pendingLabel="Salvando…"
+        onConfirm={async () => {
+          const r = await run.run(() =>
+            saveTelegramAction({
+              chatId: f.chatId.trim(),
+              ...(f.token.trim() ? { token: f.token.trim() } : {}),
+              events: f.events,
+              ...(f.events.abandoned ? { abandonAfterMinutes: Number(f.minutes) } : {}),
+            }),
+          );
+          if (r.ok) {
+            setConfirm(false);
+            setEditing(false);
+            setF((x) => ({ ...x, token: "" }));
+          }
+        }}
+      >
+        <p>
+          Os avisos passam a ir para o chat <b>{f.chatId}</b> pelo bot. O token é conferido no Telegram antes de salvar.
+        </p>
+      </ConfirmSave>
+      <ConfirmSave
+        open={disconnect}
+        onClose={() => setDisconnect(false)}
+        title="Desconectar o Telegram? Os avisos deixam de ser enviados."
+        run={drop}
+        label="Desconectar"
+        pendingLabel="Desconectando…"
+        onConfirm={async () => {
+          const r = await drop.run(() => removeTelegramAction());
+          if (r.ok) {
+            setDisconnect(false);
+            setEditing(true);
+            setF({ token: "", chatId: "", events: { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false }, minutes: "30" });
+          }
+        }}
+      >
+        <p>Você pode conectar de novo quando quiser, com o mesmo bot ou outro.</p>
       </ConfirmSave>
     </section>
   );

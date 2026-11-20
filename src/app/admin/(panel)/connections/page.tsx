@@ -5,7 +5,7 @@ import { connectionsStatus } from "@/lib/connections";
 import { PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
-import { AsaasCard, MetaCard, PixManualCard, ResendCard, SmtpCard } from "./cards";
+import { AsaasCard, MetaCard, PixManualCard, ResendCard, SmtpCard, TelegramCard } from "./cards";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Conexões" };
@@ -52,6 +52,7 @@ export default async function ConnectionsPage() {
           <PixManualCard data={st.pixManual} canWrite={canWrite} />
           <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} active={st.emailProvider === "smtp"} usable={st.emailUsable} />
           <ResendCard data={st.resend} canWrite={canWrite} defaultTo={userEmail} storeName={storeName} active={st.emailProvider === "resend"} usable={st.emailUsable} />
+          <TelegramCard data={st.telegram} canWrite={canWrite} />
         </div>
         <div className={s.stack}>
           <AsaasCard data={st.asaas} canWrite={canWrite} />
