@@ -1,17 +1,21 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { listActions } from "@/lib/actions/registry";
 import { createOffer } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders } from "@/lib/db/schema";
 import {
   ASAAS_LIMITS,
+  CARD_UNAVAILABLE_MESSAGE,
   CHECKOUT_LIMIT_MESSAGE,
   PIX_REGEN_PER_HOUR,
   PIX_UNAVAILABLE_MESSAGE,
   TOUCH_MAX_BYTES,
   VIEW_LIMIT_PER_HOUR,
+  checkoutMethods,
   checkoutRenewCardTicket,
   checkoutStart,
   checkoutView as checkoutViewAction,
@@ -600,7 +604,7 @@ describe("fix 1: checkout.view (gravação anônima)", () => {
   });
 });
 
-describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
+describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
   const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
 
   test("startCheckout com a chave: cartão devolve um bilhete que verifyCardTicket aceita para aquele pedido; Pix não", async () => {
@@ -622,10 +626,22 @@ describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
     expect(verifyCardTicket(renewed, KEY)).toMatchObject({ publicId: card.publicId, totalCents: 990 + 1710, maxInstallments: 4 });
   });
 
-  test("startCheckout sem a chave (flag desligada): cartão sem bilhete, como hoje", async () => {
+  test("startCheckout sem a chave (serviço de cartão não configurado): cartão recusado sem criar pedido; Pix segue", async () => {
     const s = await seed({ asaas: createFakeAsaas() });
-    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }));
-    expect(card).toEqual({ publicId: card.publicId, method: "card_asaas" });
+    const before = await withStore(s.storeId, (tx) => tx.select({ id: orders.id }).from(orders));
+    const e = await fail(startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } })));
+    expect([e.code, e.message]).toEqual(["conflict", CARD_UNAVAILABLE_MESSAGE]);
+    expect(await withStore(s.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).toEqual(before);
+    expect((await startCheckout({ storeId: s.storeId }, startInput(s.slug))).method).toBe("pix_manual");
+  });
+
+  test("checkoutMethods: sem o serviço de cartão, o checkout mostra só Pix; oferta só de cartão abre com o cartão (indisponível)", () => {
+    expect(checkoutMethods(["pix", "card"], true)).toEqual(["pix", "card"]);
+    expect(checkoutMethods(["pix", "card"], false)).toEqual(["pix"]);
+    // Sem Pix para oferecer: a página abre com o cartão, e o checkout (sem iframe) mostra o aviso de indisponível.
+    expect(checkoutMethods(["card"], false)).toEqual(["card"]);
+    expect(checkoutMethods(["card", "boleto"], true)).toEqual(["card"]);
+    expect(checkoutMethods([], false)).toEqual([]);
   });
 
   test("renewCardTicket: com o bilhete anterior (mesmo vencido), pedido de cartão pendente ganha bilhete novo do mesmo pedido", async () => {
@@ -659,11 +675,26 @@ describe("cartão isolado (CARD_ISOLATED): bilhete do pedido", () => {
     const s = await seed({ asaas: createFakeAsaas() });
     const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
     const b = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
-    const run = (ticket: unknown) => runAction(checkoutRenewCardTicket, pub(s.storeId), { publicId: a.publicId, ticket, ticketKey: KEY });
+    // A chave vem do servidor (`call.server`), fora da entrada da ação.
+    const run = (ticket: unknown) => runAction(checkoutRenewCardTicket, { ...pub(s.storeId), server: { ticketKey: KEY } }, { publicId: a.publicId, ticket });
     expect((await fail(run(b.cardTicket))).code).toBe("forbidden");
     expect((await fail(run(undefined))).code).toBe("invalid_input");
     const ok = await run(a.cardTicket);
     expect(verifyCardTicket(ok.ticket, KEY)).toMatchObject({ storeId: s.storeId, publicId: a.publicId });
+  });
+
+  test("checkout.renewCardTicket: a chave (e a hora) ficam fora da entrada: nem no schema, nem no catálogo de ações", async () => {
+    const shape = z.toJSONSchema(checkoutRenewCardTicket.input) as { properties?: Record<string, unknown> };
+    expect(Object.keys(shape.properties ?? {}).sort()).toEqual(["publicId", "ticket"]);
+    const listed = listActions().find((x) => x.name === "checkout.renewCardTicket")!;
+    expect(JSON.stringify(listed.inputSchema)).not.toMatch(/ticketKey|nowMs/);
+    // Uma chave escolhida por quem chama, na entrada, é descartada: sem a do servidor, nada é emitido.
+    const s = await seed({ asaas: createFakeAsaas() });
+    const a = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    const chosen = "c".repeat(64);
+    const e = await runAction(checkoutRenewCardTicket, pub(s.storeId), { publicId: a.publicId, ticket: a.cardTicket, ticketKey: chosen, nowMs: 0 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(Error);
+    expect(e).not.toBeInstanceOf(ActionError);
   });
 
   test("renewCardTicket: pedido de outra loja, pago ou de Pix -> falha", async () => {

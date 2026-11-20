@@ -29,8 +29,7 @@ const PRODUCTION = [
   "TRUST_PROXY",
   "SETUP_TOKEN",
   // Cartão isolado: o app emite o bilhete (CARD_TICKET_KEY), re-sela a conexão Asaas (ASAAS_SEAL_KEY) e a migração cria
-  // o papel `card` com login (CARD_DB_PASSWORD).
-  "CARD_ISOLATED",
+  // o papel `card` com login (CARD_DB_PASSWORD). CARD_ISOLATED é obsoleta (o env a ignora) e não vai ao app.
   "CARD_ORIGIN",
   "CARD_TICKET_KEY",
   "ASAAS_SEAL_KEY",
@@ -122,15 +121,15 @@ test("compose.yaml: app sem core dump (o processo que recebe o cartão nunca gra
   expect(compose.services.app!.environment!.SETUP_TOKEN).toBe("${SETUP_TOKEN:-}");
 });
 
-describe("compose.yaml: serviço de cartão isolado (profile card)", () => {
+describe("compose.yaml: serviço de cartão isolado (sobe sempre)", () => {
   const card = compose.services.card!;
   const networksOf = (name: string) => {
     const n = compose.services[name]!.networks;
     return n === undefined ? ["default"] : Array.isArray(n) ? n : Object.keys(n);
   };
 
-  test("só sobe com COMPOSE_PROFILES=card; imagem do estágio card do mesmo Dockerfile", () => {
-    expect(card.profiles).toEqual(["card"]);
+  test("sobe sempre, sem profile (sem CARD_ORIGIN fica desligado); imagem do estágio card do mesmo Dockerfile", () => {
+    expect(card.profiles).toBeUndefined();
     expect(card.build).toMatchObject({ context: ".", dockerfile: "deploy/Dockerfile", target: "card" });
   });
 
@@ -172,9 +171,9 @@ describe("compose.yaml: serviço de cartão isolado (profile card)", () => {
     expect(networksOf("app")).not.toContain("card");
   });
 
-  test("o app recebe as variáveis do cartão isolado (desligado por padrão)", () => {
+  test("o app recebe as variáveis do cartão isolado (vazias por padrão: sem CARD_ORIGIN, cartão indisponível); CARD_ISOLATED não", () => {
     const appEnv = compose.services.app!.environment!;
-    expect(appEnv.CARD_ISOLATED).toBe("${CARD_ISOLATED:-0}");
+    expect("CARD_ISOLATED" in appEnv).toBe(false);
     for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY", "CARD_DB_PASSWORD"]) expect(appEnv[k]).toBe(`\${${k}:-}`);
   });
 });
@@ -210,16 +209,17 @@ describe("Caddy: domínio do cartão só para o card, e nada do card fora dele",
   }
 
   for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi"]) {
-    test(`${file}: com CARD_ISOLATED=1, a rota antiga do cartão (/api/checkout/card) morre no Caddy, em todo site do app`, () => {
+    test(`${file}: a rota antiga do cartão (/api/checkout/card) morre no Caddy, sempre, em todo site do app`, () => {
       for (const site of caddySites(read(file))) {
-        expect(site.body, site.head).toMatch(/@legacyCard \{\n\s*path \/api\/checkout\/card\n\s*expression `"\{\$CARD_ISOLATED\}" == "1"`\n\s*\}/);
+        expect(site.body, site.head).toMatch(/@legacyCard \{\n\s*path \/api\/checkout\/card\n\s*\}/);
+        expect(site.body, site.head).not.toContain("CARD_ISOLATED");
         expect(site.body, site.head).toMatch(/respond @legacyCard 404/);
       }
     });
   }
 
-  test("compose: o Caddy recebe CARD_ISOLATED (padrão 0: sem a flag, a rota antiga segue)", () => {
-    expect(compose.services.caddy!.environment!.CARD_ISOLATED).toBe("${CARD_ISOLATED:-0}");
+  test("compose: o Caddy não recebe mais CARD_ISOLATED (a rota antiga para sem condição)", () => {
+    expect("CARD_ISOLATED" in compose.services.caddy!.environment!).toBe(false);
   });
 
   /** Interpolação do compose para as formas usadas aqui: `${X:+valor}` (só se X não vazia) e `${X:-padrão}`. */

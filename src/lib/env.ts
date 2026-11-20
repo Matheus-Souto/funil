@@ -26,8 +26,7 @@ const PLATFORM_HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:
 const schema = z.object({
   // `app` = o app Next; `card` = o serviço isolado do cartão (nunca recebe o SECRET; ver parseEnv).
   SERVICE: z.enum(["app", "card"]).default("app"),
-  // 1 = o formulário do cartão é servido pelo serviço isolado (CARD_ORIGIN) em vez de pelo app.
-  CARD_ISOLATED: z.enum(["0", "1"]).default("0").transform((v) => v === "1"),
+  // Origem do serviço de cartão isolado. No app, sem ela o cartão fica indisponível (o checkout mostra só Pix).
   CARD_ORIGIN: z.string().min(1).refine(isCardOrigin, "deve ser uma origem https://host[:porta] sem caminho, query nem barra final (http só em loopback)").optional(),
   CARD_TICKET_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
   ASAAS_SEAL_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
@@ -101,6 +100,8 @@ export function isLoopbackUrl(value: string): boolean {
 export function parseEnv(source: Record<string, string | undefined>): Env {
   // Variável vazia (`FOO=`) conta como ausente.
   const cleaned = Object.fromEntries(Object.entries(source).filter(([, v]) => v !== undefined && v !== ""));
+  // Obsoleta: o cartão é sempre o do serviço isolado. Aceita com qualquer valor e ignorada (o verify do main ainda a passa).
+  delete cleaned.CARD_ISOLATED;
   const isCard = cleaned.SERVICE === "card";
   const extra: string[] = [];
   if (isCard) {
@@ -111,9 +112,11 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
   } else if (cleaned.SECRET === undefined) {
     extra.push("SECRET (faltando)");
   }
-  if (isCard || cleaned.CARD_ISOLATED === "1") {
+  // Serviço de cartão: as três sempre. App: sem CARD_ORIGIN o cartão fica indisponível (a instalação só com Pix sobe);
+  // com ela, as chaves do bilhete e da selagem do Asaas são obrigatórias.
+  if (isCard || cleaned.CARD_ORIGIN !== undefined) {
     for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY"]) {
-      if (cleaned[k] === undefined) extra.push(`${k} (faltando; obrigatória com ${isCard ? "SERVICE=card" : "CARD_ISOLATED=1"})`);
+      if (cleaned[k] === undefined) extra.push(`${k} (faltando; obrigatória com ${isCard ? "SERVICE=card" : "CARD_ORIGIN"})`);
     }
   }
   // Segredos distintos: um vazamento de um não pode abrir os outros. Nunca incluir os valores na mensagem.
@@ -180,6 +183,14 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
 }
 
 let cached: Env | undefined;
+
+/**
+ * O app oferece cartão só com o serviço de cartão configurado (CARD_ORIGIN e a chave dos bilhetes). Sem ele, o checkout
+ * esconde o cartão, o editor de oferta não deixa ligar e o painel avisa (docs/instalacao.md, seção 12).
+ */
+export function cardServiceConfigured(e: { CARD_ORIGIN?: string; CARD_TICKET_KEY?: string }): e is { CARD_ORIGIN: string; CARD_TICKET_KEY: string } {
+  return e.CARD_ORIGIN !== undefined && e.CARD_TICKET_KEY !== undefined;
+}
 
 /** O SECRET do app. Só o app o tem: o serviço de cartão nunca o recebe, então quem chama sem SECRET lança. */
 export function requireSecret(from: { SECRET?: string } = env): string {

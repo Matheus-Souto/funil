@@ -14,13 +14,14 @@ import { and, asc, count, desc, eq, gt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
+import { UNKNOWN_IP } from "@/lib/client-ip";
 import { withStore } from "@/lib/db/client";
 import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createOrder, type Order } from "@/lib/orders/create";
-import { UNAVAILABLE_MESSAGE as CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/asaas/card";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
+import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { issueCardTicket, verifyCardTicketForRenewal } from "@/lib/payments/card-ticket";
 import { MANUAL_RESERVE_AFTER_EXPIRY_MS, manualPixBrCode } from "@/lib/payments/manual";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
@@ -42,8 +43,6 @@ export const VIEW_LIMIT_PER_HOUR = 30;
 /** Toque (UTM etc.) maior que isto, serializado, é descartado: nunca grava payload grande de anônimo. */
 export const TOUCH_MAX_BYTES = 2048;
 const HOUR = 3600;
-/** IP sem proxy confiável (ver card-http.ts): sem limite por IP nos pedidos. */
-const UNKNOWN_IP = "unknown";
 
 const manualIpKey = (ip: string) => `checkout:pix_manual:ip:${ipRateKey(ip)}`;
 const asaasIpKey = (ip: string) => `checkout:asaas:ip:${ipRateKey(ip)}`;
@@ -234,13 +233,16 @@ async function enforceEmailLimit(ctx: Ctx, email: string): Promise<void> {
  * `checkout.start` + cobrança Pix do Asaas criada na hora, com o QR guardado (HTTP fora da transação). Celular
  * recusado pelo Asaas volta como `invalid_input` para o comprador corrigir (o pedido sem cobrança expira sozinho em
  * 24 h); outras falhas deixam a página do pedido com o botão "Gerar novo código Pix" (`orders.regeneratePix`).
- * `cardTicketKey` (só com CARD_ISOLATED=1): pedido de cartão volta com o bilhete que o iframe do cartão apresenta.
+ * `cardTicketKey` (CARD_TICKET_KEY): pedido de cartão volta com o bilhete que o iframe do cartão apresenta. Sem ela (serviço
+ * de cartão não configurado), cartão é recusado antes de criar o pedido.
  */
 export async function startCheckout(
   call: { storeId: string },
   raw: unknown,
   opts: { cardTicketKey?: string; now?: Date } = {},
 ): Promise<{ publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }> {
+  const method = raw !== null && typeof raw === "object" ? (raw as { method?: unknown }).method : undefined;
+  if (method === "card" && !opts.cardTicketKey) throw new ActionError("conflict", CARD_UNAVAILABLE_MESSAGE);
   const out = await runAction(checkoutStart, publicCall(call.storeId), raw);
   if (out.method === "card_asaas" && opts.cardTicketKey) {
     const cardTicket = issueCardTicket(
@@ -261,6 +263,17 @@ export async function startCheckout(
   return { publicId: out.publicId, method: out.method };
 }
 
+/**
+ * Métodos que o checkout mostra: sem o serviço de cartão configurado, só Pix. Oferta só de cartão continua com o cartão
+ * (o checkout, sem iframe, mostra o aviso de indisponível e não cria pedido; `startCheckout` também recusa).
+ */
+export function checkoutMethods(methods: readonly string[], cardOn: boolean): ("pix" | "card")[] {
+  const known = methods.filter((m): m is "pix" | "card" => m === "pix" || m === "card");
+  if (cardOn) return known;
+  const pix = known.filter((m) => m === "pix");
+  return pix.length > 0 ? pix : known;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // checkout.renewCardTicket
 
@@ -273,22 +286,21 @@ export const checkoutRenewCardTicket = defineAction({
   name: "checkout.renewCardTicket",
   description:
     "Emite um bilhete novo de um pedido de cartão pendente da loja para quem já tinha um bilhete do mesmo pedido (o anterior venceu ou está perto de vencer).",
-  // `ticketKey` (CARD_TICKET_KEY) e `nowMs` vêm do servidor, como o `clientIp` do checkout. Uma chave escolhida por
-  // quem chama não ajuda ninguém: o bilhete novo sai assinado com ela, e o serviço de cartão só aceita a verdadeira.
+  // A chave (CARD_TICKET_KEY) e a hora vêm do servidor por `call.server`, fora da entrada: não aparecem no schema, no
+  // catálogo de ações nem na auditoria, e quem chama a ação não as escolhe.
   input: z.object({
     publicId: publicIdSchema,
     ticket: z.string().min(1).max(2048),
-    ticketKey: z.string().min(32),
-    nowMs: z.number().int().optional(),
   }),
   permission: "public",
-  // Anônima e repetível (o bilhete dura 30 min); a entrada tem a chave: sem linha de auditoria, como checkout.view.
+  // Anônima e repetível (o bilhete dura 30 min): sem linha de auditoria, como checkout.view.
   audit: false,
-  async run(ctx, input): Promise<{ ticket: string }> {
-    const now = input.nowMs === undefined ? new Date() : new Date(input.nowMs);
+  async run(ctx, input, _prepared: undefined, server?: { ticketKey: string; now?: Date }): Promise<{ ticket: string }> {
+    if (!server?.ticketKey) throw new Error("checkout.renewCardTicket sem a chave dos bilhetes (call.server.ticketKey)");
+    const now = server.now ?? new Date();
     // Só quem tinha um bilhete do MESMO pedido e da MESMA loja (íntegro; vencido há no máximo 24 h): saber o
     // `publicId` não basta. Conferido antes de olhar o pedido.
-    const prev = verifyCardTicketForRenewal(input.ticket, input.ticketKey, now);
+    const prev = verifyCardTicketForRenewal(input.ticket, server.ticketKey, now);
     if (!prev || prev.storeId !== ctx.storeId || prev.publicId !== input.publicId) throw new ActionError("forbidden", BAD_TICKET);
     // RLS: pedido de outra loja não aparece (not_found, como um publicId inexistente).
     const [o] = await ctx.tx
@@ -308,7 +320,7 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
     const terms = { totalCents: o.totalCents, maxInstallments: o.maxInstallments };
-    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, input.ticketKey, now) };
+    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, server.ticketKey, now) };
   },
 });
 
@@ -318,9 +330,9 @@ export const checkoutRenewCardTicket = defineAction({
  */
 export async function renewCardTicket(call: { storeId: string }, raw: unknown, key: string, now: Date = new Date()): Promise<string> {
   const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  // Só os dois campos do navegador; a chave e a hora são do servidor.
-  const input = { publicId: body.publicId, ticket: body.ticket, ticketKey: key, nowMs: now.getTime() };
-  return (await runAction(checkoutRenewCardTicket, publicCall(call.storeId), input)).ticket;
+  // Só os dois campos do navegador na entrada; a chave e a hora vão por `server`.
+  const input = { publicId: body.publicId, ticket: body.ticket };
+  return (await runAction(checkoutRenewCardTicket, { ...publicCall(call.storeId), server: { ticketKey: key, now } }, input)).ticket;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -384,7 +384,7 @@ select.input {
   color: var(--color-success);
 }
 
-/* ---- Iframe do cartão (CARD_ISOLATED=1) ---- */
+/* ---- Iframe do cartão (serviço isolado, CARD_ORIGIN) ---- */
 .cardFrameBox {
   margin-top: 14px;
 }

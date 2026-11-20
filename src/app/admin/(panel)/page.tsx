@@ -7,10 +7,12 @@ import { requirePanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
+import { cardServiceConfigured, env } from "@/lib/env";
 import { brl } from "@/lib/format";
 import { metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
+import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
 import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { BarList, Kpi, PageHead, deltaOf } from "../blocks";
@@ -64,6 +66,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
   const failedDeliveries = alerts?.failedDeliveries ?? (hasPermission(role, "orders.read") ? await runAction(listDeliveryFailures, call, {}) : []);
   const canAck = hasPermission(role, "connections.write");
+  // Instalação sem o serviço de cartão (sem CARD_ORIGIN) e oferta ativa com cartão: o comprador só vê Pix.
+  const cardNotice = cardSetupNoticeNeeded(cardServiceConfigured(env), hasPermission(role, "offers.read") ? await runAction(listOffers, call, {}) : []);
 
   const ticket = m.paid > 0 ? Math.round(m.revenueCents / m.paid) : 0;
   const prevTicket = prev.paid > 0 ? Math.round(prev.revenueCents / prev.paid) : 0;
@@ -96,6 +100,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
       />
 
       <div className={s.alerts}>
+        {cardNotice ? <CardSetupBanner /> : null}
         {pending > 0 ? (
           <div className={s.banner}>
             <PIcon name="hourglass" />
@@ -258,6 +263,19 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   );
 }
 
+/** Aviso de cartão indisponível (instalação sem o serviço de cartão; docs/instalacao.md, seção 12). */
+function CardSetupBanner() {
+  return (
+    <div className={s.banner} data-tone="danger" role="alert">
+      <PIcon name="triangle-alert" />
+      <div>
+        <b>Cartão fora do checkout</b>
+        <p>{CARD_SETUP_NOTICE}</p>
+      </div>
+    </div>
+  );
+}
+
 /** P04: loja nova, sem nenhum pedido nem visita. Primeiros passos a partir do que já está configurado. */
 async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runAction>[1]; storeName: string }) {
   const conn = await runAction(connectionsStatus, call, {});
@@ -278,6 +296,11 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
   return (
     <>
       <PageHead title={`Boas-vindas, ${storeName}`} sub="Sua loja está quase pronta. Falta pouco para a primeira venda." />
+      {cardSetupNoticeNeeded(cardServiceConfigured(env), offers) ? (
+        <div className={s.alerts}>
+          <CardSetupBanner />
+        </div>
+      ) : null}
       <div className={s.stack}>
         <div className={s.splitWide}>
           <section className={s.card}>

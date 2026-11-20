@@ -1,4 +1,4 @@
-// Lado do app da conversa com o iframe do cartão (CARD_ISOLATED=1). Lógica pura, sem DOM e sem React: o componente
+// Lado do app da conversa com o iframe do cartão (serviço isolado, CARD_ORIGIN). Lógica pura, sem DOM e sem React: o componente
 // do checkout liga isto ao <iframe> e ao `window.addEventListener("message")`.
 //
 // - `acceptFrameMessage`: só aceita mensagem com `origin === CARD_ORIGIN` E `source === iframe.contentWindow`, e só se
@@ -64,12 +64,41 @@ export function frameFieldNames(fields: readonly (string | readonly string[])[])
   return out;
 }
 
+/** O único formato de cor que o protocolo aceita no `config` (parseParentMsg). */
+const BRAND_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Um "Pagar" por vez. O estado `busy` do React só muda no próximo render: um Enter no iframe (`submit`) e um clique no
+ * botão no mesmo instante passariam os dois e criariam um pedido extra. `run` ignora (devolve `false`) quem chega com
+ * outro em andamento e libera ao terminar, com ou sem erro.
+ */
+export function createSubmitGate(): { readonly running: boolean; run(fn: () => Promise<void>): Promise<boolean> } {
+  let running = false;
+  return {
+    get running() {
+      return running;
+    },
+    async run(fn) {
+      if (running) return false;
+      running = true;
+      try {
+        await fn();
+      } finally {
+        running = false;
+      }
+      return true;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Controlador do iframe
 
 export interface FrameConfig {
   totalCents: number;
   maxInstallments: number;
+  /** Cor da loja (#RRGGBB), aplicada no iframe; ausente = cor padrão. */
+  brandColor?: string;
 }
 
 export interface FrameControllerDeps {
@@ -83,6 +112,8 @@ export interface FrameControllerDeps {
   newId: () => string;
   onStatus: (s: FrameStatus) => void;
   onHeight: (px: number) => void;
+  /** Enter num campo do iframe (`submit`): o checkout faz o mesmo que o botão "Pagar". */
+  onSubmit?: () => void;
 }
 
 export interface CardFrameController {
@@ -118,10 +149,15 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
   };
   const sendConfig = (force: boolean) => {
     if (status !== "ready" || config === null) return;
-    const key = `${config.totalCents}/${config.maxInstallments}`;
+    const key = `${config.totalCents}/${config.maxInstallments}/${config.brandColor ?? ""}`;
     if (!force && key === sentConfig) return;
     sentConfig = key;
-    d.post({ t: "funil-card:config", totalCents: config.totalCents, maxInstallments: config.maxInstallments });
+    d.post({
+      t: "funil-card:config",
+      totalCents: config.totalCents,
+      maxInstallments: config.maxInstallments,
+      ...(config.brandColor ? { brandColor: config.brandColor } : {}),
+    });
   };
   const settleAll = () => {
     for (const p of pending.values()) {
@@ -154,7 +190,9 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       }, FRAME_READY_TIMEOUT_MS);
     },
     setConfig(c) {
-      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments };
+      // Cor fora de #rrggbb fica de fora: o iframe recusaria o `config` inteiro (e ficaria sem o total).
+      const color = c.brandColor !== undefined && BRAND_COLOR.test(c.brandColor) ? { brandColor: c.brandColor } : {};
+      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...color };
       sendConfig(false);
     },
     handle(ev) {
@@ -173,6 +211,10 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
           return;
         case "funil-card:height":
           d.onHeight(msg.px);
+          return;
+        case "funil-card:submit":
+          // Só do iframe já pronto (origem e janela conferidas acima).
+          if (status === "ready") d.onSubmit?.();
           return;
         case "funil-card:validated":
         case "funil-card:result": {

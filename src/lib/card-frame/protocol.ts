@@ -38,13 +38,16 @@ export function randomUuid(c: { randomUUID?: () => string; getRandomValues<T ext
 export type ResultStatus = "approved" | "declined" | "unknown" | "unavailable" | "error";
 
 export type ParentMsg =
-  | { t: "funil-card:config"; totalCents: number; maxInstallments: number }
+  /** `brandColor`: cor da loja (#rrggbb), aplicada no iframe como variável CSS. */
+  | { t: "funil-card:config"; totalCents: number; maxInstallments: number; brandColor?: string }
   | { t: "funil-card:validate"; id: string }
   /** `turnstileToken`: desafio resolvido no checkout (o Turnstile nunca roda no documento do cartão). */
   | { t: "funil-card:pay"; id: string; orderPublicId: string; ticket: string; buyerCpf: string; turnstileToken?: string };
 
 export type FrameMsg =
   | { t: "funil-card:ready" }
+  /** Enter num campo do iframe: o checkout faz o mesmo que o botão "Pagar" (valida, cria o pedido e paga). */
+  | { t: "funil-card:submit" }
   | { t: "funil-card:height"; px: number }
   | { t: "funil-card:validated"; id: string; ok: boolean; fields: string[] }
   | {
@@ -93,7 +96,14 @@ export function parseParentMsg(data: unknown): ParentMsg | null {
       const totalCents = int(get(d, "totalCents"), 1, 100_000_000);
       const maxInstallments = int(get(d, "maxInstallments"), 1, 12);
       if (totalCents === null || maxInstallments === null) return null;
-      return { t: "funil-card:config", totalCents, maxInstallments };
+      const out: Extract<ParentMsg, { t: "funil-card:config" }> = { t: "funil-card:config", totalCents, maxInstallments };
+      const color = get(d, "brandColor");
+      if (color !== undefined) {
+        // Só #rrggbb: o valor vira variável CSS no iframe (nada de url(), ponto e vírgula ou outra sintaxe).
+        if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) return null;
+        out.brandColor = color;
+      }
+      return out;
     }
     case "funil-card:validate": {
       const id = str(get(d, "id"), 64);
@@ -126,6 +136,8 @@ export function parseFrameMsg(data: unknown): FrameMsg | null {
   switch (get(d, "t")) {
     case "funil-card:ready":
       return { t: "funil-card:ready" };
+    case "funil-card:submit":
+      return { t: "funil-card:submit" };
     case "funil-card:height": {
       const px = int(get(d, "px"), 0, 4000);
       return px === null ? null : { t: "funil-card:height", px };

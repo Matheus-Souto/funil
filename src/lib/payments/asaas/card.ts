@@ -20,23 +20,26 @@ import { and, eq, gt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { alertSeller } from "@/lib/alerts";
 import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
+import { UNKNOWN_IP } from "@/lib/client-ip";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, integration, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { IntegrationSecretUnreadable } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
+import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
-import { verifyTurnstile } from "@/lib/payments/turnstile";
+import { checkoutHostnames, verifyTurnstile, type TurnstileDeps } from "@/lib/payments/turnstile";
+import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardExpiryValid } from "@/lib/validation/br";
 import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
 import { buyerOf, ensureAsaasCustomer } from "./pix";
 import { applyAsaasPayment, asaasPaymentInput, mapAsaasStatus } from "./webhook";
 
-/** IP desconhecido (sem proxy confiável o app não lê X-Forwarded-For): sem limite por IP; valem e-mail e cartão. */
-export const UNKNOWN_IP = "unknown";
-export const UNAVAILABLE_MESSAGE = "Pagamento por cartão indisponível no momento. Tente pagar com Pix.";
+/** IP desconhecido (sem proxy confiável o X-Forwarded-For não é lido): sem limite por IP; valem e-mail e cartão. */
+export { UNKNOWN_IP };
+export const UNAVAILABLE_MESSAGE = CARD_UNAVAILABLE_MESSAGE;
 export const DECLINE_MESSAGE = "Pagamento recusado. Confira os dados ou pague com Pix.";
 export const UNKNOWN_MESSAGE = "Não foi possível confirmar o pagamento. Verifique em instantes antes de tentar de novo.";
 export const ANALYSIS_MESSAGE = "Já existe um pagamento em análise para este pedido. Aguarde alguns minutos.";
@@ -90,6 +93,8 @@ export interface CardDeps {
   /** Relógio (limites, janela de bloqueio, dueDate e created_at da tentativa). */
   now?: () => Date;
   verifyTurnstile?: (token: string | undefined, ip: string) => Promise<boolean>;
+  /** Sem `verifyTurnstile`: segredo e fetch do siteverify (testes); os hosts são sempre os do checkout da loja. */
+  turnstile?: TurnstileDeps;
   /** Turnstile está configurado (padrão: TURNSTILE_SECRET definido). Decide o que o disjuntor da loja exige. */
   turnstileConfigured?: boolean;
 }
@@ -135,7 +140,7 @@ const defaultWait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 type Attempt = typeof cardAttempt.$inferSelect;
 
 /**
- * Paga um pedido `card_asaas` com o cartão digitado. Chamada só pela rota POST /api/checkout/card.
+ * Paga um pedido `card_asaas` com o cartão digitado. Chamada só pelo serviço de cartão isolado (POST /api/card).
  * Erros: `invalid_input`, `not_found`, `conflict`, `rate_limited` (details `{ captcha: true }` quando falta o Turnstile).
  */
 export async function payWithCard(call: { storeId: string }, raw: CardPaymentInput, deps: CardDeps = {}): Promise<CardResult> {
@@ -217,7 +222,10 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   const recentDecline =
     (knownIp && (await hadRecentEvent(`card:decline:ip:${ipKey}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
   if (recentDecline || (breakerOn && turnstileOn)) {
-    const verify = deps.verifyTurnstile ?? verifyTurnstile;
+    const verify =
+      deps.verifyTurnstile ??
+      (async (tok: string | undefined, at: string) =>
+        verifyTurnstile(tok, at, { hosts: checkoutHostnames(await storeCheckoutOrigins(storeId)), ...deps.turnstile }));
     if (!(await verify(input.turnstileToken, ip))) {
       throw new ActionError("rate_limited", "Confirme que você não é um robô e tente de novo.", { captcha: true });
     }

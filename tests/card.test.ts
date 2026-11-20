@@ -4,6 +4,7 @@ import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
+import { env } from "@/lib/env";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import {
   payWithCard,
@@ -16,7 +17,8 @@ import {
   type CardDeps,
   type CardPaymentInput,
 } from "@/lib/payments/asaas/card";
-import { clientIpFrom, handleCardCheckout } from "@/lib/payments/asaas/card-http";
+import { clientIpFrom } from "@/lib/client-ip";
+import { cardErrorResponse } from "@/lib/payments/asaas/card-http";
 import { ensureAsaasCustomer, startAsaasPix } from "@/lib/payments/asaas/pix";
 import { handleAsaasWebhook } from "@/lib/payments/asaas/webhook";
 import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
@@ -844,6 +846,25 @@ describe("payWithCard: limites e Turnstile", () => {
   });
 });
 
+describe("payWithCard: Turnstile confere o host do checkout da loja", () => {
+  test("token resolvido no checkout da loja passa; resolvido em outro host é recusado (captcha de novo)", async () => {
+    const { call, storeId, offerId } = await setup();
+    const ip = "203.0.113.78";
+    const hostOf = { value: "" };
+    const siteverify = (async () => Response.json({ success: true, hostname: hostOf.value })) as unknown as typeof fetch;
+    const deps: CardDeps = { ...fastDeps, turnstile: { secret: "s", fetch: siteverify } };
+    const o1 = await newCardOrder(storeId, offerId, email());
+    expect((await payWithCard(call, input(o1.publicId, { clientIp: ip, number: DECLINE }), deps)).status).toBe("declined");
+    const o2 = await newCardOrder(storeId, offerId, email());
+    hostOf.value = "evil.example";
+    const e = (await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "tok" }), deps).catch((x: unknown) => x)) as ActionError;
+    expect([e.code, e.details]).toEqual(["rate_limited", { captcha: true }]);
+    // Checkout desta loja (MODE=single dos testes: o host do BASE_URL).
+    hostOf.value = new URL(env.BASE_URL).hostname;
+    expect((await payWithCard(call, input(o2.publicId, { clientIp: ip, turnstileToken: "tok" }), deps)).status).toBe("approved");
+  });
+});
+
 describe("payWithCard: parcelado", () => {
   test("envia installmentCount + totalValue (sem value); webhook de outra parcela não vira cobrança em dobro; estorno pelo parcelamento", async () => {
     const { fake, call, storeId, offerId, webhookToken } = await setup(1000, 3);
@@ -1108,96 +1129,7 @@ describe("Asaas (pendências da Task 9)", () => {
   });
 });
 
-describe("rota POST /api/checkout/card", () => {
-  const store = { id: "", slug: "s", name: "Loja" };
-  const req = (body: string, headers: Record<string, string> = {}, url = "http://127.0.0.1:3000/api/checkout/card") =>
-    new Request(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000", ...headers },
-      body,
-    });
-  const noOrigin = (body: string, headers: Record<string, string> = {}) =>
-    new Request("http://127.0.0.1:3000/api/checkout/card", {
-      method: "POST",
-      headers: { "content-type": "application/json", host: "127.0.0.1:3000", ...headers },
-      body,
-    });
-
-  test("CARD_ISOLATED=1: 404 sem ler o corpo, sem loja e sem cobrança (nenhum cartão entra no app)", async () => {
-    let resolved = 0;
-    let paid = 0;
-    const opts = {
-      nodeEnv: "test",
-      cardIsolated: true,
-      resolveStore: async () => {
-        resolved++;
-        return store;
-      },
-      payWithCard: async () => {
-        paid++;
-        return { status: "approved" as const };
-      },
-    };
-    const r = req(JSON.stringify(input("p")));
-    const res = await handleCardCheckout(r, opts);
-    expect(res.status).toBe(404);
-    expect(r.bodyUsed).toBe(false);
-    expect(resolved).toBe(0);
-    expect(paid).toBe(0);
-    // Desligada (como hoje): a mesma requisição paga.
-    expect((await handleCardCheckout(req(JSON.stringify(input("p"))), { ...opts, cardIsolated: false })).status).toBe(200);
-  });
-
-  test("POST entre sites: Content-Type e Origin (ou Sec-Fetch-Site) exigidos, 403 antes de qualquer trabalho", async () => {
-    let resolved = 0;
-    let paid = 0;
-    const opts = {
-      nodeEnv: "test",
-      resolveStore: async () => {
-        resolved++;
-        return store;
-      },
-      payWithCard: async () => {
-        paid++;
-        return { status: "approved" as const };
-      },
-    };
-    const body = JSON.stringify(input("p"));
-    const bad: Request[] = [
-      req(body, { "content-type": "text/plain" }),
-      req(body, { "content-type": "application/x-www-form-urlencoded" }),
-      req(body, { origin: "https://evil.example" }),
-      req(body, { origin: "http://127.0.0.1:3001" }),
-      req(body, { origin: "null" }),
-      noOrigin(body),
-      noOrigin(body, { "sec-fetch-site": "cross-site" }),
-      noOrigin(body, { "sec-fetch-site": "same-site" }),
-    ];
-    for (const r of bad) {
-      const res = await handleCardCheckout(r, opts);
-      expect(res.status).toBe(403);
-      expect((await res.json()).error).toBe("forbidden_origin");
-    }
-    expect(resolved).toBe(0);
-    expect(paid).toBe(0);
-
-    expect((await handleCardCheckout(req(body), opts)).status).toBe(200);
-    expect((await handleCardCheckout(req(body, { "content-type": "application/json; charset=utf-8" }), opts)).status).toBe(200);
-    expect((await handleCardCheckout(noOrigin(body, { "sec-fetch-site": "same-origin" }), opts)).status).toBe(200);
-    expect(paid).toBe(3);
-  });
-
-  test("POST entre sites é recusado antes da repetição idempotente (não revela o resultado de outra requisição)", async () => {
-    const { call, storeId, offerId } = await setup();
-    const o = await newCardOrder(storeId, offerId, email());
-    const inp = input(o.publicId);
-    expect((await payWithCard(call, inp, fastDeps)).status).toBe("approved");
-    const opts = { nodeEnv: "test", resolveStore: async () => ({ ...store, id: storeId }) };
-    const res = await handleCardCheckout(req(JSON.stringify(inp), { origin: "https://evil.example" }), opts);
-    expect(res.status).toBe(403);
-    expect(await res.text()).not.toContain("approved");
-  });
-
+describe("IP do cliente e erro da cobrança (o serviço de cartão os usa; a rota antiga do app saiu)", () => {
   test("clientIpFrom: com proxy confiável, a entrada mais à direita; entradas forjadas à esquerda não mudam a chave", () => {
     for (const xff of ["203.0.113.4", "6.6.6.6, 203.0.113.4", "1.1.1.1, 2.2.2.2, 203.0.113.4"]) {
       expect(clientIpFrom(new Headers({ "x-forwarded-for": xff }), 1)).toBe("203.0.113.4");
@@ -1222,79 +1154,18 @@ describe("rota POST /api/checkout/card", () => {
     expect(clientIpFrom(new Headers(), 0)).toBe(UNKNOWN_IP);
   });
 
-  test("loja desconhecida -> 404; corpo > 16 KB -> 413; JSON inválido -> 400", async () => {
-    const none = { resolveStore: async () => null, nodeEnv: "test" };
-    expect((await handleCardCheckout(req("{}"), none)).status).toBe(404);
-    const opts = { resolveStore: async () => store, nodeEnv: "test" };
-    expect((await handleCardCheckout(req("x".repeat(17 * 1024)), opts)).status).toBe(413);
-    expect((await handleCardCheckout(req("{nao json"), opts)).status).toBe(400);
-  });
-
-  test("produção exige HTTPS, exceto em loopback; com proxy confiável vale x-forwarded-proto", async () => {
-    const pay = async () => ({ status: "approved" as const });
-    const prod = { resolveStore: async () => store, nodeEnv: "production", payWithCard: pay, trustProxy: 0 };
-    const remote = req("{}", { host: "loja.example.com", origin: "http://loja.example.com" }, "http://loja.example.com/api/checkout/card");
-    const remoteRes = await handleCardCheckout(remote, prod);
-    expect(remoteRes.status).toBe(403);
-    expect((await remoteRes.json()).error).toBe("https_required");
-    expect((await handleCardCheckout(req("{}"), prod)).status).toBe(200);
-    const proxied = req(
-      "{}",
-      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https", "x-forwarded-for": "203.0.113.4" },
-      "http://loja.example.com/api/checkout/card",
-    );
-    expect((await handleCardCheckout(proxied, { ...prod, trustProxy: 1 })).status).toBe(200);
-    const forged = req(
-      "{}",
-      { host: "loja.example.com", origin: "https://loja.example.com", "x-forwarded-proto": "https" },
-      "http://loja.example.com/api/checkout/card",
-    );
-    expect((await handleCardCheckout(forged, prod)).status).toBe(403);
-  });
-
-  test("pedido desconhecido -> 404 sem ecoar dados; IP do cliente vai para payWithCard", async () => {
-    const { storeId } = await setup();
-    const body = JSON.stringify({ ...input("pedido-que-nao-existe"), clientIp: "6.6.6.6" });
-    const res = await handleCardCheckout(req(body, { "x-forwarded-for": "203.0.113.50" }), {
-      resolveStore: async () => ({ ...store, id: storeId }),
-      nodeEnv: "test",
-    });
-    expect(res.status).toBe(404);
-    const text = await res.text();
-    expect(text).not.toContain("4444");
-    expect(JSON.parse(text)).toEqual({ error: "not_found", message: "Pedido não encontrado" });
-
-    let seenIp = "";
-    await handleCardCheckout(req(body, { "x-forwarded-for": "6.6.6.6, 203.0.113.50" }), {
-      resolveStore: async () => ({ ...store, id: storeId }),
-      nodeEnv: "test",
-      trustProxy: 1,
-      payWithCard: async (_c, i) => {
-        seenIp = i.clientIp;
-        return { status: "approved" };
-      },
-    });
-    expect(seenIp).toBe("203.0.113.50");
-  });
-
-  test("erro inesperado -> 500 genérico; o log não recebe dados do cartão", async () => {
+  test("cardErrorResponse: erro inesperado -> 500 genérico; o log não recebe dados do cartão", () => {
     const cap = captureOutput();
-    let res: Response;
+    let out: { status: number; body: object };
     try {
-      res = await handleCardCheckout(req(JSON.stringify(input("x"))), {
-        resolveStore: async () => store,
-        nodeEnv: "test",
-        payWithCard: async (_c, i) => {
-          throw new Error(`falhou com ${i.card.number} ${i.card.holderName}`);
-        },
-      });
+      const i = input("x");
+      out = cardErrorResponse(new Error(`falhou com ${i.card.number} ${i.card.holderName}`));
     } finally {
       cap.restore();
     }
-    expect(res!.status).toBe(500);
-    expect(await res!.json()).toEqual({
-      error: "internal",
-      message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.",
+    expect(out!).toEqual({
+      status: 500,
+      body: { error: "internal", message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo." },
     });
     // Só nome e código do erro vão para o log: nem o PAN nem o nome impresso (texto livre do erro).
     expect(cap.text()).toContain("checkout cartão: erro inesperado");

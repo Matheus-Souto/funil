@@ -2,8 +2,8 @@
 # Guia passo a passo: docs/instalacao.md. Variáveis: copie .env.example para .env e preencha.
 #   docker compose up -d --build
 # Só o Caddy publica portas (80/443). Postgres e app ficam na rede interna do compose.
-# Cartão isolado (opcional): COMPOSE_PROFILES=card no .env sobe também o serviço `card` (formulário do cartão em
-# CARD_ORIGIN), numa rede própria só com Postgres e Caddy (docs/instalacao.md, "Cartão isolado").
+# Cartão: o serviço `card` (formulário do cartão em CARD_ORIGIN) sobe sempre, numa rede própria só com Postgres e
+# Caddy. Sem CARD_ORIGIN no .env ele fica desligado e o checkout mostra só Pix (docs/instalacao.md, seção 12).
 name: funil
 
 services:
@@ -31,9 +31,9 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-1}
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
-      # Cartão isolado: 1 = o checkout embute o iframe do serviço `card` (profile card). As chaves só valem com ele
-      # ligado; CARD_DB_PASSWORD é usada só pela migração (dá login ao papel `card`) e sai do ambiente antes do app.
-      CARD_ISOLATED: ${CARD_ISOLATED:-0}
+      # Cartão: o checkout embute o iframe do serviço `card` em CARD_ORIGIN. Sem CARD_ORIGIN, o cartão fica indisponível
+      # (o checkout mostra só Pix). CARD_DB_PASSWORD é usada só pela migração (dá login ao papel `card`) e sai do
+      # ambiente antes do app.
       CARD_ORIGIN: ${CARD_ORIGIN:-}
       CARD_TICKET_KEY: ${CARD_TICKET_KEY:-}
       ASAAS_SEAL_KEY: ${ASAAS_SEAL_KEY:-}
@@ -55,13 +55,11 @@ services:
     expose:
       - "3000"
 
-  # Serviço de cartão isolado (só com COMPOSE_PROFILES=card). Recebe número e CVV (só em memória) e nada mais do
-  # sistema: sem SECRET, sem papel dono, sem SMTP/Meta, sem volume. Rede `card`: alcança só Postgres e Caddy (e a
-  # internet, para o Asaas e o Turnstile: restrinja a saída no firewall do host, docs/seguranca-pagamento.md).
-  # Variáveis vazias aqui não travam o compose (o profile desligado também é interpolado): o serviço recusa subir e
-  # diz qual falta.
+  # Serviço de cartão isolado. Recebe número e CVV (só em memória) e nada mais do sistema: sem SECRET, sem papel dono,
+  # sem SMTP/Meta, sem volume. Rede `card`: alcança só Postgres e Caddy (e a internet, para o Asaas e o Turnstile:
+  # restrinja a saída no firewall do host, docs/seguranca-pagamento.md). Variáveis vazias aqui não travam o compose:
+  # sem CARD_ORIGIN o serviço sobe desligado (só o /healthz); com ela, recusa subir e diz qual variável falta.
   card:
-    profiles: ["card"]
     build:
       context: .
       dockerfile: deploy/Dockerfile
@@ -141,8 +139,6 @@ services:
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       # Endereço do site do cartão (deploy/Caddyfile.card).
       CARD_ORIGIN: ${CARD_ORIGIN:-}
-      # Com 1, o Caddy responde 404 à rota antiga do cartão (/api/checkout/card) sem repassar ao app.
-      CARD_ISOLATED: ${CARD_ISOLATED:-0}
     volumes:
       # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
       # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).

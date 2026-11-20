@@ -9,10 +9,9 @@ export type IntegrationKind = "pix_manual" | "asaas" | "smtp" | "meta";
 export type IntegrationConfig = Record<string, unknown>;
 
 /**
- * Abre e sela segredos de conexão conforme o tipo. `asaas` é gravado com a chave própria (`a1.`, ASAAS_SEAL_KEY) só
- * com o isolamento ligado (CARD_ISOLATED=1), para o serviço de cartão abri-la sem o SECRET; com ele desligado, segue
- * em `v1.` (uma imagem anterior ao isolamento continua abrindo). As demais (SMTP, Meta...) sempre usam o SECRET (`v1.`)
- * e nunca abrem com a chave do Asaas. Abrir: `a1.` com a chave (se ela existir), `v1.` com o SECRET.
+ * Abre e sela segredos de conexão conforme o tipo. `asaas` é gravado com a chave própria (`a1.`, ASAAS_SEAL_KEY) sempre
+ * que ela existe, para o serviço de cartão abri-la sem o SECRET; sem ela, em `v1.`. As demais (SMTP, Meta...) sempre
+ * usam o SECRET (`v1.`) e nunca abrem com a chave do Asaas. Abrir: `a1.` com a chave (se ela existir), `v1.` com o SECRET.
  */
 export interface IntegrationSecrets {
   open(kind: string, sealed: string): string;
@@ -58,12 +57,9 @@ export function createIntegrationSecrets(keys: { secret?: string; asaasKey?: str
   );
 }
 
-/**
- * Regra do processo a partir do ambiente: `asaas` em `a1.` só com CARD_ISOLATED=1 (a mesma condição da re-selagem
- * no boot). Assim, definir a ASAAS_SEAL_KEY antes de ligar o isolamento não tranca a loja num rollback de imagem.
- */
-export function integrationSecretsFor(e: { SECRET?: string; ASAAS_SEAL_KEY?: string; CARD_ISOLATED: boolean }): IntegrationSecrets {
-  return createIntegrationSecrets({ secret: e.SECRET, asaasKey: e.ASAAS_SEAL_KEY, sealAsaas: e.CARD_ISOLATED });
+/** Regra do processo a partir do ambiente: `asaas` em `a1.` sempre que há ASAAS_SEAL_KEY (a mesma condição da re-selagem no boot). */
+export function integrationSecretsFor(e: { SECRET?: string; ASAAS_SEAL_KEY?: string }): IntegrationSecrets {
+  return createIntegrationSecrets({ secret: e.SECRET, asaasKey: e.ASAAS_SEAL_KEY });
 }
 
 let processSecrets: IntegrationSecrets | undefined;
@@ -126,7 +122,7 @@ export async function readIntegration(
 
 /**
  * Grava (upsert) a conexão. `secret` omitido mantém o segredo atual; `null` apaga; texto é selado conforme o tipo
- * (`asaas` em `a1.` com ASAAS_SEAL_KEY e CARD_ISOLATED=1; o resto, e `asaas` com o isolamento desligado, em `v1.`).
+ * (`asaas` em `a1.` com ASAAS_SEAL_KEY; o resto, e `asaas` sem a chave, em `v1.`).
  */
 export async function saveIntegration(
   tx: Tx,
@@ -241,22 +237,19 @@ export async function checkAsaasSealKey(
 }
 
 /**
- * Passo do boot do app: re-sela `asaas` v1 -> a1 só com CARD_ISOLATED=1 (o passo é irreversível; no fluxo antigo não
- * há por que dar), com falha só no log; depois confere a chave (`checkAsaasSealKey`). Erro na conferência propaga.
+ * Passo do boot do app: re-sela `asaas` v1 -> a1 sempre que há ASAAS_SEAL_KEY (sem ela, nada), com falha só no log;
+ * depois confere a chave (`checkAsaasSealKey`). Erro na conferência propaga.
  */
 export async function prepareAsaasSealOnBoot(
-  opts: { cardIsolated: boolean },
   secrets: IntegrationSecrets = defaultSecrets(),
 ): Promise<{ resealed: number; sealed: number; unreadable: number; legacy: number }> {
   let resealed = 0;
-  if (opts.cardIsolated) {
-    try {
-      resealed = await resealAsaasSecrets(secrets);
-      if (resealed > 0) log.info("conexões Asaas re-seladas com a ASAAS_SEAL_KEY", { count: resealed });
-    } catch (e) {
-      // Não derruba: um `v1.` continua abrindo com o SECRET no app.
-      log.error("re-selagem das conexões Asaas falhou no boot", { error: e });
-    }
+  try {
+    resealed = await resealAsaasSecrets(secrets);
+    if (resealed > 0) log.info("conexões Asaas re-seladas com a ASAAS_SEAL_KEY", { count: resealed });
+  } catch (e) {
+    // Não derruba: um `v1.` continua abrindo com o SECRET no app.
+    log.error("re-selagem das conexões Asaas falhou no boot", { error: e });
   }
   return { resealed, ...(await checkAsaasSealKey(secrets)) };
 }

@@ -3,11 +3,11 @@
 // aos próprios scripts (as páginas são dinâmicas). Painel, API, /d e /t.js ficam fora do matcher.
 // Inventário e justificativa de cada script: docs/seguranca-pagamento.md.
 import { NextResponse, type NextRequest } from "next/server";
-import { env } from "@/lib/env";
+import { cardServiceConfigured, env } from "@/lib/env";
 
 /**
  * Política das páginas do comprador. `turnstile`: o desafio da Cloudflare pode ser carregado no checkout.
- * `cardOrigin` (só com CARD_ISOLATED=1): o formulário do cartão vem em iframe desse domínio.
+ * `cardOrigin` (com o serviço de cartão configurado): o formulário do cartão vem em iframe desse domínio.
  */
 export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean; cardOrigin?: string }): string {
   const scripts = ["'self'", `'nonce-${nonce}'`, "https://connect.facebook.net"];
@@ -34,7 +34,7 @@ export function proxy(request: NextRequest): NextResponse {
   const csp = buyerCsp(nonce, {
     dev: process.env.NODE_ENV === "development",
     turnstile: Boolean(env.TURNSTILE_SITE_KEY),
-    cardOrigin: env.CARD_ISOLATED ? env.CARD_ORIGIN : undefined,
+    cardOrigin: cardServiceConfigured(env) ? env.CARD_ORIGIN : undefined,
   });
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("content-security-policy", csp);

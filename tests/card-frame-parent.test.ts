@@ -5,12 +5,13 @@ import {
   TICKET_RENEW_AFTER_MS,
   acceptFrameMessage,
   createCardFrameController,
+  createSubmitGate,
   frameFieldNames,
   payWithFrame,
   type CardOrder,
   type FrameResult,
 } from "@/app/c/[slug]/card-frame";
-import type { ParentMsg } from "@/lib/card-frame/protocol";
+import { parseParentMsg, type ParentMsg } from "@/lib/card-frame/protocol";
 
 const ORIGIN = "https://pagar.loja.test";
 const win = { name: "janela do iframe" };
@@ -44,6 +45,7 @@ function harness() {
   const posted: ParentMsg[] = [];
   const statuses: string[] = [];
   const heights: number[] = [];
+  let submits = 0;
   const timers: { fn: () => void; ms: number; live: boolean }[] = [];
   let seq = 0;
   const frameWindow: { current: unknown } = { current: win };
@@ -59,6 +61,7 @@ function harness() {
     newId: () => `id-${++seq}`,
     onStatus: (s) => statuses.push(s),
     onHeight: (px) => heights.push(px),
+    onSubmit: () => submits++,
   });
   const fire = (ms: number) => {
     for (const t of timers.filter((x) => x.live && x.ms === ms)) {
@@ -68,10 +71,55 @@ function harness() {
   };
   const send = (data: unknown, over: { origin?: string; source?: unknown } = {}) =>
     ctrl.handle({ origin: over.origin ?? ORIGIN, source: "source" in over ? over.source : win, data });
-  return { ctrl, posted, statuses, heights, timers, fire, send, frameWindow };
+  return { ctrl, posted, statuses, heights, timers, fire, send, frameWindow, submits: () => submits };
 }
 
+describe("createSubmitGate (Enter no iframe e clique em Pagar quase juntos)", () => {
+  test("um Pagar por vez: o segundo, com o primeiro em andamento, é ignorado (sem pedido extra); depois, libera", async () => {
+    const gate = createSubmitGate();
+    let calls = 0;
+    let finish!: () => void;
+    const first = gate.run(() => {
+      calls++;
+      return new Promise<void>((r) => (finish = r));
+    });
+    // Clique e Enter no mesmo instante: antes de qualquer re-render do React.
+    expect(await gate.run(async () => void calls++)).toBe(false);
+    expect(gate.running).toBe(true);
+    expect(calls).toBe(1);
+    finish();
+    expect(await first).toBe(true);
+    expect(gate.running).toBe(false);
+    expect(await gate.run(async () => void calls++)).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  test("erro no Pagar também libera a trava", async () => {
+    const gate = createSubmitGate();
+    await expect(gate.run(async () => Promise.reject(new Error("x")))).rejects.toThrow("x");
+    expect(gate.running).toBe(false);
+  });
+});
+
 describe("controlador do iframe", () => {
+  test("submit (Enter num campo do iframe): chama onSubmit só da origem e da janela do iframe, e só depois do ready", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    h.ctrl.start();
+    h.send({ t: "funil-card:submit" });
+    expect(h.submits()).toBe(0); // antes do ready
+    h.send({ t: "funil-card:ready" });
+    h.send({ t: "funil-card:submit" }, { origin: "https://outra.test" });
+    h.send({ t: "funil-card:submit" }, { source: {} });
+    h.send({ t: "funil-card:submit" }, { source: null });
+    expect(h.submits()).toBe(0);
+    h.send({ t: "funil-card:submit", number: "4111111111111111" });
+    expect(h.submits()).toBe(1);
+    h.ctrl.dispose();
+    h.send({ t: "funil-card:submit" });
+    expect(h.submits()).toBe(1);
+  });
+
   test("ready: manda config (total e parcelas atuais) e fica pronto; altura vem de height", () => {
     const h = harness();
     h.ctrl.setConfig({ totalCents: 990, maxInstallments: 3 });
@@ -84,6 +132,33 @@ describe("controlador do iframe", () => {
     expect(h.posted).toEqual([{ t: "funil-card:config", totalCents: 990, maxInstallments: 3 }]);
     h.send({ t: "funil-card:height", px: 412 });
     expect(h.heights).toEqual([412]);
+  });
+
+  test("cor da loja vai no config e, se mudar, o config é reenviado", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" });
+    h.ctrl.start();
+    h.send({ t: "funil-card:ready" });
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" }); // igual: não reenvia
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    expect(h.posted).toEqual([
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1, brandColor: "#AB12CD" },
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1 },
+    ]);
+  });
+
+  test("cor da loja fora de #rrggbb: o config sai sem ela (o iframe recusaria a mensagem inteira e ficaria sem total)", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "red" });
+    h.ctrl.start();
+    h.send({ t: "funil-card:ready" });
+    for (const bad of ["#fff", "#0b6e4f;x", "0b6e4f", "#0B6E4G"]) h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: bad });
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1, brandColor: "#0B6E4F" });
+    expect(h.posted).toEqual([
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1 },
+      { t: "funil-card:config", totalCents: 990, maxInstallments: 1, brandColor: "#0B6E4F" },
+    ]);
+    for (const m of h.posted) expect(parseParentMsg(m)).toEqual(m);
   });
 
   test("bump ligado ou desligado depois do ready: reenvia config com o total novo", () => {

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { brandVars } from "@/lib/brand";
 import { brl, centsToInput, parseBrl } from "@/lib/format";
+import { cardToggle } from "@/lib/payments/card-messages";
 import { Badge } from "../../../blocks";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
@@ -47,6 +48,8 @@ export function OfferEditor(props: {
   brandColor: string | null;
   canWrite: boolean;
   canPixel: boolean;
+  /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
+  cardAvailable: boolean;
   /** Acabou de ser criada (a página nova mostra a confirmação). */
   created?: boolean;
 }) {
@@ -84,6 +87,7 @@ export function OfferEditor(props: {
     offer !== null &&
     JSON.stringify(bump) !== JSON.stringify(offer.bumpProductId && offer.bumpPriceCents ? { productId: offer.bumpProductId, priceCents: offer.bumpPriceCents } : null);
   const methods = [...(f.pix ? ["pix"] : []), ...(f.card ? ["card"] : [])];
+  const cardBox = cardToggle(props.cardAvailable, f.card);
   const link = `${props.checkoutBase}/c/${f.slug || "endereco-da-oferta"}`;
   const productName = products.find((p) => p.id === f.productId)?.name ?? "Produto";
   const vars = useMemo(() => brandVars(props.brandColor) as CSSProperties, [props.brandColor]);
@@ -273,10 +277,15 @@ export function OfferEditor(props: {
                   Pix
                 </label>
                 <label className={s.check}>
-                  <input type="checkbox" checked={f.card} onChange={(e) => set("card", e.target.checked)} />
+                  <input type="checkbox" checked={f.card} onChange={(e) => set("card", e.target.checked)} disabled={cardBox.disabled} aria-describedby={cardBox.notice ? "cartao-indisponivel" : undefined} />
                   Cartão de crédito
                 </label>
               </div>
+              {cardBox.notice ? (
+                <p id="cartao-indisponivel" className={s.hint} role="note">
+                  {cardBox.notice}
+                </p>
+              ) : null}
               <div className={s.grid2}>
                 <div className={s.field} role="radiogroup" aria-label="Modo do Pix">
                   <span className={s.label}>Modo do Pix</span>

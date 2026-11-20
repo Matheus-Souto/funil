@@ -19,9 +19,10 @@ export const MIGRATE_LOCK = 7_303_010;
  * Papel `card` (serviço de cartão isolado): sempre existe, para as permissões e políticas `to card` serem um caminho só.
  * Com `cardPassword`, entra (login) com essa senha; sem ela, é criado SEM login (instalação que ainda não usa o
  * isolamento) e, se já existir, o login e a senha ficam como estão (rodar a migração sem a variável não derruba o
- * serviço de cartão). Nos dois casos: sem superusuário, sem BYPASSRLS, sem criar papel nem banco, no máximo
- * `CARD_CONNECTION_LIMIT` conexões e consultas de até `CARD_STATEMENT_TIMEOUT` (um `card` comprometido não esgota o
- * Postgres do app).
+ * serviço de cartão). Nos dois casos: sem superusuário, sem BYPASSRLS, sem criar papel nem banco e no máximo
+ * `CARD_CONNECTION_LIMIT` conexões (teto do papel: vale mesmo contra um `card` comprometido). O `statement_timeout`
+ * padrão de `CARD_STATEMENT_TIMEOUT` só corta consulta presa por erro do próprio serviço: NÃO é controle contra um
+ * `card` comprometido, que o desfaz com `SET statement_timeout` na sessão dele.
  *
  * O rls.sql e as permissões do `card` recriam políticas a cada subida (`drop policy`/`create policy`: trava exclusiva
  * na tabela). Com o app atendendo, uma consulta longa seguraria a migração e, atrás dela na fila de travas, todas as
@@ -48,7 +49,7 @@ export async function migrate(ownerUrl: string, appPassword: string, cardPasswor
 }
 
 const LIMITS = "nosuperuser nocreatedb nocreaterole nobypassrls";
-/** Teto de conexões do papel `card` (o serviço usa um pool de 5) e duração máxima de cada consulta dele. */
+/** Teto de conexões do papel `card` (o serviço usa um pool de 5) e `statement_timeout` padrão (a sessão pode mudar). */
 export const CARD_CONNECTION_LIMIT = 10;
 export const CARD_STATEMENT_TIMEOUT = "10s";
 

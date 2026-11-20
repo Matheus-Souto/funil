@@ -1,4 +1,4 @@
-# Site do serviço de cartão isolado (COMPOSE_PROFILES=card, CARD_ISOLATED=1; docs/instalacao.md, "Cartão isolado").
+# Site do serviço de cartão isolado (CARD_ORIGIN; docs/instalacao.md, seção 12).
 # Importado pelo deploy/Caddyfile e pelo deploy/Caddyfile.multi (`import card/*.caddy`) só quando CARD_ORIGIN está
 # definida no .env: o compose o monta como /etc/caddy/card/site.caddy; sem ela, como card/site, fora do glob, e nada
 # muda. O endereço é a própria origem (https://pagar.<domínio>): o Caddy emite o certificado e serve só esse host.

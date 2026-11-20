@@ -3,7 +3,8 @@ import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { getPublicOffer } from "@/lib/catalog/offers";
-import { env } from "@/lib/env";
+import { checkoutMethods } from "@/lib/checkout";
+import { cardServiceConfigured, env } from "@/lib/env";
 import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import { parseTouch } from "@/lib/tracking/touch";
 import { BuyerShell } from "../../(design)/shell";
@@ -43,7 +44,11 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
   const { first, last, ref } = parseTouch(urlOf(slug, sp), { _fbc: jar.get("_fbc")?.value, _fbp: jar.get("_fbp")?.value });
   const touch = { first, last };
   const eventId = randomUUID();
-  const wantsCard = sp.metodo === "cartao" && offer.methods.includes("card");
+  // Sem o serviço de cartão configurado, só Pix (oferta só de cartão: o checkout mostra o cartão indisponível).
+  const cardOrigin = cardServiceConfigured(env) ? env.CARD_ORIGIN : null;
+  const methods = checkoutMethods(offer.methods, cardOrigin !== null);
+  if (methods.length === 0) notFound();
+  const wantsCard = sp.metodo === "cartao" && methods.includes("card");
   const brandColor = await getStoreBrandColor(store.id);
 
   return (
@@ -56,19 +61,20 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
           name: offer.name,
           productName: offer.productName,
           priceCents: offer.priceCents,
-          methods: offer.methods as ("pix" | "card")[],
+          methods,
           pixMode: offer.pixMode as "manual" | "asaas",
           maxInstallments: offer.maxInstallments,
           bump: offer.bump,
         }}
-        initialMethod={wantsCard ? "card" : offer.methods.includes("pix") ? "pix" : "card"}
+        initialMethod={wantsCard ? "card" : methods.includes("pix") ? "pix" : "card"}
         touch={touch}
         refCode={ref}
         eventId={eventId}
         turnstileSiteKey={env.TURNSTILE_SITE_KEY ?? null}
+        brandColor={brandColor}
         cardFrame={
-          env.CARD_ISOLATED && env.CARD_ORIGIN && offer.methods.includes("card")
-            ? { origin: env.CARD_ORIGIN, src: `${env.CARD_ORIGIN}/form/${encodeURIComponent(store.id)}` }
+          cardOrigin !== null && methods.includes("card")
+            ? { origin: cardOrigin, src: `${cardOrigin}/form/${encodeURIComponent(store.id)}` }
             : null
         }
       />

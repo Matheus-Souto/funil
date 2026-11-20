@@ -11,11 +11,12 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import { clientIpFrom, isHttps } from "@/lib/client-ip";
 import { dbHealthy } from "@/lib/db/client";
 import { isLoopbackUrl } from "@/lib/env";
 import { errorFields, log } from "@/lib/log";
 import { payWithCard as defaultPayWithCard, type CardPaymentInput } from "@/lib/payments/asaas/card";
-import { cardErrorResponse, clientIpFrom, isHttps } from "@/lib/payments/asaas/card-http";
+import { cardErrorResponse } from "@/lib/payments/asaas/card-http";
 import { verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
 import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardFormCsp, cardFormHtml } from "./page";
@@ -136,6 +137,38 @@ function readBody(req: IncomingMessage, max: number): Promise<Buffer | null> {
     req.on("error", onError);
     req.on("close", onClose);
   });
+}
+
+/**
+ * Endereço em que o serviço escuta: 127.0.0.1 (ou ::1, com `http://[::1]`) quando CARD_ORIGIN é http em loopback (verify e desenvolvimento: nada
+ * exposto no IP da máquina); 0.0.0.0 nos outros casos (no container, atrás do Caddy, que o alcança pela rede `card`).
+ */
+export function cardBindHost(cardOrigin: string | undefined): string {
+  if (cardOrigin === undefined) return "0.0.0.0";
+  try {
+    const u = new URL(cardOrigin);
+    if (u.protocol !== "http:" || !isLoopbackUrl(cardOrigin)) return "0.0.0.0";
+    return u.hostname === "[::1]" ? "::1" : "127.0.0.1";
+  } catch {
+    return "0.0.0.0";
+  }
+}
+
+/**
+ * Serviço sem CARD_ORIGIN (instalação que ainda não configurou o cartão; o container `card` sobe sempre): só
+ * `GET /healthz` (200 "desligado", para o healthcheck e o `docker compose up --wait`), sem banco; o resto, 404.
+ */
+export function createIdleCardServer(): Server {
+  const server = createServer({ connectionsCheckingInterval: SERVER_LIMITS.connectionsCheckingInterval }, (req, res) => {
+    const path = (req.url ?? "/").split("?")[0]!;
+    if (req.method === "GET" && path === "/healthz") return send(res, 200, "desligado", { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+    send(res, 404);
+  });
+  server.headersTimeout = SERVER_LIMITS.headersTimeout;
+  server.requestTimeout = SERVER_LIMITS.requestTimeout;
+  server.keepAliveTimeout = SERVER_LIMITS.keepAliveTimeout;
+  server.maxConnections = SERVER_LIMITS.maxConnections;
+  return server;
 }
 
 export function createCardServer(opts: CardServerOptions): Server {
