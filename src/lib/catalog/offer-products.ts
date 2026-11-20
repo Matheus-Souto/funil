@@ -7,8 +7,7 @@ import { z } from "zod";
 import { ActionError, type Ctx } from "@/lib/actions/core";
 import { offerProduct, product } from "@/lib/db/schema";
 import type { Tx } from "@/lib/db/client";
-
-export const MAX_PRODUCTS_PER_GROUP = 20;
+import { MAX_PRODUCTS_PER_GROUP } from "./offer-editing";
 
 export type ProductRef = { id: string; name: string; deletedAt: Date | null };
 export type OfferProducts = { main: ProductRef[]; bump: ProductRef[] };

@@ -115,13 +115,14 @@ export const createOffer = defineAction({
 
 /**
  * Troca o que a oferta entrega: produtos principais (em ordem) e o bump (produtos, preço e rótulo), ou remove o bump
- * com `null`. Sensível como o preço (muda o que é entregue): MCP/IA pedem aprovação.
+ * com `null`. `priceCents` opcional muda o preço da oferta na mesma transação (o editor salva produtos e preço juntos,
+ * sem ficar pela metade). Sensível como o preço (muda o que é entregue): MCP/IA pedem aprovação.
  */
 export const setOfferProducts = defineAction({
   name: "offers.setProducts",
   description:
-    "Define os produtos entregues pela oferta (productIds, 1 a 20, em ordem) e o order bump (productIds, priceCents em centavos e label, obrigatório com mais de 1 produto), ou remove o bump com null.",
-  input: z.strictObject({ id, ...productsFields }).superRefine(refineProducts),
+    "Define os produtos entregues pela oferta (productIds, 1 a 20, em ordem) e o order bump (productIds, priceCents em centavos e label, obrigatório com mais de 1 produto), ou remove o bump com null. priceCents (opcional, centavos) muda também o preço da oferta, junto.",
+  input: z.strictObject({ id, ...productsFields, priceCents: priceCents.optional() }).superRefine(refineProducts),
   permission: "offers.write",
   sensitive: true,
   async run(ctx, input) {
@@ -131,7 +132,12 @@ export const setOfferProducts = defineAction({
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
     // Lista primeiro (valida os produtos); depois as colunas antigas, que têm FK simples para product.
     await writeOfferProducts(ctx, input.id, input.productIds, input.bump?.productIds ?? []);
-    const [row] = await ctx.tx.update(offer).set(legacyColumns(input.productIds, input.bump)).where(eq(offer.id, input.id)).returning(offerCols);
+    const price = input.priceCents === undefined ? {} : { priceCents: input.priceCents };
+    const [row] = await ctx.tx
+      .update(offer)
+      .set({ ...legacyColumns(input.productIds, input.bump), ...price })
+      .where(eq(offer.id, input.id))
+      .returning(offerCols);
     return (await withProducts(ctx.tx, [row!]))[0]!;
   },
 });
@@ -213,7 +219,7 @@ export const updateOffer = defineAction({
 
 export const updateOfferPrice = defineAction({
   name: "offers.updatePrice",
-  description: "Altera o preço da oferta (centavos). O bump (produtos, preço e rótulo) muda por offers.setProducts.",
+  description: "Altera o preço da oferta (centavos). O bump (produtos, preço e rótulo) muda por offers.setProducts, que também aceita o preço junto.",
   input: z.strictObject({ id, priceCents }),
   permission: "offers.write",
   sensitive: true,

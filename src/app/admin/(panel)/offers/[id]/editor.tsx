@@ -1,14 +1,15 @@
 "use client";
 
-// Editor de oferta (P12). Preço por offers.updatePrice e produto/bump por offers.setProducts (ações sensíveis: diálogo de
-// confirmação); endereço por offers.setSlug (sensível; o dono no painel executa direto); os demais campos por
-// offers.update; pixel próprio por offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado.
-// Por ora edita 1 produto principal e 1 no bump; oferta com mais não tem produtos/bump editáveis aqui (Task 4).
-import { useMemo, useState, type CSSProperties } from "react";
+// Editor de oferta (P12). Produtos principais e do bump em listas ordenadas (1 a 20 cada: adicionar, subir/descer,
+// remover). Produtos/bump/rótulo por offers.setProducts, com o preço junto quando ele também mudou (atômico); só o
+// preço por offers.updatePrice. As duas são sensíveis: diálogo de confirmação que diz o que muda. Endereço por
+// offers.setSlug (sensível; o dono no painel executa direto); os demais campos por offers.update; pixel próprio por
+// offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado. Regras puras em offer-editing.ts.
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { brandVars } from "@/lib/brand";
-import { editorCanEditProducts } from "@/lib/catalog/offer-editing";
+import { MAX_PRODUCTS_PER_GROUP, changeDialog, moveItem, offerChanges, productsProblem, removeAt, saveCall } from "@/lib/catalog/offer-editing";
 import { brl, centsToInput, parseBrl } from "@/lib/format";
 import { cardToggle } from "@/lib/payments/card-messages";
 import { Badge } from "../../../blocks";
@@ -21,23 +22,24 @@ export interface OfferData {
   id: string;
   slug: string;
   name: string;
-  productId: string;
+  /** Produtos principais, na ordem da oferta. */
+  productIds: string[];
   priceCents: number;
   methods: string[];
   pixMode: "manual" | "asaas";
   maxInstallments: number;
-  bumpProductId: string | null;
-  bumpPriceCents: number | null;
-  bumpLabel: string | null;
+  bump: { productIds: string[]; priceCents: number; label: string | null } | null;
   thankYouText: string | null;
   pixelId: string | null;
   active: boolean;
-  /** Quantos produtos principais e do bump a oferta tem (offer_product). */
-  mainCount: number;
-  bumpCount: number;
 }
 
-const MULTI_NOTICE = "Esta oferta tem vários produtos; edite os produtos e o bump pelo painel novo (em breve).";
+/** Produto que pode aparecer nos selects. `deleted`: excluído (só aparece porque a oferta ainda o tem). */
+export interface ProductOption {
+  id: string;
+  name: string;
+  deleted?: boolean;
+}
 
 const slugify = (t: string) =>
   t
@@ -50,7 +52,7 @@ const slugify = (t: string) =>
 
 export function OfferEditor(props: {
   offer: OfferData | null;
-  products: Array<{ id: string; name: string }>;
+  products: ProductOption[];
   checkoutBase: string;
   storeName: string;
   brandColor: string | null;
@@ -66,16 +68,16 @@ export function OfferEditor(props: {
   const [f, setF] = useState(() => ({
     name: offer?.name ?? "",
     slug: offer?.slug ?? "",
-    productId: offer?.productId ?? products[0]?.id ?? "",
+    productIds: offer?.productIds ?? [products.find((p) => !p.deleted)?.id ?? ""],
     price: offer ? centsToInput(offer.priceCents) : "",
     pix: offer ? offer.methods.includes("pix") : true,
     card: offer ? offer.methods.includes("card") : false,
     pixMode: offer?.pixMode ?? ("manual" as "manual" | "asaas"),
     maxInstallments: offer?.maxInstallments ?? 1,
-    bumpOn: Boolean(offer?.bumpProductId),
-    bumpProductId: offer?.bumpProductId ?? products.find((p) => p.id !== (offer?.productId ?? products[0]?.id))?.id ?? "",
-    bumpPrice: offer?.bumpPriceCents ? centsToInput(offer.bumpPriceCents) : "",
-    bumpLabel: offer?.bumpLabel ?? "",
+    bumpOn: offer?.bump != null,
+    bumpProductIds: offer?.bump?.productIds ?? [""],
+    bumpPrice: offer?.bump ? centsToInput(offer.bump.priceCents) : "",
+    bumpLabel: offer?.bump?.label ?? "",
     thankYouText: offer?.thankYouText ?? "",
     active: offer?.active ?? true,
   }));
@@ -90,33 +92,35 @@ export function OfferEditor(props: {
   const priceCents = parseBrl(f.price);
   const bumpCents = f.bumpOn ? parseBrl(f.bumpPrice) : null;
   const bumpLabel = f.bumpLabel.trim() || null;
-  const bump = f.bumpOn && f.bumpProductId && bumpCents ? { productId: f.bumpProductId, priceCents: bumpCents, label: bumpLabel } : null;
-  // Oferta com vários produtos: este editor não mexe em produtos nem no bump (salvar reduziria a lista a 1 por grupo).
-  const productsEditable = editorCanEditProducts(offer && { mainCount: offer.mainCount, bumpCount: offer.bumpCount });
-  const priceChanged = offer !== null && priceCents !== offer.priceCents;
+  /** Bump como as ações recebem (offers.create / offers.setProducts). */
+  const bumpInput = f.bumpOn && bumpCents ? { productIds: f.bumpProductIds, priceCents: bumpCents, label: bumpLabel } : null;
+  const changes = offer
+    ? offerChanges({ priceCents: offer.priceCents, productIds: offer.productIds, bump: offer.bump }, { priceCents, productIds: f.productIds, bump: bumpInput })
+    : null;
   const slugChanged = offer !== null && f.slug !== offer.slug;
-  const productChanged = productsEditable && offer !== null && f.productId !== offer.productId;
-  const bumpChanged =
-    productsEditable &&
-    offer !== null &&
-    JSON.stringify(bump) !==
-      JSON.stringify(offer.bumpProductId && offer.bumpPriceCents ? { productId: offer.bumpProductId, priceCents: offer.bumpPriceCents, label: offer.bumpLabel } : null);
-  /** Entrada de offers.setProducts / do bump de offers.create (1 produto em cada grupo neste editor). */
-  const bumpInput = bump ? { productIds: [bump.productId], priceCents: bump.priceCents, label: bump.label } : null;
   const methods = [...(f.pix ? ["pix"] : []), ...(f.card ? ["card"] : [])];
   const cardBox = cardToggle(props.cardAvailable, f.card);
   const link = `${props.checkoutBase}/c/${f.slug || "endereco-da-oferta"}`;
-  const productName = products.find((p) => p.id === f.productId)?.name ?? "Produto";
+  const nameOf = (id: string) => products.find((p) => p.id === id)?.name ?? "Produto";
+  const namesOf = (ids: string[]) => ids.map(nameOf).join(" · ");
+  const productName = f.productIds.length > 1 ? f.name.trim() || "Oferta" : nameOf(f.productIds[0] ?? "");
   const vars = useMemo(() => brandVars(props.brandColor) as CSSProperties, [props.brandColor]);
+  /** Produtos já escolhidos em alguma linha (o bump só conta ligado): o mesmo produto não entra duas vezes. */
+  const used = new Set([...f.productIds, ...(f.bumpOn ? f.bumpProductIds : [])].filter(Boolean));
+  const firstUnused = (taken: Set<string>) => products.find((p) => !p.deleted && !taken.has(p.id))?.id ?? "";
 
   function problem(): string | null {
     if (!f.name.trim()) return "Informe o nome da oferta.";
     if (!/^[a-z0-9-]{3,60}$/.test(f.slug)) return "Endereço: use 3 a 60 caracteres (letras minúsculas, números e hífen).";
-    if (productsEditable && !f.productId) return "Escolha o produto entregue (envie o PDF em Produtos).";
+    const lists = productsProblem({ productIds: f.productIds, bumpOn: f.bumpOn, bumpProductIds: f.bumpProductIds, bumpPriceCents: bumpCents, bumpLabel });
+    if (lists) return lists;
     if (!priceCents || priceCents <= 0) return "Preço inválido. Use o formato 9,90.";
     if (methods.length === 0) return "Escolha ao menos um método de pagamento.";
-    if (productsEditable && f.bumpOn && (!f.bumpProductId || !bumpCents)) return "Bump: escolha o produto e o preço do acréscimo.";
-    if (productsEditable && f.bumpOn && f.bumpProductId === f.productId) return "O produto do bump deve ser diferente do principal.";
+    // Produto excluído só pode ficar se a lista não for regravada (offers.setProducts recusaria).
+    if (!changes || saveCall(changes)?.action === "setProducts") {
+      const gone = [...used].find((id) => products.find((p) => p.id === id)?.deleted);
+      if (gone) return `“${nameOf(gone)}” foi excluído: troque ou remova esse produto da oferta.`;
+    }
     return null;
   }
 
@@ -141,7 +145,7 @@ export function OfferEditor(props: {
           createOfferAction({
             ...common(),
             slug: f.slug,
-            productIds: [f.productId],
+            productIds: f.productIds,
             priceCents,
             bump: bumpInput,
           }),
@@ -149,7 +153,7 @@ export function OfferEditor(props: {
       );
       return;
     }
-    if (priceChanged || productChanged || bumpChanged) {
+    if (changes && saveCall(changes)) {
       setDialog("price");
       return;
     }
@@ -166,18 +170,76 @@ export function OfferEditor(props: {
     await save.run(() => updateOfferAction({ id: offer.id, ...common() }), ok ? { ok } : {});
   }
 
-  async function confirmPrice() {
-    if (!offer) return;
-    if (priceChanged) {
+  /** Ação sensível confirmada no diálogo (produtos e preço juntos, ou só o preço); depois os demais campos. */
+  async function confirmChanges() {
+    if (!offer || !changes) return;
+    const c = saveCall(changes);
+    if (c?.action === "setProducts") {
+      const input = { id: offer.id, productIds: f.productIds, bump: bumpInput, ...(c.withPrice ? { priceCents } : {}) };
+      const r = await save.run(() => setOfferProductsAction(input), { refresh: false });
+      if (!r.ok) return;
+    } else if (c?.action === "updatePrice") {
       const r = await save.run(() => updateOfferPriceAction({ id: offer.id, priceCents }), { refresh: false });
       if (!r.ok) return;
     }
-    if (productChanged || bumpChanged) {
-      const r = await save.run(() => setOfferProductsAction({ id: offer.id, productIds: [f.productId], bump: bumpInput }), { refresh: false });
-      if (!r.ok) return;
-    }
     setDialog(null);
-    await saveRest("Oferta e preço salvos.");
+    await saveRest(c?.action === "updatePrice" ? "Oferta e preço salvos." : "Oferta salva.");
+  }
+
+  const dialogText = changes ? changeDialog(changes) : null;
+  const bumpSummary = (b: { productIds: string[]; priceCents: number } | null) => (b ? `${namesOf(b.productIds)} + ${brl(b.priceCents)}` : "sem bump");
+  const quoted = (t: string | null) => (t ? `“${t}”` : "sem título");
+
+  /** Lista ordenada de selects de produto: a primeira linha leva `firstLabel` (os rótulos que o E2E usa). */
+  function productList(o: { ids: string[]; onChange: (ids: string[]) => void; firstLabel: string; lineLabel: (n: number) => string; addLabel?: string; firstEmpty: ReactNode }) {
+    const { ids, onChange } = o;
+    return (
+      <div className={s.productLines}>
+        {ids.map((id, i) => {
+          const label = i === 0 ? o.firstLabel : o.lineLabel(i + 1);
+          const what = id ? nameOf(id) : `produto ${i + 1}`;
+          return (
+            <div className={s.productLine} key={i}>
+              <label className={s.field}>
+                <span className={s.label}>{label}</span>
+                <select className={s.select} value={id} onChange={(e) => onChange(ids.map((x, j) => (j === i ? e.target.value : x)))}>
+                  {i === 0 ? o.firstEmpty : <option value="">Escolha…</option>}
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id} disabled={p.id !== id && (p.deleted || used.has(p.id))}>
+                      {p.deleted ? `${p.name} (excluído)` : p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {ids.length > 1 ? (
+                <>
+                  <button type="button" className={s.iconBtn} aria-label={`Mover ${what} para cima`} disabled={i === 0} onClick={() => onChange(moveItem(ids, i, -1))}>
+                    <PIcon name="chevron-up" size={16} />
+                  </button>
+                  <button type="button" className={s.iconBtn} aria-label={`Mover ${what} para baixo`} disabled={i === ids.length - 1} onClick={() => onChange(moveItem(ids, i, 1))}>
+                    <PIcon name="chevron-down" size={16} />
+                  </button>
+                  <button type="button" className={s.iconBtn} aria-label={`Remover ${what}`} onClick={() => onChange(removeAt(ids, i))}>
+                    <PIcon name="x" size={16} />
+                  </button>
+                </>
+              ) : null}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          className={`${s.btn} ${s.btnSm}`}
+          style={{ alignSelf: "flex-start" }}
+          aria-label={o.addLabel}
+          disabled={ids.length >= MAX_PRODUCTS_PER_GROUP}
+          onClick={() => onChange([...ids, firstUnused(used)])}
+        >
+          <PIcon name="plus" size={16} />
+          Adicionar produto
+        </button>
+      </div>
+    );
   }
 
   const ro = !canWrite;
@@ -246,24 +308,13 @@ export function OfferEditor(props: {
                 </div>
               </div>
               <div className={s.formGrid}>
-                {productsEditable ? (
-                  <label className={s.field}>
-                    <span className={s.label}>Produto entregue</span>
-                    <select className={s.select} value={f.productId} onChange={(e) => set("productId", e.target.value)}>
-                      {products.length === 0 ? <option value="">Envie um PDF em Produtos</option> : null}
-                      {products.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : (
-                  <div className={s.field}>
-                    <span className={s.label}>Produtos entregues</span>
-                    <span className={s.hint}>{MULTI_NOTICE}</span>
-                  </div>
-                )}
+                {productList({
+                  ids: f.productIds,
+                  onChange: (ids) => set("productIds", ids),
+                  firstLabel: "Produto entregue",
+                  lineLabel: (n) => `Produto ${n}`,
+                  firstEmpty: products.length === 0 ? <option value="">Envie um PDF em Produtos</option> : null,
+                })}
                 <div className={s.field}>
                   <label className={s.field}>
                   <span className={s.label}>Endereço (slug)</span>
@@ -356,32 +407,35 @@ export function OfferEditor(props: {
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
             <div className={s.cardHead} style={{ marginBottom: 4 }}>
               <legend className={s.sectionTitle}>Order bump</legend>
-              {productsEditable ? (
-                <label className={s.switch}>
-                  <span className={s.srOnly}>Oferecer order bump</span>
-                  <input type="checkbox" checked={f.bumpOn} onChange={(e) => set("bumpOn", e.target.checked)} />
-                </label>
-              ) : null}
+              <label className={s.switch}>
+                <span className={s.srOnly}>Oferecer order bump</span>
+                <input
+                  type="checkbox"
+                  checked={f.bumpOn}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    // Ao ligar, linha vazia ou repetida com um principal ganha o primeiro produto livre.
+                    const main = new Set(f.productIds);
+                    const ids = f.bumpProductIds.map((id) => (id && !main.has(id) ? id : ""));
+                    setF((x) => ({ ...x, bumpOn: on, bumpProductIds: on ? ids.map((id) => id || firstUnused(new Set([...main, ...ids]))) : x.bumpProductIds }));
+                  }}
+                />
+              </label>
             </div>
             <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
-              {productsEditable ? "Uma caixa extra antes do botão de pagar. Sempre começa desmarcada." : MULTI_NOTICE}
+              Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
             </p>
-            {productsEditable && f.bumpOn ? (
+            {f.bumpOn ? (
               <div className={s.stack}>
                 <div className={s.grid2}>
-                  <label className={s.field}>
-                    <span className={s.label}>Produto do bump</span>
-                    <select className={s.select} value={f.bumpProductId} onChange={(e) => set("bumpProductId", e.target.value)}>
-                      <option value="">Escolha…</option>
-                      {products
-                        .filter((p) => p.id !== f.productId)
-                        .map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}
-                          </option>
-                        ))}
-                    </select>
-                  </label>
+                  {productList({
+                    ids: f.bumpProductIds,
+                    onChange: (ids) => set("bumpProductIds", ids),
+                    firstLabel: "Produto do bump",
+                    lineLabel: (n) => `Produto ${n} do bump`,
+                    addLabel: "Adicionar produto ao bump",
+                    firstEmpty: <option value="">Escolha…</option>,
+                  })}
                   <div className={s.field}>
                     <label className={s.field}>
                     <span className={s.label}>Preço do acréscimo</span>
@@ -393,9 +447,18 @@ export function OfferEditor(props: {
                 <div className={s.field}>
                   <label className={s.field}>
                   <span className={s.label}>Título da caixa</span>
-                  <input className={s.input} value={f.bumpLabel} maxLength={200} placeholder="Quero a versão completa" onChange={(e) => set("bumpLabel", e.target.value)} />
+                  <input
+                    className={s.input}
+                    value={f.bumpLabel}
+                    maxLength={200}
+                    placeholder={f.bumpProductIds.length > 1 ? "5 Kits Extras" : "Quero a versão completa"}
+                    aria-required={f.bumpProductIds.length > 1}
+                    onChange={(e) => set("bumpLabel", e.target.value)}
+                  />
                   </label>
-                  <span className={s.hint}>Quem marca recebe os dois PDFs no mesmo e-mail.</span>
+                  <span className={s.hint}>
+                    {f.bumpProductIds.length > 1 ? "Obrigatório com mais de um produto. " : ""}Quem marca recebe tudo no mesmo e-mail.
+                  </span>
                 </div>
               </div>
             ) : null}
@@ -424,6 +487,7 @@ export function OfferEditor(props: {
               <span>{productName}</span>
               <b>{priceCents ? brl(priceCents) : "—"}</b>
             </div>
+            {f.productIds.length > 1 ? <p className={s.previewIncludes}>Inclui: {namesOf(f.productIds.filter(Boolean))}</p> : null}
             {f.bumpOn && bumpCents ? (
               <div className={s.previewBump}>
                 <b>{f.bumpLabel || "Acrescentar"}</b> + {brl(bumpCents)}
@@ -486,22 +550,26 @@ export function OfferEditor(props: {
       <Dialog
         open={dialog === "price"}
         onClose={() => setDialog(null)}
-        icon="tag"
-        title="Alterar o preço desta oferta?"
+        icon={changes?.products || changes?.bump ? "package" : "tag"}
+        title={dialogText?.title ?? ""}
         footer={
           <>
             <button type="button" className={s.btn} onClick={() => setDialog(null)} data-autofocus>
               Cancelar
             </button>
-            <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={confirmPrice} disabled={save.pending}>
-              {save.pending ? "Salvando…" : "Salvar novo preço"}
+            <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={confirmChanges} disabled={save.pending}>
+              {save.pending ? "Salvando…" : (dialogText?.confirm ?? "Salvar")}
             </button>
           </>
         }
       >
-        <p>Vale para os próximos pedidos. Quem já gerou um Pix paga o valor antigo.</p>
+        <p>
+          Vale para os próximos pedidos.
+          {changes?.price ? " Quem já gerou um Pix paga o valor antigo." : ""}
+          {changes?.products || changes?.bump ? " Pedidos já feitos recebem o que foi comprado." : ""}
+        </p>
         <ul className={s.infoList}>
-          {priceChanged && offer ? (
+          {changes?.price && offer ? (
             <li>
               <PIcon name="tag" size={16} />
               <span>
@@ -509,19 +577,27 @@ export function OfferEditor(props: {
               </span>
             </li>
           ) : null}
-          {productChanged && offer ? (
+          {changes?.products && offer ? (
             <li>
               <PIcon name="file-text" size={16} />
               <span>
-                Produto entregue: {products.find((p) => p.id === offer.productId)?.name ?? "produto"} → <b>{productName}</b>
+                Produtos entregues: {namesOf(offer.productIds)} → <b>{namesOf(f.productIds)}</b>
               </span>
             </li>
           ) : null}
-          {bumpChanged && offer ? (
+          {changes?.bump && offer ? (
             <li>
               <PIcon name="gift" size={16} />
               <span>
-                Bump: {offer.bumpPriceCents ? brl(offer.bumpPriceCents) : "sem bump"} → <b>{bump ? brl(bump.priceCents) : "sem bump"}</b>
+                Bump: {bumpSummary(offer.bump)} → <b>{bumpSummary(bumpInput)}</b>
+              </span>
+            </li>
+          ) : null}
+          {changes?.label && offer ? (
+            <li>
+              <PIcon name="gift" size={16} />
+              <span>
+                Título da caixa: {quoted(offer.bump?.label ?? null)} → <b>{quoted(bumpLabel)}</b>
               </span>
             </li>
           ) : null}

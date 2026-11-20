@@ -5,7 +5,8 @@ import fc from "fast-check";
 import { z } from "zod";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
-import { createOffer, setOfferProducts } from "@/lib/catalog/offers";
+import { checkoutOffer } from "@/lib/catalog/checkout-offer";
+import { createOffer, getPublicOffer, setOfferProducts } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutView, customer, orderItem, orders, product } from "@/lib/db/schema";
 import {
@@ -413,6 +414,58 @@ describe("cartão: CPF do titular e validade", () => {
     expect(e.details).toEqual([{ path: ["card", "expiryMonth"] }]);
     expect(fake.calls.filter((c) => c.path === "/payments")).toHaveLength(0);
     expect((await payWithCard({ storeId: s.storeId }, card("11"), { wait: tick, now })).status).toBe("approved");
+  });
+});
+
+describe("página do checkout: \"Inclui:\" e cartão do bump (dados de offers.getPublic)", () => {
+  const KIDS = ["Almanaque Bíblico Kids", "Pack de jogos", "Datas especiais", "Cartões de versículos", "Diário de oração", "Escola dominical"];
+  const pageData = async (storeId: string, slug: string) =>
+    checkoutOffer(await runAction(getPublicOffer, pub(storeId), { slug }), ["pix", "card"]);
+
+  test("Completo (6 principais): nome da oferta e a linha \"Inclui:\" com os 6 nomes na ordem", async () => {
+    const { storeId } = await seedStore("Kids");
+    const six = [];
+    for (const n of KIDS) six.push(await seedProduct(storeId, n));
+    await runAction(createOffer, { storeId, actor: owner, origin: "panel" }, {
+      slug: "completo",
+      name: "Completo",
+      productIds: six.map((p) => p.id),
+      priceCents: 2700,
+      methods: ["pix"],
+      pixMode: "manual",
+    });
+    const v = await pageData(storeId, "completo");
+    expect(v.name).toBe("Completo");
+    expect(v.includes).toBe(`Inclui: ${KIDS.join(" · ")}`);
+    expect(v.productName).toBe("Completo");
+    expect(v.priceCents).toBe(2700);
+    expect(v.bump).toBeNull();
+  });
+
+  test("1 principal: sem linha \"Inclui\" e o nome do produto (como antes); bump de 1 produto mostra o nome dele", async () => {
+    const s = await seed();
+    const v = await pageData(s.storeId, s.slug);
+    expect(v.includes).toBeNull();
+    expect(v.productName).toBe("Maná básica");
+    expect(v.bump).toEqual({ productName: "Maná completa", contents: null, priceCents: 1710, label: "Quero a versão completa" });
+  });
+
+  test("Almanaque com bump de 5: o cartão do bump mostra o rótulo e a lista dos 5", async () => {
+    const { storeId } = await seedStore("Kids");
+    const [alm, ...kits] = await Promise.all(KIDS.map((n) => seedProduct(storeId, n)));
+    await runAction(createOffer, { storeId, actor: owner, origin: "panel" }, {
+      slug: "almanaque",
+      name: "Almanaque",
+      productIds: [alm!.id],
+      priceCents: 990,
+      methods: ["pix"],
+      pixMode: "manual",
+      bump: { productIds: kits.map((p) => p.id), priceCents: 1710, label: "5 Kits Extras" },
+    });
+    const v = await pageData(storeId, "almanaque");
+    expect(v.includes).toBeNull();
+    expect(v.productName).toBe(KIDS[0]);
+    expect(v.bump).toEqual({ productName: "5 Kits Extras", contents: KIDS.slice(1).join(" · "), priceCents: 1710, label: "5 Kits Extras" });
   });
 });
 

@@ -10,7 +10,7 @@ import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
-import { editorCanEditProducts } from "@/lib/catalog/offer-editing";
+import { changeDialog, moveItem, offerChanges, productsProblem, removeAt, saveCall } from "@/lib/catalog/offer-editing";
 import { env } from "@/lib/env";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
@@ -549,11 +549,79 @@ describe("rodada de correção 1 (concorrência, slug sensível, editor com N pr
     expect(await code(call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public"))).toBe("not_found");
   });
 
-  test("editor (até a Task 4): só edita produtos e bump com no máximo 1 em cada grupo", () => {
-    expect(editorCanEditProducts(null)).toBe(true);
-    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 0 })).toBe(true);
-    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 1 })).toBe(true);
-    expect(editorCanEditProducts({ mainCount: 6, bumpCount: 0 })).toBe(false);
-    expect(editorCanEditProducts({ mainCount: 1, bumpCount: 5 })).toBe(false);
+  test("offers.setProducts com priceCents: produtos, bump e preço mudam juntos; uma recusa não muda nenhum dos dois", async () => {
+    const { storeId } = await seedStore();
+    const ps = await Promise.all(["A", "B", "C", "D"].map((n) => seedProduct(storeId, n)));
+    const [a, b, c, d] = ps.map((p) => p.id) as [string, string, string, string];
+    const o = await call(createOffer, storeId, owner, offerInput(a, { slug: "atomica" }));
+    // Sensível como antes, também com o preço.
+    const input = { id: o.id, productIds: [a, b], bump: { productIds: [c], priceCents: 500 }, priceCents: 2700 };
+    expect(await code(call(setOfferProducts, storeId, owner, input, "mcp"))).toBe("approval_required");
+    const r = await call(setOfferProducts, storeId, owner, input);
+    expect([r.priceCents, r.products.map((p) => p.id), r.bump?.priceCents]).toEqual([2700, [a, b], 500]);
+    // Sem priceCents, o preço fica como está.
+    expect((await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [b, a], bump: null })).priceCents).toBe(2700);
+    // Recusa (produto apagado) depois de passar pela validação de entrada: nem lista nem preço mudam.
+    await withStore(storeId, (tx) => tx.update(product).set({ deletedAt: new Date() }).where(eq(product.id, d)));
+    expect(await code(call(setOfferProducts, storeId, owner, { id: o.id, productIds: [a, d], bump: null, priceCents: 100 }))).toBe("invalid_input");
+    expect(await code(call(setOfferProducts, storeId, owner, { id: o.id, productIds: [a], bump: null, priceCents: 0 }))).toBe("invalid_input");
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect([got.priceCents, got.products.map((p) => p.id), got.bump]).toEqual([2700, [b, a], null]);
+  });
+
+  test("editor: mover e remover linhas", () => {
+    expect(moveItem(["a", "b", "c"], 1, -1)).toEqual(["b", "a", "c"]);
+    expect(moveItem(["a", "b", "c"], 1, 1)).toEqual(["a", "c", "b"]);
+    expect(moveItem(["a", "b", "c"], 0, -1)).toEqual(["a", "b", "c"]); // já no topo
+    expect(moveItem(["a", "b", "c"], 2, 1)).toEqual(["a", "b", "c"]); // já no fim
+    expect(removeAt(["a", "b", "c"], 1)).toEqual(["a", "c"]);
+  });
+
+  test("editor: problemas nas listas (vazio, repetido, rótulo do bump com N, limite de 20)", () => {
+    const ok = { productIds: ["a"], bumpOn: false, bumpProductIds: [], bumpPriceCents: null, bumpLabel: null };
+    expect(productsProblem(ok)).toBeNull();
+    expect(productsProblem({ ...ok, productIds: [""] })).toBe("Escolha o produto entregue (envie o PDF em Produtos).");
+    expect(productsProblem({ ...ok, productIds: ["a", ""] })).toBe("Escolha um produto em cada linha ou remova a linha vazia.");
+    expect(productsProblem({ ...ok, productIds: ["a", "b", "a"] })).toBe("O mesmo produto aparece mais de uma vez na oferta.");
+    expect(productsProblem({ ...ok, productIds: Array.from({ length: 21 }, (_, i) => `p${i}`) })).toBe("No máximo 20 produtos em cada lista.");
+    const bump = { ...ok, bumpOn: true, bumpProductIds: ["b"], bumpPriceCents: 1710 };
+    expect(productsProblem(bump)).toBeNull();
+    expect(productsProblem({ ...bump, bumpPriceCents: null })).toBe("Bump: escolha o produto e o preço do acréscimo.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", ""] })).toBe("Bump: escolha o produto e o preço do acréscimo.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["a"] })).toBe("O mesmo produto aparece mais de uma vez na oferta.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", "c"] })).toBe("Bump com mais de um produto: preencha o título da caixa.");
+    expect(productsProblem({ ...bump, bumpProductIds: ["b", "c"], bumpLabel: "5 Kits Extras" })).toBeNull();
+    // Bump desligado: as linhas do bump não contam.
+    expect(productsProblem({ ...bump, bumpOn: false, bumpProductIds: ["a", ""] })).toBeNull();
+  });
+
+  test("editor: o que mudou, a ação que salva e o diálogo de confirmação", () => {
+    const before = { priceCents: 990, productIds: ["a"], bump: { productIds: ["b"], priceCents: 1710, label: "Quero" } };
+    const none = { price: false, products: false, bump: false, label: false };
+    expect(offerChanges(before, structuredClone(before))).toEqual(none);
+    expect(saveCall(none)).toBeNull();
+    // Só o preço: updatePrice, com o título que o E2E procura.
+    const price = offerChanges(before, { ...before, priceCents: 1290 });
+    expect(price).toEqual({ ...none, price: true });
+    expect(saveCall(price)).toEqual({ action: "updatePrice" });
+    expect(changeDialog(price)).toEqual({ title: "Alterar o preço desta oferta?", confirm: "Salvar novo preço" });
+    // Só o rótulo: não fala de preço.
+    const label = offerChanges(before, { ...before, bump: { ...before.bump, label: "Quero tudo" } });
+    expect(label).toEqual({ ...none, label: true });
+    expect(saveCall(label)).toEqual({ action: "setProducts", withPrice: false });
+    expect(changeDialog(label).title).toBe("Alterar o título do bump desta oferta?");
+    // Reordenar principais é mudança de produtos; produtos + preço vão juntos no setProducts.
+    const both = offerChanges({ ...before, productIds: ["a", "c"] }, { ...before, productIds: ["c", "a"], priceCents: 2700 });
+    expect(both).toEqual({ ...none, price: true, products: true });
+    expect(saveCall(both)).toEqual({ action: "setProducts", withPrice: true });
+    expect(changeDialog(both)).toEqual({ title: "Alterar o preço e os produtos desta oferta?", confirm: "Salvar alterações" });
+    // Bump: ligar/desligar, preço ou lista. Rótulo junto com o bump é "o order bump".
+    expect(offerChanges(before, { ...before, bump: null })).toEqual({ ...none, bump: true });
+    expect(offerChanges(before, { ...before, bump: { ...before.bump, priceCents: 1000 } })).toEqual({ ...none, bump: true });
+    const all = offerChanges(before, { priceCents: 2700, productIds: ["a", "c"], bump: { productIds: ["b", "d"], priceCents: 1710, label: "Kits" } });
+    expect(all).toEqual({ price: true, products: true, bump: true, label: true });
+    expect(changeDialog(all).title).toBe("Alterar o preço, os produtos e o order bump desta oferta?");
+    expect(changeDialog({ ...none, products: true }).title).toBe("Alterar os produtos desta oferta?");
+    expect(changeDialog({ ...none, bump: true }).title).toBe("Alterar o order bump desta oferta?");
   });
 });
