@@ -1048,6 +1048,22 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     return { subject: found!.Subject, html: msg.HTML, text: msg.Text, items, links };
   }
 
+  /** Cada link (POST com origin, conta 1 download) baixa o PDF do produto certo: nome do arquivo e largura da página dele. */
+  async function expectDownloads(request: APIRequestContext, items: DeliveryItem[], products: typeof KIDS) {
+    expect(items).toHaveLength(products.length);
+    for (const [i, p] of products.entries()) {
+      const url = items[i]!.url;
+      const res = await request.post(url, { headers: { origin: new URL(url).origin } });
+      expect(res.status(), p.name).toBe(200);
+      expect(res.headers()["content-type"]).toBe("application/pdf");
+      expect(res.headers()["content-disposition"], p.name).toMatch(/^attachment; /);
+      expect(res.headers()["content-disposition"], p.name).toContain(`filename="${p.file}"`);
+      const pdf = await PDFDocument.load(await res.body());
+      expect(pdf.getPageCount(), p.name).toBe(1);
+      expect(Math.round(pdf.getPage(0).getWidth()), p.name).toBe(p.width);
+    }
+  }
+
   test("Kids, painel: 6 produtos com PDF, oferta Completo com os 6 e Almanaque com bump de 5 kits", async () => {
     const page = owner;
     await page.goto("/admin/products");
@@ -1158,18 +1174,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.setContent(mail.html);
     await shot(page, "14-email-completo-6-links");
 
-    // Cada link baixa o PDF do produto certo: nome do arquivo e largura da página dele.
-    const origin = new URL(mail.links[0]!).origin;
-    for (const [i, p] of KIDS.entries()) {
-      const res = await request.post(mail.items[i]!.url, { headers: { origin } });
-      expect(res.status(), p.name).toBe(200);
-      expect(res.headers()["content-type"]).toBe("application/pdf");
-      expect(res.headers()["content-disposition"], p.name).toMatch(/^attachment; /);
-      expect(res.headers()["content-disposition"], p.name).toContain(`filename="${p.file}"`);
-      const pdf = await PDFDocument.load(await res.body());
-      expect(pdf.getPageCount(), p.name).toBe(1);
-      expect(Math.round(pdf.getPage(0).getWidth()), p.name).toBe(p.width);
-    }
+    await expectDownloads(request, mail.items, KIDS);
   });
 
   test("Kids, Almanaque com o bump '5 Kits Extras' pelo iframe do cartão: R$ 27,00, 6 links; reembolso pelo painel revoga os 6", async ({ page, request }) => {
@@ -1200,7 +1205,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
       expect(body).toContain("R$ 27,00");
       expect(body).not.toContain("R$ 3,42");
     }
-    for (const link of mail.links) expect((await request.get(link)).status(), link).toBe(200);
+    // Cada um dos 6 links leva ao PDF certo (o Almanaque e cada kit do bump), antes do reembolso.
+    await expectDownloads(request, mail.items, KIDS);
 
     // Reembolso pelo painel: o estorno vai ao Asaas falso (conclui na hora) e o pedido reembolsado revoga os 6 links.
     await openOrder(owner, kitsPublicId, buyerEmail("kits"));
