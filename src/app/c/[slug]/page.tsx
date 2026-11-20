@@ -44,7 +44,7 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
   const { first, last, ref } = parseTouch(urlOf(slug, sp), { _fbc: jar.get("_fbc")?.value, _fbp: jar.get("_fbp")?.value });
   const touch = { first, last };
   const eventId = randomUUID();
-  // Sem o serviço de cartão configurado, só Pix (uma oferta só de cartão fica fora do ar até configurar).
+  // Sem o serviço de cartão configurado, só Pix (oferta só de cartão: o checkout mostra o cartão indisponível).
   const cardOrigin = cardServiceConfigured(env) ? env.CARD_ORIGIN : null;
   const methods = checkoutMethods(offer.methods, cardOrigin !== null);
   if (methods.length === 0) notFound();

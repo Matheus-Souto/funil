@@ -635,11 +635,13 @@ describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
     expect((await startCheckout({ storeId: s.storeId }, startInput(s.slug))).method).toBe("pix_manual");
   });
 
-  test("checkoutMethods: sem o serviço de cartão, o checkout mostra só Pix (oferta só de cartão fica sem método)", () => {
+  test("checkoutMethods: sem o serviço de cartão, o checkout mostra só Pix; oferta só de cartão abre com o cartão (indisponível)", () => {
     expect(checkoutMethods(["pix", "card"], true)).toEqual(["pix", "card"]);
     expect(checkoutMethods(["pix", "card"], false)).toEqual(["pix"]);
-    expect(checkoutMethods(["card"], false)).toEqual([]);
+    // Sem Pix para oferecer: a página abre com o cartão, e o checkout (sem iframe) mostra o aviso de indisponível.
+    expect(checkoutMethods(["card"], false)).toEqual(["card"]);
     expect(checkoutMethods(["card", "boleto"], true)).toEqual(["card"]);
+    expect(checkoutMethods([], false)).toEqual([]);
   });
 
   test("renewCardTicket: com o bilhete anterior (mesmo vencido), pedido de cartão pendente ganha bilhete novo do mesmo pedido", async () => {

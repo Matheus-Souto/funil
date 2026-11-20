@@ -202,6 +202,8 @@ export function CheckoutForm(props: {
   const frameCtrl = useRef<CardFrameController | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [frameStatus, setFrameStatus] = useState<FrameStatus>("loading");
+  // Sem iframe (oferta só de cartão numa instalação sem o serviço de cartão): o cartão aparece indisponível.
+  const frameState: FrameStatus = cardFrame ? frameStatus : "unavailable";
   // Enter num campo do iframe (`submit`): o mesmo que o botão "Pagar". Atualizado a cada render (ver o efeito abaixo).
   const submitFromFrame = useRef<() => void>(() => {});
   // Um "Pagar" por vez, mesmo antes de o `busy` chegar ao render (Enter no iframe + clique juntos).
@@ -394,7 +396,7 @@ export function CheckoutForm(props: {
     if (method === "card") {
       const ctrl = frameCtrl.current;
       // Indisponível: o aviso já está no bloco do cartão (sem repetir no topo); nenhum pedido é criado.
-      if (!ctrl || frameStatus !== "ready") return setFormError(frameStatus === "unavailable" ? null : FRAME_UNAVAILABLE_MESSAGE);
+      if (!ctrl || frameState !== "ready") return setFormError(frameState === "unavailable" ? null : FRAME_UNAVAILABLE_MESSAGE);
       // Dados pessoais aqui e os do cartão no iframe (que marca os dele); a contagem soma os dois.
       setBusy(true);
       const checked = await ctrl.validate().catch(() => null);
@@ -553,13 +555,13 @@ export function CheckoutForm(props: {
 
             {cardFrame ? (
               // Carregando: esqueleto do tamanho aproximado do bloco (CSS), sem texto; `aria-busy` até o `ready`.
-              <div ref={frameBox} className={s.cardFrameBox} aria-busy={frameStatus === "loading"} hidden={method !== "card" || frameStatus === "unavailable"} />
+              <div ref={frameBox} className={s.cardFrameBox} aria-busy={frameState === "loading"} hidden={method !== "card" || frameState === "unavailable"} />
             ) : null}
             {/* Com o iframe, a nota "Os dados do cartão não ficam salvos." vem dentro dele. */}
-            {method === "card" && frameStatus !== "unavailable" && captcha && turnstileSiteKey ? (
+            {method === "card" && frameState !== "unavailable" && captcha && turnstileSiteKey ? (
               <Turnstile key={turnstileKey} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
             ) : null}
-            {method === "card" && frameStatus === "unavailable" ? (
+            {method === "card" && frameState === "unavailable" ? (
               <p className={s.alert} role="alert">
                 <Icon name="circle-alert" />
                 <span>{FRAME_UNAVAILABLE_MESSAGE}</span>
@@ -603,7 +605,7 @@ export function CheckoutForm(props: {
                   {brl(total)}
                 </span>
               </div>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated || (method === "card" && frameStatus !== "ready")}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated || (method === "card" && frameState !== "ready")}>
                 <Icon name={method === "pix" ? "pix" : "lock"} size={20} />
                 {buttonLabel}
               </button>

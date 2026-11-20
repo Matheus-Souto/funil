@@ -361,7 +361,7 @@ O cartão é sempre digitado num formulário (iframe) servido por um serviço pe
 domínio próprio (`pagar.`): o número, a validade e o CVV não passam pelo processo do app (painel, PDF, e-mail, fila).
 O E2E de cada versão faz a compra com cartão por esse iframe. **Para vender com cartão, configure esta seção**: sem
 ela (sem `CARD_ORIGIN`), a instalação sobe normalmente, mas o cartão fica indisponível: o checkout mostra só Pix (uma
-oferta só de cartão fica fora do ar), o editor de oferta não deixa ligar o cartão e a visão geral do painel avisa que
+oferta só de cartão abre com o aviso "Pagamento com cartão indisponível agora" e não vende), o editor de oferta não deixa ligar o cartão e a visão geral do painel avisa que
 falta configurar o serviço de cartão.
 
 É uma redução de risco, não de escopo PCI: no mesmo servidor, app e `card` dividem host, Docker e Caddy, e o app

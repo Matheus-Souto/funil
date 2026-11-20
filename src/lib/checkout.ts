@@ -263,9 +263,15 @@ export async function startCheckout(
   return { publicId: out.publicId, method: out.method };
 }
 
-/** Métodos que o checkout mostra: sem o serviço de cartão configurado, só Pix. Vazio = nenhum método disponível. */
+/**
+ * Métodos que o checkout mostra: sem o serviço de cartão configurado, só Pix. Oferta só de cartão continua com o cartão
+ * (o checkout, sem iframe, mostra o aviso de indisponível e não cria pedido; `startCheckout` também recusa).
+ */
 export function checkoutMethods(methods: readonly string[], cardOn: boolean): ("pix" | "card")[] {
-  return methods.filter((m): m is "pix" | "card" => m === "pix" || (m === "card" && cardOn));
+  const known = methods.filter((m): m is "pix" | "card" => m === "pix" || m === "card");
+  if (cardOn) return known;
+  const pix = known.filter((m) => m === "pix");
+  return pix.length > 0 ? pix : known;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
