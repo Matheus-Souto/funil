@@ -5,6 +5,7 @@
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
+import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
 import { IntegrationSecretUnreadable, getIntegration, saveIntegration } from "@/lib/integrations";
@@ -56,7 +57,16 @@ function providerError(status: number): ActionError {
   return new ActionError("provider_error", message, { status });
 }
 
-/** Envia pelo Resend. `Idempotency-Key` (o id do job) evita e-mail duplicado em re-tentativa (o Resend guarda 24 h). */
+/**
+ * `Idempotency-Key` = `<id do job>:<sha256 da mensagem>`. O Resend responde 409 quando a mesma chave chega com corpo
+ * diferente, e cada execução do job gera links novos (corpo novo): com o hash, só a repetição idêntica da mesma
+ * mensagem reaproveita a chave. Sempre abaixo de 256 caracteres (o id do job é um UUID; 36 + 1 + 64).
+ */
+export function resendIdempotencyKey(jobId: string, msg: MailMessage): string {
+  return `${jobId.slice(0, 150)}:${sha256(`${msg.subject}\n${msg.text}\n${msg.html}`)}`;
+}
+
+/** Envia pelo Resend. `idempotencyKey` é o id do job; o cabeçalho leva a chave composta com o hash da mensagem (o Resend guarda 24 h). */
 export async function sendViaResend(
   s: ResendSettings,
   storeName: string,
@@ -73,7 +83,7 @@ export async function sendViaResend(
       headers: {
         Authorization: `Bearer ${s.apiKey}`,
         "Content-Type": "application/json",
-        ...(opts.idempotencyKey ? { "Idempotency-Key": opts.idempotencyKey } : {}),
+        ...(opts.idempotencyKey ? { "Idempotency-Key": resendIdempotencyKey(opts.idempotencyKey, msg) } : {}),
       },
       body: JSON.stringify({
         from: resendFrom(s.fromName ?? storeName, s.fromEmail),

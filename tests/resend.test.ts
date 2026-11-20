@@ -4,7 +4,7 @@ import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
 import { auditLog, emailLog, integration, store } from "@/lib/db/schema";
-import { RESEND_ERRORS, loadResend, resendFrom, saveResend, sendViaResend, setEmailProvider, setResendFetchForTests, testResend } from "@/lib/delivery/resend";
+import { RESEND_ERRORS, loadResend, resendFrom, resendIdempotencyKey, saveResend, sendViaResend, setEmailProvider, setResendFetchForTests, testResend } from "@/lib/delivery/resend";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -66,7 +66,7 @@ describe("cliente do Resend", () => {
     expect(init.method).toBe("POST");
     const h = new Headers(init.headers);
     expect(h.get("authorization")).toBe(`Bearer ${KEY}`);
-    expect(h.get("idempotency-key")).toBe("job-1");
+    expect(h.get("idempotency-key")).toBe(resendIdempotencyKey("job-1", msg));
     expect(h.get("content-type")).toContain("application/json");
     expect(JSON.parse(String(init.body))).toEqual({
       from: "Loja <vendas@loja.com>",
@@ -81,6 +81,26 @@ describe("cliente do Resend", () => {
     const calls = fakeFetch(() => json(200, { id: "msg_1" }));
     await sendViaResend(settings, "Minha Loja", msg);
     expect(JSON.parse(String(calls[0]!.init.body)).from).toBe("Minha Loja <vendas@loja.com>");
+  });
+
+  test("chave de idempotência: <jobId>:<64 hex>, determinística e diferente quando a mensagem muda", async () => {
+    const id = crypto.randomUUID();
+    const key = resendIdempotencyKey(id, msg);
+    expect(key).toMatch(new RegExp(`^${id}:[0-9a-f]{64}$`));
+    expect(key.length).toBeLessThanOrEqual(256);
+    expect(resendIdempotencyKey(id, { ...msg })).toBe(key);
+    for (const changed of [{ subject: "Outro" }, { text: "outro" }, { html: "<p>outro</p>" }]) {
+      expect(resendIdempotencyKey(id, { ...msg, ...changed })).not.toBe(key);
+    }
+    const calls = fakeFetch(() => json(200, { id: "msg_1" }));
+    await sendViaResend(settings, "Loja", msg, { idempotencyKey: id });
+    expect(new Headers(calls[0]!.init.headers).get("idempotency-key")).toBe(key);
+  });
+
+  test("409 (chave repetida com corpo diferente, ou envio ainda em andamento) -> provider_error 'unreachable'", async () => {
+    fakeFetch(() => json(409, { message: "idempotency conflict" }));
+    const err = await failure(sendViaResend(settings, "Loja", msg, { idempotencyKey: "job-1" }));
+    expect(err).toMatchObject({ code: "provider_error", message: RESEND_ERRORS.unreachable });
   });
 
   test("sem Idempotency-Key quando não informada", async () => {

@@ -1033,7 +1033,7 @@ describe("envio pelo Resend", () => {
     const [j] = await jobsOf(o.id, "deliver_order");
     await getHandlers().deliver_order!(j!, new AbortController().signal);
     expect(resendCalls).toHaveLength(1);
-    expect(resendCalls[0]!.headers["Idempotency-Key"]).toBe(j!.id);
+    expect(resendCalls[0]!.headers["Idempotency-Key"]).toMatch(new RegExp(`^${j!.id}:[0-9a-f]{64}$`));
     expect(resendCalls[0]!.body.to).toEqual(["maria@exemplo.com"]);
     expect(outbox).toHaveLength(0);
     const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
@@ -1078,6 +1078,24 @@ describe("envio pelo Resend", () => {
     expect(logs.map((l) => [l.status, l.provider, l.error])).toEqual([["failed", "resend", "E-mail não configurado"]]);
   }, HEAVY_TEST_MS);
 
+  test("nova execução do mesmo job (1ª tentativa 503, 2ª ok): links novos mudam o corpo, então a chave muda; grava sent com o id", async () => {
+    const shop = await seedShop();
+    await useResend(shop.storeId);
+    fakeResend();
+    resendStatus = 503;
+    const o = await paidOrder(shop);
+    const [j] = await jobsOf(o.id, "deliver_order");
+    await expect(getHandlers().deliver_order!(j!, new AbortController().signal)).rejects.toMatchObject({ message: RESEND_ERRORS.unreachable });
+    resendStatus = 200;
+    await getHandlers().deliver_order!(j!, new AbortController().signal);
+    expect(resendCalls).toHaveLength(2);
+    const [k1, k2] = resendCalls.map((c) => c.headers["Idempotency-Key"]!);
+    for (const k of [k1!, k2!]) expect(k).toMatch(new RegExp(`^${j!.id}:[0-9a-f]{64}$`));
+    expect(k1).not.toBe(k2);
+    const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "delivery");
+    expect(logs.map((l) => [l.status, l.providerMessageId])).toEqual([["failed", null], ["sent", "msg_2"]]);
+  }, HEAVY_TEST_MS);
+
   test("notify_seller pelo Resend grava provider e id", async () => {
     const shop = await seedShop();
     await useResend(shop.storeId);
@@ -1085,7 +1103,7 @@ describe("envio pelo Resend", () => {
     const j = sellerJob(shop.storeId, { reason: "chave_asaas_invalida", httpStatus: 401 });
     await getHandlers().notify_seller!(j, new AbortController().signal);
     expect(resendCalls).toHaveLength(1);
-    expect(resendCalls[0]!.headers["Idempotency-Key"]).toBe(j.id);
+    expect(resendCalls[0]!.headers["Idempotency-Key"]).toMatch(new RegExp(`^${j.id}:[0-9a-f]{64}$`));
     expect(resendCalls[0]!.body.to).toEqual(["dono@loja.com"]);
     const logs = (await logsOf(shop.storeId)).filter((l) => l.kind === "seller_notice");
     expect(logs.map((l) => [l.status, l.provider, l.providerMessageId])).toEqual([["sent", "resend", "msg_1"]]);
