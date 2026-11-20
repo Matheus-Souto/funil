@@ -176,12 +176,15 @@ Suspeita de invasão do `card` (ou do host): guarde os logs antes de qualquer co
 - **Com a `ASAAS_SEAL_KEY` definida**, o app grava a chave do Asaas cifrada com ela (`a1`) e, a cada início, re-sela
   as que ainda estão com o `SECRET` (`v1`). O `card` não abre `v1`: o boot dele registra quantas conexões ainda estão
   assim, e o pagamento dessas lojas responde "indisponível" (sem cobrança) até o próximo início do app.
-- **Rollback:** voltar para a versão anterior desta (com `CARD_ISOLATED`) é seguro: ela abre `a1` com a chave. Voltar
+- **Rollback:** voltar para a versão anterior desta (a do `CARD_ISOLATED`) só é seguro com `CARD_ISOLATED=1` e
+  `COMPOSE_PROFILES=card` no `.env`: sem a flag, aquela versão volta ao formulário antigo e o cartão passa pelo app,
+  sem aviso (a chave do Asaas abre, porque ela conhece `a1`). Voltar
   para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback: com o
   app desta versão no ar, rode a CLI `asaas-unseal` (`docker compose exec app asaas-unseal`; regrava `a1` em `v1` com o
   `SECRET`, loja a loja, idempotente, só contagens, no terminal de quem roda) e troque a imagem logo em seguida (esta
-  versão re-sela tudo em `a1` a cada início). Parando de vender com cartão de vez: `alter role card nologin`
-  (`docs/instalacao.md`, seção 12).
+  versão re-sela tudo em `a1` a cada início). Parando de vender com cartão de vez: apague `CARD_ORIGIN`,
+  `CARD_TICKET_KEY` e `CARD_DB_PASSWORD` do `.env` (com a senha lá, a migração devolve o login ao papel) e rode
+  `alter role card nologin` (`docs/instalacao.md`, seção 12).
 - **Logs do `card` (10.5.1, guardar 12 meses):** o driver de log padrão do Docker apaga os logs quando o container é
   recriado (`docker compose up -d --build` numa atualização, `docker compose rm`). Configure um driver persistente no
   Docker do host (por exemplo, `journald` no `/etc/docker/daemon.json`, com o journal guardado por 12 meses) ou envie

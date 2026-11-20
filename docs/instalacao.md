@@ -375,7 +375,9 @@ formulário antigo saiu: **sem `CARD_ORIGIN` configurada, o cartão some do chec
 ANTES de atualizar (seção 10, "Atualizar"):
 
 - **Já usava `CARD_ISOLATED=1`:** nada a fazer além da atualização. `CARD_ISOLATED` e `COMPOSE_PROFILES=card` deixam
-  de ter efeito (pode apagar as duas do `.env`); o `card` sobe sempre.
+  de ter efeito nesta versão (o `card` sobe sempre), mas **mantenha as duas no `.env`** enquanto houver chance de
+  voltar à versão anterior: lá elas ainda decidem tudo, e sem `CARD_ISOLATED=1` o cartão volta a ser digitado no
+  checkout e a passar pelo app, sem aviso (veja "Voltar para a versão anterior" nos avisos abaixo).
 - **Vendia com cartão no formulário antigo:** faça os passos 1 a 3 da ordem de ativação abaixo (DNS do `pagar.`, as
   variáveis no `.env` e, com `Caddyfile.local`, a linha `import card/*.caddy` e o bloco `@legacyCard`) e só então
   atualize (passo 4). Se atualizar antes, o checkout segue vendendo com Pix e o painel avisa até você configurar.
@@ -404,7 +406,10 @@ escopo PCI (`docs/seguranca-pagamento.md`).
 nada da Cloudflare): a lista de hostnames do widget no painel da Cloudflare continua com o domínio do checkout (no
 `multi`, o `PLATFORM_DOMAIN`, que cobre as lojas em subdomínio, e cada domínio próprio de loja). O `pagar.` não precisa
 estar nela. O `card` confere o token e também o host em que o desafio foi resolvido: só vale o do checkout da loja do
-pedido.
+pedido. **Chaves de teste da Cloudflare** (as de "sempre passa"): a resposta do siteverify delas não traz o host do
+seu checkout, então toda compra com cartão que precisar do desafio é recusada ("Confirme que você não é um robô").
+Para testar em homologação, use um widget real com o host da homologação (ex.: `homolog.minhaloja.com.br`) na lista
+de hostnames, ou deixe o Turnstile desligado lá (sem `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET`, o desafio não aparece).
 
 **2. Variáveis no `.env`.** Gere cada chave com o comando ao lado (um valor diferente para cada uma; as três chaves
 `SECRET`, `CARD_TICKET_KEY` e `ASAAS_SEAL_KEY` precisam ser diferentes entre si) e guarde-as junto com o `SECRET`, no
@@ -464,9 +469,11 @@ capabilities, 192 MB de memória e sem core dump.
 - **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois da primeira subida com ela. Sem ela (ou com
   outra), o app e o `card` recusam subir com `ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão Asaas de N
   loja(s); restaure a chave correta`. Restaure o valor do gerenciador de senhas.
-- **Parar de vender com cartão:** desligue o cartão em cada oferta (editor da oferta) e, no `.env`, apague a
-  `CARD_ORIGIN` (mantenha a `ASAAS_SEAL_KEY`: as conexões Asaas seguem cifradas com ela). Antes, guarde os logs do
-  `card` (recriar o container apaga os logs dele, e o PCI pede 12 meses, requisito 10.5.1):
+- **Parar de vender com cartão:** desligue o cartão em cada oferta (editor da oferta) e, no `.env`, apague
+  `CARD_ORIGIN`, `CARD_TICKET_KEY` e `CARD_DB_PASSWORD` (mantenha a `ASAAS_SEAL_KEY`: as conexões Asaas seguem
+  cifradas com ela). A `CARD_DB_PASSWORD` precisa sair: enquanto ela estiver no `.env`, a migração devolve o login ao
+  papel `card` a cada início do app. Antes, guarde os logs do `card` (recriar o container apaga os logs dele, e o PCI
+  pede 12 meses, requisito 10.5.1):
 
   ```sh
   docker compose logs --no-color --timestamps card > card-$(date +%F).log
@@ -475,8 +482,14 @@ capabilities, 192 MB de memória e sem core dump.
 
   Guarde o arquivo fora do servidor (com os backups). Com um driver de log persistente no Docker
   (`docs/seguranca-pagamento.md`, "Logs do `card`"), o export é só uma cópia a mais. O `card` volta a subir
-  desligado. Tire também o login do papel `card` (a migração não tira sozinha):
+  desligado. Tire também o login do papel `card` (a migração não tira sozinha; sem a `CARD_DB_PASSWORD` no `.env`,
+  ela também não devolve):
   `docker compose exec -T postgres psql -U owner -d funil -c 'alter role card nologin'`.
+- **Voltar para a versão anterior (a do cartão isolado com `CARD_ISOLATED`)** só é seguro com `CARD_ISOLATED=1` e
+  `COMPOSE_PROFILES=card` no `.env` (além de `CARD_ORIGIN` e das chaves). Sem `CARD_ISOLATED=1`, aquela versão volta
+  ao formulário antigo: o cartão é digitado no checkout e passa pelo processo do app, sem nenhum aviso. Sem
+  `COMPOSE_PROFILES=card`, o `card` não sobe lá e o cartão fica indisponível. A chave do Asaas segue abrindo (aquela
+  versão abre `a1` com a `ASAAS_SEAL_KEY`).
 - **Voltar para uma versão do sistema anterior ao isolamento trava o Asaas das lojas** se as conexões continuarem
   cifradas com a `ASAAS_SEAL_KEY` (a versão antiga não as abre: Pix e cartão do Asaas param). Esta versão cifra de
   novo a cada início do app, então a ordem importa:
