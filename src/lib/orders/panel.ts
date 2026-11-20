@@ -192,7 +192,7 @@ export const getOrderDetail = defineAction({
       .where(eq(downloadLink.orderId, o.id))
       .orderBy(asc(downloadLink.createdAt), ...itemOrder);
     const emails = await ctx.tx
-      .select({ kind: emailLog.kind, status: emailLog.status, error: emailLog.error, at: emailLog.at })
+      .select({ kind: emailLog.kind, status: emailLog.status, deliveryStatus: emailLog.deliveryStatus, error: emailLog.error, at: emailLog.at })
       .from(emailLog)
       .where(and(eq(emailLog.orderId, o.id), inArray(emailLog.kind, ["delivery", "seller_notice"])))
       .orderBy(asc(emailLog.at), asc(emailLog.id));
