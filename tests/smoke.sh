@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Smoke de deploy: constrói a imagem (deploy/Dockerfile), sobe a pilha do compose.yaml completa (app + Postgres + Caddy,
-# mais um Mailpit só do smoke) com DOMAIN=localhost (HTTPS pela CA interna do Caddy), e confere:
-#   1. /api/health pelo Caddy; Postgres e app sem portas publicadas; app como usuário não-root;
-#   2. o Caddy preserva o Host e manda X-Forwarded-Proto (POST de cartão da mesma origem passa do 403) e HSTS; o
-#      entrypoint gera e imprime o código do primeiro acesso (SETUP_TOKEN) quando o .env não traz um;
+# Smoke de deploy: constrói as imagens (deploy/Dockerfile: app e `card`), sobe a pilha do compose.yaml completa com o
+# cartão isolado (COMPOSE_PROFILES=card, CARD_ISOLATED=1: app + `card` + Postgres + Caddy, mais Mailpit e Asaas falso só
+# do smoke) com DOMAIN=localhost e CARD_ORIGIN=https://pagar.localhost:<porta> (HTTPS pela CA interna do Caddy), e confere:
+#   1. /api/health pelo Caddy; Postgres, app e `card` sem portas publicadas; app como usuário não-root; `card` healthy;
+#   2. cartão pelo Caddy: a rota antiga do app (/api/checkout/card) para no Caddy (404 sem corpo, nunca chega ao app);
+#      no pagar.: /form.js 200, /healthz e / 404, POST /api/card de outra origem 403 e da própria origem com bilhete
+#      inválido 403 `ticket` (passou da checagem de HTTPS: o Caddy manda X-Forwarded-Proto); HSTS; o entrypoint gera e
+#      imprime o código do primeiro acesso (SETUP_TOKEN) quando o .env não traz um;
 #   3. fluxo mínimo pelo navegador (tests/deploy/flow.spec.ts): setup -> produto com PDF de ~46 MB -> oferta -> Pix
-#      manual -> liberar -> e-mail -> download carimbado (Worker de PDF dentro do container);
+#      manual -> liberar -> e-mail -> download carimbado (Worker de PDF dentro do container); depois, Asaas (falso)
+#      conectado e compra com cartão pelo iframe do pagar. (server actions do checkout provam o Host preservado);
+#   3b. logs do app e do `card` sem o número nem o CVV do cartão usado no fluxo;
 #   4. memória: pico do container no fluxo (cgroup memory.peak) abaixo de 700 MiB e nenhum OOM kill (teto 768 MB);
 #      ociosa (docker stats) abaixo de 512 MiB; tamanho da imagem;
 #   4b. o servidor (tini e node) roda sem OWNER_DATABASE_URL, sem core dump e sem swap; a CLI store-create via
@@ -29,6 +34,9 @@ free_port() { node -e 'const s=require("net").createServer().listen(0,"127.0.0.1
 HTTPS_PORT="$(free_port)"
 MAIL_PORT="$(free_port)"
 BASE="https://localhost:$HTTPS_PORT"
+CARD="https://pagar.localhost:$HTTPS_PORT"
+# curl: *.localhost em loopback sem depender do resolvedor do sistema.
+RESOLVE=(--resolve "localhost:$HTTPS_PORT:127.0.0.1" --resolve "pagar.localhost:$HTTPS_PORT:127.0.0.1")
 
 # Ambiente só deste smoke (--env-file): nunca lê o .env do desenvolvedor.
 umask 077
@@ -41,6 +49,13 @@ POSTGRES_PASSWORD=$(openssl rand -hex 24)
 APP_DB_PASSWORD=$(openssl rand -hex 24)
 SMOKE_HTTPS_PORT=$HTTPS_PORT
 SMOKE_MAIL_PORT=$MAIL_PORT
+COMPOSE_PROFILES=card
+CARD_ISOLATED=1
+CARD_ORIGIN=$CARD
+SMOKE_CARD_SITE=https://pagar.localhost
+CARD_TICKET_KEY=$(openssl rand -hex 32)
+ASAAS_SEAL_KEY=$(openssl rand -hex 32)
+CARD_DB_PASSWORD=$(openssl rand -hex 24)
 ENV
 umask 022
 
@@ -59,9 +74,9 @@ trap cleanup EXIT
 step() { echo "--> $*"; }
 fail() { echo "FALHA: $*" >&2; exit 1; }
 
-step "build da imagem"
+step "build das imagens (app e card)"
 TB=$(date +%s)
-dc build app
+dc build app card
 BUILD_S=$(( $(date +%s) - TB ))
 IMAGE_BYTES=$(docker image inspect -f '{{.Size}}' funil-smoke:latest)
 
@@ -72,26 +87,44 @@ UP_S=$(( $(date +%s) - TU ))
 
 step "health pelo Caddy"
 # --wait garante app saudável; o Caddy pode levar um instante para emitir o certificado interno de localhost.
-curl -fsSk --retry 20 --retry-delay 1 --retry-all-errors "$BASE/api/health" | grep -q '"ok":true' \
+curl -fsSk "${RESOLVE[@]}" --retry 20 --retry-delay 1 --retry-all-errors "$BASE/api/health" | grep -q '"ok":true' \
   || fail "/api/health pelo Caddy"
 
+step "cartão isolado: container card no ar e saudável"
+[ -n "$(dc ps -q card)" ] || fail "o container card não subiu (COMPOSE_PROFILES=card no env do smoke)"
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$(dc ps -q card)")" = "healthy" ] || fail "o container card não está healthy"
+
 step "portas: só o Caddy publica"
-# `docker port` lista só as portas publicadas no host: vazio para postgres e app; o Caddy publica (controle do teste).
-for svc in postgres app; do
+# `docker port` lista só as portas publicadas no host: vazio para postgres, app e card; o Caddy publica (controle do teste).
+for svc in postgres app card; do
   [ -z "$(docker port "$(dc ps -q "$svc")")" ] || fail "$svc publica porta no host"
 done
 [ -n "$(docker port "$(dc ps -q caddy)")" ] || fail "caddy deveria publicar a porta HTTPS"
 [ "$(dc exec -T app id -u)" != "0" ] || fail "app roda como root"
 
-step "Caddy preserva Host e manda X-Forwarded-Proto (POST de cartão da mesma origem)"
+step "cartão pelo Caddy: rota antiga parada no Caddy; pagar. só com as rotas do serviço"
 card='{"orderPublicId":"nao-existe","idempotencyKey":"6f1c1f5e-3c55-4a43-9a7b-0d6a3f1f2b11","installments":1}'
-code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "origin: $BASE" --data "$card" "$BASE/api/checkout/card")
-[ "$code" = "404" ] || fail "POST de cartão da mesma origem deveria chegar ao app (404 pedido inexistente), veio $code"
-code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "origin: https://evil.example" --data "$card" "$BASE/api/checkout/card")
-[ "$code" = "403" ] || fail "POST de cartão de outra origem deveria ser 403, veio $code"
+# Rota antiga com CARD_ISOLATED=1: o Caddy responde 404 sem corpo (o app responderia JSON): os bytes não entram no app.
+body=$(curl -sk "${RESOLVE[@]}" -o - -w '\n%{http_code}' -X POST -H 'content-type: application/json' -H "origin: $BASE" --data "$card" "$BASE/api/checkout/card")
+[ "$(printf '%s' "$body" | tail -n1)" = "404" ] || fail "rota antiga do cartão deveria dar 404 no Caddy, veio $(printf '%s' "$body" | tail -n1)"
+[ -z "$(printf '%s' "$body" | sed '$d')" ] || fail "rota antiga do cartão chegou ao app (corpo: $(printf '%s' "$body" | sed '$d'))"
+code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' "$CARD/form.js")
+[ "$code" = "200" ] || fail "GET $CARD/form.js deveria ser 200, veio $code"
+for path in /healthz / /api/health; do
+  code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' "$CARD$path")
+  [ "$code" = "404" ] || fail "GET $CARD$path deveria ser 404 no Caddy, veio $code"
+done
+code=$(curl -sk "${RESOLVE[@]}" -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -H "origin: $BASE" --data '{"ticket":"x"}' "$CARD/api/card")
+[ "$code" = "403" ] || fail "POST /api/card com a origem do app deveria ser 403, veio $code"
+# Da própria origem e com bilhete inválido: 403 `ticket`, ou seja, passou da checagem de HTTPS (o Caddy manda
+# X-Forwarded-Proto e o card confia nele com TRUST_PROXY=1). Sem o cabeçalho, seria 403 `https_required`.
+out=$(curl -sk "${RESOLVE[@]}" -X POST -H 'content-type: application/json' -H "origin: $CARD" --data '{"ticket":"x"}' "$CARD/api/card")
+[ "$out" = '{"error":"ticket","ticketExpired":false}' ] || fail "POST /api/card com bilhete inválido deveria dar 403 ticket, veio: $out"
+CARD_HEADERS="$(curl -fsSk "${RESOLVE[@]}" -D - -o /dev/null "$CARD/form.js")" || fail "$CARD/form.js (cabeçalhos)"
+grep -qi '^strict-transport-security: max-age=31536000' <<< "$CARD_HEADERS" || fail "o pagar. não manda Strict-Transport-Security"
 
 step "HSTS no Caddy e código de configuração inicial gerado pelo entrypoint"
-HEALTH_HEADERS="$(curl -fsSk -D - -o /dev/null "$BASE/api/health")" || fail "/api/health pelo Caddy (cabeçalhos)"
+HEALTH_HEADERS="$(curl -fsSk "${RESOLVE[@]}" -D - -o /dev/null "$BASE/api/health")" || fail "/api/health pelo Caddy (cabeçalhos)"
 printf '%s\n' "$HEALTH_HEADERS" | grep -qi '^strict-transport-security: max-age=31536000' \
   || fail "o Caddy não manda Strict-Transport-Security"
 # Sem SETUP_TOKEN no .env do smoke: o entrypoint gera, guarda no volume e imprime no log do app.
@@ -103,9 +136,15 @@ step "fluxo pelo navegador"
 # arquivos) a cada 100 ms durante o fluxo. O total com cache vem exato do memory.peak abaixo.
 dc exec -d app sh -c 'm=0; while [ ! -f /tmp/anon-stop ]; do a=$(sed -n "s/^anon //p" /sys/fs/cgroup/memory.stat); if [ "$a" -gt "$m" ]; then m=$a; echo "$m" > /tmp/anon-peak; fi; sleep 0.1; done'
 TF=$(date +%s)
-BASE_URL="$BASE" MAILPIT_URL="http://127.0.0.1:$MAIL_PORT" SMOKE_OUT="$OUT" SETUP_TOKEN="$SETUP_TOKEN" \
+BASE_URL="$BASE" CARD_ORIGIN="$CARD" MAILPIT_URL="http://127.0.0.1:$MAIL_PORT" SMOKE_OUT="$OUT" SETUP_TOKEN="$SETUP_TOKEN" \
   bunx playwright test --config tests/deploy/playwright.config.ts
 FLOW_S=$(( $(date +%s) - TF ))
+
+step "logs do app e do card sem o cartão do fluxo"
+# Cartão do tests/deploy/flow.spec.ts (4111 1111 1111 1111, CVV 582): nem número nem CVV junto da chave nos logs.
+svc_logs="$(dc logs --no-color app card)"
+! grep -Eq '4111 ?1111 ?1111 ?1111' <<< "$svc_logs" || fail "número do cartão de teste no log do app ou do card"
+! grep -Eiq '(c[cv]v|cvc)["'"'"' :=]*582([^0-9]|$)|"(ccv|cvv)"' <<< "$svc_logs" || fail "CVV do cartão de teste no log do app ou do card"
 
 step "memória do app: pico no fluxo (upload e carimbo de ~46 MB) e ociosa"
 # cgroup v2 do próprio container: memory.peak = maior uso desde a criação (exato, sem amostragem; inclui o cache de
@@ -144,9 +183,12 @@ printf '%s\n' "$cli_out" | grep -q "exige trocar esta senha" || fail "store-crea
 
 step "recriar o app: migração repetida e /data persistente"
 dc up -d --wait --wait-timeout 180 --force-recreate --no-deps app
-dc logs --no-color app | grep -q "migrate: ok" || fail "migração não rodou ao recriar o app"
+# Log inteiro numa variável: `dc logs | grep -q` fecha o pipe no primeiro acerto e o `docker compose logs` ainda
+# escrevendo morre de SIGPIPE (com pipefail, falha intermitente que cresce com o tamanho do log).
+app_logs="$(dc logs --no-color app)"
+grep -q "migrate: ok" <<< "$app_logs" || fail "migração não rodou ao recriar o app"
 link="$(cat "$OUT/download-link.txt")"
-code=$(curl -sk -o "$OUT/again.pdf" -w '%{http_code}' -X POST -H "origin: $BASE" "$link")
+code=$(curl -sk "${RESOLVE[@]}" -o "$OUT/again.pdf" -w '%{http_code}' -X POST -H "origin: $BASE" "$link")
 [ "$code" = "200" ] && [ "$(head -c 5 "$OUT/again.pdf")" = "%PDF-" ] || fail "download depois de recriar o app veio $code"
 
 TOTAL_S=$(( $(date +%s) - T0 ))

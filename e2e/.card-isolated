@@ -1,0 +1,1 @@
+# Marcador: com este arquivo, scripts/verify.sh sobe o app com o cartão isolado (CARD_ISOLATED=1, CARD_ORIGIN do serviço `card`) e repassa CARD_ORIGIN ao Playwright. O E2E deste diretório pressupõe o checkout com o iframe.
