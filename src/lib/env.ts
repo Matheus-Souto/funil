@@ -9,9 +9,39 @@ function isHttpBaseUrl(value: string): boolean {
   }
 }
 
+/** Origem `https://host[:porta]` sem caminho, query nem barra final; `http:` só em loopback. */
+function isCardOrigin(value: string): boolean {
+  try {
+    const u = new URL(value);
+    if (u.origin !== value) return false;
+    return u.protocol === "https:" || (u.protocol === "http:" && isLoopbackUrl(value));
+  } catch {
+    return false;
+  }
+}
+
+/** Hostname puro em minúsculas (um ou mais rótulos): vira parte das origens do checkout. */
+const PLATFORM_HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
 const schema = z.object({
+  // `app` = o app Next; `card` = o serviço isolado do cartão (nunca recebe o SECRET; ver parseEnv).
+  SERVICE: z.enum(["app", "card"]).default("app"),
+  // 1 = o formulário do cartão é servido pelo serviço isolado (CARD_ORIGIN) em vez de pelo app.
+  CARD_ISOLATED: z.enum(["0", "1"]).default("0").transform((v) => v === "1"),
+  CARD_ORIGIN: z.string().min(1).refine(isCardOrigin, "deve ser uma origem https://host[:porta] sem caminho, query nem barra final (http só em loopback)").optional(),
+  CARD_TICKET_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
+  ASAAS_SEAL_KEY: z.string().min(32, "deve ter no mínimo 32 caracteres (openssl rand -hex 32)").optional(),
+  CARD_DB_PASSWORD: z.string().min(1).optional(),
+  // Porta do serviço de cartão (SERVICE=card). 0 = porta livre escolhida pelo sistema (testes do bundle em Node).
+  CARD_PORT: z
+    .string()
+    .regex(/^\d{1,5}$/, "deve ser um número de porta (0 a 65535)")
+    .default("3100")
+    .transform(Number)
+    .refine((n) => n <= 65535, "deve ser um número de porta (0 a 65535)"),
   MODE: z.enum(["single", "multi"]).default("single"),
   BASE_URL: z.string().min(1).refine(isHttpBaseUrl, "deve ser uma URL http(s) válida, sem barra final (ex.: https://loja.example.com)"),
+  // Validada como hostname só com MODE=multi (ver parseEnv); no single é ignorada.
   PLATFORM_DOMAIN: z.string().min(1).optional(),
   DATABASE_URL: z.string().min(1),
   // Papel dono: só migrações, CLI store-create e testes (ver requireOwnerUrl em db/client.ts). Em produção o
@@ -20,7 +50,9 @@ const schema = z.object({
   SECRET: z
     .string()
     .min(32, "deve ter no mínimo 32 caracteres")
-    .refine((v) => !v.toLowerCase().includes("troque"), "é um valor de exemplo; gere um segredo próprio (openssl rand -hex 32)"),
+    .refine((v) => !v.toLowerCase().includes("troque"), "é um valor de exemplo; gere um segredo próprio (openssl rand -hex 32)")
+    // Obrigatório com SERVICE=app e proibido com SERVICE=card (ver parseEnv).
+    .optional(),
   DATA_DIR: z.string().min(1).default("./data"),
   TURNSTILE_SITE_KEY: z.string().min(1).optional(),
   TURNSTILE_SECRET: z.string().min(1).optional(),
@@ -69,17 +101,56 @@ export function isLoopbackUrl(value: string): boolean {
 export function parseEnv(source: Record<string, string | undefined>): Env {
   // Variável vazia (`FOO=`) conta como ausente.
   const cleaned = Object.fromEntries(Object.entries(source).filter(([, v]) => v !== undefined && v !== ""));
+  const isCard = cleaned.SERVICE === "card";
+  const extra: string[] = [];
+  if (isCard) {
+    for (const k of ["SECRET", "OWNER_DATABASE_URL", "APP_DB_PASSWORD"]) {
+      if (cleaned[k] !== undefined) extra.push(`${k} não pode ser passado ao serviço de cartão (SERVICE=card)`);
+      delete cleaned[k];
+    }
+  } else if (cleaned.SECRET === undefined) {
+    extra.push("SECRET (faltando)");
+  }
+  if (isCard || cleaned.CARD_ISOLATED === "1") {
+    for (const k of ["CARD_ORIGIN", "CARD_TICKET_KEY", "ASAAS_SEAL_KEY"]) {
+      if (cleaned[k] === undefined) extra.push(`${k} (faltando; obrigatória com ${isCard ? "SERVICE=card" : "CARD_ISOLATED=1"})`);
+    }
+  }
+  // Segredos distintos: um vazamento de um não pode abrir os outros. Nunca incluir os valores na mensagem.
+  const secrets = [source.CARD_TICKET_KEY, source.ASAAS_SEAL_KEY, source.SECRET].filter((v): v is string => v !== undefined && v !== "");
+  if (new Set(secrets).size !== secrets.length) extra.push("CARD_TICKET_KEY, ASAAS_SEAL_KEY e SECRET precisam ser diferentes");
+  if (cleaned.CARD_ORIGIN !== undefined && cleaned.BASE_URL !== undefined && isCardOrigin(cleaned.CARD_ORIGIN)) {
+    let baseOrigin: string | undefined;
+    try {
+      baseOrigin = new URL(cleaned.BASE_URL).origin;
+    } catch {
+      /* BASE_URL inválida: o schema já reclama */
+    }
+    if (baseOrigin === cleaned.CARD_ORIGIN) extra.push("CARD_ORIGIN precisa ser um domínio diferente do checkout (ex.: https://pagar.<DOMAIN>)");
+  }
   const parsed = schema.safeParse(cleaned);
-  if (!parsed.success) {
-    const problems = parsed.error.issues.map((i) => {
-      const name = i.path.join(".") || "(env)";
-      const missing = i.code === "invalid_type" && cleaned[name] === undefined;
-      return missing ? `${name} (faltando)` : `${name}: ${i.message}`;
-    });
-    throw new Error(`Variáveis de ambiente inválidas: ${problems.join("; ")}`);
+  if (!parsed.success || extra.length > 0) {
+    const problems = parsed.success
+      ? []
+      : parsed.error.issues.map((i) => {
+          const name = i.path.join(".") || "(env)";
+          const missing = i.code === "invalid_type" && cleaned[name] === undefined;
+          return missing ? `${name} (faltando)` : `${name}: ${i.message}`;
+        });
+    throw new Error(`Variáveis de ambiente inválidas: ${[...problems, ...extra].join("; ")}`);
   }
   if (parsed.data.MODE === "multi" && parsed.data.PLATFORM_DOMAIN === undefined) {
     throw new Error("Variáveis de ambiente inválidas: PLATFORM_DOMAIN é obrigatória com MODE=multi");
+  }
+  if (parsed.data.MODE === "multi") {
+    // Antes desta validação o valor era aceito como viesse: maiúsculas e o ponto final (FQDN) viram a forma canônica,
+    // em vez de impedir o boot de uma instalação que já subia. Porta, esquema e caminho continuam recusados.
+    parsed.data.PLATFORM_DOMAIN = parsed.data.PLATFORM_DOMAIN!.toLowerCase().replace(/\.$/, "");
+  }
+  if (parsed.data.MODE === "multi" && !PLATFORM_HOSTNAME.test(parsed.data.PLATFORM_DOMAIN!)) {
+    throw new Error(
+      "Variáveis de ambiente inválidas: PLATFORM_DOMAIN deve ser só o hostname, sem esquema, porta nem caminho (ex.: plataforma.com.br)",
+    );
   }
   if ((parsed.data.TURNSTILE_SITE_KEY === undefined) !== (parsed.data.TURNSTILE_SECRET === undefined)) {
     throw new Error("Variáveis de ambiente inválidas: TURNSTILE_SITE_KEY e TURNSTILE_SECRET devem ser definidas juntas ou nenhuma");
@@ -109,6 +180,13 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
 }
 
 let cached: Env | undefined;
+
+/** O SECRET do app. Só o app o tem: o serviço de cartão nunca o recebe, então quem chama sem SECRET lança. */
+export function requireSecret(from: { SECRET?: string } = env): string {
+  const secret = from.SECRET;
+  if (secret === undefined) throw new Error("SECRET não definido: o app precisa do SECRET (o serviço de cartão nunca o recebe)");
+  return secret;
+}
 
 /** Lê `process.env` só no primeiro acesso a uma propriedade (o import nunca falha). */
 export const env: Env = new Proxy({} as Env, {

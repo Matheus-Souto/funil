@@ -23,11 +23,13 @@ import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { cardAttempt, customer, integration, offer, orders, payment } from "@/lib/db/schema";
 import { env } from "@/lib/env";
+import { IntegrationSecretUnreadable } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
 import { verifyTurnstile } from "@/lib/payments/turnstile";
 import { cardExpiryValid } from "@/lib/validation/br";
+import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
 import { buyerOf, ensureAsaasCustomer } from "./pix";
 import { applyAsaasPayment, asaasPaymentInput, mapAsaasStatus } from "./webhook";
@@ -52,23 +54,6 @@ export const LIMITS = { ip: 10, email: 5, card: 3 } as const;
  * na loja. Um teto global da loja seria consumido pelo próprio atacante e desligaria o cartão para todos.
  */
 export const BREAKER = { declines: 10, windowSec: 15 * 60, holdSec: 3600, capPerSourceWithoutTurnstile: 3 } as const;
-/**
- * Cartão de aprovação do sandbox do Asaas (documentado; não passa no Luhn). Aceito só com a conexão sandbox: em
- * produção nenhum cartão real falha no Luhn.
- */
-export const SANDBOX_TEST_CARD = "4444444444444444";
-
-/** Dígito verificador (Luhn): todo número de cartão real passa. Número inválido nunca vai ao Asaas. */
-export function luhnValid(number: string): boolean {
-  if (!/^\d{13,19}$/.test(number)) return false;
-  let sum = 0;
-  for (let i = 0; i < number.length; i++) {
-    let d = number.charCodeAt(number.length - 1 - i) - 48;
-    if (i % 2 === 1) d = d * 2 > 9 ? d * 2 - 9 : d * 2;
-    sum += d;
-  }
-  return sum % 10 === 0;
-}
 /** Códigos de erro do Asaas que significam recusa do cartão (doc: "invalid_creditCard"). Os demais: integração. */
 const DECLINE_CODES = new Set(["invalid_creditCard"]);
 /** HTTP em que o Asaas rejeitou a requisição sem processá-la (sem cobrança): erro de integração/configuração. */
@@ -279,6 +264,12 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   } catch (e) {
     // Nenhuma cobrança foi enviada: libera o pedido para nova tentativa.
     await closeAttempt(storeId, attempt.id, { status: "error", errorMessage: NO_CHARGE }, now());
+    if (e instanceof IntegrationSecretUnreadable) {
+      // Chave do Asaas da loja que este processo não abre (no serviço de cartão: conexão ainda em v1). Configuração,
+      // não o comprador: "indisponível" (o iframe não trava o cartão) e o operador vê no log.
+      log.error("cartão: a conexão Asaas da loja não pode ser aberta; confira a ASAAS_SEAL_KEY e a re-selagem", { storeId, orderId: order.id, attemptId: attempt.id });
+      return unavailable();
+    }
     throw e;
   }
 

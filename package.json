@@ -14,9 +14,12 @@
     "migration": "drizzle-kit generate",
     "migrate": "bun src/lib/db/migrate.ts",
     "store:create": "bun scripts/store-create.ts",
+    "asaas:unseal": "bun scripts/asaas-unseal.ts",
     "hygiene": "bun scripts/check-test-hygiene.ts",
     "verify": "bash scripts/verify.sh",
-    "verify:reset": "rm -f .verify/state.json"
+    "verify:reset": "rm -f .verify/state.json",
+    "card:build": "bun build src/card-service/main.ts --target=node --outfile=dist/card/server.js && bun build src/card-service/form/form.ts --target=browser --format=iife --minify --outfile=dist/card/form.js && cp src/card-service/form/form.css dist/card/form.css && bun -e \"const c=require('node:crypto'),f=require('node:fs');f.writeFileSync('dist/card/form.js.sha256',c.createHash('sha256').update(f.readFileSync('dist/card/form.js')).digest('hex')+'\\n')\"",
+    "card:dev": "bun run card:build && bun scripts/card-dev.ts"
   },
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",

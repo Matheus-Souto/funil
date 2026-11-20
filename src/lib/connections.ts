@@ -7,7 +7,7 @@ import { defineAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { env } from "@/lib/env";
 import { offer } from "@/lib/db/schema";
-import { getIntegration } from "@/lib/integrations";
+import { getIntegration, readIntegration } from "@/lib/integrations";
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
 const webhookUrl = (storeId: string) => `${env.BASE_URL.replace(/\/+$/, "")}/api/webhooks/asaas/${storeId}`;
@@ -20,9 +20,10 @@ export const connectionsStatus = defineAction({
   audit: false,
   async run(ctx) {
     const canWrite = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.write");
-    const [pix, asaas, smtp, meta] = await Promise.all(
-      (["pix_manual", "asaas", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)),
-    );
+    const [pix, smtp, meta] = await Promise.all((["pix_manual", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)));
+    // Chave do Asaas que não abre (ASAAS_SEAL_KEY trocada, removida ou rollback) não derruba a tela: aparece como
+    // ilegível para o dono colar a chave de novo.
+    const asaas = await readIntegration(ctx.tx, ctx.storeId, "asaas");
     const cfg = (c: typeof pix) => (c?.config ?? {}) as Record<string, unknown>;
     // Sem Turnstile, o disjuntor do cartão só limita por IP: com oferta ativa de cartão, o painel recomenda configurar.
     const turnstileConfigured = Boolean(env.TURNSTILE_SECRET);
@@ -36,7 +37,7 @@ export const connectionsStatus = defineAction({
       asaas: asaas
         ? {
             env: cfg(asaas).env === "production" ? ("production" as const) : ("sandbox" as const),
-            apiKey: asaas.secret ? ("configured" as const) : null,
+            apiKey: asaas.unreadable ? ("unreadable" as const) : asaas.secret ? ("configured" as const) : null,
             webhookUrl: webhookUrl(ctx.storeId),
             webhookToken: canWrite ? str(cfg(asaas).webhookToken) : null,
           }

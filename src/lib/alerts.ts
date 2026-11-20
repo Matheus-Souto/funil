@@ -27,8 +27,8 @@ export interface AlertExtra {
   code?: string;
   /** Estorno parcial: quanto já voltou ao comprador (centavos). */
   refundedCents?: number;
-  /** Monitor de página de pagamento: qual página. */
-  page?: "/c" | "/o";
+  /** Monitor de página de pagamento: qual página (`/form` = o iframe do cartão no domínio do serviço de cartão). */
+  page?: "/c" | "/o" | "/form";
 }
 
 const safeCode = (v: string) => v.replace(/[^\w.:-]/g, "").slice(0, 64);
@@ -40,7 +40,7 @@ export async function alertSeller(tx: Tx, storeId: string, reason: AlertReason, 
     ...(extra.paymentId !== undefined ? { paymentId: extra.paymentId } : {}),
     ...(extra.code !== undefined ? { code: safeCode(extra.code) } : {}),
     ...(extra.refundedCents !== undefined ? { refundedCents: extra.refundedCents } : {}),
-    ...(extra.page === "/c" || extra.page === "/o" ? { page: extra.page } : {}),
+    ...(extra.page === "/c" || extra.page === "/o" || extra.page === "/form" ? { page: extra.page } : {}),
   };
   await tx.insert(storeAlert).values({ storeId, kind: reason, orderId: extra.orderId ?? null, detail });
   await enqueue(tx, { storeId, type: "notify_seller", payload: { ...(extra.orderId ? { orderId: extra.orderId } : {}), reason, ...detail } });
@@ -83,7 +83,7 @@ export function alertText(
     case "monitor_pagina_pagamento":
       return {
         title: `A página de pagamento mudou${typeof detail.page === "string" ? ` (${detail.page})` : ""}${motivo}`,
-        body: "A verificação semanal encontrou cabeçalho de segurança ou scripts diferentes do esperado na página do checkout ou do pedido. Se você não atualizou o sistema, investigue antes de continuar vendendo com cartão.",
+        body: "A verificação semanal encontrou cabeçalho de segurança ou scripts diferentes do esperado na página do checkout, do pedido ou do formulário do cartão. Se você não atualizou o sistema, investigue antes de continuar vendendo com cartão.",
       };
     case "disjuntor_cartao":
       return {

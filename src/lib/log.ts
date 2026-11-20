@@ -40,6 +40,43 @@ export function safeErrorMessage(e: unknown): string {
   return String(walk(e instanceof Error ? e.message : String(e), new WeakSet()));
 }
 
+const IDENT = /^[A-Za-z0-9_.:-]{1,64}$/;
+const ident = (v: unknown): string | undefined => (typeof v === "string" && IDENT.test(v) ? v : undefined);
+
+/**
+ * Identificação de um erro para log quando a mensagem pode trazer dados do comprador (nome impresso, CVV, validade:
+ * a máscara só reconhece PAN). Nunca inclui texto livre do erro:
+ * - consulta ao banco (drizzle/Postgres, inclusive pelo `cause`): nome e SQLSTATE (ou o `code` da causa, ex. rede);
+ * - `ActionError` nosso: code, mensagem e `details.status`; `provider_error` (erro de um provedor, ex. o Asaas, cuja
+ *   descrição pode ecoar o que foi enviado): só code e `details.status`, nunca a mensagem;
+ * - demais: nome, `code` e `cause.code` (ECONNRESET, ETIMEDOUT...).
+ * Nome e códigos só entram com formato de identificador.
+ */
+export function errorFields(e: unknown): Record<string, string | number> {
+  // Classes que não definem `name` (ex.: DrizzleQueryError) ficam com "Error": vale o nome da classe.
+  const name = e instanceof Error ? (e.name === "Error" ? ident(e.constructor?.name) : ident(e.name)) : typeof e;
+  const out: Record<string, string | number> = { errorName: name ?? "Error" };
+  const obj = (typeof e === "object" && e !== null ? e : {}) as { code?: unknown; cause?: unknown; details?: unknown; message?: unknown };
+  const causeCode = ident((obj.cause as { code?: unknown } | null | undefined)?.code);
+  const query = queryErrorCode(e);
+  if (query !== undefined) {
+    if (query) out.sqlState = query;
+    else if (causeCode) out.causeCode = causeCode;
+    return out;
+  }
+  if (e instanceof Error && e.name === "ActionError" && ident(obj.code)) {
+    out.errorCode = obj.code as string;
+    if (obj.code !== "provider_error") out.errorMessage = e.message.slice(0, 200);
+    const status = (obj.details as { status?: unknown } | null | undefined)?.status;
+    if (typeof status === "number" && Number.isInteger(status) && status >= 0 && status <= 999) out.status = status;
+    return out;
+  }
+  const code = ident(obj.code);
+  if (code) out.errorCode = code;
+  if (causeCode) out.causeCode = causeCode;
+  return out;
+}
+
 function walk(v: unknown, seen: WeakSet<object>): unknown {
   if (typeof v === "string") return v.replace(PAN, MASK);
   if (v === null || typeof v !== "object") return v;

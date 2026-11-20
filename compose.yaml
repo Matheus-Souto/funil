@@ -2,6 +2,8 @@
 # Guia passo a passo: docs/instalacao.md. Variáveis: copie .env.example para .env e preencha.
 #   docker compose up -d --build
 # Só o Caddy publica portas (80/443). Postgres e app ficam na rede interna do compose.
+# Cartão isolado (opcional): COMPOSE_PROFILES=card no .env sobe também o serviço `card` (formulário do cartão em
+# CARD_ORIGIN), numa rede própria só com Postgres e Caddy (docs/instalacao.md, "Cartão isolado").
 name: funil
 
 services:
@@ -29,6 +31,13 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-1}
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      # Cartão isolado: 1 = o checkout embute o iframe do serviço `card` (profile card). As chaves só valem com ele
+      # ligado; CARD_DB_PASSWORD é usada só pela migração (dá login ao papel `card`) e sai do ambiente antes do app.
+      CARD_ISOLATED: ${CARD_ISOLATED:-0}
+      CARD_ORIGIN: ${CARD_ORIGIN:-}
+      CARD_TICKET_KEY: ${CARD_TICKET_KEY:-}
+      ASAAS_SEAL_KEY: ${ASAAS_SEAL_KEY:-}
+      CARD_DB_PASSWORD: ${CARD_DB_PASSWORD:-}
       # Código do primeiro acesso (/admin/setup). Vazio: o entrypoint gera um, guarda no volume e mostra no log.
       SETUP_TOKEN: ${SETUP_TOKEN:-}
     volumes:
@@ -46,6 +55,58 @@ services:
     expose:
       - "3000"
 
+  # Serviço de cartão isolado (só com COMPOSE_PROFILES=card). Recebe número e CVV (só em memória) e nada mais do
+  # sistema: sem SECRET, sem papel dono, sem SMTP/Meta, sem volume. Rede `card`: alcança só Postgres e Caddy (e a
+  # internet, para o Asaas e o Turnstile: restrinja a saída no firewall do host, docs/seguranca-pagamento.md).
+  # Variáveis vazias aqui não travam o compose (o profile desligado também é interpolado): o serviço recusa subir e
+  # diz qual falta.
+  card:
+    profiles: ["card"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      target: card
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE: card
+      MODE: ${MODE:-single}
+      BASE_URL: ${BASE_URL:-https://${DOMAIN:?defina DOMAIN no .env}}
+      PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
+      # Papel `card` (sem BYPASSRLS, só o necessário para cobrar; src/lib/db/rls.sql). Sem CARD_DB_PASSWORD, vazia.
+      DATABASE_URL: ${CARD_DB_PASSWORD:+postgres://card:${CARD_DB_PASSWORD}@postgres:5432/funil}
+      CARD_ORIGIN: ${CARD_ORIGIN:-}
+      CARD_TICKET_KEY: ${CARD_TICKET_KEY:-}
+      ASAAS_SEAL_KEY: ${ASAAS_SEAL_KEY:-}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+    networks:
+      - card
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Nenhuma capability (escuta na 3100) e nada de virar root por um binário setuid da imagem base.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 192m
+    # Número e CVV em memória: sem swap além da RAM e sem core dump (como o app).
+    memswap_limit: 192m
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    # Uma cobrança em curso leva até ~75 s (Turnstile, conferência no Asaas e cobrança de até 60 s, depois do corpo);
+    # o SIGTERM espera ela terminar.
+    stop_grace_period: 90s
+    expose:
+      - "3100"
+
   postgres:
     # Versões fixadas por versão menor; atualizar: docker compose pull && docker compose build --pull (docs/instalacao.md).
     image: postgres:17.12
@@ -56,6 +117,9 @@ services:
       POSTGRES_DB: funil
     volumes:
       - db-data:/var/lib/postgresql/data
+    networks:
+      - default
+      - card
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U owner -d funil"]
       interval: 5s
@@ -75,12 +139,27 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?defina DOMAIN no .env}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
+      # Endereço do site do cartão (deploy/Caddyfile.card).
+      CARD_ORIGIN: ${CARD_ORIGIN:-}
+      # Com 1, o Caddy responde 404 à rota antiga do cartão (/api/checkout/card) sem repassar ao app.
+      CARD_ISOLATED: ${CARD_ISOLATED:-0}
     volumes:
       # Personalização (Cloudflare com proxy, lista de lojas): copie para deploy/Caddyfile.local (fora do git) e use
       # CADDYFILE=Caddyfile.local; curinga do MODE=multi: CADDYFILE=Caddyfile.multi (ver docs/instalacao.md).
       - ./deploy/${CADDYFILE:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      # Site do cartão: com CARD_ORIGIN, vira card/site.caddy (o `import card/*.caddy` do Caddyfile pega); sem ela,
+      # card/site (o glob não pega e o Caddy sobe sem o site).
+      - ./deploy/Caddyfile.card:/etc/caddy/card/site${CARD_ORIGIN:+.caddy}:ro
       - caddy-data:/data
       - caddy-config:/config
+    networks:
+      - default
+      - card
+
+networks:
+  default:
+  # Rede do serviço de cartão: card, Postgres e Caddy. O app não entra nela.
+  card:
 
 volumes:
   app-data:

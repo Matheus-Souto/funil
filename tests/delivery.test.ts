@@ -594,6 +594,8 @@ describe("notify_seller", () => {
     const monitor = lastMailTo("dono@loja.com")!;
     expect(monitor.subject).toMatch(/página de pagamento/i);
     expect(monitor.text).toContain("csp_diferente");
+    await h(sellerJob(shop.storeId, { reason: "monitor_pagina_pagamento", page: "/form", code: "script_nao_autorizado" }), new AbortController().signal);
+    expect(lastMailTo("dono@loja.com")!.text).toContain("na página do formulário do cartão");
     // Código fora do formato não é ecoado.
     await h(sellerJob(shop.storeId, { reason: "estorno_falhou", code: "<b>x</b>" }), new AbortController().signal);
     expect(lastMailTo("dono@loja.com")!.html).not.toContain("<b>x</b>");

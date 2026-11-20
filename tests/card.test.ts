@@ -1123,6 +1123,31 @@ describe("rota POST /api/checkout/card", () => {
       body,
     });
 
+  test("CARD_ISOLATED=1: 404 sem ler o corpo, sem loja e sem cobrança (nenhum cartão entra no app)", async () => {
+    let resolved = 0;
+    let paid = 0;
+    const opts = {
+      nodeEnv: "test",
+      cardIsolated: true,
+      resolveStore: async () => {
+        resolved++;
+        return store;
+      },
+      payWithCard: async () => {
+        paid++;
+        return { status: "approved" as const };
+      },
+    };
+    const r = req(JSON.stringify(input("p")));
+    const res = await handleCardCheckout(r, opts);
+    expect(res.status).toBe(404);
+    expect(r.bodyUsed).toBe(false);
+    expect(resolved).toBe(0);
+    expect(paid).toBe(0);
+    // Desligada (como hoje): a mesma requisição paga.
+    expect((await handleCardCheckout(req(JSON.stringify(input("p"))), { ...opts, cardIsolated: false })).status).toBe(200);
+  });
+
   test("POST entre sites: Content-Type e Origin (ou Sec-Fetch-Site) exigidos, 403 antes de qualquer trabalho", async () => {
     let resolved = 0;
     let paid = 0;
@@ -1260,7 +1285,7 @@ describe("rota POST /api/checkout/card", () => {
         resolveStore: async () => store,
         nodeEnv: "test",
         payWithCard: async (_c, i) => {
-          throw new Error(`falhou com ${i.card.number}`);
+          throw new Error(`falhou com ${i.card.number} ${i.card.holderName}`);
         },
       });
     } finally {
@@ -1271,7 +1296,9 @@ describe("rota POST /api/checkout/card", () => {
       error: "internal",
       message: "Não foi possível processar o pagamento. Verifique em instantes antes de tentar de novo.",
     });
-    expect(cap.text()).toContain("[redacted]");
+    // Só nome e código do erro vão para o log: nem o PAN nem o nome impresso (texto livre do erro).
+    expect(cap.text()).toContain("checkout cartão: erro inesperado");
     expect(cap.text()).not.toContain("44444444");
+    expect(cap.text()).not.toContain(HOLDER);
   });
 });

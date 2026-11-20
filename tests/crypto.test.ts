@@ -1,5 +1,5 @@
 import fc from "fast-check";
-import { createSealer, open, randomToken, seal, sha256, timingSafeEqualStr } from "@/lib/crypto";
+import { createAsaasSealer, createSealer, open, randomToken, seal, sha256, timingSafeEqualStr } from "@/lib/crypto";
 
 test("seal/open ida e volta", () => {
   const s = seal("chave-asaas");
@@ -56,4 +56,38 @@ test("randomToken, sha256 e timingSafeEqualStr", () => {
   expect(timingSafeEqualStr("a", "a")).toBe(true);
   expect(timingSafeEqualStr("a", "b")).toBe(false);
   expect(timingSafeEqualStr("a", "ab")).toBe(false);
+});
+
+describe("selo próprio do Asaas (a1)", () => {
+  const chave = "a".repeat(32);
+
+  test("ida e volta a1 e formato", () => {
+    const asaas = createAsaasSealer(chave);
+    const s = asaas.seal("chave-asaas");
+    expect(s.startsWith("a1.")).toBe(true);
+    expect(s.split(".")).toHaveLength(4);
+    expect(s).not.toContain("chave-asaas");
+    expect(asaas.open(s)).toBe("chave-asaas");
+  });
+
+  test("a1 aberto com outra chave lança erro", () => {
+    const s = createAsaasSealer(chave).seal("x");
+    expect(() => createAsaasSealer("b".repeat(32)).open(s)).toThrow();
+  });
+
+  test("a1 e v1 não se abrem um pelo outro, mesmo com o mesmo segredo", () => {
+    const asaas = createAsaasSealer(chave);
+    const padrao = createSealer(chave);
+    expect(() => padrao.open(asaas.seal("x"))).toThrow("Valor selado inválido");
+    expect(() => asaas.open(padrao.seal("x"))).toThrow("Valor selado inválido");
+    // Mesmo trocando o prefixo, a chave derivada (info do HKDF) é outra.
+    expect(() => asaas.open(padrao.seal("x").replace(/^v1\./, "a1."))).toThrow();
+  });
+
+  test("createSealer aceita info e versão próprias; o padrão segue v1", () => {
+    const s = createSealer(chave, { info: "funil:seal:outro:v1", version: "z9" });
+    expect(s.seal("x").startsWith("z9.")).toBe(true);
+    expect(createSealer(chave).seal("x").startsWith("v1.")).toBe(true);
+    expect(() => createSealer(chave).open(s.seal("x").replace(/^z9\./, "v1."))).toThrow();
+  });
 });

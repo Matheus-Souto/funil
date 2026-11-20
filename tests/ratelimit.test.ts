@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { sql } from "drizzle-orm";
 import {
   countRecentEvents,
@@ -95,6 +96,12 @@ describe("checkCardFingerprint (só memória)", () => {
     const dump = JSON.stringify(await t.ownerDb.execute(sql`select * from rate_limit`));
     expect(dump).not.toContain("4000000000000010");
     expect(dump).not.toContain("0010");
+  });
+
+  test("a chave do HMAC é aleatória por processo, sem o SECRET (o serviço de cartão não o tem)", () => {
+    const src = readFileSync(new URL("../src/lib/payments/ratelimit.ts", import.meta.url), "utf8");
+    expect(src).not.toMatch(/requireSecret|SECRET/);
+    expect(src).toMatch(/const FINGERPRINT_KEY = randomBytes\(32\);/);
   });
 });
 

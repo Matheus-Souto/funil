@@ -20,7 +20,12 @@ function withDatabase(url: string, user: string | undefined, password: string | 
 export interface TestDb {
   db: Db;
   ownerDb: Db;
+  /** URL do papel dono neste banco. */
   url: string;
+  /** URL do papel `app` neste banco (o `db` padrão). */
+  appUrl: string;
+  /** URL do papel `card` neste banco (serviço de cartão isolado). */
+  cardUrl: string;
   drop(): Promise<void>;
 }
 
@@ -31,18 +36,20 @@ export interface TestDb {
 export async function createTestDb(): Promise<TestDb> {
   const name = `test_${randomBytes(6).toString("hex")}`;
   const appPassword = env.APP_DB_PASSWORD ?? "app";
+  const cardPassword = env.CARD_DB_PASSWORD ?? "card";
   const owner = requireOwnerUrl();
   const adminUrl = withDatabase(owner, undefined, undefined, "postgres");
   const ownerUrl = withDatabase(owner, undefined, undefined, name);
   const appUrl = withDatabase(owner, "app", appPassword, name);
+  const cardUrl = withDatabase(owner, "card", cardPassword, name);
 
   const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
   try {
     await admin.unsafe(`create database "${name}"`);
-    // O papel `app` é global ao servidor: serializa a migração entre arquivos/processos.
+    // Os papéis `app` e `card` são globais ao servidor: serializa a migração entre arquivos/processos.
     await admin`select pg_advisory_lock(${LOCK_KEY})`;
     try {
-      await migrate(ownerUrl, appPassword);
+      await migrate(ownerUrl, appPassword, cardPassword);
     } finally {
       await admin`select pg_advisory_unlock(${LOCK_KEY})`;
     }
@@ -57,6 +64,8 @@ export async function createTestDb(): Promise<TestDb> {
     db,
     ownerDb,
     url: ownerUrl,
+    appUrl,
+    cardUrl,
     async drop() {
       if (dropped) return;
       dropped = true;

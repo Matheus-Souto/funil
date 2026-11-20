@@ -1,5 +1,7 @@
 import fc from "fast-check";
-import { log, redact } from "@/lib/log";
+import { DrizzleQueryError } from "drizzle-orm";
+import { ActionError } from "@/lib/actions/core";
+import { errorFields, log, redact } from "@/lib/log";
 
 type Rec = Record<string, unknown>;
 
@@ -161,4 +163,56 @@ test("UUID só é poupado sob chave de id, inteiro, no formato e com letra hex; 
       expect(out).not.toMatch(/4111[\s.-]*1111[\s.-]*1111[\s.-]*1111/);
     }
   }
+});
+
+describe("errorFields: identificação de erro para log, sem texto livre", () => {
+  const PAN = "4444444444444444";
+  const HOLDER = "TITULAR ERRO SIGMA";
+  const leaks = (v: unknown) => JSON.stringify(redact(v));
+  const pgError = (code: string) => Object.assign(new Error(`valor ${HOLDER} ${PAN} viola a restrição`), { code, severity: "ERROR", detail: HOLDER });
+
+  test("erro do drizzle com cause do Postgres: nome e SQLSTATE; nada da SQL, dos params nem da mensagem", () => {
+    const e = new DrizzleQueryError(`select * from x where nome = $1 and n = $2`, [HOLDER, PAN], pgError("23505"));
+    const out = errorFields(e);
+    expect(out).toEqual({ errorName: "DrizzleQueryError", sqlState: "23505" });
+    expect(leaks(out)).not.toContain(HOLDER);
+  });
+
+  test("erro do Postgres direto (severity): SQLSTATE; drizzle com cause de rede: o code da causa", () => {
+    expect(errorFields(pgError("40P01"))).toEqual({ errorName: "Error", sqlState: "40P01" });
+    const net = Object.assign(new Error(`connect ECONNREFUSED ${HOLDER}`), { code: "ECONNREFUSED" });
+    expect(errorFields(new DrizzleQueryError("select 1", [HOLDER], net))).toEqual({ errorName: "DrizzleQueryError", causeCode: "ECONNREFUSED" });
+  });
+
+  test("ActionError nosso: code e mensagem; provider_error (Asaas): só code e status, nunca a mensagem", () => {
+    const e = new ActionError("provider_error", "Erro no Asaas (HTTP 401)", { status: 401, errorCodes: ["invalid_access_token"] });
+    expect(errorFields(e)).toEqual({ errorName: "ActionError", errorCode: "provider_error", status: 401 });
+    // A descrição do provedor pode ecoar o que foi enviado (nome impresso, validade): fora do log.
+    expect(leaks(errorFields(new ActionError("provider_error", `Asaas: titular ${HOLDER} inválido`, { status: 400 })))).not.toContain(HOLDER);
+    expect(errorFields(new ActionError("conflict", "Pedido ocupado"))).toEqual({
+      errorName: "ActionError",
+      errorCode: "conflict",
+      errorMessage: "Pedido ocupado",
+    });
+    // status que não é inteiro HTTP é ignorado; a mensagem passa pela máscara do log
+    const odd = errorFields(new ActionError("conflict", `falhou ${PAN}`, { status: "x" }));
+    expect(odd.status).toBeUndefined();
+    expect(leaks(odd)).not.toContain(PAN);
+  });
+
+  test("outros erros: nome, code e cause.code; nunca a mensagem", () => {
+    const cause = Object.assign(new Error(`timeout ${HOLDER}`), { code: "ETIMEDOUT" });
+    const e = Object.assign(new TypeError(`falhou com ${PAN} ${HOLDER}`, { cause }), { code: "ECONNRESET" });
+    expect(errorFields(e)).toEqual({ errorName: "TypeError", errorCode: "ECONNRESET", causeCode: "ETIMEDOUT" });
+    expect(errorFields(new Error(`só texto ${HOLDER}`))).toEqual({ errorName: "Error" });
+    expect(errorFields(`texto ${HOLDER}`)).toEqual({ errorName: "string" });
+    expect(errorFields(null)).toEqual({ errorName: "object" });
+  });
+
+  test("code ou nome fora do formato de identificador são descartados", () => {
+    const e = Object.assign(new Error("x"), { code: `${HOLDER} ${PAN}`, cause: { code: "a b" } });
+    e.name = `Nome com espaço ${HOLDER}`;
+    expect(errorFields(e)).toEqual({ errorName: "Error" });
+    expect(errorFields(Object.assign(new Error("x"), { code: 42 }))).toEqual({ errorName: "Error" });
+  });
 });

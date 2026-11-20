@@ -5,7 +5,8 @@ import { hashPassword } from "@/lib/auth/password";
 import { randomToken, timingSafeEqualStr } from "@/lib/crypto";
 import { db, ownerDb } from "@/lib/db/client";
 import { membership, store, users } from "@/lib/db/schema";
-import { env } from "@/lib/env";
+import { env, isLoopbackUrl } from "@/lib/env";
+import { log } from "@/lib/log";
 
 export interface ResolvedStore {
   id: string;
@@ -54,7 +55,14 @@ const setupInput = z.object({
   name: z.string().max(100).trim().min(1),
 });
 
-const slugify = (s: string) =>
+/** Slugs que a loja não pode usar: o serviço de cartão vive em `pagar.<domínio>`. */
+export const RESERVED_SLUGS: readonly string[] = ["pagar"];
+
+const slugify = (s: string) => {
+  const slug = slugifyRaw(s);
+  return RESERVED_SLUGS.includes(slug) ? `${slug}-loja` : slug;
+};
+const slugifyRaw = (s: string) =>
   s
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
@@ -115,7 +123,10 @@ export async function setupFirstRun(
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const createStoreInput = z.object({
   name: z.string().trim().min(1).max(120),
-  slug: z.string().regex(SLUG, "slug inválido (a-z, 0-9 e hífen)"),
+  slug: z
+    .string()
+    .regex(SLUG, "slug inválido (a-z, 0-9 e hífen)")
+    .refine((v) => !RESERVED_SLUGS.includes(v), "slug reservado"),
   ownerEmail: email,
   domain: z
     .string()
@@ -175,4 +186,56 @@ export async function createStoreWithOwner(raw: {
 export async function getStoreBrandColor(storeId: string): Promise<string | null> {
   const [row] = await db.select({ brandColor: store.brandColor }).from(store).where(eq(store.id, storeId)).limit(1);
   return row?.brandColor ?? null;
+}
+
+export interface OriginsOptions {
+  mode: "single" | "multi";
+  platformDomain?: string;
+  baseUrl?: string;
+}
+
+/**
+ * Origens de onde o checkout da loja é servido: vão no `frame-ancestors` e são o destino do `postMessage` do
+ * serviço de cartão. Lê só `id`, `slug` e `domain` (o papel `card` não enxerga mais nada de `store`).
+ * `single`: a origem do BASE_URL. `multi`: `https://<domain>` (se houver) e `https://<slug>.<PLATFORM_DOMAIN>`;
+ * se o BASE_URL for `http` em loopback (dev), o subdomínio usa o esquema e a porta do BASE_URL.
+ * Loja inexistente → `[]`.
+ */
+export async function storeCheckoutOrigins(
+  storeId: string,
+  opts: OriginsOptions = { mode: env.MODE, platformDomain: env.PLATFORM_DOMAIN, baseUrl: env.BASE_URL },
+): Promise<string[]> {
+  const [row] = await db
+    .select({ id: store.id, slug: store.slug, domain: store.domain })
+    .from(store)
+    .where(eq(store.id, storeId))
+    .limit(1);
+  if (!row) return [];
+  const base = new URL(opts.baseUrl ?? env.BASE_URL);
+  if (opts.mode === "single") return [base.origin];
+  const origins: string[] = [];
+  const add = (scheme: "http" | "https", host: string, port = "", label?: string) => {
+    const o = label !== undefined && (label.includes(".") || !label) ? null : originFor(scheme, host, port);
+    if (o) origins.push(o);
+    else log.warn("origens do checkout: host da loja descartado por formato inválido", { storeId });
+  };
+  if (row.domain) add("https", row.domain.toLowerCase());
+  if (opts.platformDomain) {
+    const dev = base.protocol === "http:" && isLoopbackUrl(base.origin);
+    add(dev ? "http" : "https", `${row.slug}.${opts.platformDomain.toLowerCase()}`, dev ? base.port : "", row.slug);
+  }
+  return origins;
+}
+
+const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+/** Monta a origem com `URL` e só a aceita se o host é exatamente o esperado (sem porta, caminho, `@`, curinga). */
+function originFor(scheme: "http" | "https", host: string, port: string): string | null {
+  if (!HOST.test(host)) return null;
+  const candidate = `${scheme}://${host}${port ? `:${port}` : ""}`;
+  try {
+    const u = new URL(candidate);
+    return u.hostname === host && u.origin === candidate && u.pathname === "/" ? u.origin : null;
+  } catch {
+    return null;
+  }
 }

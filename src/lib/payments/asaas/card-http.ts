@@ -13,7 +13,7 @@ import { isIP } from "node:net";
 import { ActionError, type ActionErrorCode } from "@/lib/actions/core";
 import { env } from "@/lib/env";
 import { readCapped } from "@/lib/http";
-import { log } from "@/lib/log";
+import { errorFields, log } from "@/lib/log";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
 import { payWithCard as defaultPayWithCard, UNKNOWN_IP, type CardPaymentInput, type CardResult } from "./card";
 
@@ -35,6 +35,8 @@ export interface CardHttpOptions {
   payWithCard?: (call: { storeId: string }, input: CardPaymentInput) => Promise<CardResult>;
   nodeEnv?: string;
   trustProxy?: number;
+  /** CARD_ISOLATED=1: o cartão é do serviço isolado; esta rota não existe (404 sem ler o corpo). */
+  cardIsolated?: boolean;
 }
 
 function normalizeIp(v: string | undefined): string | null {
@@ -58,7 +60,8 @@ export function clientIpFrom(headers: Headers, trustProxy: number): string {
   return normalizeIp(hops[Math.max(0, hops.length - trustProxy)]) ?? UNKNOWN_IP;
 }
 
-function isHttps(headers: Headers, trustProxy: number): boolean {
+/** HTTPS só pelo `X-Forwarded-Proto` (último valor) de um proxy confiável; sem proxy confiável, nunca. */
+export function isHttps(headers: Headers, trustProxy: number): boolean {
   // `next start` só fala HTTP: sem proxy confiável, nenhuma requisição é HTTPS (X-Forwarded-Proto pode ser forjado).
   if (trustProxy <= 0) return false;
   const proto = (headers.get("x-forwarded-proto") ?? "").split(",").map((s) => s.trim().toLowerCase());
@@ -98,6 +101,8 @@ function sameOriginJson(headers: Headers, trustProxy: number): boolean {
 }
 
 export async function handleCardCheckout(req: Request, opts: CardHttpOptions = {}): Promise<Response> {
+  // Com o cartão isolado, nenhum dado de cartão entra no app (nem de uma aba antiga do checkout): nada é lido.
+  if (opts.cardIsolated ?? env.CARD_ISOLATED) return json(404, { error: "not_found", message: "Não encontrado" });
   const nodeEnv = opts.nodeEnv ?? process.env.NODE_ENV;
   const trustProxy = opts.trustProxy ?? env.TRUST_PROXY;
   // Antes de qualquer trabalho (loja, corpo, repetição idempotente): POST de outro site nunca chega ao pagamento.
@@ -129,18 +134,28 @@ export async function handleCardCheckout(req: Request, opts: CardHttpOptions = {
     const result = await (opts.payWithCard ?? defaultPayWithCard)({ storeId: store.id }, input);
     return json(200, result);
   } catch (e) {
-    if (e instanceof ActionError) {
-      // Mensagens de ActionError deste fluxo são nossas (as do Asaas no cartão são opacas); detalhes só se seguros.
-      const extra =
-        e.code === "invalid_input" && Array.isArray(e.details)
-          ? { fields: (e.details as { path?: unknown }[]).map((d) => d.path) }
-          : e.code === "rate_limited" && (e.details as { captcha?: boolean } | undefined)?.captcha
-            ? { captcha: true }
-            : {};
-      return json(STATUS[e.code] ?? 400, { error: e.code, message: e.message, ...extra });
-    }
-    // `log` aplica redact (remove PAN e chaves de cartão); nunca registramos o corpo da requisição.
-    log.error("checkout cartão: erro inesperado", { error: e });
-    return json(500, { error: "internal", message: INTERNAL_MESSAGE });
+    const { status, body: out } = cardErrorResponse(e);
+    return json(status, out);
   }
+}
+
+/**
+ * Resposta HTTP de um erro da cobrança com cartão (rota do app e serviço isolado). Nunca ecoa o corpo nem campos do
+ * cartão: `ActionError` vira código + mensagem nossa (+ caminhos dos campos ou `captcha`); o resto, 500 genérico com o
+ * erro no `log` (que aplica a máscara de cartão).
+ */
+export function cardErrorResponse(e: unknown): { status: number; body: object } {
+  if (e instanceof ActionError) {
+    // Mensagens de ActionError deste fluxo são nossas (as do Asaas no cartão são opacas); detalhes só se seguros.
+    const extra =
+      e.code === "invalid_input" && Array.isArray(e.details)
+        ? { fields: (e.details as { path?: unknown }[]).map((d) => d.path) }
+        : e.code === "rate_limited" && (e.details as { captcha?: boolean } | undefined)?.captcha
+          ? { captcha: true }
+          : {};
+    return { status: STATUS[e.code] ?? 400, body: { error: e.code, message: e.message, ...extra } };
+  }
+  // Sem texto livre do erro (pode trazer dados do comprador; ver `errorFields`). Nunca registramos o corpo da requisição.
+  log.error("checkout cartão: erro inesperado", errorFields(e));
+  return { status: 500, body: { error: "internal", message: INTERNAL_MESSAGE } };
 }

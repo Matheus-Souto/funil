@@ -66,6 +66,11 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
         refCode={ref}
         eventId={eventId}
         turnstileSiteKey={env.TURNSTILE_SITE_KEY ?? null}
+        cardFrame={
+          env.CARD_ISOLATED && env.CARD_ORIGIN && offer.methods.includes("card")
+            ? { origin: env.CARD_ORIGIN, src: `${env.CARD_ORIGIN}/form/${encodeURIComponent(store.id)}` }
+            : null
+        }
       />
     </BuyerShell>
   );

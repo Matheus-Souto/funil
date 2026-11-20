@@ -6,16 +6,29 @@
 //   - Cartão: `startCheckoutAction` (cria o pedido) + POST /api/checkout/card (mesma origem, JSON) com uma chave de
 //     idempotência por tentativa (reaproveitada se a rede cair no meio da mesma tentativa).
 // Dados do cartão só ficam no estado deste componente e no corpo do POST; nunca vão para a server action.
+// Com CARD_ISOLATED=1 (`cardFrame`), não há campo de cartão nem de titular aqui: o bloco do cartão é o iframe do
+// serviço isolado (card-frame.ts) e o "Pagar" valida os dados pessoais, o iframe, cria o pedido e manda `pay`.
 // Envio nativo (sem JS, ou antes de hidratar) não vaza nada: nenhum campo tem `name` (só o rádio do método), o form é
 // `method="post"` para a própria página sem query, e o botão fica desabilitado até o componente hidratar.
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { CARD_GENERIC_MESSAGE, fieldsMessage } from "@/lib/card-frame/protocol";
 import { brl } from "@/lib/format";
 import { cardExpiryValid, normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
 import { TrustSeals } from "../../(design)/shell";
-import { recordCheckoutViewAction, startCheckoutAction, type StartResult } from "./actions";
+import { recordCheckoutViewAction, renewCardTicketAction, startCheckoutAction, type StartResult } from "./actions";
+import {
+  FRAME_UNAVAILABLE_MESSAGE,
+  createCardFrameController,
+  frameFieldNames,
+  newFrameMsgId,
+  payWithFrame,
+  type CardFrameController,
+  type CardOrder,
+  type FrameStatus,
+} from "./card-frame";
 import { checkoutTracking } from "./tracking";
 
 type Method = "pix" | "card";
@@ -161,7 +174,7 @@ function ProductCover({ small }: { small?: boolean }) {
   );
 }
 
-// ---- Turnstile (só quando a API pede) ----
+// ---- Turnstile (só quando a API pede; com o cartão isolado, também aqui no checkout, nunca dentro do iframe) ----
 declare global {
   interface Window {
     turnstile?: { render: (el: HTMLElement, opts: { sitekey: string; callback: (token: string) => void }) => void };
@@ -196,8 +209,11 @@ export function CheckoutForm(props: {
   refCode?: string;
   eventId: string;
   turnstileSiteKey: string | null;
+  /** CARD_ISOLATED=1: o iframe do cartão (`${CARD_ORIGIN}/form/${storeId}`); `null` = formulário de hoje. */
+  cardFrame: { origin: string; src: string } | null;
 }) {
-  const { offer, storeName, touch, refCode, eventId, turnstileSiteKey } = props;
+  const { offer, storeName, touch, refCode, eventId, turnstileSiteKey, cardFrame } = props;
+  const isolated = cardFrame !== null;
   const router = useRouter();
   const hydrated = useHydrated();
   const [method, setMethod] = useState<Method>(props.initialMethod);
@@ -224,11 +240,18 @@ export function CheckoutForm(props: {
   const [declined, setDeclined] = useState<{ last4: string } | null>(null);
   const [captcha, setCaptcha] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState<string | undefined>();
+  // Remonta o widget depois de usar o token (ele vale uma vez): o próximo captcha pede um desafio novo.
+  const [turnstileKey, setTurnstileKey] = useState(0);
   // Pedido de cartão já criado para estes dados (nova tentativa de cartão reaproveita o pedido).
   const order = useRef<{ publicId: string; sig: string } | null>(null);
   // Chave de idempotência da tentativa de cartão em andamento (mantida se a rede cair antes da resposta).
   const idemKey = useRef<{ key: string; sig: string } | null>(null);
   const viewed = useRef(false);
+  // CARD_ISOLATED: pedido de cartão com o bilhete atual; iframe (remontado ao trocar `frameKey`) e o seu estado.
+  const cardOrder = useRef<CardOrder | null>(null);
+  const frameCtrl = useRef<CardFrameController | null>(null);
+  const [frameKey, setFrameKey] = useState(0);
+  const [frameStatus, setFrameStatus] = useState<FrameStatus>("loading");
 
   useEffect(() => {
     if (viewed.current) return;
@@ -237,6 +260,57 @@ export function CheckoutForm(props: {
   }, [offer.slug, touch]);
 
   const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);
+  const frameConfig = useRef({ totalCents: total, maxInstallments: offer.maxInstallments });
+  useEffect(() => {
+    // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.
+    frameConfig.current = { totalCents: total, maxInstallments: offer.maxInstallments };
+    frameCtrl.current?.setConfig(frameConfig.current);
+  }, [total, offer.maxInstallments]);
+
+  // O iframe é criado aqui (não no JSX) para o listener existir ANTES de ele carregar: o `ready` sai assim que carrega.
+  // Ref com limpeza (React 19): desmontar o bloco (ou trocar `frameKey`) tira o listener e o iframe.
+  const frameOrigin = cardFrame?.origin;
+  const frameSrc = cardFrame?.src;
+  const frameBox = useCallback(
+    (box: HTMLDivElement | null) => {
+      if (!box || !frameOrigin || !frameSrc) return;
+      const iframe = document.createElement("iframe");
+      const ctrl = createCardFrameController({
+        origin: frameOrigin,
+        getWindow: () => iframe.contentWindow,
+        post: (msg) => iframe.contentWindow?.postMessage(msg, frameOrigin),
+        setTimer: (fn, ms) => {
+          const t = window.setTimeout(fn, ms);
+          return () => window.clearTimeout(t);
+        },
+        newId: newFrameMsgId,
+        onStatus: setFrameStatus,
+        onHeight: (px) => {
+          iframe.style.height = `${px}px`;
+        },
+      });
+      const onMessage = (ev: MessageEvent) => ctrl.handle(ev);
+      window.addEventListener("message", onMessage);
+      frameCtrl.current = ctrl;
+      setFrameStatus("loading");
+      ctrl.setConfig(frameConfig.current);
+      iframe.title = "Dados do cartão";
+      iframe.className = s.cardFrame;
+      iframe.src = frameSrc;
+      box.appendChild(iframe);
+      ctrl.start();
+      return () => {
+        window.removeEventListener("message", onMessage);
+        ctrl.dispose();
+        iframe.remove();
+        if (frameCtrl.current === ctrl) frameCtrl.current = null;
+      };
+    },
+    // `frameKey`: "Tentar outro cartão" remonta o iframe (formulário limpo). Hoje a tela de recusa já desmonta o
+    // formulário (e o iframe com ele); a chave garante a remontagem se isso mudar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [frameOrigin, frameSrc, frameKey],
+  );
   const asaasPix = offer.pixMode === "asaas";
   const showCpf = method === "card" || (method === "pix" && (asaasPix || needsCpf));
   const set = (k: FieldKey, mask?: (x: string) => string) => (x: string) => {
@@ -254,7 +328,7 @@ export function CheckoutForm(props: {
       if (!onlyDigits(v.cpf)) e.cpf = "Informe o CPF.";
       else if (!validCpf(onlyDigits(v.cpf))) e.cpf = "CPF inválido. Confira os 11 números.";
     }
-    if (m === "card") {
+    if (m === "card" && !isolated) {
       const num = onlyDigits(v.cardNumber);
       // Sem Luhn: o servidor e o Asaas decidem (cartões de teste do sandbox não passam no Luhn).
       if (num.length < 13 || num.length > 19) e.cardNumber = "Confira o número do cartão.";
@@ -273,9 +347,12 @@ export function CheckoutForm(props: {
     setErrors(e);
     const keys = FIELD_ORDER.filter((k) => e[k]);
     const n = keys.length;
-    setFormError(message ?? (n === 1 ? "Confira o campo marcado para continuar." : `Confira os ${n} campos marcados para continuar.`));
+    setFormError(message ?? fieldsMessage(n));
     if (keys[0]) document.getElementById(keys[0])?.focus();
   }
+
+  /** Assinatura dos dados pessoais e do bump: muda -> pedido novo (nova tentativa de cartão reaproveita o pedido). */
+  const orderSig = () => JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
 
   const customerPayload = (m: Method) => ({
     name: v.name.trim(),
@@ -313,7 +390,7 @@ export function CheckoutForm(props: {
 
   async function payCard() {
     checkoutTracking.onAddPaymentInfo("card", total);
-    const sig = JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
+    const sig = orderSig();
     let publicId = order.current?.sig === sig ? order.current.publicId : null;
     if (!publicId) {
       const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId });
@@ -376,19 +453,85 @@ export function CheckoutForm(props: {
       if (Object.keys(e).length > 0) return showErrors(e, body.message === "Dados de pagamento inválidos" ? undefined : body.message);
     }
     if (body.captcha) setCaptcha(true);
-    setFormError(body.message ?? "Não foi possível processar o pagamento. Tente de novo em instantes.");
+    setFormError(body.message ?? CARD_GENERIC_MESSAGE);
+  }
+
+  /** CARD_ISOLATED: pedido (novo ou reaproveitado) + `pay` ao iframe; dados do cartão nunca passam por aqui. */
+  async function payCardInFrame() {
+    const ctrl = frameCtrl.current;
+    if (!ctrl) {
+      setFormError(FRAME_UNAVAILABLE_MESSAGE);
+      setBusy(false);
+      return;
+    }
+    checkoutTracking.onAddPaymentInfo("card", total);
+    const sig = orderSig();
+    const buyerCpf = onlyDigits(v.cpf);
+    // Token do Turnstile resolvido aqui no checkout (depois de um `captcha`): vai no `pay`, e o iframe o repassa.
+    const sentToken = turnstileToken;
+    const { outcome, order: next } = await payWithFrame({
+      order: cardOrder.current,
+      sig,
+      ...(sentToken ? { turnstileToken: sentToken } : {}),
+      now: () => Date.now(),
+      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId }),
+      renew: (o) => renewCardTicketAction(o),
+      pay: (a) => ctrl.pay({ ...a, buyerCpf }),
+    });
+    cardOrder.current = next;
+    if (sentToken && outcome.kind !== "start_error") {
+      setTurnstileToken(undefined);
+      setTurnstileKey((k) => k + 1);
+    }
+    setCaptcha(outcome.kind === "failed" && outcome.captcha === true);
+    if (outcome.kind === "go") {
+      router.push(`/o/${outcome.publicId}`);
+      return;
+    }
+    setBusy(false);
+    if (outcome.kind === "start_error") return handleStartError(outcome.result);
+    if (outcome.kind === "declined") {
+      setDeclined({ last4: outcome.last4 });
+      window.scrollTo({ top: 0 });
+      return;
+    }
+    if (outcome.marks.length > 0) {
+      // Campos do comprador recusados pelo servidor, com as mensagens do fluxo de hoje.
+      const e: Partial<Record<FieldKey, string>> = {};
+      for (const k of outcome.marks) e[k] = k === "phone" ? "Confira o número de WhatsApp." : "Confira este campo.";
+      setErrors(e);
+      const first = FIELD_ORDER.find((k) => e[k]);
+      if (first) document.getElementById(first)?.focus();
+    }
+    setFormError(outcome.message);
   }
 
   async function onSubmit(ev: FormEvent) {
     ev.preventDefault();
     if (busy) return;
     const e = validate(method);
-    if (Object.keys(e).length > 0) return showErrors(e);
+    if (method === "card" && isolated) {
+      const ctrl = frameCtrl.current;
+      // Indisponível: o aviso já está no bloco do cartão (sem repetir no topo); nenhum pedido é criado.
+      if (!ctrl || frameStatus !== "ready") return setFormError(frameStatus === "unavailable" ? null : FRAME_UNAVAILABLE_MESSAGE);
+      // Dados pessoais aqui e os do cartão no iframe (que marca os dele); a contagem soma os dois.
+      setBusy(true);
+      const checked = await ctrl.validate().catch(() => null);
+      if (!checked) {
+        setBusy(false);
+        return setFormError(FRAME_UNAVAILABLE_MESSAGE);
+      }
+      const n = Object.keys(e).length + (checked.ok ? 0 : Math.max(1, frameFieldNames(checked.fields).length));
+      if (n > 0) {
+        setBusy(false);
+        return showErrors(e, fieldsMessage(n));
+      }
+    } else if (Object.keys(e).length > 0) return showErrors(e);
     setErrors({});
     setFormError(null);
     setBusy(true);
     try {
-      await (method === "pix" ? payPix() : payCard());
+      await (method === "pix" ? payPix() : isolated ? payCardInFrame() : payCard());
     } catch {
       setFormError("Não foi possível continuar agora. Tente de novo em instantes.");
       setBusy(false);
@@ -412,6 +555,7 @@ export function CheckoutForm(props: {
         onRetry={() => {
           setDeclined(null);
           setV((cur) => ({ ...cur, cardNumber: "", expiry: "", cvv: "", holderName: "" }));
+          if (isolated) setFrameKey((k) => k + 1);
         }}
       />
     );
@@ -519,7 +663,24 @@ export function CheckoutForm(props: {
                   </span>
                 )}
               </p>
-            ) : (
+            ) : null}
+
+            {cardFrame ? (
+              // Carregando: esqueleto do tamanho aproximado do bloco (CSS), sem texto; `aria-busy` até o `ready`.
+              <div ref={frameBox} className={s.cardFrameBox} aria-busy={frameStatus === "loading"} hidden={method !== "card" || frameStatus === "unavailable"} />
+            ) : null}
+            {/* Com o iframe, a nota "Os dados do cartão não ficam salvos." vem dentro dele. */}
+            {method === "card" && isolated && frameStatus !== "unavailable" && captcha && turnstileSiteKey ? (
+              <Turnstile key={turnstileKey} siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+            ) : null}
+            {method === "card" && isolated && frameStatus === "unavailable" ? (
+              <p className={s.alert} role="alert">
+                <Icon name="circle-alert" />
+                <span>{FRAME_UNAVAILABLE_MESSAGE}</span>
+              </p>
+            ) : null}
+
+            {method === "card" && !isolated ? (
               <>
                 <div className={s.stack} style={{ marginTop: 14 }}>
                   <Field id="cardNumber" label="Número do cartão" value={v.cardNumber} onChange={set("cardNumber", maskCard)} error={errors.cardNumber} inputMode="numeric" autoComplete="cc-number" placeholder="0000 0000 0000 0000" />
@@ -562,7 +723,7 @@ export function CheckoutForm(props: {
                 </p>
                 {captcha && turnstileSiteKey ? <Turnstile siteKey={turnstileSiteKey} onToken={setTurnstileToken} /> : null}
               </>
-            )}
+            ) : null}
           </section>
         </div>
 
@@ -600,7 +761,7 @@ export function CheckoutForm(props: {
                   {brl(total)}
                 </span>
               </div>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated || (isolated && method === "card" && frameStatus !== "ready")}>
                 <Icon name={method === "pix" ? "pix" : "lock"} size={20} />
                 {buttonLabel}
               </button>

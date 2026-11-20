@@ -55,6 +55,14 @@ export async function setDbForTests(urls?: { appUrl: string; ownerUrl: string })
   await Promise.all(old.map((h) => h?.close()));
 }
 
+/** Fecha os pools abertos (desligamento do processo: SIGTERM do serviço de cartão). */
+export async function closeDb(): Promise<void> {
+  const old = [appHandle, ownerHandle];
+  appHandle = undefined;
+  ownerHandle = undefined;
+  await Promise.all(old.map((h) => h?.close()));
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**

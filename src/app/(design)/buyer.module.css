@@ -384,6 +384,43 @@ select.input {
   color: var(--color-success);
 }
 
+/* ---- Iframe do cartão (CARD_ISOLATED=1) ---- */
+.cardFrameBox {
+  margin-top: 14px;
+}
+/* Até o `ready`: esqueleto com a altura aproximada do formulário do cartão (5 linhas de campo: rótulo + caixa de 48px),
+   sem texto. O iframe (altura 0 até a mensagem `height`) fica por cima. */
+.cardFrameBox[aria-busy="true"] {
+  min-height: 430px;
+  border-radius: var(--radius-md);
+  background: repeating-linear-gradient(to bottom, transparent 0 24px, var(--color-surface-2) 24px 72px, transparent 72px 86px);
+  animation: skeleton 1.4s ease-in-out infinite alternate;
+}
+@keyframes skeleton {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cardFrameBox[aria-busy="true"] {
+    animation: none;
+  }
+}
+/* A altura vem do iframe (mensagem `height`). O formulário lá dentro tem 4px de folga para o anel de foco: a margem
+   negativa a devolve, e os campos alinham com os do app. color-scheme igual ao do iframe: sem fundo opaco. */
+.cardFrame {
+  display: block;
+  width: calc(100% + 8px);
+  height: 0;
+  margin: -4px;
+  border: 0;
+  background: transparent;
+  color-scheme: light;
+}
+
 /* ---- Caixa do bump ---- */
 .bump {
   display: flex;

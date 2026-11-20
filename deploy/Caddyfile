@@ -8,5 +8,19 @@
 	# da lista de pré-carga dos navegadores por padrão (difícil de desfazer): entre nela depois de estável, se quiser.
 	header Strict-Transport-Security "max-age=31536000"
 	encode zstd gzip
+	# Cartão isolado ligado (CARD_ISOLATED=1): a rota antiga do cartão não chega ao app. Uma aba aberta antes da troca
+	# ainda manda o cartão para ela; assim os bytes param aqui e nunca entram no processo do Next. Com a flag
+	# desligada (padrão), a expressão é falsa e nada muda.
+	@legacyCard {
+		path /api/checkout/card
+		expression `"{$CARD_ISOLATED}" == "1"`
+	}
+	respond @legacyCard 404
 	reverse_proxy app:3000
 }
+
+# Cartão isolado (COMPOSE_PROFILES=card): com CARD_ORIGIN definida, o compose monta deploy/Caddyfile.card como
+# /etc/caddy/card/site.caddy; sem ela, como /etc/caddy/card/site, que este glob não pega (nenhum arquivo: o Caddy só
+# avisa e sobe igual). Sem variável aqui de propósito: `{$X:padrão}` não usa o padrão com X vazia, e o compose passa
+# vazia. Numa cópia Caddyfile.local, acrescente esta mesma linha no fim.
+import card/*.caddy

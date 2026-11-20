@@ -1,0 +1,41 @@
+# Site do serviço de cartão isolado (COMPOSE_PROFILES=card, CARD_ISOLATED=1; docs/instalacao.md, "Cartão isolado").
+# Importado pelo deploy/Caddyfile e pelo deploy/Caddyfile.multi (`import card/*.caddy`) só quando CARD_ORIGIN está
+# definida no .env: o compose o monta como /etc/caddy/card/site.caddy; sem ela, como card/site, fora do glob, e nada
+# muda. O endereço é a própria origem (https://pagar.<domínio>): o Caddy emite o certificado e serve só esse host.
+#
+# Regras (tests/deploy-config.test.ts):
+#   - este domínio vai SÓ para o container `card`; nenhum outro site manda nada para ele, e ele nunca para o app;
+#   - só as rotas do serviço passam (/form/<loja>, /form.js, /form.css, /api/card); o resto, inclusive /healthz, é 404
+#     no próprio Caddy;
+#   - keepalive com o card abaixo dos 5 s do servidor dele (keepAliveTimeout): o Caddy nunca reaproveita uma conexão
+#     que o Node já está fechando.
+# O tempo para ler o cabeçalho é do servidor :443 inteiro (compartilhado com o app); o card já corta em 10 s
+# (headersTimeout) e limita 256 conexões.
+# Não edite este arquivo (vem do git). Num deploy/Caddyfile.local que ainda não termina com a linha
+# `import card/*.caddy` (cópia anterior ao cartão isolado), acrescente-a no fim, uma vez só: repetida, o Caddy recusa
+# subir com "ambiguous site definition".
+{$CARD_ORIGIN} {
+	# HSTS (1 ano), como nos outros sites. Sem o cabeçalho Server (versão do proxy não interessa a ninguém).
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	# Corpo do POST /api/card tem teto de 16 KB no serviço; aqui, uma folga.
+	request_body {
+		max_size 64KB
+	}
+	@card path /form/* /form.js /form.css /api/card
+	handle @card {
+		reverse_proxy card:3100 {
+			# Lê o corpo inteiro (até 64 KB) antes de abrir a conexão com o card: corpo enviado devagar fica preso no
+			# Caddy, não nas 256 conexões do serviço.
+			request_buffers 64KB
+			transport http {
+				keepalive 4s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}
