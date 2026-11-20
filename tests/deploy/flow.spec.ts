@@ -2,14 +2,21 @@
 // comprador fariam: setup -> conexões (Pix manual, SMTP) -> produto com upload de um PDF de ~48 MB (perto do teto de
 // 50 MB; validação no Worker de PDF) -> oferta -> checkout Pix manual -> dono libera -> e-mail -> download do PDF
 // carimbado (Worker de PDF de novo). O tests/smoke.sh mede o pico de memória do container depois deste fluxo.
-// Orquestrado por tests/smoke.sh (BASE_URL do Caddy, MAILPIT_URL do Mailpit do smoke, SMOKE_OUT da execução).
+// Depois, o cartão isolado (COMPOSE_PROFILES=card): Asaas falso conectado pelo painel e compra com cartão pelo iframe
+// servido pelo container `card` em CARD_ORIGIN (https://pagar.localhost:<porta>), tudo através do Caddy.
+// Orquestrado por tests/smoke.sh (BASE_URL do Caddy, CARD_ORIGIN, MAILPIT_URL do Mailpit do smoke, SMOKE_OUT da execução).
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { test, expect, type Page } from "@playwright/test";
 import { PDFDocument, PDFName, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState } from "pdf-lib";
+import { cardLeaks } from "../../e2e/card-leaks";
+
+// O teste do cartão usa a loja, o produto e o dono criados pelo primeiro: em série (o segundo não roda se o primeiro falhar).
+test.describe.configure({ mode: "serial" });
 
 const MAILPIT = `${process.env.MAILPIT_URL}/api/v1`;
+const CARD_ORIGIN = process.env.CARD_ORIGIN ?? "";
 const OUT = process.env.SMOKE_OUT ?? ".";
 const OWNER = { email: "dono@exemplo.com", password: "senha-longa-123" };
 const BUYER = `comprador.${Date.now()}@exemplo.com`;
@@ -148,4 +155,75 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   writeFileSync(join(OUT, "download-link.txt"), link!);
   await buyer.close();
   await owner.close();
+});
+
+test("cartão isolado pelo Caddy: Asaas (falso) conectado e compra com cartão pelo iframe do pagar.", async ({ browser, baseURL }) => {
+  expect(CARD_ORIGIN).toMatch(/^https:\/\/pagar\.localhost:\d+$/);
+  const owner: Page = await browser.newPage();
+  await owner.goto("/admin/login");
+  await owner.getByLabel("E-mail").fill(OWNER.email);
+  await owner.getByLabel("Senha").fill(OWNER.password);
+  await owner.getByRole("button", { name: "Entrar" }).click();
+  await expect(owner).toHaveURL(/\/admin$/);
+
+  // Asaas falso do smoke (127.0.0.1:4010 dentro do app e do card; tests/smoke.compose.yaml), conectado pelo painel.
+  await owner.goto("/admin/connections");
+  const asaas = owner.locator("#asaas");
+  await asaas.getByLabel("Chave de API").fill("fake-asaas-key");
+  await asaas.getByRole("button", { name: "Conectar Asaas" }).click();
+  await owner.getByRole("dialog", { name: /^Conectar o Asaas em/ }).getByRole("button", { name: "Testar e salvar" }).click();
+  await expect(asaas.getByText("Asaas conectado.")).toBeVisible();
+
+  await owner.goto("/admin/offers/nova");
+  await owner.getByLabel("Nome da oferta").fill("Guia do deploy no cartão");
+  await owner.getByLabel("Preço", { exact: true }).fill("9,90");
+  await owner.getByLabel("Produto entregue").selectOption({ label: "Guia do deploy" });
+  await owner.getByLabel("Endereço (slug)").fill("guia-cartao");
+  await owner.getByLabel("Cartão de crédito").check();
+  await owner.getByRole("button", { name: "Criar oferta" }).click();
+  await expect(owner.getByText("Oferta criada.")).toBeVisible();
+  await owner.close();
+
+  // Comprador no celular: o cartão vai só ao pagar. (nada com o número chega à origem do app).
+  const buyer = await browser.newPage({ viewport: { width: 375, height: 812 } });
+  const app = new URL(baseURL!).origin;
+  const testCard = { number: "4111 1111 1111 1111", holder: "MARIA A SOUZA", expiry: "09/31", cvv: "582" };
+  const toApp: Promise<{ url: string; headers: Record<string, string>; body: string }>[] = [];
+  const toCard: string[] = [];
+  buyer.on("request", (r) => {
+    const origin = new URL(r.url()).origin;
+    if (origin === app) toApp.push(r.allHeaders().then((headers) => ({ url: r.url(), headers, body: r.postData() ?? "" })));
+    if (origin === CARD_ORIGIN && r.method() === "POST") toCard.push(r.postData() ?? "");
+  });
+  await buyer.goto("/c/guia-cartao?metodo=cartao");
+  const iframe = buyer.locator('iframe[title="Dados do cartão"]');
+  await expect(iframe).toHaveAttribute("src", new RegExp(`^${CARD_ORIGIN.replace(/\./g, "\\.")}/form/[0-9a-f-]{36}$`));
+  await buyer.getByLabel("Nome completo").fill("Maria Aparecida Souza");
+  await buyer.getByLabel("E-mail", { exact: true }).fill(`cartao.${BUYER}`);
+  await buyer.getByLabel("WhatsApp").fill("11987654321");
+  await buyer.getByLabel("CPF", { exact: true }).fill("52998224725");
+  const f = buyer.frameLocator('iframe[title="Dados do cartão"]');
+  await f.getByLabel("Número do cartão").fill(testCard.number);
+  await f.getByLabel("Nome impresso no cartão").fill(testCard.holder);
+  await f.getByLabel("Validade").fill(testCard.expiry);
+  await f.getByLabel("CVV").fill(testCard.cvv);
+  await f.getByLabel("CEP").fill("01310100");
+  await f.getByLabel("Número", { exact: true }).fill("100");
+  await buyer.getByRole("button", { name: "Pagar R$ 9,90" }).click();
+  await expect(buyer).toHaveURL(/\/o\/[\w-]+$/);
+  await expect(buyer.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
+  await expect(buyer.getByText("Total pago com cartão")).toBeVisible();
+  // Nada do cartão em URL, cabeçalhos (todos, allHeaders) ou corpo das requisições à origem do app. Controle positivo:
+  // o mesmo detector acha os quatro itens no POST ao pagar.
+  const leaks = cardLeaks(testCard);
+  expect(toCard).toHaveLength(1);
+  expect(leaks(toCard[0]!)).toEqual(["CVV", "nome impresso", "número", "validade"]);
+  const requests = await Promise.all(toApp);
+  expect(requests.length).toBeGreaterThan(5);
+  for (const r of requests) {
+    expect(leaks(r.url), `URL ${r.url}`).toEqual([]);
+    expect(leaks(JSON.stringify(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
+    expect(leaks(r.body), `corpo de ${r.url}`).toEqual([]);
+  }
+  await buyer.close();
 });

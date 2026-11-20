@@ -2,9 +2,16 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import { PDFDocument } from "pdf-lib";
+import postgres from "postgres";
+import { cardLeaks } from "./card-leaks";
 
 // Código do primeiro acesso: o verify sobe o app com este SETUP_TOKEN e o repassa ao Playwright.
 const SETUP_TOKEN = process.env.SETUP_TOKEN ?? "";
+// Origem do serviço de cartão isolado (com o marcador e2e/.card-isolated, o verify sobe o app com CARD_ISOLATED=1 e
+// esta CARD_ORIGIN).
+const CARD_ORIGIN = process.env.CARD_ORIGIN ?? "";
+// Banco descartável da rodada (papel dono, loopback): só para conferir o que o painel gravou.
+const OWNER_DB = process.env.E2E_OWNER_DATABASE_URL ?? "";
 
 // Tasks 6-14 acrescentam aqui o fluxo de compra.
 test("/api/health responde ok", async ({ request }) => {
@@ -114,8 +121,13 @@ test("webhook do Asaas: storeId inválido 404, token errado 401, corpo grande 41
   expect(big.status()).toBe(413);
 });
 
-// Cartão (Task 10): o fluxo de compra completo pelo checkout fica para a Task 11; aqui só a borda HTTP já garantida.
-test("cartão: POST de outro site 403; pedido desconhecido 404 sem ecoar dados, JSON inválido 400, corpo grande 413", async ({ request, baseURL }) => {
+// Cartão isolado (CARD_ISOLATED=1): o verify sobe o serviço de cartão (dist/card/server.js) em CARD_ORIGIN, outra origem
+// (127.0.0.1 em outra porta). A rota antiga do cartão no app responde 404 a tudo, sem ler o corpo nem ecoar dados; o
+// serviço só aceita POST da própria origem e com bilhete válido.
+test("cartão isolado: rota antiga do app 404 sem ecoar dados; serviço de cartão no ar e recusando POST sem bilhete", async ({ request, baseURL }) => {
+  expect(CARD_ORIGIN, "o verify passa CARD_ORIGIN (origem do serviço de cartão)").toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  const app = new URL(baseURL!).origin;
+  expect(CARD_ORIGIN).not.toBe(app);
   const card = {
     orderPublicId: "pedido-que-nao-existe",
     idempotencyKey: "6f1c1f5e-3c55-4a43-9a7b-0d6a3f1f2b11",
@@ -123,29 +135,25 @@ test("cartão: POST de outro site 403; pedido desconhecido 404 sem ecoar dados, 
     card: { holderName: "Teste Smoke", number: "4444444444444444", expiryMonth: "12", expiryYear: "2034", ccv: "987" },
     holder: { cpf: "52998224725", postalCode: "01310100", addressNumber: "100" },
   };
-  const origin = new URL(baseURL!).origin;
-  const json = { "content-type": "application/json" };
+  for (const headers of [{ origin: app }, { origin: "https://evil.example" }, {}] as Record<string, string>[]) {
+    const res = await request.post("/api/checkout/card", { headers, data: card });
+    expect(res.status(), JSON.stringify(headers)).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain("4444");
+    expect(text).not.toContain("987");
+  }
 
-  // Sem Origin (nem Sec-Fetch-Site: same-origin) ou de outro site: 403 antes de qualquer trabalho.
-  expect((await request.post("/api/checkout/card", { data: card })).status()).toBe(403);
-  expect((await request.post("/api/checkout/card", { headers: { origin: "https://evil.example" }, data: card })).status()).toBe(403);
-  expect((await request.post("/api/checkout/card", { headers: { ...json, origin }, data: "orderPublicId=x" })).status()).toBe(400);
-  expect((await request.post("/api/checkout/card", { headers: { "content-type": "text/plain", origin }, data: JSON.stringify(card) })).status()).toBe(403);
-
-  const res = await request.post("/api/checkout/card", { headers: { origin }, data: card });
-  expect(res.status()).toBe(404);
-  const text = await res.text();
-  expect(text).not.toContain("4444");
-  expect(text).not.toContain("987");
-  expect(JSON.parse(text)).toEqual({ error: "not_found", message: "Pedido não encontrado" });
-
-  const bad = await request.post("/api/checkout/card", { headers: { ...json, origin }, data: "{nao json" });
-  expect(bad.status()).toBe(400);
-  const big = await request.post("/api/checkout/card", {
-    headers: { ...json, origin },
-    data: JSON.stringify({ pad: "x".repeat(20 * 1024) }),
-  });
-  expect(big.status()).toBe(413);
+  expect((await request.get(`${CARD_ORIGIN}/healthz`)).status()).toBe(200);
+  const js = await request.get(`${CARD_ORIGIN}/form.js`);
+  expect(js.status()).toBe(200);
+  expect(js.headers()["content-type"]).toMatch(/javascript/);
+  // POST de outra origem (inclusive a do app): 403 antes de ler o corpo. Da origem do cartão sem bilhete válido: 403.
+  const fromApp = await request.post(`${CARD_ORIGIN}/api/card`, { headers: { origin: app }, data: { ...card, ticket: "x" } });
+  expect(fromApp.status()).toBe(403);
+  expect(await fromApp.json()).toMatchObject({ error: "forbidden_origin" });
+  const noTicket = await request.post(`${CARD_ORIGIN}/api/card`, { headers: { origin: CARD_ORIGIN }, data: { ...card, ticket: "x" } });
+  expect(noTicket.status()).toBe(403);
+  expect(await noTicket.json()).toEqual({ error: "ticket", ticketExpired: false });
 });
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -301,13 +309,14 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(page.getByRole("cell", { name: "Maná bíblico · versão completa" })).toBeVisible();
     await shot(page, "p13-produtos-1280");
 
-    async function newOffer(o: { slug: string; manual: boolean; bump: boolean }) {
+    async function newOffer(o: { slug: string; manual: boolean; bump: boolean; maxInstallments?: number }) {
       await page.goto("/admin/offers/nova");
       await page.getByLabel("Nome da oferta").fill("Maná bíblico para crianças");
       await page.getByLabel("Preço", { exact: true }).fill("9,90");
       await page.getByLabel("Produto entregue").selectOption({ label: "Maná bíblico · versão básica" });
       await page.getByLabel("Endereço (slug)").fill(o.slug);
       await page.getByLabel("Cartão de crédito").check();
+      if (o.maxInstallments) await page.getByLabel("Parcelas máximas no cartão").selectOption(String(o.maxInstallments));
       await page.locator("label", { hasText: o.manual ? /^Manual$/ : /^Asaas \(automático\)$/ }).click();
       await expect(page.getByLabel(o.manual ? "Manual" : "Asaas (automático)", { exact: true })).toBeChecked();
       if (o.bump) {
@@ -321,7 +330,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
       await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
       await expect(page.getByText("Oferta criada.")).toBeVisible();
     }
-    await newOffer({ slug: "mana-basica", manual: true, bump: true });
+    await newOffer({ slug: "mana-basica", manual: true, bump: true, maxInstallments: 3 });
     await expect(page.getByText("Total com bump: R$ 27,00")).toBeVisible();
     // Preço é sensível: mudar abre o diálogo; cancelar não salva.
     await page.getByLabel("Preço", { exact: true }).fill("12,90");
@@ -536,8 +545,22 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     expect((await request.post(links[1]!, { headers: { origin } })).status()).toBe(410);
   });
 
-  test("Pix do Asaas: QR e copia e cola, pagamento no Asaas falso, vira obrigado", async ({ page, context, request }) => {
+  // Com CARD_ISOLATED=1 o app grava a chave do Asaas em `a1.` (ASAAS_SEAL_KEY, conferido no banco) e precisa abri-la para
+  // gerar o Pix; os testes de cartão abaixo usam a mesma conexão pelo serviço de cartão, que não tem o SECRET.
+  test("Pix do Asaas com o cartão isolado ligado: QR e copia e cola, pagamento no Asaas falso, vira obrigado", async ({ page, context, request }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const csp = (await request.get("/c/mana-auto")).headers()["content-security-policy"] ?? "";
+    expect(csp).toContain(`frame-src ${CARD_ORIGIN}`); // checkout no modo isolado
+    // A chave do Asaas que o painel salvou está selada com a ASAAS_SEAL_KEY (`a1.`), não com o SECRET (`v1.`).
+    expect(OWNER_DB, "o verify passa E2E_OWNER_DATABASE_URL").not.toBe("");
+    const sql = postgres(OWNER_DB, { max: 1 });
+    try {
+      const rows = await sql<{ secret: string | null }[]>`select secret from integration where kind = 'asaas'`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.secret?.slice(0, 3)).toBe("a1.");
+    } finally {
+      await sql.end();
+    }
     await page.goto("/c/mana-auto");
     await fillBuyer(page, "asaas");
     await page.getByLabel("CPF").fill("52998224725");
@@ -569,23 +592,65 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await shot(owner, "p06c-pedido-estorno-solicitado-1280");
   });
 
-  test("cartão: erros de validação, depois aprovado -> obrigado", async ({ page }) => {
+  // ---- Cartão isolado (CARD_ISOLATED=1): os dados do cartão só existem no iframe do serviço (CARD_ORIGIN). ----
+  // Cada teste usa um número próprio: o serviço limita 3 tentativas por cartão por hora (LIMITS.card) e 5 por e-mail.
+  // Números e CVVs só desta lista: o verify confere que nenhum aparece no log do app nem no do serviço (E2E_CARDS e
+  // E2E_CVVS em scripts/verify.sh).
+  const CARDS = {
+    vista: "4111 1111 1111 1111",
+    parcelado: "5555 5555 5555 4444",
+    recusado: "5184 0197 4037 3151", // DECLINED_CARDS do Asaas falso
+    outro: "4444 4444 4444 4444",
+    isolado: "4012 8888 8888 1881",
+  };
+  const FRAME = 'iframe[title="Dados do cartão"]';
+  const cardFrame = (page: Page) => page.frameLocator(FRAME);
+
+  async function fillCard(page: Page, c: { number: string; holder: string; expiry: string; cvv: string; installments?: number }) {
+    const f = cardFrame(page);
+    await f.getByLabel("Número do cartão").fill(c.number);
+    await f.getByLabel("Nome impresso no cartão").fill(c.holder);
+    await f.getByLabel("Validade").fill(c.expiry);
+    await f.getByLabel("CVV").fill(c.cvv);
+    await f.getByLabel("CEP").fill("01310100");
+    await f.getByLabel("Número", { exact: true }).fill("100");
+    if (c.installments) await f.getByLabel("Parcelas").selectOption(String(c.installments));
+  }
+
+  /** Altura aplicada ao iframe pelo app (mensagem `height`) e altura do conteúdo dentro dele. */
+  async function frameHeights(page: Page) {
+    const applied = await page.locator(FRAME).evaluate((el) => (el as HTMLIFrameElement).getBoundingClientRect().height);
+    const frame = page.frames().find((f) => f.url().startsWith(`${CARD_ORIGIN}/form/`));
+    const content = frame ? await frame.evaluate(() => Math.ceil(document.body.getBoundingClientRect().height)) : -1;
+    return { applied: Math.round(applied), content };
+  }
+
+  /** Inputs de cartão no documento do app (frame principal): devem ser zero com o cartão isolado. */
+  const cardInputsInMainFrame = (page: Page) =>
+    page.mainFrame().evaluate(
+      () =>
+        document.querySelectorAll(
+          'input[autocomplete^="cc-"], #cardNumber, #holderName, #expiry, #cvv, #holderCpf, #cep, #addressNumber, #installments, [name*="card" i], [name*="cvv" i], [name*="ccv" i]',
+        ).length,
+    );
+
+  test("cartão pelo iframe: erros de validação dos dois lados, depois à vista aprovado -> obrigado", async ({ page }) => {
     await page.goto("/c/mana-basica?metodo=cartao");
+    await expect(cardFrame(page).getByLabel("Número do cartão")).toBeVisible();
+    expect(await cardInputsInMainFrame(page)).toBe(0);
     await fillBuyer(page, "cartao");
     await page.getByLabel("CPF", { exact: true }).fill("12345678900");
-    await page.getByLabel("Número do cartão").fill("4444 4444 4444 4444");
-    await page.getByLabel("Nome impresso no cartão").fill("MARIA A SOUZA");
-    await page.getByLabel("Validade").fill("08/24");
-    await page.getByLabel("CVV").fill("123");
-    await page.getByLabel("CEP").fill("01310100");
-    await page.getByLabel("Número", { exact: true }).fill("100");
+    await fillCard(page, { number: CARDS.vista, holder: "MARIA A SOUZA", expiry: "08/24", cvv: "582" });
     await page.getByRole("button", { name: "Pagar R$ 9,90" }).click();
+    // A contagem soma os dois lados: CPF no app e validade vencida no iframe (cada um marca os seus).
     await expect(page.getByText("Confira os 2 campos marcados para continuar.")).toBeVisible();
     await expect(page.getByText("CPF inválido. Confira os 11 números.")).toBeVisible();
+    await expect(cardFrame(page).getByLabel("Validade")).toHaveAttribute("aria-invalid", "true");
+    await expect(cardFrame(page).getByLabel("Número do cartão")).not.toHaveAttribute("aria-invalid", "true");
     await shot(page, "03-cartao-erros-de-validacao");
 
     await page.getByLabel("CPF", { exact: true }).fill("52998224725");
-    await page.getByLabel("Validade").fill("12/34");
+    await cardFrame(page).getByLabel("Validade").fill("12/34");
     await page.getByRole("button", { name: "Pagar R$ 9,90" }).click();
     await expect(page).toHaveURL(/\/o\/[\w-]+$/);
     await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
@@ -593,38 +658,193 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await shot(page, "07c-obrigado-cartao");
   });
 
-  test("cartão recusado: mensagem clara, nada cobrado, opção de Pix", async ({ page }) => {
+  test("cartão pelo iframe: parcelado em 3x com o bump, parcelas com o total novo, aprovado", async ({ page, request }) => {
+    await page.goto("/c/mana-basica?metodo=cartao");
+    await fillBuyer(page, "parcelado");
+    await page.getByLabel("CPF", { exact: true }).fill("52998224725");
+    const parcelas = cardFrame(page).getByLabel("Parcelas");
+    await expect(parcelas.locator("option")).toHaveText(["1x de R$ 9,90 sem juros", "2x (total R$ 9,90)", "3x (total R$ 9,90)"]);
+    // Bump ligado depois de o iframe carregar: o seletor do iframe passa a mostrar o total novo.
+    await page.getByText("Quero a versão completa").click();
+    await expect(page.getByTestId("total")).toHaveText("R$ 27,00");
+    await expect(parcelas.locator("option")).toHaveText(["1x de R$ 27,00 sem juros", "2x (total R$ 27,00)", "3x (total R$ 27,00)"]);
+    await fillCard(page, { number: CARDS.parcelado, holder: "MARIA A SOUZA", expiry: "12/34", cvv: "604", installments: 3 });
+    await shot(page, "03b-cartao-parcelado-3x");
+    await page.getByRole("button", { name: "Pagar R$ 27,00" }).click();
+    await expect(page).toHaveURL(/\/o\/[\w-]+$/);
+    await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
+
+    // No Asaas falso: um parcelamento de 3 cobranças de R$ 9,00 (R$ 27,00) no cartão.
+    const { apiKey } = (await (await request.get(`${asaasBase}/__control/key`)).json()) as { apiKey: string };
+    type P = { installment?: string; installmentNumber?: number; value: number; billingType: string };
+    const list = (await (await request.get(`${asaasBase}/payments`, { headers: { access_token: apiKey } })).json()) as { data: P[] };
+    const parcels = list.data.filter((p) => p.installment !== undefined && p.billingType === "CREDIT_CARD");
+    expect(parcels.map((p) => [p.installmentNumber, p.value])).toEqual([
+      [1, 9],
+      [2, 9],
+      [3, 9],
+    ]);
+  });
+
+  test("cartão recusado pelo iframe: mensagem clara, nada cobrado, e 'Tentar outro cartão' paga o mesmo pedido", async ({ page }) => {
+    // Corpo dos POST /api/card (do iframe ao serviço de cartão): o pedido de cada tentativa.
+    const cardPosts: string[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && r.url() === `${CARD_ORIGIN}/api/card`) {
+        cardPosts.push((JSON.parse(r.postData() ?? "{}") as { orderPublicId?: string }).orderPublicId ?? "");
+      }
+    });
     await page.goto("/c/mana-basica?metodo=cartao");
     await fillBuyer(page, "recusa");
     await page.getByLabel("CPF", { exact: true }).fill("52998224725");
-    await page.getByLabel("Número do cartão").fill("5184 0197 4037 3151");
-    await page.getByLabel("Nome impresso no cartão").fill("MARIA A SOUZA");
-    await page.getByLabel("Validade").fill("12/34");
-    await page.getByLabel("CVV").fill("123");
-    await page.getByLabel("CEP").fill("01310100");
-    await page.getByLabel("Número", { exact: true }).fill("100");
+    await fillCard(page, { number: CARDS.recusado, holder: "MARIA A SOUZA", expiry: "12/34", cvv: "739" });
     await page.getByRole("button", { name: "Pagar R$ 9,90" }).click();
     await expect(page.getByRole("heading", { name: "Pagamento não aprovado" })).toBeVisible();
     await expect(page.getByText("Nenhum valor foi cobrado.")).toBeVisible();
     await expect(page.getByText("3151")).toBeVisible();
     await expect(page.getByRole("button", { name: "Pagar R$ 9,90 com Pix" })).toBeVisible();
     await shot(page, "08-cartao-recusado");
+    expect(cardPosts).toHaveLength(1);
+
+    await page.getByRole("button", { name: "Tentar outro cartão" }).click();
+    // Iframe remontado: formulário limpo.
+    await expect(cardFrame(page).getByLabel("Número do cartão")).toHaveValue("");
+    await fillCard(page, { number: CARDS.outro, holder: "MARIA A SOUZA", expiry: "12/34", cvv: "321" });
+    await page.getByRole("button", { name: "Pagar R$ 9,90" }).click();
+    await expect(page).toHaveURL(/\/o\/[\w-]+$/);
+    await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
+    const paidId = new URL(page.url()).pathname.split("/").pop()!;
+    expect(cardPosts).toEqual([paidId, paidId]); // o mesmo pedido, sem criar outro
   });
 
-  test("sem JavaScript: enviar o formulário não põe dados do cartão na URL", async ({ browser, baseURL }) => {
+  test("o app principal não recebe o cartão: nada do número, CVV ou validade em URL, cabeçalho, corpo ou postMessage", async ({ page, baseURL }) => {
+    const app = new URL(baseURL!).origin;
+    const number = CARDS.isolado;
+    const cvv = "737";
+    const expiry = "07/33";
+    // Mensagens que chegam ao documento do app (postMessage do iframe), gravadas desde o início da página.
+    await page.addInitScript(() => {
+      if (window.top !== window) return;
+      const w = window as unknown as { __appMsgs: string[] };
+      w.__appMsgs = [];
+      window.addEventListener("message", (e) => w.__appMsgs.push(JSON.stringify(e.data)));
+    });
+    const toApp: Promise<{ url: string; headers: Record<string, string>; body: string }>[] = [];
+    const toCard: string[] = [];
+    page.on("request", (r) => {
+      const origin = new URL(r.url()).origin;
+      if (origin === app) toApp.push(r.allHeaders().then((headers) => ({ url: r.url(), headers, body: r.postData() ?? "" })));
+      if (origin === CARD_ORIGIN && r.method() === "POST") toCard.push(r.postData() ?? "");
+    });
+
+    await page.goto("/c/mana-basica?metodo=cartao");
+    await fillBuyer(page, "isolado");
+    await page.getByLabel("CPF", { exact: true }).fill("52998224725");
+    await fillCard(page, { number, holder: "JOANA T CARTAO", expiry, cvv });
+    expect(await cardInputsInMainFrame(page)).toBe(0);
+    await page.getByRole("button", { name: "Pagar R$ 9,90" }).click();
+    await expect(page).toHaveURL(/\/o\/[\w-]+$/);
+    await expect(page.getByRole("heading", { name: "Pagamento confirmado!" })).toBeVisible();
+    expect(await cardInputsInMainFrame(page)).toBe(0);
+    expect(toCard).toHaveLength(1); // o cartão foi, sim, ao serviço isolado
+
+    const requests = await Promise.all(toApp);
+    expect(requests.length).toBeGreaterThan(5);
+    expect(requests.some((r) => r.body.length > 0)).toBe(true); // houve server actions com corpo (pedido)
+    const messages = (await page.evaluate(() => (window as unknown as { __appMsgs?: string[] }).__appMsgs ?? [])) as string[];
+    const leaks = cardLeaks({ number, holder: "JOANA T CARTAO", expiry, cvv });
+    // Controle positivo: no POST ao serviço de cartão o detector acha tudo (prova que a busca abaixo enxergaria).
+    expect(leaks(toCard[0]!)).toEqual(["CVV", "nome impresso", "número", "validade"]);
+    for (const r of requests) {
+      expect(leaks(r.url), `URL ${r.url}`).toEqual([]);
+      expect(leaks(JSON.stringify(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
+      expect(leaks(r.body), `corpo de ${r.url}`).toEqual([]);
+    }
+    expect(messages.length).toBeGreaterThan(0);
+    for (const m of messages) expect(leaks(m), `postMessage ${m}`).toEqual([]);
+  });
+
+  test("oferta que abre em Pix e troca para Cartão: iframe com altura certa e campos visíveis", async ({ page }) => {
+    await page.goto("/c/mana-basica");
+    await expect(page.getByRole("button", { name: "Gerar Pix de R$ 9,90" })).toBeVisible();
+    await expect(page.locator(FRAME)).toBeHidden(); // carregado escondido (Pix selecionado)
+    await page.getByText("Cartão", { exact: true }).click();
+    await expect(page.getByRole("button", { name: "Pagar R$ 9,90" })).toBeEnabled();
+    const f = cardFrame(page);
+    for (const label of ["Número do cartão", "Nome impresso no cartão", "Validade", "CVV", "CEP"]) await expect(f.getByLabel(label)).toBeVisible();
+    await expect(f.getByLabel("Número", { exact: true })).toBeVisible();
+    // Altura do iframe = altura do conteúdo (nada cortado nem sobrando) e maior que zero.
+    await expect.poll(async () => (await frameHeights(page)).content).toBeGreaterThan(200);
+    await expect.poll(async () => { const h = await frameHeights(page); return h.applied - h.content; }).toBe(0);
+    // O último campo (CEP/Número) cabe na área visível do iframe.
+    const frameBox = (await page.locator(FRAME).boundingBox())!;
+    const cepBox = (await f.getByLabel("CEP").boundingBox())!;
+    expect(cepBox.y + cepBox.height).toBeLessThanOrEqual(frameBox.y + frameBox.height);
+    await shot(page, "03c-pix-para-cartao-iframe");
+  });
+
+  test("iframe indisponível: em até 10 s o aviso aparece, Pagar fica desabilitado e nenhum pedido é criado", async ({ page }) => {
+    const NOTICE = "Pagamento com cartão indisponível agora. Tente de novo em instantes ou pague com Pix.";
+    // Medido na própria página (performance.now em um MutationObserver): da criação do iframe ao aviso no DOM.
+    await page.addInitScript((msg) => {
+      if (window.top !== window) return;
+      const w = window as unknown as { __frameAt?: number; __noticeAt?: number };
+      new MutationObserver(() => {
+        const now = performance.now();
+        if (w.__frameAt === undefined && document.querySelector('iframe[title="Dados do cartão"]')) w.__frameAt = now;
+        if (w.__noticeAt === undefined && document.body?.textContent?.includes(msg)) w.__noticeAt = now;
+      }).observe(document, { childList: true, subtree: true, characterData: true });
+    }, NOTICE);
+    // Serviço de cartão inacessível para esta página: a carga do iframe falha na rede.
+    let blocked = 0;
+    await page.route(`${CARD_ORIGIN}/**`, (r) => {
+      blocked++;
+      return r.abort("connectionrefused");
+    });
+    await page.goto("/c/mana-basica?metodo=cartao");
+    await fillBuyer(page, "indisponivel");
+    await page.getByLabel("CPF", { exact: true }).fill("52998224725");
+    const notice = page.getByText(NOTICE);
+    await expect(notice).toBeVisible({ timeout: 15_000 });
+    expect(blocked).toBeGreaterThan(0);
+    const t = await page.evaluate(() => {
+      const w = window as unknown as { __frameAt?: number; __noticeAt?: number };
+      return { frameAt: w.__frameAt ?? -1, noticeAt: w.__noticeAt ?? -1 };
+    });
+    expect(t.frameAt).toBeGreaterThan(0);
+    expect(t.noticeAt).toBeGreaterThan(t.frameAt);
+    // 10 s do controlador (FRAME_READY_TIMEOUT_MS) mais a renderização do React.
+    expect(t.noticeAt - t.frameAt).toBeLessThanOrEqual(10_500);
+    await expect(page.locator(FRAME)).toBeHidden();
+    const pay = page.getByRole("button", { name: "Pagar R$ 9,90" });
+    await expect(pay).toBeDisabled();
+    await shot(page, "08b-cartao-indisponivel");
+    // Mesmo um envio forçado do formulário não cria pedido.
+    await page.locator("form").first().evaluate((f) => (f as HTMLFormElement).requestSubmit());
+    await expect(notice).toHaveCount(1);
+    await expect(page).toHaveURL(/\/c\/mana-basica\?metodo=cartao$/);
+    // O Pix continua disponível.
+    await page.getByText("Pix", { exact: true }).click();
+    await expect(page.getByRole("button", { name: "Gerar Pix de R$ 9,90" })).toBeEnabled();
+    await owner.goto(`/admin/orders?q=${encodeURIComponent(buyerEmail("indisponivel"))}`);
+    await expect(owner.getByText("0 pedidos com estes filtros")).toBeVisible();
+  });
+
+  test("sem JavaScript: nenhum campo de cartão no app e enviar o formulário não põe dados na URL", async ({ browser, baseURL }) => {
     const ctx = await browser.newContext({ baseURL, javaScriptEnabled: false, viewport: { width: 375, height: 812 } });
     const page = await ctx.newPage();
     await page.goto("/c/mana-basica?metodo=cartao");
+    // O iframe é criado pelo JavaScript do checkout: sem ele, não há iframe nem campo de cartão algum.
+    await expect(page.locator("iframe")).toHaveCount(0);
+    expect(await cardInputsInMainFrame(page)).toBe(0);
     // Nenhum campo com `name` (só o rádio do método) e form POST: nem um envio nativo levaria dados.
     expect(await page.locator("form [name]:not([name=method])").count()).toBe(0);
     await expect(page.locator("form")).toHaveAttribute("method", "post");
     await page.getByLabel("CPF", { exact: true }).fill("52998224725");
-    await page.getByLabel("Número do cartão").fill("4444 4444 4444 4444");
-    await page.getByLabel("CVV").fill("987");
     await expect(page.getByRole("button", { name: /Pagar/ })).toBeDisabled();
-    await page.getByLabel("CVV").press("Enter");
+    await page.getByLabel("CPF", { exact: true }).press("Enter");
     await page.waitForLoadState();
-    expect(page.url()).not.toMatch(/4444|987|52998224725/);
+    expect(page.url()).not.toMatch(/52998224725/);
     expect(new URL(page.url()).search).toBe("?metodo=cartao");
     await ctx.close();
   });

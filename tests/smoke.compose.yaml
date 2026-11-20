@@ -1,14 +1,52 @@
 # Sobreposição do compose.yaml só para o smoke de deploy (tests/smoke.sh). Nunca use em produção.
-# - imagem com nome próprio (não sobrescreve a da instalação);
+# - imagens com nome próprio (não sobrescrevem as da instalação);
 # - Caddy publicado só em 127.0.0.1, numa porta livre (a pilha real usa 80/443);
-# - Mailpit na rede do compose (o SMTP da loja aponta para mailpit:1025) com a API publicada em 127.0.0.1.
+# - Mailpit na rede do compose (o SMTP da loja aponta para mailpit:1025) com a API publicada em 127.0.0.1;
+# - cartão isolado (COMPOSE_PROFILES=card no env do smoke): o navegador fala com https://pagar.localhost:<porta livre>
+#   (CARD_ORIGIN do app e do `card`), mas dentro do container o Caddy escuta na 443: o endereço do site do cartão no
+#   Caddy fica sem a porta (como o DOMAIN=localhost do app, cuja BASE_URL também leva a porta);
+# - Asaas falso (e2e/fakes/asaas-server.ts, o mesmo do verify) em 127.0.0.1:4010 DENTRO do app e do `card`: um
+#   container ao lado de cada um, na mesma pilha de rede (`network_mode: service:...`). Em produção o app e o `card` só
+#   aceitam ASAAS_BASE_URL em loopback. São duas instâncias com a mesma chave (`fake-asaas-key`): a do app testa a
+#   chave ao conectar; a do `card` recebe a cobrança.
 services:
   app:
     image: funil-smoke:latest
+    environment:
+      ASAAS_BASE_URL: http://127.0.0.1:4010
+  card:
+    image: funil-smoke-card:latest
+    environment:
+      ASAAS_BASE_URL: http://127.0.0.1:4010
   caddy:
     ports: !override
       - "127.0.0.1:${SMOKE_HTTPS_PORT:?}:443"
+    environment:
+      CARD_ORIGIN: ${SMOKE_CARD_SITE:?}
   mailpit:
     image: axllent/mailpit:v1.34.0
     ports:
       - "127.0.0.1:${SMOKE_MAIL_PORT:?}:8025"
+  asaas-app:
+    image: oven/bun:1.4.4
+    network_mode: service:app
+    depends_on:
+      - app
+    environment:
+      PORT: "4010"
+    volumes:
+      - ./e2e/fakes:/w/e2e/fakes:ro
+      - ./tests/fakes:/w/tests/fakes:ro
+    command: ["bun", "/w/e2e/fakes/asaas-server.ts"]
+  asaas-card:
+    profiles: ["card"]
+    image: oven/bun:1.4.4
+    network_mode: service:card
+    depends_on:
+      - card
+    environment:
+      PORT: "4010"
+    volumes:
+      - ./e2e/fakes:/w/e2e/fakes:ro
+      - ./tests/fakes:/w/tests/fakes:ro
+    command: ["bun", "/w/e2e/fakes/asaas-server.ts"]
