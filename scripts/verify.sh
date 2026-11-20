@@ -268,7 +268,7 @@ e2e() {
 # de cartão (o Asaas falso ecoa número e CVV na recusa, como o real às vezes faz). Número com ou sem espaços; CVV como
 # valor de uma chave cvv/ccv, ou sozinho entre aspas/espaços (não dentro de número, hora ou id: `:123` de uma duração
 # não conta).
-E2E_CARDS="4444444444444444 5184019740373151 4111111111111111 5555555555554444 4012888888881881"
+E2E_CARDS="4444444444444444 5184019740373151 4111111111111111 5555555555554444 4012888888881881 5500000000000004"
 E2E_CVVS="123 987 321 737 582 604 739"
 logs_no_card() {
   local f n cvv pat found=0
