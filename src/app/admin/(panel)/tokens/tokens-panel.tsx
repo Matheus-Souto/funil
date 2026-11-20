@@ -23,10 +23,10 @@ type TokenRole = "reader" | "traffic" | "support" | "admin" | "owner";
 
 const ROLES: Array<{ value: TokenRole; label: string; text: string }> = [
   { value: "reader", label: "Leitor", text: "lê produtos, ofertas, métricas e o relatório de vendas pagas" },
-  { value: "traffic", label: "Tráfego", text: "Leitor + métricas e testar o Pixel" },
-  { value: "support", label: "Suporte", text: "consulta pedidos (com comprador mascarado)" },
-  { value: "admin", label: "Admin", text: "tudo que o painel permite, menos equipe e conexões" },
-  { value: "owner", label: "Dono", text: "tudo que um agente pode fazer pelo MCP" },
+  { value: "traffic", label: "Tráfego", text: "Leitor + avisos da loja, estado das conexões (sem chaves) e configurações" },
+  { value: "support", label: "Suporte", text: "consulta pedidos (comprador mascarado), produtos, ofertas e o relatório de vendas pagas" },
+  { value: "admin", label: "Admin", text: "consulta tudo que o MCP oferece hoje" },
+  { value: "owner", label: "Dono", text: "igual ao Admin por enquanto; prefira Admin" },
 ];
 const ROLE_NAME = Object.fromEntries(ROLES.map((r) => [r.value, r.label])) as Record<string, string>;
 
@@ -43,6 +43,15 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
   const create = useActionRunner();
   const revoke = useActionRunner();
   const box = useRef<HTMLDivElement>(null);
+  // Abrir ou fechar o diálogo sem revogar limpa o erro da tentativa anterior.
+  const openRevoke = (t: TokenRow) => {
+    revoke.setMsg(null);
+    setTarget(t);
+  };
+  const closeRevoke = () => {
+    revoke.setMsg(null);
+    setTarget(null);
+  };
 
   // Leitor de tela e teclado: o foco vai para o quadro do token assim que ele aparece (é a única chance de copiá-lo).
   useEffect(() => {
@@ -86,7 +95,8 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
             className={s.stack}
             onSubmit={async (e) => {
               e.preventDefault();
-              const r = await create.run(() => createMcpTokenAction({ name: name.trim(), role }), {
+              // Em erro, o quadro do token anterior (se ainda aberto) continua: ele não aparece de novo.
+              await create.run(() => createMcpTokenAction({ name: name.trim(), role }), {
                 onOk: (d) => {
                   const data = d as { token: string; name: string };
                   setCreated({ token: data.token, name: data.name });
@@ -94,7 +104,6 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
                   setRole("reader");
                 },
               });
-              if (!r.ok) setCreated(null);
             }}
           >
             <h2 id="token-criar" className={s.sectionTitle}>
@@ -147,7 +156,7 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
                     </small>
                   </span>
                   {t.revokedAt ? null : (
-                    <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => setTarget(t)} aria-label={`Revogar o token ${t.name}`}>
+                    <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => openRevoke(t)} aria-label={`Revogar o token ${t.name}`}>
                       Revogar
                     </button>
                   )}
@@ -161,13 +170,13 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
 
       <Dialog
         open={target !== null}
-        onClose={() => setTarget(null)}
+        onClose={closeRevoke}
         icon="lock"
         tone="danger"
         title={`Revogar o token ${target?.name ?? ""}?`}
         footer={
           <>
-            <button type="button" className={s.btn} onClick={() => setTarget(null)} data-autofocus>
+            <button type="button" className={s.btn} onClick={closeRevoke} data-autofocus>
               Cancelar
             </button>
             <button

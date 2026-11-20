@@ -6,9 +6,10 @@ import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { eq } from "drizzle-orm";
-import { ActionError, runAction, TOKEN_DENIED } from "@/lib/actions/core";
+import { z } from "zod";
+import { ActionError, defineAction, runAction, TOKEN_DENIED, type Action } from "@/lib/actions/core";
 import { hasPermission, ROLE_PERMISSIONS, type Permission, type Role } from "@/lib/actions/permissions";
-import { listActions } from "@/lib/actions/registry";
+import { listActions, registry } from "@/lib/actions/registry";
 import { ownerDb } from "@/lib/db/client";
 import { auditLog, orders } from "@/lib/db/schema";
 import { callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
@@ -80,8 +81,18 @@ describe("classificação", () => {
         "offers.create",
         "offers.update",
         "orders.resend",
+        "products.update",
+        "connections.testMeta",
       ]),
     );
+  });
+
+  test("MCP só de leitura: nenhuma ferramenta de nenhum papel tem permissão de escrita", () => {
+    const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read"];
+    for (const role of ROLES) {
+      const writes = mcpTools(role).filter((x) => !READ.includes(x.permission));
+      expect([role, writes.map((x) => x.name)]).toEqual([role, []]);
+    }
   });
 
   test("nenhuma ação sensível, excluída, pública, de sistema ou negada a token aparece em nenhum papel", () => {
@@ -109,6 +120,8 @@ describe("classificação", () => {
       "offers.create",
       "offers.update",
       "orders.resend",
+      "products.update",
+      "connections.testMeta",
     ]) {
       expect(owner).not.toContain(name);
     }
@@ -182,6 +195,16 @@ describe("nomes e esquemas", () => {
     });
   });
 
+  test("orders_paidReport: from e to explicam o formato (ISO 8601 com fuso; data sem hora é meia-noite de São Paulo)", () => {
+    const props = (tool("reader", "orders_paidReport").inputSchema as { properties: Record<string, { type?: string; description?: string }> }).properties;
+    for (const k of ["from", "to"]) {
+      expect(props[k]!.type).toBe("string");
+      expect(props[k]!.description).toContain("ISO 8601 com fuso, ex.: 2026-10-21T00:00:00-03:00");
+      expect(props[k]!.description).toContain("AAAA-MM-DD");
+      expect(props[k]!.description).toContain("meia-noite de São Paulo");
+    }
+  });
+
   test("campo com default não é obrigatório e data aparece como texto ISO", () => {
     const list = tool("owner", "orders_list").inputSchema as { required?: string[] };
     expect(list.required ?? []).not.toContain("page");
@@ -227,11 +250,19 @@ describe("callMcpTool", () => {
     return Object.values(PII).filter((v) => text.includes(v));
   };
 
-  test("grava auditoria com origin mcp e actor.kind token", async () => {
+  test("grava auditoria com origin mcp e actor.kind token (ação auditada criada só no teste)", async () => {
+    const audited = defineAction(
+      { name: "testes.auditada", description: "Leitura auditada, só neste teste.", input: z.object({}), permission: "products.read", run: async () => ({ ok: true }) },
+      { register: false },
+    );
+    registry.set(audited.name, audited as Action<unknown, unknown>);
     const c = call(s.storeId);
-    const out = await callMcpTool(tool("owner", "products_update"), c, { id: s.mainId, name: "Maná básica" });
-    expect(out).toMatchObject({ id: s.mainId });
-    const rows = await t.ownerDb.select().from(auditLog).where(eq(auditLog.action, "products.update"));
+    try {
+      expect(await callMcpTool(tool("owner", "testes_auditada"), c, {})).toEqual({ ok: true });
+    } finally {
+      registry.delete(audited.name);
+    }
+    const rows = await t.ownerDb.select().from(auditLog).where(eq(auditLog.action, "testes.auditada"));
     const row = rows.find((r) => (r.actor as { tokenId?: string }).tokenId === c.tokenId);
     expect(row).toMatchObject({ origin: "mcp", ok: true, actor: { kind: "token", tokenId: c.tokenId, role: "owner" } });
   });

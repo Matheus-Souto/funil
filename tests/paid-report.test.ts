@@ -240,6 +240,18 @@ describe("orders.paidReport", () => {
     expect(p2.orders[0]!.code).not.toBe(p1.orders[0]!.code);
   });
 
+  test("data sem hora (AAAA-MM-DD) é meia-noite de São Paulo", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { paidAt: D("2026-01-10T02:59:00Z") }); // 09/01 23:59 em São Paulo: fora
+    const inside = await seedOrder(s, { paidAt: D("2026-01-10T03:00:00Z") }); // 10/01 00:00 em São Paulo: dentro
+    await seedOrder(s, { paidAt: D("2026-01-11T03:00:00Z") }); // 11/01 00:00 em São Paulo: fim exclusivo
+    const r = await runAction(paidReport, panelCall(s.storeId), { from: "2026-01-10", to: "2026-01-11" });
+    expect(r.orders.map((o) => o.code)).toEqual([inside.publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8)]);
+    // Com hora e fuso, vale o que veio.
+    const utc = await runAction(paidReport, panelCall(s.storeId), { from: "2026-01-10T00:00:00Z", to: "2026-01-11T00:00:00Z" });
+    expect(utc.orders.map((o) => o.paidAt.toISOString())).toEqual(["2026-01-10T02:59:00.000Z", "2026-01-10T03:00:00.000Z"]);
+  });
+
   test("dia em São Paulo: 01:00 UTC conta no dia anterior", async () => {
     const s = await seedPanelStore();
     await seedOrder(s, { paidAt: D("2026-01-10T01:00:00Z") });

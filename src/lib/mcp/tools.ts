@@ -1,5 +1,6 @@
 // Catálogo de ferramentas MCP: cada ação registrada vira ferramenta, a menos que seja sensível (fila de aprovação no
 // PR 6), pública ou de sistema, de uma permissão que token nunca tem (team.manage, account.self) ou excluída com motivo.
+// Nesta versão o MCP é só de leitura: as escritas não sensíveis também ficam em MCP_EXCLUDED até o PR 6.
 // Nenhum dado pessoal do comprador sai por aqui: as saídas com comprador passam por projeção de lista branca (monta o
 // objeto só com os campos permitidos, mascarados). Ação nova sem decisão faz tests/mcp-tools.test.ts falhar.
 import "@/lib/actions/all";
@@ -15,6 +16,9 @@ import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
 const SENDS_TO_CALLER_ADDRESS = "enviam a endereço escolhido por quem chama; revisão no PR 6";
 const AWAITS_APPROVAL_QUEUE = "aguarda a fila de aprovação (PR 6)";
 
+/** Rótulo do papel do token como o painel de tokens mostra. */
+export const TOKEN_ROLE_LABEL: Record<Role, string> = { reader: "Leitor", traffic: "Tráfego", support: "Suporte", admin: "Admin", owner: "Dono" };
+
 /** Ações que não saem pelo MCP neste PR (nome → motivo). Públicas e de sistema ficam de fora pela permissão. */
 export const MCP_EXCLUDED: Record<string, string> = {
   "orders.export": "CSV com dados do comprador",
@@ -28,6 +32,9 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "offers.update": AWAITS_APPROVAL_QUEUE,
   // Reenvia ao comprador sem limite por pedido e, com renew, gira os links de download.
   "orders.resend": AWAITS_APPROVAL_QUEUE,
+  // MCP só de leitura nesta versão.
+  "products.update": AWAITS_APPROVAL_QUEUE,
+  "connections.testMeta": "chama a API do Meta e precisa de limite próprio (PR 6)",
 };
 
 export interface McpTool {
@@ -45,13 +52,20 @@ export interface McpTool {
 
 type Schema = Record<string, unknown> & { properties?: Record<string, unknown>; required?: string[] };
 
-/** Esquema da entrada como o agente a envia: default não é obrigatório e data é texto ISO 8601 (z.coerce.date()). */
+/**
+ * Esquema da entrada como o agente a envia: default não é obrigatório e data é texto ISO 8601 (z.coerce.date()).
+ * Data com pré-processamento (ex.: aceita AAAA-MM-DD) vira texto sem `format`; a descrição do campo explica o formato.
+ */
 function inputSchemaOf(action: Action<unknown, unknown>): Schema {
   return z.toJSONSchema(action.input, {
     io: "input",
     unrepresentable: "any",
     override: (ctx) => {
-      if (ctx.zodSchema._zod.def.type === "date") Object.assign(ctx.jsonSchema, { type: "string", format: "date-time" });
+      const def = ctx.zodSchema._zod.def;
+      if (def.type === "date") Object.assign(ctx.jsonSchema, { type: "string", format: "date-time" });
+      else if (def.type === "pipe" && (def as { out?: { _zod: { def: { type: string } } } }).out?._zod.def.type === "date") {
+        Object.assign(ctx.jsonSchema, { type: "string" });
+      }
     },
   }) as Schema;
 }
@@ -216,13 +230,43 @@ function toolInputSchema(action: Action<unknown, unknown>): Schema {
 function toTool(action: Action<unknown, unknown>, permission: Permission): McpTool {
   const o = OVERRIDES[action.name] ?? {};
   return {
-    name: action.name.replaceAll(".", "_"),
+    name: toolName(action.name),
     action: action.name,
     description: o.description ?? action.description,
     inputSchema: toolInputSchema(action),
     permission,
     project: o.project ?? identity,
     ...(o.input ? { input: o.input } : {}),
+  };
+}
+
+const toolName = (action: string) => action.replaceAll(".", "_");
+
+/**
+ * Texto do erro de ferramenta para um nome fora do catálogo do papel. O nome com `_` é procurado no registro: ação
+ * sensível → aprovação; excluída → o motivo; exposta mas fora do papel → o papel; o resto (desconhecida, pública, de
+ * sistema, negada a token) → indisponível.
+ */
+export function unavailableToolText(name: string, role: Role): string {
+  const action = [...registry.values()].find((a) => toolName(a.name) === name);
+  if (!action) return "forbidden: ferramenta indisponível";
+  if (action.sensitive) return `approval_required: ${action.name} exige aprovação; peça a quem administra a loja para fazer no painel`;
+  if (Object.hasOwn(MCP_EXCLUDED, action.name)) return `indisponível pelo MCP: ${MCP_EXCLUDED[action.name]}`;
+  if (exposedPermission(action) !== null) return `forbidden: o papel ${TOKEN_ROLE_LABEL[role]} não inclui esta ferramenta`;
+  return "forbidden: ferramenta indisponível";
+}
+
+/** O que não está disponível pelo MCP (nomes de ferramenta): as ações sensíveis e as excluídas com o motivo. */
+export function unavailableTools(): { approval: string[]; excluded: { tool: string; reason: string }[] } {
+  const actions = [...registry.values()];
+  return {
+    approval: actions
+      .filter((a) => a.sensitive)
+      .map((a) => toolName(a.name))
+      .sort(),
+    excluded: Object.entries(MCP_EXCLUDED)
+      .map(([name, reason]) => ({ tool: toolName(name), reason }))
+      .sort((a, b) => a.tool.localeCompare(b.tool)),
   };
 }
 

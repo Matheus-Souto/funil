@@ -578,15 +578,17 @@ capabilities, 192 MB de memória e sem core dump.
 ## 13. Agentes de IA (MCP)
 
 O painel deixa um agente de IA (Claude, por exemplo) consultar a loja pelo protocolo MCP, sem nunca receber dado
-pessoal de comprador.
+pessoal de comprador. **Nesta versão o MCP é só de leitura**: o agente consulta, mas não altera nada na loja.
 
 **Criar o token.** No painel: **Loja → Agentes (MCP)** (só quem gerencia a equipe, o dono). Dê um nome, escolha o
 papel e clique em **Criar token**. O token (`fnl_...`) aparece **uma única vez**, num quadro com o botão Copiar:
-guarde-o agora (cofre de senhas ou o segredo do cliente MCP). Se perder, revogue e crie outro.
+guarde-o agora (cofre de senhas ou o segredo do cliente MCP). Se perder, revogue e crie outro. **Nunca cole o token em
+repositório, chat ou ticket; se vazar, revogue na hora.**
 
 **Configurar o cliente MCP.** O endereço é `<BASE_URL>/api/mcp` (por exemplo `https://checkout.minhaloja.com.br/api/mcp`;
 o painel mostra o endereço certo ao criar o token) e a autenticação é o cabeçalho `Authorization: Bearer <token>`.
-Em um cliente MCP genérico (HTTP), a configuração fica assim:
+O cabeçalho `Accept: application/json, text/event-stream` é obrigatório (os clientes MCP já o mandam; num `curl` feito à
+mão, sem ele, o servidor recusa a requisição). Em um cliente MCP genérico (HTTP), a configuração fica assim:
 
 ```json
 {
@@ -602,27 +604,34 @@ Em um cliente MCP genérico (HTTP), a configuração fica assim:
 O nome do bloco e o formato exato do arquivo variam de cliente para cliente; o que importa é a URL e o cabeçalho.
 Token ausente, errado ou revogado dá sempre o mesmo erro 401, sem dizer qual foi o caso.
 
+**Datas e prazos.** Períodos (relatório de vendas pagas e métricas) vão em ISO 8601 com fuso, por exemplo
+`2026-10-21T00:00:00-03:00`. No relatório de vendas pagas, uma data sem hora (`2026-10-21`) vale como meia-noite de São
+Paulo.
+
 **O que cada papel vê:**
 
 | Papel | Acesso |
 | --- | --- |
 | Leitor | lê produtos, ofertas, métricas e o relatório de vendas pagas |
-| Tráfego | Leitor + métricas e testar o Pixel |
-| Suporte | consulta pedidos (com comprador mascarado) |
-| Admin | tudo que o painel permite, menos equipe e conexões |
-| Dono | tudo que um agente pode fazer pelo MCP |
+| Tráfego | Leitor + avisos da loja, estado das conexões (sem chaves) e configurações |
+| Suporte | consulta pedidos (comprador mascarado), produtos, ofertas e o relatório de vendas pagas |
+| Admin | consulta tudo que o MCP oferece hoje |
+| Dono | igual ao Admin por enquanto; prefira Admin |
 
 Comece pelo menor papel que resolve o que o agente precisa (Leitor, na dúvida).
 
 **O que nunca sai pelo MCP, em nenhum papel:**
 
 - Dado pessoal do comprador: nome, e-mail, telefone e CPF saem mascarados (`M***`, `m***@gmail.com`,
-  `(**) *****-1234`, `***.***.***-12`) ou não saem; não há busca por e-mail ou nome, nem exportação de pedidos (CSV).
-  IP, user agent e e-mails da equipe também não saem.
+  `(**) *****-1234`, `***.***.***-12`) ou não saem; o domínio do e-mail só aparece se for de um provedor comum (Gmail,
+  Hotmail, Outlook, Yahoo, iCloud, UOL, BOL, Terra, iG...): os outros saem como `m***@***`. Não há busca por e-mail
+  ou nome, nem exportação de pedidos (CSV). IP, user agent e e-mails da equipe também não saem.
+- Origem (UTM) e indicação (`ref`) só saem se parecerem nome de campanha; com cara de e-mail, endereço, telefone ou
+  frase longa, saem como `(oculto)`.
 - Ações sensíveis: reembolso, liberar pedido, chaves e conexões (inclusive desligar o Telegram), preço, produtos e
   endereço da oferta, apagar produto, configurações da loja, senha e equipe (inclusive criar e revogar tokens).
-- Por enquanto, também ficam de fora: criar e editar oferta, reenviar acesso, criar produto (envio de arquivo),
-  "Enviar teste" das conexões e confirmar avisos.
+- Por enquanto, também ficam de fora: criar e editar oferta e produto (inclusive o envio de arquivo), reenviar acesso,
+  "Enviar teste" das conexões, testar o Pixel e confirmar avisos.
 
 **Revogar.** Em **Agentes (MCP)**, clique em **Revogar** ao lado do token e confirme. O agente perde o acesso na hora.
 O token revogado continua na lista, marcado como revogado, para o histórico.
@@ -635,7 +644,8 @@ um) e crie outros, se ainda forem necessários.
 tentativas com token inválido por IP (30 por minuto). Com `TRUST_PROXY` errado, todo mundo parece ter o mesmo IP: o
 limite bloqueia agentes legítimos junto com quem erra. Com `TRUST_PROXY=0`, o IP é desconhecido: o limite por IP não
 vale e as falhas de autenticação caem num balde único para o servidor todo. Além disso, cada token tem o limite próprio
-de 120 requisições por minuto.
+de 120 requisições por minuto e de 2 requisições ao mesmo tempo (a terceira simultânea recebe 429 e pode tentar de novo
+em 5 segundos); uma consulta que passe de 5 segundos no banco é cortada e volta como erro.
 
 ## 14. Problemas comuns
 

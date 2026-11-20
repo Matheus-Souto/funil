@@ -57,10 +57,17 @@ export function labelOrHidden(v: unknown): string | null {
   return v === null || v === undefined ? null : (safeLabel(v) ?? HIDDEN_LABEL);
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+/** Data ISO 8601; sem hora (AAAA-MM-DD) é a meia-noite de São Paulo (Brasil sem horário de verão desde 2019). */
+const spDate = (what: string) =>
+  z
+    .preprocess((v) => (typeof v === "string" && DATE_ONLY.test(v) ? `${v}T00:00:00-03:00` : v), z.coerce.date())
+    .describe(`${what}: ISO 8601 com fuso, ex.: 2026-10-21T00:00:00-03:00. Data sem hora (AAAA-MM-DD) é meia-noite de São Paulo.`);
+
 const input = z
   .object({
-    from: z.coerce.date(),
-    to: z.coerce.date(),
+    from: spDate("Início do período (inclusivo)"),
+    to: spDate("Fim do período (exclusivo)"),
     cursor: z.string().max(200).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT),
   })
