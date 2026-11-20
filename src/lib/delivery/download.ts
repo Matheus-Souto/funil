@@ -20,8 +20,7 @@ import { customer, downloadLink, downloadToken, orders, product } from "@/lib/db
 import { env } from "@/lib/env";
 import { dateTimeSP } from "@/lib/format";
 import { log } from "@/lib/log";
-import { UNKNOWN_IP } from "@/lib/payments/asaas/card";
-import { clientIpFrom } from "@/lib/payments/asaas/card-http";
+import { clientIpFrom, UNKNOWN_IP } from "@/lib/client-ip";
 import { hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
 import { PdfBusyError } from "@/lib/pdf/sandbox";
 import { storage } from "@/lib/storage";

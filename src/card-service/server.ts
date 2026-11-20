@@ -11,11 +11,12 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import { clientIpFrom, isHttps } from "@/lib/client-ip";
 import { dbHealthy } from "@/lib/db/client";
 import { isLoopbackUrl } from "@/lib/env";
 import { errorFields, log } from "@/lib/log";
 import { payWithCard as defaultPayWithCard, type CardPaymentInput } from "@/lib/payments/asaas/card";
-import { cardErrorResponse, clientIpFrom, isHttps } from "@/lib/payments/asaas/card-http";
+import { cardErrorResponse } from "@/lib/payments/asaas/card-http";
 import { verifyCardTicketDetailed } from "@/lib/payments/card-ticket";
 import { storeCheckoutOrigins } from "@/lib/stores";
 import { cardFormCsp, cardFormHtml } from "./page";

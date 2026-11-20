@@ -4,10 +4,10 @@
 // navegador) e chamam `startCheckout` / `checkout.view`; a regra de negócio fica em src/lib/checkout.ts.
 import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
+import { clientIpFrom } from "@/lib/client-ip";
 import { NEEDS_CPF, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
 import { env } from "@/lib/env";
 import { log } from "@/lib/log";
-import { clientIpFrom } from "@/lib/payments/asaas/card-http";
 import { resolveStore } from "@/lib/stores";
 import { fbcFromFbclid } from "@/lib/tracking/touch";
 

@@ -14,13 +14,14 @@ import { and, asc, count, desc, eq, gt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
+import { UNKNOWN_IP } from "@/lib/client-ip";
 import { withStore } from "@/lib/db/client";
 import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createOrder, type Order } from "@/lib/orders/create";
-import { UNAVAILABLE_MESSAGE as CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/asaas/card";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
+import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { issueCardTicket, verifyCardTicketForRenewal } from "@/lib/payments/card-ticket";
 import { MANUAL_RESERVE_AFTER_EXPIRY_MS, manualPixBrCode } from "@/lib/payments/manual";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
@@ -42,8 +43,6 @@ export const VIEW_LIMIT_PER_HOUR = 30;
 /** Toque (UTM etc.) maior que isto, serializado, é descartado: nunca grava payload grande de anônimo. */
 export const TOUCH_MAX_BYTES = 2048;
 const HOUR = 3600;
-/** IP sem proxy confiável (ver card-http.ts): sem limite por IP nos pedidos. */
-const UNKNOWN_IP = "unknown";
 
 const manualIpKey = (ip: string) => `checkout:pix_manual:ip:${ipRateKey(ip)}`;
 const asaasIpKey = (ip: string) => `checkout:asaas:ip:${ipRateKey(ip)}`;
