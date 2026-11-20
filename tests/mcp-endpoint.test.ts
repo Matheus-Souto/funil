@@ -411,7 +411,7 @@ describe("limites", () => {
         permission: "products.read",
         audit: false,
         async run(ctx) {
-          await ctx.tx.execute(sql`select pg_sleep(15)`);
+          await ctx.tx.execute(sql`select pg_sleep_for('15 seconds')`);
           return { dormiu: true };
         },
       },
