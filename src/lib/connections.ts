@@ -24,7 +24,8 @@ export const connectionsStatus = defineAction({
   permission: "connections.read",
   audit: false,
   async run(ctx) {
-    const canWrite = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.write");
+    // Só o papel importa (usuário do painel ou token MCP).
+    const canWrite = (ctx.actor.kind === "user" || ctx.actor.kind === "token") && hasPermission(ctx.actor.role, "connections.write");
     const [pix, smtp, meta] = await Promise.all((["pix_manual", "smtp", "meta"] as const).map((k) => getIntegration(ctx.tx, ctx.storeId, k)));
     // Chave do Asaas que não abre (ASAAS_SEAL_KEY trocada, removida ou rollback) não derruba a tela: aparece como
     // ilegível para o dono colar a chave de novo.

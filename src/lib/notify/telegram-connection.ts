@@ -168,6 +168,8 @@ export const removeTelegram = defineAction({
   description: "Remove a conexão do Telegram da loja.",
   input: z.object({}),
   permission: "connections.write",
+  // Desliga os avisos da loja: MCP/IA precisam de aprovação.
+  sensitive: true,
   async run(ctx) {
     const removed = await ctx.tx
       .delete(integration)

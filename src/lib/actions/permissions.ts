@@ -1,4 +1,5 @@
-export type Role = "owner" | "admin" | "support" | "traffic";
+/** `reader` só existe para tokens MCP (o `membership_role_check` não o aceita: usuário do painel nunca é leitor). */
+export type Role = "owner" | "admin" | "support" | "traffic" | "reader";
 
 export type Permission =
   | "products.read"
@@ -10,6 +11,8 @@ export type Permission =
   | "orders.refund"
   | "orders.resend"
   | "orders.export"
+  /** Relatório de vendas pagas sem dados do comprador (orders.paidReport): quem tem metrics.read ou orders.read. */
+  | "orders.report"
   | "metrics.read"
   | "connections.read"
   | "connections.write"
@@ -28,6 +31,7 @@ const ALL: Permission[] = [
   "orders.refund",
   "orders.resend",
   "orders.export",
+  "orders.report",
   "metrics.read",
   "connections.read",
   "connections.write",
@@ -39,10 +43,13 @@ const ALL: Permission[] = [
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: ALL,
   admin: ALL.filter((p) => p !== "team.manage" && p !== "connections.write"),
-  support: ["orders.read", "orders.resend", "products.read", "offers.read", "account.self"],
+  support: ["orders.read", "orders.report", "orders.resend", "products.read", "offers.read", "account.self"],
   // tracking.write: pixel próprio das ofertas (validado contra o token salvo pelo dono) e teste da conexão Meta.
   // Token/Pixel da loja (connections.saveMeta) exige connections.write: só o dono.
-  traffic: ["metrics.read", "offers.read", "products.read", "connections.read", "tracking.write", "account.self"],
+  traffic: ["metrics.read", "orders.report", "offers.read", "products.read", "connections.read", "tracking.write", "account.self"],
+  // Só tokens MCP: catálogo, métricas e o relatório de vendas pagas. Sem pedidos (dados do comprador), conexões, escrita
+  // nem a própria conta (um token não tem conta).
+  reader: ["products.read", "offers.read", "metrics.read", "orders.report"],
 };
 
 export function hasPermission(role: Role, permission: Permission): boolean {

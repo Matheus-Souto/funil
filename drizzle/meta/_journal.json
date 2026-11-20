@@ -183,6 +183,13 @@
       "when": 1795183751129,
       "tag": "0025_telegram",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1795193930239,
+      "tag": "0026_mcp_token",
+      "breakpoints": true
     }
   ]
 }

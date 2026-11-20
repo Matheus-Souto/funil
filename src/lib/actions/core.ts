@@ -5,7 +5,15 @@ import { log, redact, safeErrorMessage } from "@/lib/log";
 import { hasPermission, type Permission, type Role } from "./permissions";
 import { registry } from "./registry";
 
-export type Actor = { kind: "user"; userId: string; role: Role } | { kind: "public" } | { kind: "system" };
+/**
+ * `token`: agente com token MCP da loja (src/lib/mcp/tokens.ts). Autorizado pelo papel do token como um usuário, mas sem
+ * conta: ações que precisam de um usuário real (a própria senha) o recusam.
+ */
+export type Actor =
+  | { kind: "user"; userId: string; role: Role }
+  | { kind: "token"; tokenId: string; role: Role }
+  | { kind: "public" }
+  | { kind: "system" };
 export type Origin = "panel" | "api" | "mcp" | "ai" | "public" | "system" | "webhook";
 export type Ctx = { storeId: string; actor: Actor; origin: Origin; tx: Tx };
 
@@ -78,9 +86,9 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
     return;
   }
   // Fronteira de confiança: o papel vem de `actor.role`, informado pelo chamador.
-  // runAction NÃO reconsulta `membership`; quem monta o ator (getPanelActor, Task 5)
+  // runAction NÃO reconsulta `membership` nem `mcp_token`; quem monta o ator (getPanelActor, authenticateMcpToken)
   // garante que o papel é o atual da loja.
-  if (actor.kind !== "user" || !hasPermission(actor.role, action.permission)) {
+  if ((actor.kind !== "user" && actor.kind !== "token") || !hasPermission(actor.role, action.permission)) {
     throw new ActionError("forbidden", `Sem permissão: ${action.permission}`);
   }
 }

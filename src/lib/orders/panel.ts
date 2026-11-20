@@ -231,7 +231,8 @@ export const getOrderDetail = defineAction({
     timeline.sort((a, b) => b.at.getTime() - a.at.getTime());
 
     const snapshot = o.buyerName !== null;
-    const seesConnections = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.read");
+    // Só o papel importa (usuário do painel ou token MCP).
+    const seesConnections = (ctx.actor.kind === "user" || ctx.actor.kind === "token") && hasPermission(ctx.actor.role, "connections.read");
     return {
       id: o.id,
       code: orderCode(o.publicId),
