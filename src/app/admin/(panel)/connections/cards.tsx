@@ -758,6 +758,8 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
   });
   const [confirm, setConfirm] = useState(false);
   const [disconnect, setDisconnect] = useState(false);
+  // O hook só zera a mensagem do próprio runner: guardamos qual ação rodou por último e mostramos a dela.
+  const [last, setLast] = useState<"save" | "drop">("save");
   const run = useActionRunner();
   const test = useActionRunner();
   const drop = useActionRunner();
@@ -850,7 +852,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
       ) : (
         <p className={s.muted}>Ainda não configurado.</p>
       )}
-      <Live msg={confirm || disconnect ? null : (run.msg ?? drop.msg)} />
+      <Live msg={confirm || disconnect ? null : (last === "drop" ? drop.msg : run.msg)} />
       {canWrite && data ? (
         <div className={s.cardFoot}>
           <button type="button" className={s.btn} disabled={test.pending || data.token === "unreadable"} onClick={() => void test.run(() => testTelegramAction(), { refresh: false })}>
@@ -877,6 +879,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
         label="Salvar"
         pendingLabel="Salvando…"
         onConfirm={async () => {
+          setLast("save");
           const r = await run.run(() =>
             saveTelegramAction({
               chatId: f.chatId.trim(),
@@ -904,6 +907,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
         label="Desconectar"
         pendingLabel="Desconectando…"
         onConfirm={async () => {
+          setLast("drop");
           const r = await drop.run(() => removeTelegramAction());
           if (r.ok) {
             setDisconnect(false);
