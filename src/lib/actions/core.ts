@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import { withStore, type Tx } from "@/lib/db/client";
 import { auditLog } from "@/lib/db/schema";
@@ -5,7 +6,15 @@ import { log, redact, safeErrorMessage } from "@/lib/log";
 import { hasPermission, type Permission, type Role } from "./permissions";
 import { registry } from "./registry";
 
-export type Actor = { kind: "user"; userId: string; role: Role } | { kind: "public" } | { kind: "system" };
+/**
+ * `token`: agente com token MCP da loja (src/lib/mcp/tokens.ts). Autorizado pelo papel do token como um usuário, menos
+ * `team.manage` e `account.self` (sempre forbidden); ação sensível exige aprovação qualquer que seja a origem.
+ */
+export type Actor =
+  | { kind: "user"; userId: string; role: Role }
+  | { kind: "token"; tokenId: string; role: Role }
+  | { kind: "public" }
+  | { kind: "system" };
 export type Origin = "panel" | "api" | "mcp" | "ai" | "public" | "system" | "webhook";
 export type Ctx = { storeId: string; actor: Actor; origin: Origin; tx: Tx };
 
@@ -78,12 +87,22 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
     return;
   }
   // Fronteira de confiança: o papel vem de `actor.role`, informado pelo chamador.
-  // runAction NÃO reconsulta `membership`; quem monta o ator (getPanelActor, Task 5)
+  // runAction NÃO reconsulta `membership` nem `mcp_token`; quem monta o ator (getPanelActor, authenticateMcpToken)
   // garante que o papel é o atual da loja.
-  if (actor.kind !== "user" || !hasPermission(actor.role, action.permission)) {
+  if ((actor.kind !== "user" && actor.kind !== "token") || !hasPermission(actor.role, action.permission)) {
+    throw new ActionError("forbidden", `Sem permissão: ${action.permission}`);
+  }
+  // Token MCP nunca administra a equipe (nem os próprios tokens) nem uma conta, qualquer que seja o papel.
+  if (actor.kind === "token" && TOKEN_DENIED.includes(action.permission)) {
     throw new ActionError("forbidden", `Sem permissão: ${action.permission}`);
   }
 }
+
+/** Teto de cada consulta numa transação de origem `mcp` (`set local`: vale só para a transação). */
+const MCP_STATEMENT_TIMEOUT = "5s";
+
+/** Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora). */
+export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -118,7 +137,8 @@ export async function runAction<I, O, P = any, S = any>(
       throw new ActionError("invalid_input", "Entrada inválida", issues);
     }
     input = parsed.data;
-    if (action.sensitive && (origin === "mcp" || origin === "ai")) {
+    // Pelo ator também: um token MCP chamando por outra origem não escapa da aprovação.
+    if (action.sensitive && (origin === "mcp" || origin === "ai" || actor.kind === "token")) {
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
     if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
@@ -145,6 +165,8 @@ export async function runAction<I, O, P = any, S = any>(
   let committed: O;
   try {
     committed = await withStore(storeId, async (tx) => {
+      // Agente pelo MCP não segura conexão do pool (5) com consulta longa: o banco corta e vira "falha interna".
+      if (origin === "mcp") await tx.execute(sql.raw(`set local statement_timeout = '${MCP_STATEMENT_TIMEOUT}'`));
       const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P, call.server);
       ran = { out };
       if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));

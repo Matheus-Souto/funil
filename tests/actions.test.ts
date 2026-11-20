@@ -6,8 +6,8 @@ import { enqueue, runDueJobs } from "@/lib/jobs";
 import { log, redact, safeErrorMessage } from "@/lib/log";
 import { withStore } from "@/lib/db/client";
 import { ActionError, defineAction, runAction, type Actor } from "@/lib/actions/core";
-import { hasPermission } from "@/lib/actions/permissions";
-import { listActions } from "@/lib/actions/registry";
+import { ROLE_PERMISSIONS, hasPermission } from "@/lib/actions/permissions";
+import { listActions, registry } from "@/lib/actions/registry";
 import "@/lib/catalog/offers";
 import "@/lib/tracking/meta";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -68,6 +68,34 @@ test("public aceita qualquer ator; system só system", async () => {
   expect((await runAction(sys, { storeId, actor: owner, origin: "panel" }, {}).catch((e) => e)).code).toBe("forbidden");
   expect((await runAction(sys, { storeId, actor: { kind: "public" }, origin: "public" }, {}).catch((e) => e)).code).toBe("forbidden");
   expect(await runAction(sys, { storeId, actor: { kind: "system" }, origin: "system" }, {})).toBe(2);
+});
+
+test("ator token: autorizado pelo papel do token, como o usuário; ação de sistema continua recusada", async () => {
+  const { storeId } = await seedStore();
+  const refund = defineAction({ name: "t.tokrefund", description: "x", input: z.object({}), permission: "orders.refund", run: async () => 1 }, def);
+  const sys = defineAction({ name: "t.toksys", description: "x", input: z.object({}), permission: "system", run: async () => 2 }, def);
+  const token = (role: "admin" | "support" | "reader"): Actor => ({ kind: "token", tokenId: "tok-1", role });
+  expect(await runAction(refund, { storeId, actor: token("admin"), origin: "mcp" }, {})).toBe(1);
+  for (const role of ["support", "reader"] as const) {
+    expect((await runAction(refund, { storeId, actor: token(role), origin: "mcp" }, {}).catch((e) => e)).code).toBe("forbidden");
+  }
+  expect((await runAction(sys, { storeId, actor: token("admin"), origin: "mcp" }, {}).catch((e) => e)).code).toBe("forbidden");
+});
+
+test("ator token: team.manage e account.self recusados mesmo para o dono; ação sensível exige aprovação por qualquer origem", async () => {
+  const { storeId } = await seedStore();
+  let calls = 0;
+  const mk = (name: string, permission: "team.manage" | "account.self" | "orders.refund", sensitive = false) =>
+    defineAction({ name, description: "x", input: z.object({}), permission, sensitive, run: async () => ++calls }, def);
+  const owner = (origin: "mcp" | "api" | "panel") => ({ storeId, actor: { kind: "token" as const, tokenId: "tok-1", role: "owner" as const }, origin });
+  for (const origin of ["mcp", "api", "panel"] as const) {
+    expect((await runAction(mk("t.tokteam", "team.manage"), owner(origin), {}).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(mk("t.tokself", "account.self"), owner(origin), {}).catch((e) => e)).code).toBe("forbidden");
+    expect((await runAction(mk("t.toksens", "orders.refund", true), owner(origin), {}).catch((e) => e)).code).toBe("approval_required");
+  }
+  expect(calls).toBe(0);
+  // O mesmo sensível com usuário do painel por "api" segue executando (o portão por ator é só do token).
+  expect(await runAction(mk("t.usrsens", "orders.refund", true), { storeId, actor: { kind: "user", userId: "u1", role: "owner" }, origin: "api" }, {})).toBe(1);
 });
 
 test("ação sensitive: mcp/ai exigem aprovação; panel com owner executa", async () => {
@@ -157,6 +185,8 @@ test("registro rejeita nome duplicado; register:false não vaza", () => {
   expect(mk).toThrow(/reg\.dup/);
   expect(listActions().filter((a) => a.name === "test.echo")).toHaveLength(0);
   const item = listActions().find((a) => a.name === "reg.dup")!;
+  // O registro é do processo (todos os arquivos de teste): a ação de teste não pode sobrar para o catálogo do MCP.
+  registry.delete("reg.dup");
   expect(item).toMatchObject({ permission: "offers.read", sensitive: false });
   expect(item.inputSchema).toHaveProperty("properties.a");
 });
@@ -177,6 +207,10 @@ test("matriz de papéis", () => {
   expect(hasPermission("traffic", "tracking.write")).toBe(true);
   expect(hasPermission("support", "tracking.write")).toBe(false);
   expect(hasPermission("traffic", "connections.write")).toBe(false);
+  // orders.report (relatório de vendas pagas, sem dados do comprador): quem tem metrics.read ou orders.read.
+  for (const role of ["owner", "admin", "support", "traffic", "reader"] as const) expect(hasPermission(role, "orders.report")).toBe(true);
+  // reader (só para tokens MCP): leitura de catálogo, métricas e o relatório; nada de pedidos, conexões nem escrita.
+  expect([...ROLE_PERMISSIONS.reader].sort()).toEqual(["metrics.read", "offers.read", "orders.report", "products.read"]);
   const byName = new Map(listActions().map((a) => [a.name, a]));
   expect(byName.get("connections.saveMeta")).toMatchObject({ permission: "connections.write", sensitive: true });
   expect(byName.get("offers.setPixel")).toMatchObject({ permission: "tracking.write", sensitive: true });

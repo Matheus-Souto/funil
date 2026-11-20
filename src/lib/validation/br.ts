@@ -36,8 +36,14 @@ export function normalizeBrMobile(raw: string): string | null {
   return d;
 }
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-export const validEmail = (s: string): boolean => s.length <= 254 && EMAIL.test(s.trim());
+/** Parte local sem espaço nem `@`; domínio no formato de nome de host (rótulos de até 63, TLD de 2 a 24 letras). */
+const EMAIL_LOCAL = /^[^\s@]+$/;
+const EMAIL_DOMAIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.[A-Za-z]{2,24}$/;
+export function validEmail(s: string): boolean {
+  const t = s.trim();
+  const at = t.lastIndexOf("@");
+  return s.length <= 254 && at > 0 && EMAIL_LOCAL.test(t.slice(0, at)) && EMAIL_DOMAIN.test(t.slice(at + 1));
+}
 
 const SP_MONTH = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit" });
 

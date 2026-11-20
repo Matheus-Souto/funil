@@ -10,7 +10,7 @@ import postgres from "postgres";
 import type { ActionError } from "@/lib/actions/core";
 import { setDbForTests, withStore } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
-import { auditLog, cardAttempt, customer, integration, job, orders, payment, rateLimit, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { auditLog, cardAttempt, customer, integration, job, mcpToken, orders, payment, rateLimit, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
@@ -112,6 +112,17 @@ describe("papel card: atributos e o que fica de fora", () => {
       asCardIn(shop.storeId, (tx) => tx`insert into telegram_notice (store_id, order_id, event, message_id) values (${shop.storeId}, ${order.id}, 'abandoned', 2)`),
     ).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(shop.storeId, (tx) => tx`delete from telegram_notice`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("mcp_token: select, insert, update e delete dão permission denied", async () => {
+    const { storeId } = await seedStore("Tokens MCP");
+    await t.ownerDb.insert(mcpToken).values({ storeId, name: "agente", role: "reader", tokenHash: randomBytes(32).toString("hex"), last4: "abcd" });
+    await expect(asCardIn(storeId, (tx) => tx`select token_hash from mcp_token`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(storeId, (tx) => tx`insert into mcp_token (store_id, name, role, token_hash, last4) values (${storeId}, 'x', 'owner', 'h', 'h')`),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`update mcp_token set revoked_at = null`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`delete from mcp_token`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {

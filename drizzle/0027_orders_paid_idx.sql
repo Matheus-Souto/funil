@@ -1,0 +1,1 @@
+CREATE INDEX "orders_store_paid_idx" ON "orders" USING btree ("store_id","status","paid_at","id");

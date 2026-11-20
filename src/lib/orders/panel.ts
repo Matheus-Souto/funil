@@ -7,6 +7,7 @@ import { hasPermission } from "@/lib/actions/permissions";
 import { auditLog, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
+import { maskCpf, maskCpfStrict } from "@/lib/privacy";
 import { hasOpenJob } from "@/lib/jobs";
 import { refundMarkerOf } from "@/lib/payments/asaas/refunds";
 import { hasOldAccountEvent } from "@/lib/payments/asaas/webhook";
@@ -14,6 +15,7 @@ import { groupItems, itemOrder } from "./items";
 import { METHOD_LABEL, ORDER_METHODS, ORDER_STATUSES, STATUS_LABEL, type OrderMethod, type OrderStatus, type RefundState } from "./labels";
 
 export { allowedOrderActions } from "./labels";
+export { maskCpf };
 
 export const PAGE_SIZE = 50;
 const EXPORT_MAX = 10_000;
@@ -110,14 +112,6 @@ export const orderCounts = defineAction({
     return { pendingManual: r?.n ?? 0 };
   },
 });
-
-/** "52998224725" -> "***.982.247-**" (só os dígitos do meio, para conferência com o comprador). */
-export function maskCpf(cpf: string | null | undefined): string | null {
-  if (!cpf) return null;
-  const d = cpf.replace(/\D/g, "");
-  if (d.length !== 11) return "***";
-  return `***.${d.slice(3, 6)}.${d.slice(6, 9)}-**`;
-}
 
 export type PaymentFlag = "duplicate" | "superseded" | "old_account_event";
 
@@ -231,6 +225,7 @@ export const getOrderDetail = defineAction({
     timeline.sort((a, b) => b.at.getTime() - a.at.getTime());
 
     const snapshot = o.buyerName !== null;
+    // Só usuário do painel: o erro cru do SMTP costuma trazer o e-mail do comprador, e um token MCP nunca o recebe.
     const seesConnections = ctx.actor.kind === "user" && hasPermission(ctx.actor.role, "connections.read");
     return {
       id: o.id,
@@ -251,7 +246,8 @@ export const getOrderDetail = defineAction({
         name: o.buyerName ?? c.name,
         email: c.email,
         phone: o.buyerPhone ?? c.phone,
-        cpfMasked: maskCpf(snapshot ? o.buyerCpf : c.cpf),
+        // Token MCP: só os 2 últimos dígitos (a máscara do painel mostra os do meio; uma não se deriva da outra).
+        cpfMasked: (ctx.actor.kind === "token" ? maskCpfStrict : maskCpf)(snapshot ? o.buyerCpf : c.cpf),
       },
       items,
       payments: pays.map((p) => {

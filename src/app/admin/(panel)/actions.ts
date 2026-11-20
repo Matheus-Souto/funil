@@ -9,6 +9,7 @@ import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
+import { createMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { removeTelegram, saveTelegram, testTelegram } from "@/lib/notify/telegram-connection";
 import { saveResend, setEmailProvider, testResend } from "@/lib/delivery/resend";
 import { resendOrder } from "@/lib/delivery/jobs";
@@ -204,4 +205,17 @@ export async function testMetaAction() {
 export async function updateSettingsAction(input: unknown) {
   const panel = await requirePanelActor();
   return call(panel, updateStoreSettings, input, () => "Configurações salvas.");
+}
+
+// ---- agentes de IA (tokens MCP) --------------------------------------------------------------------------------
+
+/** O retorno traz o token uma única vez: quem chama o guarda só em estado de componente. */
+export async function createMcpTokenAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, createMcpToken, input, () => "Token criado.");
+}
+
+export async function revokeMcpTokenAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, revokeMcpToken, { id }, () => "Token revogado.");
 }

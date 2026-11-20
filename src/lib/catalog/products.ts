@@ -110,6 +110,7 @@ export const listProducts = defineAction({
   description: "Lista os produtos da loja (sem excluídos).",
   input: z.object({}),
   permission: "products.read",
+  audit: false,
   run: (ctx) => ctx.tx.select(view).from(product).where(isNull(product.deletedAt)).orderBy(desc(product.createdAt)),
 });
 

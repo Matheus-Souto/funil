@@ -36,6 +36,7 @@ export default async function PanelLayout({ children }: { children: ReactNode })
           { href: "/admin/settings", label: "Configurações", icon: "settings" as const, section: "loja" as const },
         ]
       : []),
+    ...(can("team.manage") ? [{ href: "/admin/tokens", label: "Agentes (MCP)", icon: "code" as const, section: "loja" as const }] : []),
   ];
 
   return (

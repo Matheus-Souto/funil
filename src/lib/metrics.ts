@@ -2,7 +2,7 @@
 // Receita = soma de `total_cents` dos pedidos `paid` com `paid_at` no período: reembolsados e contestados ficam fora.
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { defineAction } from "@/lib/actions/core";
+import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { checkoutView, orders } from "@/lib/db/schema";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
@@ -32,6 +32,14 @@ const range = z
   .object({ from: z.coerce.date(), to: z.coerce.date() })
   .refine((r) => r.from.getTime() <= r.to.getTime(), { message: "O início do período deve ser antes do fim", path: ["to"] });
 
+/** Teto do período para tokens MCP (o pool do banco é pequeno); o painel não tem teto (a visão geral lê desde 1970). */
+const TOKEN_MAX_DAYS = 400;
+function capForToken(ctx: Ctx, from: Date, to: Date): void {
+  if (ctx.actor.kind === "token" && to.getTime() - from.getTime() > TOKEN_MAX_DAYS * DAY_MS) {
+    throw new ActionError("invalid_input", `Período de no máximo ${TOKEN_MAX_DAYS} dias`);
+  }
+}
+
 const money = (col: unknown) => sql<number>`coalesce(sum(${col}), 0)::bigint`.mapWith(Number);
 const n = () => count().mapWith(Number);
 
@@ -44,6 +52,7 @@ export const metricsSummary = defineAction({
   permission: "metrics.read",
   audit: false,
   async run(ctx, { from, to }) {
+    capForToken(ctx, from, to);
     const created = and(gte(orders.createdAt, from), lt(orders.createdAt, to));
     const paidIn = and(eq(orders.status, "paid"), gte(orders.paidAt, from), lt(orders.paidAt, to));
 
@@ -101,6 +110,7 @@ export const metricsBreakdown = defineAction({
   permission: "metrics.read",
   audit: false,
   async run(ctx, { from, to }) {
+    capForToken(ctx, from, to);
     const paidIn = and(eq(orders.status, "paid"), gte(orders.paidAt, from), lt(orders.paidAt, to));
     const day = sql<string>`to_char(${orders.paidAt} at time zone 'America/Sao_Paulo', 'YYYY-MM-DD')`;
     const daily = await ctx.tx.select({ day, cents: money(orders.totalCents) }).from(orders).where(paidIn).groupBy(day);

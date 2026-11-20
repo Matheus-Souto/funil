@@ -73,6 +73,8 @@ export const orders = pgTable(
     uniqueIndex("orders_manual_amount_pending_unique")
       .on(t.storeId, t.manualAmountCents)
       .where(sql`${t.method} = 'pix_manual' and ${t.status} = 'pending'`),
+    // Relatório de pagos (MCP): filtro por status e período, paginado por (paid_at, id).
+    index("orders_store_paid_idx").on(t.storeId, t.status, t.paidAt, t.id),
     index("orders_pending_expiry_idx").on(t.expiresAt).where(sql`${t.status} = 'pending'`),
   ],
 );
@@ -130,14 +132,19 @@ export const payment = pgTable(
   ],
 );
 
-export const checkoutView = pgTable("checkout_view", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  storeId: uuid("store_id")
-    .notNull()
-    .references(() => store.id, { onDelete: "cascade" }),
-  offerId: uuid("offer_id")
-    .notNull()
-    .references(() => offer.id),
-  touch: jsonb("touch"),
-  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const checkoutView = pgTable(
+  "checkout_view",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    storeId: uuid("store_id")
+      .notNull()
+      .references(() => store.id, { onDelete: "cascade" }),
+    offerId: uuid("offer_id")
+      .notNull()
+      .references(() => offer.id),
+    touch: jsonb("touch"),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  // Visitas por período (metrics.summary e metrics.breakdown, também pelo MCP) sem varrer a tabela inteira.
+  (t) => [index("checkout_view_store_at_idx").on(t.storeId, t.at)],
+);

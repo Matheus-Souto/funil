@@ -17,6 +17,7 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | pdf-lib | 1.17.1 | MIT |
 | nodemailer | 10.6.0 | MIT-0 |
 | qrcode | 1.5.4 | MIT |
+| @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | geist (fonte) | 1.9.2 | SIL Open Font License 1.1 |
 | @fontsource-variable/bricolage-grotesque (fonte) | 5.3.0 | OFL-1.1 |
 
