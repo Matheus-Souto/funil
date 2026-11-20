@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import fc from "fast-check";
 import { z } from "zod";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
@@ -769,6 +769,8 @@ const directOrder = (storeId: string, offerId: string, withBump: boolean, method
     }),
   );
 
+const BUMP_GONE = "O acréscimo não está mais disponível. Atualize a página.";
+
 describe("pedido com N itens: rateio em centavos", () => {
   test("Completo (6 principais) por R$ 27,00: 6 itens de 450 na ordem da oferta, soma 2.700", async () => {
     const c = await seedCatalog(6);
@@ -864,21 +866,33 @@ describe("pedido com N itens: rateio em centavos", () => {
     ]);
   });
 
-  test("qualquer principal apagado: a oferta não vende (not_found); qualquer produto do bump apagado: pedido sai sem bump", async () => {
+  test("qualquer principal apagado: a oferta não vende (not_found); bump marcado e indisponível: conflict e nenhum pedido (R4)", async () => {
     const c = await seedCatalog(6);
     const ids = c.products.map((p) => p.id);
     const k = await kitOffer(c.storeId, { main: ids.slice(0, 3), priceCents: 2700, bump: { ids: ids.slice(3), priceCents: 1710 } });
-    // Apaga o 3º produto do bump (não o 1º).
+    const countOrders = async () => (await withStore(c.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).length;
+    // Apaga o 3º produto do bump (não o 1º): bump marcado -> recusa; sem o bump o pedido sai normal.
     await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[5]!));
-    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true }));
-    const o = await orderBy(c.storeId, r.publicId);
-    expect(o.hasBump).toBe(false);
-    expect(o.totalCents).toBe(2700);
-    expect((await itemsOf(c.storeId, o.id)).map((i) => i.kind)).toEqual(["main", "main", "main"]);
+    const e1 = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true })));
+    expect([e1.code, e1.message]).toEqual(["conflict", BUMP_GONE]);
+    expect(await countOrders()).toBe(0);
+    const ok = await orderBy(c.storeId, (await runAction(checkoutStart, pub(c.storeId), startInput(k.slug))).publicId);
+    expect([ok.hasBump, ok.totalCents]).toEqual([false, 2700]);
     // Apaga o 2º principal (não o 1º).
     await t.ownerDb.update(product).set({ deletedAt: new Date() }).where(eq(product.id, ids[1]!));
     const e = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug)));
     expect(e.code).toBe("not_found");
+    expect(await countOrders()).toBe(1);
+  });
+
+  test("bump retirado da oferta depois de a página carregar: bump marcado -> conflict, nenhum pedido (R4)", async () => {
+    const c = await seedCatalog(3);
+    const ids = c.products.map((p) => p.id);
+    const k = await kitOffer(c.storeId, { main: [ids[0]!], priceCents: 990, bump: { ids: ids.slice(1), priceCents: 1710 } });
+    await runAction(setOfferProducts, { storeId: c.storeId, actor: owner, origin: "panel" as const }, { id: k.offerId, productIds: [ids[0]!], bump: null });
+    const e = await fail(runAction(checkoutStart, pub(c.storeId), startInput(k.slug, { withBump: true })));
+    expect([e.code, e.message]).toEqual(["conflict", BUMP_GONE]);
+    expect(await withStore(c.storeId, (tx) => tx.select({ id: orders.id }).from(orders))).toHaveLength(0);
   });
 });
 
@@ -889,6 +903,15 @@ describe("página do pedido: sem preço rateado", () => {
     const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
     const view = (await getOrderPublic(c.storeId, r.publicId))!;
     expect(view.items).toEqual([{ name: "Almanaque Completo", priceCents: 2700 }]);
+  });
+
+  test("total com sobra (1.000 em 3): uma linha de R$ 10,00, nunca 3,34 / 3,33", async () => {
+    const c = await seedCatalog(3);
+    const k = await kitOffer(c.storeId, { name: "Trio", main: c.products.map((p) => p.id), priceCents: 1000 });
+    const r = await runAction(checkoutStart, pub(c.storeId), startInput(k.slug));
+    const view = (await getOrderPublic(c.storeId, r.publicId))!;
+    expect(view.items).toEqual([{ name: "Trio", priceCents: 1000 }]);
+    expect(JSON.stringify(view)).not.toMatch(/\b33[34]\b/);
   });
 
   test("1 principal + bump de 5: o principal e o rótulo do bump, cada um com o preço do grupo", async () => {
@@ -902,4 +925,83 @@ describe("página do pedido: sem preço rateado", () => {
       { name: "5 Kits Extras", priceCents: 1710 },
     ]);
   });
+});
+
+describe("setProducts e checkout concorrentes na mesma oferta", () => {
+  /** Espera (por condição, sem tempo fixo) até outra sessão deste banco ficar bloqueada numa trava, ou `done` virar true. */
+  async function blockedOnLock(done: () => boolean): Promise<boolean> {
+    for (let i = 0; i < 20_000; i++) {
+      if (done()) return false;
+      const [row] = (await t.ownerDb.execute(
+        sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+      )) as unknown as { n: number }[];
+      if (row!.n > 0) return true;
+    }
+    return false;
+  }
+
+  async function setup() {
+    const c = await seedCatalog(7);
+    const ids = c.products.map((p) => p.id);
+    const old = { main: ids.slice(0, 2), bump: [ids[2]!], bumpPrice: 1000 };
+    const neu = { main: ids.slice(3, 6), bump: [ids[6]!, ids[2]!], bumpPrice: 2000 };
+    const k = await kitOffer(c.storeId, { main: old.main, priceCents: 1200, bump: { ids: old.bump, priceCents: old.bumpPrice } });
+    const setNew = (tx: Ctx["tx"]) =>
+      setOfferProducts.run({ storeId: c.storeId, actor: owner, origin: "panel", tx }, { id: k.offerId, productIds: neu.main, bump: { productIds: neu.bump, priceCents: neu.bumpPrice, label: "Extras" } }, undefined, undefined);
+    const shape = (s: typeof old) => [
+      ...splitOf(1200, s.main).map(([productId, priceCents], position) => ({ productId, kind: "main", position, priceCents })),
+      ...splitOf(s.bumpPrice, s.bump).map(([productId, priceCents], position) => ({ productId, kind: "bump", position, priceCents })),
+    ];
+    return { c, k, old, neu, setNew, oldItems: shape(old), newItems: shape(neu) };
+  }
+  const splitOf = (total: number, ids: string[]) => ids.map((id, i) => [id, Math.floor(total / ids.length) + (i === 0 ? total % ids.length : 0)] as const);
+
+  test("setProducts com a trava: o checkout espera e sai inteiro com a lista e o preço novos", async () => {
+    const { c, k, setNew, newItems } = await setup();
+    let order: Promise<{ id: string }> | undefined;
+    let finished = false;
+    await withStore(c.storeId, async (tx) => {
+      await setNew(tx);
+      order = directOrder(c.storeId, k.offerId, true, "card_asaas").finally(() => {
+        finished = true;
+      });
+      // O pedido não pode terminar enquanto a lista nova não foi gravada (commit): fica bloqueado na trava da oferta.
+      expect(await blockedOnLock(() => finished)).toBe(true);
+    });
+    const o = await order!;
+    expect(await itemsOf(c.storeId, o.id)).toEqual(newItems);
+  });
+
+  test("pedido com a trava: o setProducts espera; o pedido sai inteiro com a lista e o preço antigos", async () => {
+    const { c, k, setNew, oldItems } = await setup();
+    let change: Promise<unknown> | undefined;
+    let finished = false;
+    const o = await withStore(c.storeId, async (tx) => {
+      const created = await createOrder(sysCtx(c.storeId, tx), {
+        offerId: k.offerId,
+        withBump: true,
+        method: "card_asaas",
+        customer: { name: "Maria Souza", email: email(), phone: "11987654321", cpf: CPF },
+        touch: { first: null, last: null },
+        clientIp: nextIp(),
+        userAgent: "bun-test",
+      });
+      change = withStore(c.storeId, (tx2) => setNew(tx2)).finally(() => {
+        finished = true;
+      });
+      expect(await blockedOnLock(() => finished)).toBe(true);
+      return created;
+    });
+    await change;
+    expect(await itemsOf(c.storeId, o.id)).toEqual(oldItems);
+  });
+
+  test("corrida sem ordem combinada (10 rodadas): cada pedido é inteiro antigo ou inteiro novo", async () => {
+    for (let i = 0; i < 10; i++) {
+      const { c, k, setNew, oldItems, newItems } = await setup();
+      const [, o] = await Promise.all([withStore(c.storeId, (tx) => setNew(tx)), directOrder(c.storeId, k.offerId, true, "card_asaas")]);
+      const items = await itemsOf(c.storeId, o.id);
+      expect([JSON.stringify(oldItems), JSON.stringify(newItems)]).toContain(JSON.stringify(items));
+    }
+  }, HEAVY_TEST_MS);
 });

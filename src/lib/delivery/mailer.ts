@@ -19,6 +19,7 @@ import { emailLog, store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log, safeErrorMessage } from "@/lib/log";
+import { oneLine } from "./templates";
 
 export interface SmtpSettings {
   host: string;
@@ -170,7 +171,7 @@ export async function loadSmtp(tx: Tx, storeId: string): Promise<SmtpSettings | 
   return { host: c.host, port: c.port, secure: c.secure === true, user: c.user ?? null, password: conn.secret, from: c.from };
 }
 
-const oneLine = (s: string, max: number) => s.replace(/[\r\n\t\u0000-\u001f\u007f]+/g, " ").trim().slice(0, max);
+const header = (s: string, max: number) => oneLine(s).trim().slice(0, max);
 
 export interface MailMessage {
   to: string;
@@ -188,9 +189,9 @@ async function deliver(s: SmtpSettings, storeName: string, msg: MailMessage, sig
   if (signal?.aborted) throw abortError(signal);
   const transport = factory(s);
   const mail: SentMail = {
-    from: { name: oneLine(storeName, 100), address: s.from },
+    from: { name: header(storeName, 100), address: s.from },
     to: msg.to,
-    subject: oneLine(msg.subject, 250),
+    subject: header(msg.subject, 250),
     html: msg.html,
     text: msg.text,
   };

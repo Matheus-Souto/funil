@@ -20,7 +20,7 @@ import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, 
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { createOrder, type Order } from "@/lib/orders/create";
-import { itemOrder } from "@/lib/orders/items";
+import { groupItems, itemOrder } from "@/lib/orders/items";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { issueCardTicket, verifyCardTicketForRenewal } from "@/lib/payments/card-ticket";
@@ -481,13 +481,10 @@ export interface OrderPublic {
  * o rótulo do bump.
  */
 function summaryLines(items: { name: string; priceCents: number; kind: string }[], of: { name: string; bumpLabel: string | null }): OrderPublic["items"] {
-  const line = (kind: "main" | "bump") => {
-    const group = items.filter((i) => i.kind === kind);
-    if (group.length === 0) return [];
-    const name = group.length === 1 ? group[0]!.name : kind === "main" ? of.name : (of.bumpLabel ?? group.map((i) => i.name).join(" · "));
-    return [{ name, priceCents: group.reduce((sum, i) => sum + i.priceCents, 0) }];
-  };
-  return [...line("main"), ...line("bump")];
+  return groupItems(items).map((g) => ({
+    name: g.names.length === 1 ? g.names[0]! : g.kind === "main" ? of.name : (of.bumpLabel ?? g.names.join(" · ")),
+    priceCents: g.priceCents,
+  }));
 }
 
 /**

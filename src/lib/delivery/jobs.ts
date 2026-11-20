@@ -10,8 +10,8 @@ import { customer, downloadLink, emailLog, offer, orderItem, orders, product, st
 import { brl, dateTimeSP } from "@/lib/format";
 import { enqueue, hasOpenJob, type Job, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
+import { groupItems, itemOrder } from "@/lib/orders/items";
 import { LINK_TTL_MS, MAX_DOWNLOADS, deliveryLinks, newTokens, restoreLinks, revokeLinks, saveTokens, storeBaseUrl } from "./links";
-import { itemOrder } from "@/lib/orders/items";
 import { logEmail, sendMail } from "./mailer";
 import { deliveryEmail, methodLabel, sellerEmail } from "./templates";
 import { deleteWatermarks, ensureWatermarkedPdf, watermarkText } from "./watermark";
@@ -325,7 +325,8 @@ export const notifySellerJob: JobHandler = async (j, signal) => {
       heading: `Nova venda de ${brl(o!.totalCents)}`,
       paragraphs: [
         `Pedido #${code} pago com ${methodLabel(o!.method)}${o!.paidAt ? ` em ${dateTimeSP(o!.paidAt)}` : ""}.`,
-        ...items!.map((i) => `${i.name}${i.kind === "bump" ? " (acréscimo)" : ""}: ${brl(i.priceCents)}`),
+        // Uma linha de preço por grupo com os nomes (nunca o preço rateado de cada PDF).
+        ...groupItems(items!).map((g) => `${g.names.join(" + ")}${g.kind === "bump" ? " (acréscimo)" : ""}: ${brl(g.priceCents)}`),
         `Total: ${brl(o!.totalCents)}`,
         `Comprador: ${buyer!.name}${buyer!.email ? ` (${buyer!.email})` : ""}`,
       ],

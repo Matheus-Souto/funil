@@ -28,6 +28,9 @@ export type CreateOrderInput = {
   asaasPixFallback?: boolean;
 };
 
+/** Bump marcado que não está mais disponível: o checkout mostra a mensagem como veio (ramo `conflict`). */
+export const BUMP_UNAVAILABLE = "O acréscimo não está mais disponível. Atualize a página.";
+
 /** Validade de um Pix pendente antes de expirar. Cartão não expira por tempo. */
 export const PIX_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -41,8 +44,9 @@ function methodAllowed(method: Method, methods: string[], pixMode: string, asaas
  * Cria o pedido recalculando preços a partir do banco (nunca do cliente). Roda na transação de `ctx`.
  * Um `order_item` por produto da oferta (`offer_product`), na ordem da oferta: os principais dividem o preço da oferta e
  * os do bump (se marcado) o preço do bump (`splitCents`: sobra no primeiro item do grupo), e a soma dá `total_cents`.
- * Nunca vende combo incompleto: qualquer principal apagado -> a oferta não vende; qualquer produto do bump apagado ->
- * o pedido sai sem o bump.
+ * Nunca vende combo incompleto nem diferente do que o comprador viu: qualquer principal apagado -> a oferta não vende
+ * (`not_found`); bump marcado e indisponível (retirado da oferta ou com qualquer produto apagado) -> `conflict` com
+ * `BUMP_UNAVAILABLE` e nenhum pedido (Ruling R4: o comprador nunca paga outro valor nem leva outro combo).
  */
 export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Order> {
   // FOR SHARE: espera um offers.setProducts em andamento (FOR UPDATE na mesma linha) e lê preço e lista do mesmo estado.
@@ -55,9 +59,8 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
   if (!live(list.main)) throw new ActionError("not_found", "Oferta não encontrada");
   let bump: { products: ProductRef[]; priceCents: number } | null = null;
   if (input.withBump) {
-    if (list.bump.length === 0 || o.bumpPriceCents === null) throw new ActionError("invalid_input", "Esta oferta não tem order bump");
-    // Produto do bump apagado: o checkout já esconde o bump; quem o marcou numa página antiga compra sem ele.
-    if (live(list.bump)) bump = { products: list.bump, priceCents: o.bumpPriceCents };
+    if (!live(list.bump) || o.bumpPriceCents === null) throw new ActionError("conflict", BUMP_UNAVAILABLE);
+    bump = { products: list.bump, priceCents: o.bumpPriceCents };
   }
   const total = o.priceCents + (bump?.priceCents ?? 0);
 

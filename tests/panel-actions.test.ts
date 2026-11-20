@@ -123,9 +123,9 @@ describe("orders.get", () => {
     expect(d.status).toBe("paid");
     expect(d.buyer.cpfMasked).toBe("***.982.247-**");
     expect(JSON.stringify(d)).not.toContain("52998224725");
-    expect(d.items.map((i) => [i.name, i.kind, i.priceCents])).toEqual([
-      ["Maná básica", "main", 990],
-      ["Maná completa", "bump", 1710],
+    expect(d.items.map((i) => [i.names, i.kind, i.priceCents])).toEqual([
+      [["Maná básica"], "main", 990],
+      [["Maná completa"], "bump", 1710],
     ]);
     expect(d.pix).toEqual({ key: "contato@manakids.com.br", receiver: "MANA KIDS", amountCents: o.manualAmountCents });
     const flags = Object.fromEntries(d.payments.map((p) => [p.providerId ?? p.provider, p.flags]));
@@ -245,7 +245,7 @@ describe("exportação CSV", () => {
 
 describe("pedido com N itens no painel", () => {
   /** Troca os itens do pedido por `names` (produtos novos), na ordem dada, como `createOrder` grava (rateio de 2.700). */
-  async function kitOrder(s: PanelStore, names: string[]) {
+  async function kitOrder(s: PanelStore, names: string[], prices: number[] = names.map(() => 450)) {
     const ids: string[] = [];
     for (const n of names) {
       const [p] = await t.ownerDb
@@ -254,10 +254,10 @@ describe("pedido com N itens no painel", () => {
         .returning({ id: product.id });
       ids.push(p!.id);
     }
-    const o = await seedOrder(s, { status: "paid", totalCents: 2700 });
+    const o = await seedOrder(s, { status: "paid", totalCents: prices.reduce((x, y) => x + y, 0) });
     await t.ownerDb.delete(orderItem).where(eq(orderItem.orderId, o.id));
     // Inserção na ordem inversa: a leitura tem que ordenar por posição, não pela ordem de gravação.
-    const rows = ids.map((productId, position) => ({ storeId: s.storeId, orderId: o.id, productId, priceCents: 450, kind: "main", position }));
+    const rows = ids.map((productId, position) => ({ storeId: s.storeId, orderId: o.id, productId, priceCents: prices[position]!, kind: "main", position }));
     for (const r of rows.reverse()) await t.ownerDb.insert(orderItem).values(r);
     return o;
   }
@@ -276,7 +276,15 @@ describe("pedido com N itens no painel", () => {
     const s = await seedPanelStore();
     const o = await kitOrder(s, SIX);
     const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
-    expect(d.items.map((i) => i.name)).toEqual(SIX);
+    expect(d.items).toEqual([{ kind: "main", names: SIX, priceCents: 2700 }]);
+  });
+
+  test("detalhe com sobra (1.000 em 3): uma linha de preço por grupo, nomes sem preço; nunca 3,34 / 3,33", async () => {
+    const s = await seedPanelStore();
+    const o = await kitOrder(s, ["A", "B", "C"], [334, 333, 333]);
+    const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(d.items).toEqual([{ kind: "main", names: ["A", "B", "C"], priceCents: 1000 }]);
+    expect(JSON.stringify(d)).not.toMatch(/"priceCents":33[34]\b/);
   });
 
   test("detalhe: links criados na mesma entrega (mesmo created_at) aparecem na ordem dos itens", async () => {
@@ -299,9 +307,9 @@ describe("pedido com N itens no painel", () => {
     await t.ownerDb.insert(orderItem).values({ storeId: s.storeId, orderId: o.id, productId: s.bumpId, priceCents: 1710, kind: "bump" });
     await t.ownerDb.insert(orderItem).values({ storeId: s.storeId, orderId: o.id, productId: s.mainId, priceCents: 990, kind: "main" });
     const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
-    expect(d.items.map((i) => [i.name, i.kind])).toEqual([
-      ["Maná básica", "main"],
-      ["Maná completa", "bump"],
+    expect(d.items.map((i) => [i.names, i.kind])).toEqual([
+      [["Maná básica"], "main"],
+      [["Maná completa"], "bump"],
     ]);
     const csv = ordersCsv(await runAction(exportOrders, panelCall(s.storeId), {}));
     expect(csv).toContain('"Maná básica + Maná completa"');

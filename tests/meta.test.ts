@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
-import { createOffer, getPublicOffer, setOfferPixel } from "@/lib/catalog/offers";
+import { createOffer, getPublicOffer, setOfferPixel, setOfferProducts } from "@/lib/catalog/offers";
 import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
 import { auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
@@ -211,6 +211,19 @@ test("connections.testMeta: sem conexão conflict; com conexão valida o token g
 }, HEAVY_TEST_MS);
 
 describe("meta_event Purchase (API de Conversões)", () => {
+  test("oferta com N produtos (3 principais + bump de 2): content_ids com todos, na ordem da oferta, sem repetir", async () => {
+    const shop = await seedShop();
+    const extra = await Promise.all(["M2", "M3", "B2"].map((n) => seedProduct(shop.storeId, n)));
+    const [m2, m3, b2] = extra.map((p) => p.id) as [string, string, string];
+    const main = [m3, shop.mainId, m2];
+    const bump = [b2, shop.bumpId];
+    await runAction(setOfferProducts, panel(shop.storeId), { id: shop.offerId, productIds: main, bump: { productIds: bump, priceCents: 1710, label: "Extras" } });
+    const o = await paidOrder(shop);
+    await runMetaJobs(o.id);
+    expect(meta.events).toHaveLength(1);
+    expect(meta.events[0]!.event.custom_data!.content_ids).toEqual([...main, ...bump]);
+  });
+
   test("pedido de 2700 com bump: event_id purchase:<publicId>, value 27, dados em hash; repetir o job não reenvia", async () => {
     const shop = await seedShop();
     const o = await paidOrder(shop);

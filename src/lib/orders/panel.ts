@@ -10,7 +10,7 @@ import { getIntegration } from "@/lib/integrations";
 import { hasOpenJob } from "@/lib/jobs";
 import { refundMarkerOf } from "@/lib/payments/asaas/refunds";
 import { hasOldAccountEvent } from "@/lib/payments/asaas/webhook";
-import { itemOrder } from "./items";
+import { groupItems, itemOrder } from "./items";
 import { METHOD_LABEL, ORDER_METHODS, ORDER_STATUSES, STATUS_LABEL, type OrderMethod, type OrderStatus, type RefundState } from "./labels";
 
 export { allowedOrderActions } from "./labels";
@@ -169,7 +169,9 @@ export const getOrderDetail = defineAction({
       .from(orderItem)
       .innerJoin(product, eq(product.id, orderItem.productId))
       .where(eq(orderItem.orderId, o.id))
-      .orderBy(...itemOrder);
+      .orderBy(...itemOrder)
+      // Uma linha de preço por grupo (principal, bump) com os nomes: o preço rateado por PDF não sai do servidor.
+      .then(groupItems);
     const pays = await ctx.tx.select().from(payment).where(eq(payment.orderId, o.id)).orderBy(asc(payment.id));
     const links = await ctx.tx
       .select({

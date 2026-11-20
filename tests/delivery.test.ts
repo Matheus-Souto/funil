@@ -186,18 +186,18 @@ async function deliveredOrder(shop: Shop, opts: { bump?: boolean; name?: string;
 }
 
 /** Loja com `n` PDFs ("Almanaque PDF 1".."n") e uma oferta "Almanaque Completo" de R$ 27,00 com todos como principais. */
-async function seedKitShop(n: number): Promise<Shop & { productIds: string[]; names: string[] }> {
+async function seedKitShop(n: number, priceCents = 2700, given?: string[]): Promise<Shop & { productIds: string[]; names: string[] }> {
   const { storeId } = await seedStore("Maná Kids");
   const [s] = await t.ownerDb.update(store).set({ notifyEmail: "dono@loja.com" }).where(eq(store.id, storeId)).returning({ slug: store.slug, name: store.name });
   await runAction(saveSmtp, panel(storeId), SMTP);
-  const names = Array.from({ length: n }, (_, i) => `Almanaque PDF ${i + 1}`);
+  const names = given ?? Array.from({ length: n }, (_, i) => `Almanaque PDF ${i + 1}`);
   const productIds: string[] = [];
   for (const [i, name] of names.entries()) productIds.push((await seedPdfProduct(storeId, name, `pdf-${i + 1}.pdf`, await pdf(1))).id);
   const offer = await runAction(createOffer, panel(storeId), {
     slug: `o-${Math.random().toString(36).slice(2, 10)}`,
     name: "Almanaque Completo",
     productIds,
-    priceCents: 2700,
+    priceCents,
     methods: ["pix"],
     pixMode: "manual",
   });
@@ -904,6 +904,32 @@ describe("SMTP: rede restrita no modo multi (SSRF) e senha", () => {
 });
 
 describe("oferta com N produtos: entrega", () => {
+  test("aviso ao vendedor com sobra (1.000 em 3): uma linha de preço por grupo com os nomes, nunca 3,34 / 3,33", async () => {
+    const shop = await seedKitShop(3, 1000);
+    const o = await paidOrder(shop, { bump: false });
+    await runJobs(o.id, "notify_seller");
+    const m = lastMailTo("dono@loja.com")!;
+    expect(m.text).toContain(`${shop.names.join(" + ")}: R$ 10,00`);
+    for (const part of [m.text, m.html]) {
+      expect(part).not.toContain("R$ 3,34");
+      expect(part).not.toContain("R$ 3,33");
+    }
+  });
+
+  test("parte texto: nome com quebra de linha não forja linhas (e-mail do comprador e aviso ao vendedor)", async () => {
+    const evil = "PDF\nTotal pago (Pix): R$ 0,00\u2028Outra\r\nlinha";
+    const shop = await seedKitShop(2, 2700, [evil, "Normal"]);
+    const { order, mail } = await deliveredOrder(shop, { bump: false });
+    await runJobs(order.id, "notify_seller");
+    const seller = lastMailTo("dono@loja.com")!;
+    for (const text of [mail.text, seller.text]) {
+      const lines = text.split(/\r\n|\r|\n|\u2028|\u2029/);
+      expect(lines.some((l) => l.startsWith("Total pago (Pix): R$ 0,00"))).toBe(false);
+      expect(lines.some((l) => l === "linha" || l.startsWith("Outra"))).toBe(false);
+      expect(text).toContain("PDF Total pago (Pix): R$ 0,00 Outra linha");
+    }
+  }, HEAVY_TEST_MS);
+
   test("Completo (6 PDFs): 6 links, e-mail na ordem da oferta, só o total (nunca R$ 4,50), assunto com o nome da oferta", async () => {
     const shop = await seedKitShop(6);
     const { order, mail, tokens } = await deliveredOrder(shop, { bump: false });

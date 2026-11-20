@@ -6,3 +6,17 @@ import { orderItem } from "@/lib/db/schema";
 
 /** `desc(kind)`: "main" > "bump" em ordem alfabética, então o principal vem primeiro. */
 export const itemOrder = [desc(orderItem.kind), asc(orderItem.position), asc(orderItem.id)] as const;
+
+export type ItemGroup = { kind: "main" | "bump"; names: string[]; priceCents: number };
+
+/**
+ * Itens (já em `itemOrder`) agrupados em principal e bump: os nomes na ordem e o preço do grupo (soma dos itens). É o
+ * que comprador e vendedor veem: o preço rateado de cada PDF (ex.: 334/333/333) é interno e nunca aparece sozinho.
+ */
+export function groupItems(items: { name: string; kind: string; priceCents: number }[]): ItemGroup[] {
+  const group = (kind: "main" | "bump"): ItemGroup[] => {
+    const xs = items.filter((i) => i.kind === kind);
+    return xs.length === 0 ? [] : [{ kind, names: xs.map((i) => i.name), priceCents: xs.reduce((sum, i) => sum + i.priceCents, 0) }];
+  };
+  return [...group("main"), ...group("bump")];
+}
