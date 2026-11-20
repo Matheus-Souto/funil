@@ -73,6 +73,8 @@ export const orders = pgTable(
     uniqueIndex("orders_manual_amount_pending_unique")
       .on(t.storeId, t.manualAmountCents)
       .where(sql`${t.method} = 'pix_manual' and ${t.status} = 'pending'`),
+    // Relatório de pagos (MCP): filtro por status e período, paginado por (paid_at, id).
+    index("orders_store_paid_idx").on(t.storeId, t.status, t.paidAt, t.id),
     index("orders_pending_expiry_idx").on(t.expiresAt).where(sql`${t.status} = 'pending'`),
   ],
 );

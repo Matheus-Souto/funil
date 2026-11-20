@@ -29,3 +29,10 @@ export function maskCpf(cpf: string | null | undefined): string | null {
   if (d.length !== 11) return "***";
   return `***.${d.slice(3, 6)}.${d.slice(6, 9)}-**`;
 }
+
+/** "52998224725" -> "***.***.***-25" (só os 2 últimos dígitos). Mais estrita que `maskCpf`; é a do MCP. */
+export function maskCpfStrict(cpf: string | null | undefined): string | null {
+  if (!cpf) return null;
+  const d = cpf.replace(/\D/g, "");
+  return d.length < 2 ? "***.***.***-**" : `***.***.***-${d.slice(-2)}`;
+}
