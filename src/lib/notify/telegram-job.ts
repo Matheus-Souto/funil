@@ -52,7 +52,21 @@ export const notifyTelegramJob: JobHandler = async (j, signal) => {
   const { event, orderId, afterMinutes } = parsed.data;
 
   const prep: Prepared = await withStore(storeId, async (tx) => {
-    const [o] = await tx.select().from(orders).where(eq(orders.id, orderId));
+    // Só as colunas usadas (nada do comprador: nome, telefone...).
+    const [o] = await tx
+      .select({
+        id: orders.id,
+        publicId: orders.publicId,
+        status: orders.status,
+        method: orders.method,
+        totalCents: orders.totalCents,
+        customerId: orders.customerId,
+        offerId: orders.offerId,
+        createdAt: orders.createdAt,
+        paidAt: orders.paidAt,
+      })
+      .from(orders)
+      .where(eq(orders.id, orderId));
     if (!o) return { skip: "pedido_inexistente" };
     const [sent] = await tx
       .select({ id: telegramNotice.id })

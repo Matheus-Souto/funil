@@ -1,15 +1,15 @@
 // Conexão do Telegram da loja (o bot é da loja; a plataforma não fornece nenhum): dados e ações. Config público
 // `{ chatId, botUsername, tokenLast4, events, abandonAfterMinutes }`; segredo selado = só o token do bot. Rede (getMe e
 // envio de teste) só no `prepare`, fora da transação. Erro do Telegram vira `provider_error` com o texto fixo.
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { withStore, type Tx } from "@/lib/db/client";
-import { integration, store } from "@/lib/db/schema";
+import { integration, store, storeAlert } from "@/lib/db/schema";
 import { oneLine } from "@/lib/delivery/templates";
 import { IntegrationSecretUnreadable, getIntegration, readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { TELEGRAM_CHAT_RE, TELEGRAM_TOKEN_RE, TelegramError, telegramGetMe, telegramSend } from "./telegram";
+import { TELEGRAM_CHAT_RE, TELEGRAM_TOKEN_RE, TelegramError, cutChars, telegramGetMe, telegramSend } from "./telegram";
 
 export interface TelegramEvents {
   sale: boolean;
@@ -70,6 +70,14 @@ export async function telegramSettings(tx: Tx, storeId: string): Promise<{ event
   return { events, abandonAfterMinutes };
 }
 
+/** Confirma o aviso `telegram_falhou` aberto da loja: o vendedor corrigiu a conexão (teste ok, token ou chat id novos). */
+async function ackTelegramAlert(tx: Tx, storeId: string): Promise<void> {
+  await tx
+    .update(storeAlert)
+    .set({ acknowledgedAt: sql`now()` })
+    .where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, "telegram_falhou"), isNull(storeAlert.acknowledgedAt)));
+}
+
 function providerError(e: unknown): never {
   if (e instanceof TelegramError) throw new ActionError("provider_error", e.message, { status: e.httpStatus });
   throw e;
@@ -120,6 +128,8 @@ export const saveTelegram = defineAction({
       abandonAfterMinutes: input.abandonAfterMinutes ?? prev.abandonAfterMinutes,
     };
     await saveIntegration(ctx.tx, ctx.storeId, "telegram", config, token);
+    // Token ou chat id novos (já conferido no getMe, se token): o aviso de falha antiga deixa de valer.
+    if (input.token || input.chatId !== prev.chatId) await ackTelegramAlert(ctx.tx, ctx.storeId);
     return config;
   },
 });
@@ -140,13 +150,15 @@ export const testTelegram = defineAction({
     });
     if (!conn) throw new ActionError("provider_error", "Telegram não configurado");
     try {
-      await telegramSend(conn.token, conn.chatId, `Teste do funil: os avisos da ${oneLine(storeName).slice(0, 100) || "sua loja"} vão chegar aqui.`);
+      await telegramSend(conn.token, conn.chatId, `Teste do funil: os avisos da ${cutChars(oneLine(storeName), 100) || "sua loja"} vão chegar aqui.`);
     } catch (e) {
       providerError(e);
     }
     return true;
   },
-  async run() {
+  async run(ctx) {
+    // O teste chegou ao chat: o aviso de falha aberto já não vale.
+    await ackTelegramAlert(ctx.tx, ctx.storeId);
     return { sent: true };
   },
 });

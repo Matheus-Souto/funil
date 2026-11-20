@@ -258,12 +258,15 @@ Segurança: o token do bot é segredo. Não cole em chat, ticket ou captura de t
 grupo vê os valores e os produtos das vendas: adicione só quem pode ver esses números.
 
 Nesta versão, **abandono** é o pedido criado e não pago dentro do prazo escolhido (de 10 a 1440 minutos; padrão 30):
-o aviso só sai se o pedido continuar sem pagamento e o mesmo comprador não tiver pago a mesma oferta depois. O
-abandono antes de o comprador criar o pedido ainda não existe.
+o aviso só sai se o pedido continuar sem pagamento e o mesmo comprador não tiver pago a mesma oferta depois. No **Pix
+manual**, o pedido só conta como pago quando você o libera no painel: pedido pago e ainda não liberado dentro do prazo
+aparece como abandono. O abandono antes de o comprador criar o pedido ainda não existe.
 
 Se o Telegram passar a recusar os avisos (token revogado, bot removido do grupo), o painel mostra um aviso na tela
-inicial: confira o token e o grupo, salve em Conexões e use **Enviar teste**. Falhas temporárias (limite de envios,
-instabilidade) são tentadas de novo sozinhas.
+inicial: confira o token e o grupo, salve em Conexões e use **Enviar teste**. O aviso some sozinho quando o teste dá
+certo ou quando você salva um token ou chat id novos. Falhas temporárias (limite de envios, instabilidade) são tentadas
+de novo sozinhas por cerca de 14 horas; depois disso, aquele aviso é descartado. Raramente (queda do servidor logo
+depois do envio) um aviso pode chegar duplicado.
 
 ## 8. Meta (Pixel e API de Conversões)
 

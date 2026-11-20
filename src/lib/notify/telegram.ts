@@ -8,7 +8,8 @@ import { log } from "@/lib/log";
 import type { OrderMethod } from "@/lib/orders/labels";
 
 const API = "https://api.telegram.org";
-const TIMEOUT_MS = 15_000;
+/** Curto: o worker é serial, e um Telegram lento não deve prender os outros jobs. */
+const TIMEOUT_MS = 5_000;
 /** Limite de leitura do corpo de erro (só o `error_code` interessa). */
 const MAX_BODY = 4096;
 const MAX_NAME = 100;
@@ -139,7 +140,9 @@ export async function telegramSend(token: string, chatId: string, text: string, 
 }
 
 const METHOD_TEXT: Record<OrderMethod, string> = { pix_asaas: "Pix", pix_manual: "Pix manual", card_asaas: "Cartão" };
-const name = (v: string) => oneLine(v).slice(0, MAX_NAME);
+/** Os primeiros `max` caracteres (code points: nunca corta um emoji ao meio). */
+export const cutChars = (v: string, max: number) => Array.from(v).slice(0, max).join("");
+const name = (v: string) => cutChars(oneLine(v), MAX_NAME);
 
 /**
  * Texto do aviso: só dados da venda (produto, valor, forma e código do pedido). Nunca nome, e-mail, CPF ou telefone do
@@ -168,5 +171,5 @@ export function telegramMessage(
       text = `Carrinho abandonado (${s.abandonAfterMinutes ?? 30} min sem pagamento): ${items} — ${value} — ${how} — ${order}`;
       break;
   }
-  return text.slice(0, MAX_MESSAGE);
+  return cutChars(text, MAX_MESSAGE);
 }

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { ackAlert, alertText } from "@/lib/alerts";
 import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
@@ -202,6 +202,11 @@ describe("textos dos avisos", () => {
     expect(m).toBe("Venda: A B *x* <b> + 5 Kits — R$ 27,00 — Pix — pedido #AB12CD");
     expect(m).not.toContain("\n");
   });
+  test("o corte em 100 conta caracteres, não metades de emoji: emoji na posição 100 sai inteiro", () => {
+    const m = telegramMessage("sale", { ...base, productName: `${"x".repeat(99)}😀yz`, bumpName: null });
+    expect(m).toBe(`Venda: ${"x".repeat(99)}😀 — R$ 27,00 — Pix — pedido #AB12CD`);
+    expect(m.isWellFormed()).toBe(true);
+  });
   test("nome de 500 caracteres sai com 100", () => {
     const m = telegramMessage("sale", { ...base, productName: "x".repeat(500), bumpName: null });
     expect(m).toBe(`Venda: ${"x".repeat(100)} — R$ 27,00 — Pix — pedido #AB12CD`);
@@ -366,6 +371,34 @@ describe("conexão Telegram", () => {
     const migrated = await runAction(testTelegram, panel(storeId), {}).catch((e: unknown) => e);
     expect(migrated).toMatchObject({ code: "provider_error", message: "O grupo virou supergrupo e mudou de id. Salve o id novo (começa com -100)." });
     expect(out).not.toContain(BOT_TOKEN);
+  });
+
+  test("aviso telegram_falhou aberto é confirmado por um teste que deu certo e ao salvar token ou chat id novos; salvar só os eventos ou teste que falha não confirma", async () => {
+    const { storeId } = await seedStore();
+    fakeTg(okFor);
+    await runAction(saveTelegram, panel(storeId), { chatId: CHAT, token: BOT_TOKEN });
+    const open = async () =>
+      (await t.ownerDb.select().from(storeAlert).where(and(eq(storeAlert.storeId, storeId), isNull(storeAlert.acknowledgedAt)))).map((a) => a.kind).sort();
+    const raise = () => t.ownerDb.insert(storeAlert).values({ storeId, kind: "telegram_falhou", detail: { httpStatus: 403 } });
+    await t.ownerDb.insert(storeAlert).values({ storeId, kind: "disjuntor_cartao", detail: {} });
+
+    await raise();
+    await runAction(saveTelegram, panel(storeId), { chatId: CHAT, events: { pixGenerated: true } });
+    expect(await open()).toEqual(["disjuntor_cartao", "telegram_falhou"]);
+    fakeTg(() => json(403, { ok: false, error_code: 403, description: "Forbidden: bot was kicked" }));
+    await expect(runAction(testTelegram, panel(storeId), {})).rejects.toMatchObject({ code: "provider_error" });
+    expect(await open()).toEqual(["disjuntor_cartao", "telegram_falhou"]);
+    fakeTg(okFor);
+    await runAction(testTelegram, panel(storeId), {});
+    expect(await open()).toEqual(["disjuntor_cartao"]);
+
+    await raise();
+    await runAction(saveTelegram, panel(storeId), { chatId: CHAT, token: BOT_TOKEN2 });
+    expect(await open()).toEqual(["disjuntor_cartao"]);
+
+    await raise();
+    await runAction(saveTelegram, panel(storeId), { chatId: "-4012345678" });
+    expect(await open()).toEqual(["disjuntor_cartao"]);
   });
 
   test("removeTelegram apaga a conexão (e só ela)", async () => {
