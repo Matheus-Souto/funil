@@ -138,6 +138,13 @@ describe("orders.resend com limite para token (D4)", () => {
     for (let i = 0; i < 3; i++) expect(await code(runAction(resendOrder, panel, { orderId: order.id }))).toBe("ok");
   });
 
+  test("UUID em outra caixa não ganha contador novo: 2º reenvio com maiúsculas na mesma hora → rate_limited", async () => {
+    const { s, asToken } = await setup();
+    const order = await seedOrder(s, { status: "paid" });
+    expect(await code(runAction(resendOrder, asToken, { orderId: order.id.toLowerCase() }))).toBe("ok");
+    expect(await code(runAction(resendOrder, asToken, { orderId: order.id.toUpperCase() }))).toBe("rate_limited");
+  });
+
   test("limite por loja: 20 pedidos distintos por hora passam, o 21º → rate_limited", async () => {
     const { s, asToken } = await setup();
     for (let i = 0; i < 20; i++) {

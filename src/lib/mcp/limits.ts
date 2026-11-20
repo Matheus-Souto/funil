@@ -20,14 +20,20 @@ export async function limitToken(actor: Actor, rules: LimitRule[], message: stri
 export const limitConnectionTest = (actor: Actor, action: string, storeId: string) =>
   limitToken(actor, [{ key: `conntest:${action}:${storeId}`, limit: 5, windowSec: HOUR_SEC }], "Muitos testes de conexão. Espere um pouco e tente de novo.");
 
-/** Reenvio de acesso (`orders.resend`): 1 por pedido por hora, 3 por pedido em 24 h e 20 por loja por hora. */
-export const limitResend = (actor: Actor, storeId: string, orderId: string) =>
-  limitToken(
+/**
+ * Reenvio de acesso (`orders.resend`): 1 por pedido por hora, 3 por pedido em 24 h e 20 por loja por hora.
+ * O UUID entra em minúsculas (o Zod e o Postgres aceitam qualquer caixa: sem isso, cada variante ganharia contador novo),
+ * com a loja na chave e uma chave por janela (janelas que começam juntas não incrementam a mesma linha duas vezes).
+ */
+export const limitResend = (actor: Actor, storeId: string, orderId: string) => {
+  const order = `${storeId}:${orderId.toLowerCase()}`;
+  return limitToken(
     actor,
     [
-      { key: `resend:order:${orderId}`, limit: 1, windowSec: HOUR_SEC },
-      { key: `resend:order:${orderId}`, limit: 3, windowSec: DAY_SEC },
+      { key: `resend:order:h:${order}`, limit: 1, windowSec: HOUR_SEC },
+      { key: `resend:order:d:${order}`, limit: 3, windowSec: DAY_SEC },
       { key: `resend:store:${storeId}`, limit: 20, windowSec: HOUR_SEC },
     ],
     "Muitos reenvios. Espere um pouco e tente de novo.",
   );
+};
