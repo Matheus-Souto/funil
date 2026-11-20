@@ -195,14 +195,27 @@ function exposedPermission(action: Action<unknown, unknown>): Permission | null 
   return p;
 }
 
+/** Esquema final (com o override) por nome de ação: gerado uma vez por processo e compartilhado entre papéis. */
+const schemas = new Map<string, Schema>();
+
+function toolInputSchema(action: Action<unknown, unknown>): Schema {
+  let schema = schemas.get(action.name);
+  if (!schema) {
+    const o = OVERRIDES[action.name];
+    const base = inputSchemaOf(action);
+    schema = o?.inputSchema ? o.inputSchema(base) : base;
+    schemas.set(action.name, schema);
+  }
+  return schema;
+}
+
 function toTool(action: Action<unknown, unknown>, permission: Permission): McpTool {
   const o = OVERRIDES[action.name] ?? {};
-  const schema = inputSchemaOf(action);
   return {
     name: action.name.replaceAll(".", "_"),
     action: action.name,
     description: o.description ?? action.description,
-    inputSchema: o.inputSchema ? o.inputSchema(schema) : schema,
+    inputSchema: toolInputSchema(action),
     permission,
     project: o.project ?? identity,
     ...(o.input ? { input: o.input } : {}),

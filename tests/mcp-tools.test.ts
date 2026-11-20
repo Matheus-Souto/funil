@@ -153,6 +153,11 @@ describe("nomes e esquemas", () => {
     expect(list.input!({ q: "maria@gmail.com", page: 2 })).toEqual({ page: 2 });
   });
 
+  test("inputSchema é gerado uma vez por ação (o mesmo objeto em toda chamada e em todo papel)", () => {
+    expect(tool("owner", "orders_list").inputSchema).toBe(tool("owner", "orders_list").inputSchema);
+    expect(tool("reader", "metrics_summary").inputSchema).toBe(tool("owner", "metrics_summary").inputSchema);
+  });
+
   test("campo com default não é obrigatório e data aparece como texto ISO", () => {
     const list = tool("owner", "orders_list").inputSchema as { required?: string[] };
     expect(list.required ?? []).not.toContain("page");
