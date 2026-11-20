@@ -1,14 +1,14 @@
-import { sql } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import type { z } from "zod";
 import { withStore, type Tx } from "@/lib/db/client";
-import { auditLog } from "@/lib/db/schema";
+import { approvalRequest, auditLog, mcpToken } from "@/lib/db/schema";
 import { log, redact, safeErrorMessage } from "@/lib/log";
 import { hasPermission, type Permission, type Role } from "./permissions";
 import { registry } from "./registry";
 
 /**
  * `token`: agente com token MCP da loja (src/lib/mcp/tokens.ts). Autorizado pelo papel do token como um usuário, menos
- * `team.manage` e `account.self` (sempre forbidden); ação sensível exige aprovação qualquer que seja a origem.
+ * `TOKEN_DENIED` (sempre forbidden); ação sensível exige aprovação qualquer que seja a origem.
  */
 export type Actor =
   | { kind: "user"; userId: string; role: Role }
@@ -47,6 +47,11 @@ export interface ActionDef<I, O, P = undefined, S = undefined> {
   audit?: boolean;
   /** Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB. */
   auditInput?: (input: I) => unknown;
+  /**
+   * Parte da saída gravada na auditoria de sucesso, como `result` ao lado da entrada (ou de `auditInput`): ex. um efeito
+   * que a ação decidiu sozinha. Também passa por redact e pelo limite de 8 KB; nunca devolva segredo nem dado do comprador.
+   */
+  auditResult?: (output: O) => unknown;
   /**
    * Trabalho externo (ex.: testar uma chave num provedor) que NÃO deve segurar transação. Roda depois de permissão,
    * validação e portão de ação sensível, e antes de `withStore`; o resultado vai como 3º argumento de `run`.
@@ -101,21 +106,71 @@ function authorize(action: Action<unknown, unknown>, actor: Actor): void {
 /** Teto de cada consulta numa transação de origem `mcp` (`set local`: vale só para a transação). */
 const MCP_STATEMENT_TIMEOUT = "5s";
 
-/** Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora). */
-export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self"];
+/**
+ * Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora): a equipe
+ * (e os próprios tokens), uma conta e a decisão da fila de aprovação.
+ */
+export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self", "approvals.decide"];
+
+/**
+ * Concessão de aprovação: executa uma ação pedida pela fila do MCP (`approval_request`) em nome do aprovador. Só vale
+ * para um membro (`actor.kind === "user"`, autorizado com o próprio papel) com origem `mcp`; pula o portão de ação
+ * sensível porque a linha da fila é reivindicada (pendente -> aprovada) na MESMA transação de `run`, antes dele: sem
+ * linha reivindicada nada roda, e uma falha em `run` devolve a linha a pendente.
+ */
+export type ApprovalGrant = { requestId: string; inputSha256: string };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** `details.approval === "unclaimed"` distingue este `conflict` do `conflict` da própria ação (ex.: slug duplicado). */
+const unclaimed = () => new ActionError("conflict", "Solicitação já decidida, expirada ou cancelada", { approval: "unclaimed" });
+
+/**
+ * Reivindica o pedido: pendente, no prazo, desta loja (RLS e filtro), desta ação, com o mesmo hash de entrada e de token
+ * não revogado. Apaga a entrada selada na mesma escrita. Devolve o token que pediu; sem linha, lança `unclaimed`.
+ */
+async function claimApproval(tx: Tx, storeId: string, action: string, grant: ApprovalGrant, userId: string): Promise<string> {
+  if (!UUID_RE.test(grant.requestId)) throw unclaimed();
+  const [row] = await tx
+    .update(approvalRequest)
+    .set({ status: "approved", decidedBy: userId, decidedAt: sql`now()`, inputSealed: null })
+    .where(
+      and(
+        eq(approvalRequest.id, grant.requestId),
+        eq(approvalRequest.storeId, storeId),
+        eq(approvalRequest.action, action),
+        eq(approvalRequest.status, "pending"),
+        gt(approvalRequest.expiresAt, sql`now()`),
+        eq(approvalRequest.inputSha256, grant.inputSha256),
+        sql`exists (select 1 from ${mcpToken} where ${mcpToken.id} = ${approvalRequest.tokenId} and ${mcpToken.revokedAt} is null)`,
+      ),
+    )
+    .returning({ tokenId: approvalRequest.tokenId });
+  if (!row) throw unclaimed();
+  return row.tokenId;
+}
+
+/** `out.id` quando é um UUID (o que `approvals_status` devolve ao agente); qualquer outra coisa vira null. */
+function resultIdOf(out: unknown): string | null {
+  const id = typeof out === "object" && out !== null ? (out as { id?: unknown }).id : undefined;
+  return typeof id === "string" && UUID_RE.test(id) ? id : null;
+}
 
 /** Única porta de entrada da lógica de negócio (painel, rotas públicas, webhooks, MCP, IA). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function runAction<I, O, P = any, S = any>(
   action: Action<I, O, P, S>,
-  call: { storeId: string; actor: Actor; origin: Origin; server?: S },
+  call: { storeId: string; actor: Actor; origin: Origin; server?: S; approval?: ApprovalGrant },
   raw: unknown,
 ): Promise<O> {
-  const { storeId, actor, origin } = call;
+  const { storeId, actor, origin, approval } = call;
   const audited = action.audit !== false;
+  // Execução aprovada: a auditoria diz qual pedido (e, depois de reivindicá-lo, qual token pediu).
+  let auditActor: object = approval ? { ...actor, approval: { requestId: approval.requestId } } : actor;
+  const approverId = actor.kind === "user" ? actor.userId : undefined;
   const entry = (input: unknown, ok: boolean, error?: string) => ({
     storeId,
-    actor: redact(actor) as object,
+    actor: redact(auditActor) as object,
     origin,
     action: action.name,
     input: redact(input) as object,
@@ -129,6 +184,9 @@ export async function runAction<I, O, P = any, S = any>(
   let input: I;
   let prepared: P | undefined;
   try {
+    if (approval && (approverId === undefined || origin !== "mcp")) {
+      throw new ActionError("forbidden", "Aprovação só vale para um membro da loja, pela fila do MCP");
+    }
     authorize(action as Action<unknown, unknown>, actor);
     const parsed = action.input.safeParse(raw);
     if (!parsed.success) {
@@ -137,8 +195,9 @@ export async function runAction<I, O, P = any, S = any>(
       throw new ActionError("invalid_input", "Entrada inválida", issues);
     }
     input = parsed.data;
-    // Pelo ator também: um token MCP chamando por outra origem não escapa da aprovação.
-    if (action.sensitive && (origin === "mcp" || origin === "ai" || actor.kind === "token")) {
+    // Pelo ator também: um token MCP chamando por outra origem não escapa da aprovação. Com concessão, quem garante a
+    // aprovação é a reivindicação do pedido dentro da transação (claimApproval).
+    if (action.sensitive && !approval && (origin === "mcp" || origin === "ai" || actor.kind === "token")) {
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
     if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
@@ -160,6 +219,18 @@ export async function runAction<I, O, P = any, S = any>(
       return { omitted: "audit_input_error", keys: topKeys(raw) };
     }
   };
+  const successView = (out: O): unknown => {
+    if (!action.auditResult) return auditView();
+    let result: unknown;
+    try {
+      result = action.auditResult(out);
+    } catch {
+      result = { omitted: "audit_result_error" };
+    }
+    const view = auditView();
+    const base = typeof view === "object" && view !== null && !Array.isArray(view) ? view : { input: view };
+    return { ...base, result };
+  };
 
   let ran: { out: O } | undefined;
   let committed: O;
@@ -167,9 +238,17 @@ export async function runAction<I, O, P = any, S = any>(
     committed = await withStore(storeId, async (tx) => {
       // Agente pelo MCP não segura conexão do pool (5) com consulta longa: o banco corta e vira "falha interna".
       if (origin === "mcp") await tx.execute(sql.raw(`set local statement_timeout = '${MCP_STATEMENT_TIMEOUT}'`));
+      if (approval) {
+        const tokenId = await claimApproval(tx, storeId, action.name, approval, approverId!);
+        auditActor = { ...actor, approval: { requestId: approval.requestId, tokenId } };
+      }
       const out = await action.run({ storeId, actor, origin, tx }, input, prepared as P, call.server);
       ran = { out };
-      if (audited) await tx.insert(auditLog).values(entry(capped(auditView()), true));
+      if (approval) {
+        const resultId = resultIdOf(out);
+        if (resultId) await tx.update(approvalRequest).set({ resultId }).where(eq(approvalRequest.id, approval.requestId));
+      }
+      if (audited) await tx.insert(auditLog).values(entry(capped(successView(out)), true));
       return out;
     });
   } catch (e) {

@@ -199,7 +199,7 @@ describe("authenticateMcpToken", () => {
 
 describe("ator token no runAction", () => {
   test("actor token: authorize aceita com o papel do token; reader só lê produtos, ofertas, métricas e orders.report", async () => {
-    expect([...ROLE_PERMISSIONS.reader].sort()).toEqual(["metrics.read", "offers.read", "orders.report", "products.read"]);
+    expect([...ROLE_PERMISSIONS.reader].sort()).toEqual(["approvals.request", "metrics.read", "offers.read", "orders.report", "products.read"]);
     const { storeId } = await ownerStore();
     const reader = { storeId, actor: tokenActor("reader"), origin: "mcp" as const };
     expect(await runAction(listProducts, reader, {})).toEqual([]);

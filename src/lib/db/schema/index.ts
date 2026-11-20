@@ -10,3 +10,4 @@ export * from "./alerts";
 export * from "./security";
 export * from "./notify";
 export * from "./mcp";
+export * from "./approvals";
