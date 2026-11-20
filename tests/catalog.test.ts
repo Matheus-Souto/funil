@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
@@ -10,7 +10,22 @@ import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
-import { changeDialog, moveItem, offerChanges, productsProblem, removeAt, saveCall } from "@/lib/catalog/offer-editing";
+import {
+  changeDialog,
+  emptyOptionLabel,
+  fillBumpLines,
+  focusAfterMove,
+  focusAfterRemove,
+  moveAnnouncement,
+  moveItem,
+  offerChanges,
+  productsProblem,
+  removeAnnouncement,
+  removeAt,
+  runSaveSteps,
+  saveCall,
+  saveOutcome,
+} from "@/lib/catalog/offer-editing";
 import { env } from "@/lib/env";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
@@ -623,5 +638,103 @@ describe("rodada de correção 1 (concorrência, slug sensível, editor com N pr
     expect(changeDialog(all).title).toBe("Alterar o preço, os produtos e o order bump desta oferta?");
     expect(changeDialog({ ...none, products: true }).title).toBe("Alterar os produtos desta oferta?");
     expect(changeDialog({ ...none, bump: true }).title).toBe("Alterar o order bump desta oferta?");
+  });
+});
+
+describe("Task 4, rodada de correção 1 (editor: gravação parcial, foco, bump religado; rollback do setProducts)", () => {
+  const rowsOf = (storeId: string, offerId: string) =>
+    withStore(storeId, (tx) =>
+      tx
+        .select({ productId: offerProduct.productId, kind: offerProduct.kind, position: offerProduct.position })
+        .from(offerProduct)
+        .where(eq(offerProduct.offerId, offerId))
+        .orderBy(offerProduct.kind, offerProduct.position),
+    );
+
+  test("setProducts com priceCents: falha do banco DEPOIS de regravar a lista desfaz lista e preço juntos", async () => {
+    const { storeId } = await seedStore();
+    const [a, b, c] = (await Promise.all(["A", "B", "C"].map((n) => seedProduct(storeId, n)))).map((p) => p.id) as [string, string, string];
+    const o = await call(createOffer, storeId, owner, { ...offerInput(a, { slug: "rollback" }), bump: { productIds: [b], priceCents: 500 } });
+    const before = await rowsOf(storeId, o.id);
+    // Gatilho só deste teste: o UPDATE do preço da oferta (que vem depois do delete/insert em offer_product) falha.
+    await t.ownerDb.execute(sql.raw(`
+      create function t4_recusa_preco() returns trigger language plpgsql as $$ begin raise exception 't4: preço recusado pelo banco'; end $$;
+      create trigger t4_recusa_preco before update of price_cents on offer for each row when (new.price_cents = 4242) execute function t4_recusa_preco();
+    `));
+    try {
+      const err = await call(setOfferProducts, storeId, owner, { id: o.id, productIds: [c, a], bump: null, priceCents: 4242 }).then(
+        () => null,
+        (e: unknown) => e as Error,
+      );
+      expect(String(err?.message ?? err) + String((err as { cause?: Error } | null)?.cause?.message ?? "")).toContain("t4: preço recusado pelo banco");
+    } finally {
+      await t.ownerDb.execute(sql.raw("drop trigger t4_recusa_preco on offer; drop function t4_recusa_preco();"));
+    }
+    expect(await rowsOf(storeId, o.id)).toEqual(before);
+    const got = await call(getOffer, storeId, owner, { id: o.id });
+    expect([got.priceCents, got.products.map((p) => p.id), got.bump?.products.map((p) => p.id)]).toEqual([990, [a], [b]]);
+  });
+
+  test("editor: sequência de gravação para no primeiro erro e diz o que foi salvo e o que falhou", async () => {
+    const ran: string[] = [];
+    const step = (label: string, error?: string) => ({
+      label,
+      run: async () => {
+        ran.push(label);
+        return error ? { ok: false as const, error } : { ok: true as const };
+      },
+    });
+    const all = await runSaveSteps([step("preço"), step("endereço"), step("demais dados")]);
+    expect([all, ran]).toEqual([{ saved: ["preço", "endereço", "demais dados"], failed: null }, ["preço", "endereço", "demais dados"]]);
+    expect(saveOutcome(all, "Oferta salva.")).toEqual({ tone: "ok", text: "Oferta salva." });
+
+    ran.length = 0;
+    const mid = await runSaveSteps([step("produtos e preço"), step("endereço", "Já existe uma oferta com esse endereço"), step("demais dados")]);
+    expect(ran).toEqual(["produtos e preço", "endereço"]); // depois da falha, nada mais roda
+    expect(mid).toEqual({ saved: ["produtos e preço"], failed: { label: "endereço", error: "Já existe uma oferta com esse endereço" } });
+    expect(saveOutcome(mid, "Oferta salva.")).toEqual({
+      tone: "error",
+      text: "Salvo: produtos e preço. Não foi salvo: endereço. Já existe uma oferta com esse endereço",
+    });
+    const two = await runSaveSteps([step("preço"), step("endereço"), step("demais dados", "Falhou")]);
+    expect(saveOutcome(two, "x").text).toBe("Salvo: preço e endereço. Não foi salvo: demais dados. Falhou");
+
+    // Falha na primeira: nada salvo, só o erro (como antes).
+    const first = await runSaveSteps([step("preço", "Preço inválido"), step("endereço")]);
+    expect(first).toEqual({ saved: [], failed: { label: "preço", error: "Preço inválido" } });
+    expect(saveOutcome(first, "x")).toEqual({ tone: "error", text: "Preço inválido" });
+  });
+
+  test("editor: religar o bump não repete produto (vazias e repetidas ganham produtos livres diferentes)", () => {
+    const avail = ["p1", "p2", "b1", "b2", "b3"];
+    // O cenário da revisão: o bump era [p1, p2], que foram para os principais; religar dá dois produtos distintos.
+    expect(fillBumpLines(["p1", "p2"], ["p1", "p2"], avail)).toEqual(["b1", "b2"]);
+    // Linhas válidas ficam; vazias não roubam o produto de uma linha válida mais abaixo.
+    expect(fillBumpLines(["p1"], ["", "b1"], avail)).toEqual(["p2", "b1"]);
+    expect(fillBumpLines(["p1"], ["b2", "b2", ""], avail)).toEqual(["b2", "p2", "b1"]);
+    // Sem produto livre: a linha fica vazia (o salvar pede para escolher).
+    expect(fillBumpLines(["p1"], ["p1", ""], ["p1", "p2"])).toEqual(["p2", ""]);
+  });
+
+  test("editor: foco depois de mover e remover; anúncios", () => {
+    // Subiu para o meio: o foco fica no ↑ do item na posição nova; chegou no topo: vai para o ↓.
+    expect(focusAfterMove(2, -1, 4)).toEqual({ index: 1, target: "up" });
+    expect(focusAfterMove(1, -1, 4)).toEqual({ index: 0, target: "down" });
+    expect(focusAfterMove(1, 1, 4)).toEqual({ index: 2, target: "down" });
+    expect(focusAfterMove(2, 1, 4)).toEqual({ index: 3, target: "up" });
+    // Remover: o select vizinho (o que ocupou a posição, ou o anterior se era o último).
+    expect(focusAfterRemove(1, 3)).toBe(1);
+    expect(focusAfterRemove(3, 3)).toBe(2);
+    expect(focusAfterRemove(0, 1)).toBe(0);
+    expect(moveAnnouncement("Pack de jogos", 1)).toBe("Pack de jogos movido para a posição 1");
+    expect(removeAnnouncement("Pack de jogos")).toBe("Pack de jogos removido");
+  });
+
+  test("editor: a opção vazia aparece sempre que o valor é vazio (o select mostra exatamente o estado)", () => {
+    expect(emptyOptionLabel({ firstMain: true, value: "", hasProducts: false })).toBe("Envie um PDF em Produtos");
+    expect(emptyOptionLabel({ firstMain: true, value: "", hasProducts: true })).toBe("Escolha…");
+    expect(emptyOptionLabel({ firstMain: true, value: "p1", hasProducts: true })).toBeNull(); // 1 produto, como hoje
+    expect(emptyOptionLabel({ firstMain: false, value: "p1", hasProducts: true })).toBe("Escolha…");
+    expect(emptyOptionLabel({ firstMain: false, value: "", hasProducts: true })).toBe("Escolha…");
   });
 });
