@@ -12,7 +12,7 @@ import { enqueue, hasOpenJob, type Job, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { groupItems, itemOrder } from "@/lib/orders/items";
 import { LINK_TTL_MS, MAX_DOWNLOADS, deliveryLinks, newTokens, restoreLinks, revokeLinks, saveTokens, storeBaseUrl } from "./links";
-import { logEmail, sendMail } from "./mailer";
+import { logEmail, sendMail, type EmailProvider } from "./mailer";
 import { deliveryEmail, methodLabel, sellerEmail } from "./templates";
 import { deleteWatermarks, ensureWatermarkedPdf, watermarkText } from "./watermark";
 
@@ -109,17 +109,19 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
     ttlDays: Math.round(LINK_TTL_MS / 86_400_000),
   });
   const logRow = { storeId, orderId, jobId: j.id, to: c.email, kind: "delivery" as const };
+  let provider: EmailProvider | null = null;
+  let sent: Awaited<ReturnType<typeof sendMail>>;
   try {
-    await sendMail(storeId, { to: c.email, ...mail }, { signal });
+    sent = await sendMail(storeId, { to: c.email, ...mail }, { signal, idempotencyKey: j.id, onProvider: (p) => (provider = p) });
   } catch (e) {
-    await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "failed", error: e })).catch((logErr: unknown) =>
+    await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "failed", error: e, provider })).catch((logErr: unknown) =>
       log.error("falha ao registrar e-mail não enviado", { orderId, error: logErr }),
     );
     throw e;
   }
   await withStore(storeId, async (tx) => {
     await saveTokens(tx, storeId, links);
-    await logEmail(tx, { ...logRow, status: "sent" });
+    await logEmail(tx, { ...logRow, status: "sent", provider: sent.provider, messageId: sent.messageId });
   });
 
   // PDFs carimbados para o cache (fora do caminho da requisição de download). Melhor esforço: o link gera se faltar.
@@ -335,15 +337,17 @@ export const notifySellerJob: JobHandler = async (j, signal) => {
   throwIfAborted(signal);
   const mail = sellerEmail({ storeName: s.name, brandColor: s.brandColor, ...notice });
   const logRow = { storeId, orderId: o?.id ?? null, jobId: j.id, to: s.notifyEmail!, kind: "seller_notice" as const };
+  let provider: EmailProvider | null = null;
+  let sent: Awaited<ReturnType<typeof sendMail>>;
   try {
-    await sendMail(storeId, { to: s.notifyEmail!, ...mail }, { signal });
+    sent = await sendMail(storeId, { to: s.notifyEmail!, ...mail }, { signal, idempotencyKey: j.id, onProvider: (p) => (provider = p) });
   } catch (e) {
-    await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "failed", error: e })).catch((logErr: unknown) =>
+    await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "failed", error: e, provider })).catch((logErr: unknown) =>
       log.error("falha ao registrar e-mail não enviado", { storeId, error: logErr }),
     );
     throw e;
   }
-  await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "sent" }));
+  await withStore(storeId, (tx) => logEmail(tx, { ...logRow, status: "sent", provider: sent.provider, messageId: sent.messageId }));
 };
 
 // ---- sweep_watermarks -----------------------------------------------------------------------------------------

@@ -3,8 +3,8 @@ import { and, eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, integration, store } from "@/lib/db/schema";
-import { RESEND_ERRORS, loadResend, resendFrom, saveResend, sendViaResend, setEmailProvider, setResendFetchForTests } from "@/lib/delivery/resend";
+import { auditLog, emailLog, integration, store } from "@/lib/db/schema";
+import { RESEND_ERRORS, loadResend, resendFrom, saveResend, sendViaResend, setEmailProvider, setResendFetchForTests, testResend } from "@/lib/delivery/resend";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -253,5 +253,40 @@ describe("conexão Resend", () => {
     expect((await runAction(connectionsStatus, panel(b.storeId), {})).resend).toBeNull();
     expect(await withStore(b.storeId, (tx) => loadResend(tx, b.storeId))).toBeNull();
     await expect(runAction(setEmailProvider, panel(b.storeId), { provider: "resend" })).rejects.toMatchObject({ code: "invalid_input" });
+  });
+});
+
+describe("testResend", () => {
+  const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
+  const support: Actor = { kind: "user", userId: "u2", role: "support" };
+  const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
+  const INPUT = { fromEmail: "vendas@loja.com", apiKey: "re_AbCdEfGh_1234" };
+
+  test("envia ao endereço informado, com assunto e texto fixos, e registra test/sent/resend com o id", async () => {
+    const { storeId } = await seedStore("Maná Kids");
+    await runAction(saveResend, panel(storeId), INPUT);
+    const calls = fakeFetch(() => json(200, { id: "msg_teste" }));
+    expect(await runAction(testResend, panel(storeId), { to: "Eu@Exemplo.com" })).toEqual({ sent: true });
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(String(calls[0]!.init.body));
+    expect(body.to).toEqual(["eu@exemplo.com"]);
+    expect(body.subject).toBe("E-mail de teste da Maná Kids");
+    expect(body.text).toBe("Este é um e-mail de teste. Se chegou, as entregas da sua loja vão sair pelo Resend.");
+    const logs = await withStore(storeId, (tx) => tx.select().from(emailLog));
+    expect(logs.map((l) => [l.kind, l.status, l.provider, l.providerMessageId])).toEqual([["test", "sent", "resend", "msg_teste"]]);
+    expect(JSON.stringify(logs)).not.toContain("re_AbCdEfGh_1234");
+  });
+
+  test("sem conexão -> provider_error 'E-mail não configurado'; Resend recusando -> mensagem fixa; support não pode", async () => {
+    const { storeId } = await seedStore();
+    const calls = fakeFetch(() => json(200, { id: "x" }));
+    await expect(runAction(testResend, panel(storeId), { to: "eu@exemplo.com" })).rejects.toMatchObject({ code: "provider_error", message: "E-mail não configurado" });
+    expect(calls).toHaveLength(0);
+    await runAction(saveResend, panel(storeId), INPUT);
+    fakeFetch(() => json(401, { message: "invalid key re_AbCdEfGh_1234" }));
+    const err = await failure(runAction(testResend, panel(storeId), { to: "eu@exemplo.com" }));
+    expect(err).toMatchObject({ code: "provider_error", message: RESEND_ERRORS.key });
+    await expect(runAction(testResend, panel(storeId, support), { to: "eu@exemplo.com" })).rejects.toMatchObject({ code: "forbidden" });
+    expect(await withStore(storeId, (tx) => tx.select().from(emailLog))).toHaveLength(0);
   });
 });

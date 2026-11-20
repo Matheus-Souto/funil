@@ -1,14 +1,15 @@
 // Cliente da API do Resend (e-mail pela conta da própria loja). Destino fixo (`api.resend.com`): sem host configurável,
 // logo sem SSRF. A chave vai SÓ no header `Authorization`; a mensagem de erro vem só do status HTTP (nunca do corpo da
 // resposta) e o log leva só o status. Nada aqui toca o banco nem roda dentro de transação.
-// Também guarda a conexão e a escolha do provedor ativo (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
+// Também guarda a conexão, a escolha do provedor ativo e o teste (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import type { Tx } from "@/lib/db/client";
+import { withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
 import { IntegrationSecretUnreadable, getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
+import { NOT_CONFIGURED, logEmail } from "./email-log";
 import type { MailMessage } from "./mailer";
 import { oneLine } from "./templates";
 
@@ -186,5 +187,26 @@ export const setEmailProvider = defineAction({
     if (!conn) throw new ActionError("invalid_input", `Configure o ${provider === "smtp" ? "SMTP" : "Resend"} antes de ativá-lo.`, [{ path: ["provider"] }]);
     await ctx.tx.update(store).set({ emailProvider: provider }).where(eq(store.id, ctx.storeId));
     return { provider };
+  },
+});
+
+export const testResend = defineAction({
+  name: "connections.testResend",
+  description: "Envia um e-mail de teste pelo Resend da loja para o endereço informado.",
+  input: z.object({ to: EMAIL }),
+  permission: "connections.write",
+  // O envio (rede) acontece aqui, fora da transação; o id da mensagem segue para `run`, que só registra o resultado.
+  async prepare(call, { to }) {
+    const { resend, storeName } = await withStore(call.storeId, async (tx) => {
+      const [s] = await tx.select({ name: store.name }).from(store).where(eq(store.id, call.storeId));
+      return { resend: await loadResend(tx, call.storeId), storeName: s?.name ?? "" };
+    });
+    if (!resend) throw new ActionError("provider_error", NOT_CONFIGURED);
+    const text = "Este é um e-mail de teste. Se chegou, as entregas da sua loja vão sair pelo Resend.";
+    return sendViaResend(resend, storeName, { to, subject: `E-mail de teste da ${storeName || "sua loja"}`, text, html: `<p>${text}</p>` });
+  },
+  async run(ctx, { to }, sent) {
+    await logEmail(ctx.tx, { storeId: ctx.storeId, to, kind: "test", status: "sent", provider: "resend", messageId: sent.id });
+    return { sent: true };
   },
 });
