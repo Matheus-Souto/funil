@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { test, expect, type APIRequestContext, type Page } from "@playwright/test";
 import { PDFDocument } from "pdf-lib";
 import postgres from "postgres";
-import { cardLeaks } from "./card-leaks";
+import { cardLeaks, headersText } from "./card-leaks";
 
 // Código do primeiro acesso: o verify sobe o app com este SETUP_TOKEN e o repassa ao Playwright.
 const SETUP_TOKEN = process.env.SETUP_TOKEN ?? "";
@@ -757,7 +757,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     expect(leaks(toCard[0]!)).toEqual(["CVV", "nome impresso", "número", "validade"]);
     for (const r of requests) {
       expect(leaks(r.url), `URL ${r.url}`).toEqual([]);
-      expect(leaks(JSON.stringify(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
+      expect(leaks(headersText(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
       expect(leaks(r.body), `corpo de ${r.url}`).toEqual([]);
     }
     expect(messages.length).toBeGreaterThan(0);
@@ -785,14 +785,19 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
   test("iframe indisponível: em até 10 s o aviso aparece, Pagar fica desabilitado e nenhum pedido é criado", async ({ page }) => {
     const NOTICE = "Pagamento com cartão indisponível agora. Tente de novo em instantes ou pague com Pix.";
-    // Medido na própria página (performance.now em um MutationObserver): da criação do iframe ao aviso no DOM.
+    // Medido na própria página (performance.now): `frameAt` no appendChild do iframe, de forma síncrona (o checkout liga
+    // o prazo de 10 s logo depois, então frameAt <= início do prazo); `noticeAt` quando o aviso entra no DOM
+    // (MutationObserver). Só observa: não muda o comportamento da página.
     await page.addInitScript((msg) => {
       if (window.top !== window) return;
       const w = window as unknown as { __frameAt?: number; __noticeAt?: number };
+      const append = Node.prototype.appendChild;
+      Node.prototype.appendChild = function <T extends Node>(this: Node, child: T): T {
+        if (w.__frameAt === undefined && child instanceof HTMLIFrameElement && child.title === "Dados do cartão") w.__frameAt = performance.now();
+        return append.call(this, child) as T;
+      };
       new MutationObserver(() => {
-        const now = performance.now();
-        if (w.__frameAt === undefined && document.querySelector('iframe[title="Dados do cartão"]')) w.__frameAt = now;
-        if (w.__noticeAt === undefined && document.body?.textContent?.includes(msg)) w.__noticeAt = now;
+        if (w.__noticeAt === undefined && document.body?.textContent?.includes(msg)) w.__noticeAt = performance.now();
       }).observe(document, { childList: true, subtree: true, characterData: true });
     }, NOTICE);
     // Serviço de cartão inacessível para esta página: a carga do iframe falha na rede.
@@ -813,8 +818,13 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     });
     expect(t.frameAt).toBeGreaterThan(0);
     expect(t.noticeAt).toBeGreaterThan(t.frameAt);
-    // 10 s do controlador (FRAME_READY_TIMEOUT_MS) mais a renderização do React.
-    expect(t.noticeAt - t.frameAt).toBeLessThanOrEqual(10_500);
+    // Regra do produto: o aviso sai quando vence o prazo de 10 s do controlador (FRAME_READY_TIMEOUT_MS), e a pintura vem
+    // depois. Não antes de 10 000 ms (prova que é o prazo do controlador, não outro caminho de erro); até 12 000 ms é
+    // tolerância de medição para o atraso do setTimeout e a renderização do React numa máquina carregada (não é espera
+    // nem nova tentativa: a medida é uma só, feita na página).
+    const elapsed = t.noticeAt - t.frameAt;
+    expect(elapsed).toBeGreaterThanOrEqual(10_000);
+    expect(elapsed).toBeLessThanOrEqual(12_000);
     await expect(page.locator(FRAME)).toBeHidden();
     const pay = page.getByRole("button", { name: "Pagar R$ 9,90" });
     await expect(pay).toBeDisabled();

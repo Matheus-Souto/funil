@@ -3,6 +3,16 @@
 // "validade". Teste sempre com um controle positivo (o POST ao serviço de cartão precisa dar os quatro).
 export type TestCard = { number: string; holder: string; expiry: string; cvv: string };
 
+/**
+ * Cabeçalhos de uma requisição como texto para o detector, sem os que só dizem um tamanho (`content-length`): o valor
+ * é um número solto e, se o corpo tiver por acaso o mesmo tamanho que o CVV (ex.: 582 bytes) ou o ano (2031), o
+ * detector acusaria um vazamento que não existe, em toda rodada.
+ */
+export function headersText(headers: Record<string, string>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(headers).filter(([k]) => !SIZE_HEADERS.has(k.toLowerCase()))));
+}
+const SIZE_HEADERS = new Set(["content-length"]);
+
 export function cardLeaks(c: TestCard): (text: string) => string[] {
   const digits = c.number.replace(/\D/g, "");
   const spaced = digits.replace(/(\d{4})(?=\d)/g, "$1 ");

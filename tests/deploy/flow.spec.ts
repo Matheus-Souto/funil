@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { test, expect, type Page } from "@playwright/test";
 import { PDFDocument, PDFName, concatTransformationMatrix, drawObject, popGraphicsState, pushGraphicsState } from "pdf-lib";
-import { cardLeaks } from "../../e2e/card-leaks";
+import { cardLeaks, headersText } from "../../e2e/card-leaks";
 
 // O teste do cartão usa a loja, o produto e o dono criados pelo primeiro: em série (o segundo não roda se o primeiro falhar).
 test.describe.configure({ mode: "serial" });
@@ -222,7 +222,7 @@ test("cartão isolado pelo Caddy: Asaas (falso) conectado e compra com cartão p
   expect(requests.length).toBeGreaterThan(5);
   for (const r of requests) {
     expect(leaks(r.url), `URL ${r.url}`).toEqual([]);
-    expect(leaks(JSON.stringify(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
+    expect(leaks(headersText(r.headers)), `cabeçalhos de ${r.url}`).toEqual([]);
     expect(leaks(r.body), `corpo de ${r.url}`).toEqual([]);
   }
   await buyer.close();
