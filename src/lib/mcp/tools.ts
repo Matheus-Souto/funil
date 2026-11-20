@@ -9,8 +9,8 @@ import { hasPermission, type Permission, type Role } from "@/lib/actions/permiss
 import { registry } from "@/lib/actions/registry";
 import type { metricsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
-import { cleanTouch, safeLabel } from "@/lib/orders/report";
-import { maskEmail, maskName, maskPhone } from "@/lib/privacy";
+import { cleanTouch, HIDDEN_LABEL, labelOrHidden, safeLabel } from "@/lib/orders/report";
+import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
 
 const SENDS_TO_CALLER_ADDRESS = "enviam a endereço escolhido por quem chama; revisão no PR 6";
 const AWAITS_APPROVAL_QUEUE = "aguarda a fila de aprovação (PR 6)";
@@ -66,8 +66,6 @@ function withoutProperty(schema: Schema, key: string): Schema {
 
 const identity = (out: unknown) => out;
 
-const HIDDEN_LABEL = "(oculto)";
-
 /** Origem/indicação digitada pelo visitante: só passa se parecer rótulo (safeLabel); o resto soma numa linha "(oculto)". */
 function safeLabelRows(rows: { label: string; paid: number; revenueCents: number }[]) {
   const merged = new Map<string, { label: string; paid: number; revenueCents: number }>();
@@ -117,7 +115,7 @@ const OVERRIDES: Record<string, Override> = {
           refundRequestedAt: i.refundRequestedAt,
           offerName: i.offerName,
           buyerName: maskName(i.buyerName),
-          email: maskEmail(i.email),
+          email: maskEmailStrict(i.email),
         })),
         total: d.total,
         page: d.page,
@@ -146,7 +144,7 @@ const OVERRIDES: Record<string, Override> = {
         offer: { id: d.offer.id, name: d.offer.name, slug: d.offer.slug },
         buyer: {
           name: maskName(d.buyer.name),
-          email: maskEmail(d.buyer.email),
+          email: maskEmailStrict(d.buyer.email),
           phone: maskPhone(d.buyer.phone),
           cpfMasked: d.buyer.cpfMasked !== null && CPF_STRICT_RE.test(d.buyer.cpfMasked) ? d.buyer.cpfMasked : null,
         },
@@ -162,11 +160,11 @@ const OVERRIDES: Record<string, Override> = {
         refund: { state: d.refund.state, requestedAt: d.refund.requestedAt },
         // Sem `detail` nem `actorRole`: só quando, o quê e o rótulo fixo.
         timeline: d.timeline.map((e) => ({ at: e.at, kind: e.kind, label: e.label })),
-        // Toques pela lista branca do relatório (UTMs; fbclid fica de fora) e ref só se parecer rótulo.
+        // Toques pela lista branca do relatório (UTMs; fbclid fica de fora); valor recusado e ref recusado → "(oculto)".
         attribution: {
           firstTouch: cleanTouch(d.attribution.firstTouch),
           lastTouch: cleanTouch(d.attribution.lastTouch),
-          ref: safeLabel(d.attribution.ref),
+          ref: labelOrHidden(d.attribution.ref),
         },
       };
     },
@@ -175,7 +173,13 @@ const OVERRIDES: Record<string, Override> = {
     project: (out) => {
       const d = out as MetricsSummary;
       return {
-        ...d,
+        views: d.views,
+        orders: d.orders,
+        paid: d.paid,
+        revenueCents: d.revenueCents,
+        byMethod: Object.fromEntries(
+          Object.entries(d.byMethod).map(([k, m]) => [k, { orders: m.orders, paid: m.paid, revenueCents: m.revenueCents }]),
+        ),
         bySource: safeLabelRows(d.bySource.map((r) => ({ label: r.source, paid: r.paid, revenueCents: r.revenueCents }))).map(
           ({ label, ...r }) => ({ source: label, ...r }),
         ),

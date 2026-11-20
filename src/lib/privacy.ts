@@ -9,6 +9,36 @@ export function maskEmail(v: string | null | undefined): string | null {
   return `${Array.from(v)[0]}***${v.slice(at)}`;
 }
 
+/** Provedores de e-mail comuns: só estes domínios aparecem na máscara estrita (o resto pode identificar a pessoa). */
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  "gmail.com",
+  "googlemail.com",
+  "hotmail.com",
+  "outlook.com",
+  "live.com",
+  "msn.com",
+  "yahoo.com",
+  "yahoo.com.br",
+  "icloud.com",
+  "me.com",
+  "uol.com.br",
+  "bol.com.br",
+  "terra.com.br",
+  "ig.com.br",
+]);
+
+/**
+ * Máscara do MCP: "maria@gmail.com" -> "m***@gmail.com"; domínio fora da lista de provedores comuns -> "m***@***".
+ * O domínio é texto do visitante: domínio próprio reidentifica a pessoa e texto livre vira injeção de prompt.
+ */
+export function maskEmailStrict(v: string | null | undefined): string | null {
+  if (!v) return null;
+  const at = v.lastIndexOf("@");
+  if (at < 1) return "***";
+  const domain = v.slice(at + 1).toLowerCase();
+  return `${Array.from(v)[0]}***@${PUBLIC_EMAIL_DOMAINS.has(domain) ? domain : "***"}`;
+}
+
 /** "Maria Teste" -> "M***". */
 export function maskName(v: string | null | undefined): string | null {
   const t = v?.trim();

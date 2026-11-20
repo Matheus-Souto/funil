@@ -13,7 +13,12 @@ const MAX_DAYS = 92;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
 const TOUCH_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "src"] as const;
-const LABEL_RE = /^[A-Za-z0-9_.:+-]{1,100}$/;
+/** Letras (qualquer alfabeto), dígitos, espaço e `_ . : + - | / ( ) [ ] #`: nomes reais de campanha ("Kids ABO | Natal 25/11"). */
+const LABEL_RE = /^[\p{L}0-9 _.:+\-|/()[\]#]+$/u;
+const MAX_LABEL_CHARS = 100;
+const MAX_LABEL_WORDS = 12;
+/** Rótulo presente mas recusado: aparece assim (em vez de sumir), para a soma das origens fechar. */
+export const HIDDEN_LABEL = "(oculto)";
 
 /** paid_at com microssegundos (o Date do JS só tem milissegundos e o cursor repetiria o pedido). */
 const paidAtIso = sql<string>`to_char(${orders.paidAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -32,14 +37,24 @@ function parseCursor(cursor: string): { at: string; id: string } | null {
 }
 
 /**
- * Texto livre do visitante (UTM, src, ref) só passa se parecer um rótulo: nada de e-mail, telefone ou frase.
- * Total de 8 a 14 dígitos (em qualquer posição, com pontuação) é telefone ou CPF e é descartado; 15 ou mais passa,
+ * Texto livre do visitante (UTM, src, ref) só passa se parecer um rótulo: nada de e-mail, endereço, telefone ou frase.
+ * Espaços repetidos colapsam e as pontas são aparadas; até 100 caracteres e 12 palavras. Recusa `@`, `://` e `www.`.
+ * Total de 8 a 14 dígitos (em qualquer posição, com pontuação) é telefone ou CPF e é recusado; 15 ou mais passa,
  * porque os ids de anúncio e campanha do Meta (ex.: 120212345678901234) são o principal uso do relatório.
+ * Nulo quando recusado (ou vazio, ou não é texto).
  */
 export function safeLabel(v: unknown): string | null {
-  if (typeof v !== "string" || !LABEL_RE.test(v)) return null;
-  const digits = v.replace(/\D/g, "").length;
-  return digits >= 8 && digits <= 14 ? null : v;
+  if (typeof v !== "string") return null;
+  const t = v.replace(/ +/g, " ").trim();
+  if (t === "" || t.length > MAX_LABEL_CHARS || t.split(" ").length > MAX_LABEL_WORDS || !LABEL_RE.test(t)) return null;
+  if (t.includes("://") || /www\./i.test(t)) return null;
+  const digits = t.replace(/\D/g, "").length;
+  return digits >= 8 && digits <= 14 ? null : t;
+}
+
+/** Valor ausente (nulo/indefinido) continua nulo; presente e recusado por `safeLabel` vira "(oculto)". */
+export function labelOrHidden(v: unknown): string | null {
+  return v === null || v === undefined ? null : (safeLabel(v) ?? HIDDEN_LABEL);
 }
 
 const input = z
@@ -56,12 +71,12 @@ const input = z
     path: ["cursor"],
   });
 
-/** Só as chaves da lista branca com valor que passa em `safeLabel`; nada sobrando → nulo. */
+/** Só as chaves da lista branca; valor recusado por `safeLabel` vira "(oculto)" (não some); nada sobrando → nulo. */
 export function cleanTouch(v: unknown): Record<string, string> | null {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
   const out: Record<string, string> = {};
   for (const k of TOUCH_KEYS) {
-    const x = safeLabel((v as Record<string, unknown>)[k]);
+    const x = labelOrHidden((v as Record<string, unknown>)[k]);
     if (x !== null) out[k] = x;
   }
   return Object.keys(out).length > 0 ? out : null;
@@ -131,7 +146,7 @@ export const paidReport = defineAction({
           method: r.method,
           firstTouch: cleanTouch(r.firstTouch),
           lastTouch: cleanTouch(r.lastTouch),
-          ref: safeLabel(r.ref),
+          ref: labelOrHidden(r.ref),
         };
       }),
       nextCursor: rows.length > limit && last ? Buffer.from(`${last.paidAtIso}|${last.id}`).toString("base64url") : null,
