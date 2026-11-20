@@ -30,14 +30,10 @@ export const offer = pgTable(
       .references(() => store.id, { onDelete: "cascade" }),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
-    productId: uuid("product_id")
-      .notNull()
-      .references(() => product.id),
     priceCents: integer("price_cents").notNull(),
     methods: text("methods").array().notNull(),
     pixMode: text("pix_mode").notNull(),
     maxInstallments: integer("max_installments").notNull().default(1),
-    bumpProductId: uuid("bump_product_id").references(() => product.id),
     bumpPriceCents: integer("bump_price_cents"),
     bumpLabel: text("bump_label"),
     thankYouText: text("thank_you_text"),
@@ -52,10 +48,7 @@ export const offer = pgTable(
     check("offer_methods_check", sql`cardinality(${t.methods}) > 0 and ${t.methods} <@ array['pix','card']::text[]`),
     check("offer_pix_mode_check", sql`${t.pixMode} in ('manual','asaas')`),
     check("offer_installments_check", sql`${t.maxInstallments} between 1 and 12`),
-    check(
-      "offer_bump_check",
-      sql`(${t.bumpProductId} is null and ${t.bumpPriceCents} is null) or (${t.bumpProductId} is not null and ${t.bumpPriceCents} > 0 and ${t.bumpProductId} <> ${t.productId})`,
-    ),
+    check("offer_bump_check", sql`${t.bumpPriceCents} is null or ${t.bumpPriceCents} > 0`),
   ],
 );
 

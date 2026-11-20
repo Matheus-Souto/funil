@@ -199,6 +199,17 @@ describe("products", () => {
   });
 });
 
+describe("colunas antigas da oferta", () => {
+  test("offer.product_id e offer.bump_product_id não existem mais; bump_price_cents e bump_label continuam", async () => {
+    const rows = await t.ownerDb.execute(sql`select column_name from information_schema.columns where table_name = 'offer'`);
+    const cols = rows.map((r) => (r as { column_name: string }).column_name);
+    expect(cols).not.toContain("product_id");
+    expect(cols).not.toContain("bump_product_id");
+    expect(cols).toContain("bump_price_cents");
+    expect(cols).toContain("bump_label");
+  });
+});
+
 describe("offers", () => {
   test("caso do dono: R$ 9,90 com bump de R$ 17,10 lido por getPublic", async () => {
     const { storeId } = await seedStore();
@@ -360,7 +371,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
   const legacyOf = async (storeId: string, offerId: string) => {
     const [o] = await withStore(storeId, (tx) =>
       tx
-        .select({ productId: offer.productId, bumpProductId: offer.bumpProductId, bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel })
+        .select({ bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel })
         .from(offer)
         .where(eq(offer.id, offerId)),
     );
@@ -373,7 +384,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
     const o = await call(createOffer, storeId, owner, { ...offerInput(six[0]!.id, { slug: "completo", name: "Completo", priceCents: 2700 }), productIds: ids(six) });
     expect(await rowsOf(storeId, o.id)).toEqual(six.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
     // Colunas antigas (leitores ainda não migrados): o primeiro principal, sem bump.
-    expect(await legacyOf(storeId, o.id)).toEqual({ productId: six[0]!.id, bumpProductId: null, bumpPriceCents: null, bumpLabel: null });
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: null, bumpLabel: null });
     const got = await call(getOffer, storeId, support, { id: o.id });
     expect(got.products.map((p) => p.name)).toEqual(KIDS);
     expect(got.products.every((p) => p.deletedAt === null)).toBe(true);
@@ -397,7 +408,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
       ...kits.map((p, i) => ({ productId: p.id, kind: "bump", position: i })),
       { productId: alm!.id, kind: "main", position: 0 },
     ]);
-    expect(await legacyOf(storeId, o.id)).toEqual({ productId: alm!.id, bumpProductId: kits[0]!.id, bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
     const got = await call(getOffer, storeId, owner, { id: o.id });
     expect(got.bump?.products.map((p) => p.name)).toEqual(KIDS.slice(1));
     expect(got.bump?.priceCents).toBe(1710);
@@ -445,7 +456,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
     expect((await rowsOf(a.storeId, ok.id)).length).toBe(20);
   });
 
-  test("offers.setProducts é sensível (MCP pede aprovação; support não pode), troca a lista e regrava as colunas antigas", async () => {
+  test("offers.setProducts é sensível (MCP pede aprovação; support não pode), troca a lista e regrava preço e rótulo do bump", async () => {
     const { storeId } = await seedStore();
     const [alm, ...kits] = await mkMany(storeId, KIDS);
     const o = await call(createOffer, storeId, owner, offerInput(alm!.id, { slug: "almanaque" }));
@@ -458,7 +469,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
 
     const withBump = await call(setOfferProducts, storeId, owner, input);
     expect(withBump.bump?.products.map((p) => p.id)).toEqual(ids(kits));
-    expect(await legacyOf(storeId, o.id)).toEqual({ productId: alm!.id, bumpProductId: kits[0]!.id, bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: 1710, bumpLabel: "5 Kits Extras" });
 
     // Reordena e troca: principal vira os 6 do Completo (ordem nova), sem bump.
     const order = [kits[2]!, alm!, kits[0]!, kits[4]!, kits[1]!, kits[3]!];
@@ -466,7 +477,7 @@ describe("oferta com N produtos (exemplos do Almanaque Kids)", () => {
     expect(swapped.products.map((p) => p.id)).toEqual(ids(order));
     expect(swapped.bump).toBeNull();
     expect(await rowsOf(storeId, o.id)).toEqual(order.map((p, i) => ({ productId: p.id, kind: "main", position: i })));
-    expect(await legacyOf(storeId, o.id)).toEqual({ productId: kits[2]!.id, bumpProductId: null, bumpPriceCents: null, bumpLabel: null });
+    expect(await legacyOf(storeId, o.id)).toEqual({ bumpPriceCents: null, bumpLabel: null });
     expect((await call(getPublicOffer, storeId, pub, { slug: "almanaque" }, "public")).products.map((p) => p.name)).toEqual(order.map((p) => KIDS[[alm, ...kits].indexOf(p)]));
 
     // Bump de 1 produto: o rótulo é opcional.
@@ -515,7 +526,7 @@ describe("rodada de correção 1 (concorrência, slug sensível, editor com N pr
         .orderBy(offerProduct.kind, offerProduct.position),
     );
 
-  test("setProducts concorrente na mesma oferta: fica exatamente uma das listas, sem posição repetida, colunas antigas iguais", async () => {
+  test("setProducts concorrente na mesma oferta: fica exatamente uma das listas, sem posição repetida, preço e rótulo do bump coerentes", async () => {
     const { storeId } = await seedStore();
     const ps = await Promise.all(Array.from({ length: 7 }, (_, i) => seedProduct(storeId, `C${i}`)));
     const [p0, a1, a2, a3, b1, b2, b3] = ps.map((p) => p.id) as [string, string, string, string, string, string, string];
@@ -532,8 +543,8 @@ describe("rodada de correção 1 (concorrência, slug sensível, editor com N pr
       const ids = rows.map((r) => r.productId);
       expect([JSON.stringify(listA), JSON.stringify(listB)]).toContain(JSON.stringify(ids));
       expect(rows.map((r) => [r.kind, r.position])).toEqual([["main", 0], ["main", 1], ["main", 2]]);
-      const [legacy] = await withStore(storeId, (tx) => tx.select({ productId: offer.productId, bumpProductId: offer.bumpProductId }).from(offer).where(eq(offer.id, o.id)));
-      expect(legacy).toEqual({ productId: ids[0]!, bumpProductId: null });
+      const [bumpCols] = await withStore(storeId, (tx) => tx.select({ bumpPriceCents: offer.bumpPriceCents, bumpLabel: offer.bumpLabel }).from(offer).where(eq(offer.id, o.id)));
+      expect(bumpCols).toEqual({ bumpPriceCents: null, bumpLabel: null });
     }
   }, HEAVY_TEST_MS);
 

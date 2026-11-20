@@ -32,15 +32,13 @@ export async function seedPanelStore(name = "Loja"): Promise<PanelStore> {
       storeId,
       slug: `oferta-${randomBytes(4).toString("hex")}`,
       name: "Maná bíblico",
-      productId: main!.id,
       priceCents: 990,
       methods: ["pix", "card"],
       pixMode: "manual",
-      bumpProductId: bump!.id,
       bumpPriceCents: 1710,
     })
     .returning({ id: offer.id });
-  // A lista da oferta (offer_product) é a fonte de quem lê os produtos; as colunas antigas acima saem na Task 5.
+  // A lista da oferta (offer_product) é a fonte dos produtos; bump_price_cents é o preço do bump.
   await ownerDb.insert(offerProduct).values([
     { storeId, offerId: o!.id, productId: main!.id, kind: "main", position: 0 },
     { storeId, offerId: o!.id, productId: bump!.id, kind: "bump", position: 0 },

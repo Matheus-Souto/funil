@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
 import { offer } from "@/lib/db/schema";
-import { checkOfferProducts, loadOfferProducts, productsFields, refineProducts, writeOfferProducts, type BumpInput, type ProductRef } from "./offer-products";
+import { checkOfferProducts, loadOfferProducts, productsFields, refineProducts, writeOfferProducts, type ProductRef } from "./offer-products";
 import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
 const id = z.uuid();
@@ -35,20 +35,6 @@ async function withProducts(tx: Tx, rows: OfferRow[]): Promise<OfferView[]> {
     const bump = g.bump.length > 0 && r.bumpPriceCents !== null ? { products: g.bump, priceCents: r.bumpPriceCents, label: r.bumpLabel } : null;
     return { ...r, products: g.main, bump };
   });
-}
-
-/**
- * Colunas da oferta ligadas à lista. `product_id` e `bump_product_id` são as antigas, gravadas a partir do primeiro
- * principal e do primeiro do bump para os leitores ainda não migrados para offer_product (pedido, entrega, painel); só
- * elas saem na Task 5. `bump_price_cents` e `bump_label` continuam (preço e rótulo do bump).
- */
-function legacyColumns(productIds: string[], bump: BumpInput | null) {
-  return {
-    productId: productIds[0]!,
-    bumpProductId: bump?.productIds[0] ?? null,
-    bumpPriceCents: bump?.priceCents ?? null,
-    bumpLabel: bump?.label ?? null,
-  };
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -84,7 +70,7 @@ export const createOffer = defineAction({
   permission: "offers.write",
   async run(ctx, input) {
     const bumpIds = input.bump?.productIds ?? [];
-    // Antes do insert: a coluna antiga product_id tem FK simples e daria erro cru com produto inválido.
+    // Antes do insert: valida os produtos (loja, apagados, repetidos) com erro legível.
     await checkOfferProducts(ctx, input.productIds, bumpIds);
     await ensureSlugFree(ctx, input.slug);
     let row: OfferRow;
@@ -95,7 +81,8 @@ export const createOffer = defineAction({
           storeId: ctx.storeId,
           slug: input.slug,
           name: input.name,
-          ...legacyColumns(input.productIds, input.bump),
+          bumpPriceCents: input.bump?.priceCents ?? null,
+          bumpLabel: input.bump?.label ?? null,
           priceCents: input.priceCents,
           methods: input.methods,
           pixMode: input.pixMode,
@@ -130,12 +117,12 @@ export const setOfferProducts = defineAction({
     // as linhas novas da outra e as listas se juntam). O unique (offer_id, kind, position) é a rede de segurança.
     const [current] = await ctx.tx.select({ id: offer.id }).from(offer).where(eq(offer.id, input.id)).for("update");
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
-    // Lista primeiro (valida os produtos); depois as colunas antigas, que têm FK simples para product.
+    // Lista primeiro (valida os produtos); depois o preço e o rótulo do bump.
     await writeOfferProducts(ctx, input.id, input.productIds, input.bump?.productIds ?? []);
     const price = input.priceCents === undefined ? {} : { priceCents: input.priceCents };
     const [row] = await ctx.tx
       .update(offer)
-      .set({ ...legacyColumns(input.productIds, input.bump), ...price })
+      .set({ bumpPriceCents: input.bump?.priceCents ?? null, bumpLabel: input.bump?.label ?? null, ...price })
       .where(eq(offer.id, input.id))
       .returning(offerCols);
     return (await withProducts(ctx.tx, [row!]))[0]!;

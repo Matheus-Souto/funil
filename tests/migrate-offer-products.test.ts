@@ -1,6 +1,7 @@
 // Migração 0022: tabela offer_product, backfill a partir de offer.product_id/bump_product_id e order_item.position.
-// O tests/db.ts já migra até a 0022 (sem ofertas), então o teste roda o SQL do backfill (lido do próprio arquivo da
-// migração, o que vai para produção) sobre ofertas criadas no schema antigo (colunas product_id/bump_product_id).
+// O tests/db.ts migra até a última (a 0023 já removeu offer.product_id/bump_product_id), então o teste recria as duas
+// colunas antigas, roda o SQL do backfill (lido do próprio arquivo da 0022, o que vai para produção) sobre ofertas no
+// schema antigo e as remove de novo.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { sql } from "drizzle-orm";
@@ -30,29 +31,38 @@ async function pgError(run: () => PromiseLike<unknown>): Promise<{ code?: string
   throw new Error("esperava erro do Postgres, mas a operação passou");
 }
 
-const newOffer = (storeId: string, slug: string, productId: string, bump?: string) => ({
-  storeId,
-  slug,
-  name: slug,
-  productId,
-  priceCents: 2700,
-  methods: ["pix"],
-  pixMode: "manual",
-  ...(bump ? { bumpProductId: bump, bumpPriceCents: 990, bumpLabel: "Bump" } : {}),
-});
+const newOffer = (storeId: string, slug: string) => ({ storeId, slug, name: slug, priceCents: 2700, methods: ["pix"], pixMode: "manual" });
+
+/** Cria a oferta e grava nas colunas antigas (product_id/bump_product_id), como era antes da 0023. */
+async function legacyOffer(storeId: string, slug: string, productId: string, bump?: string): Promise<string> {
+  const [o] = await t.ownerDb
+    .insert(offer)
+    .values({ ...newOffer(storeId, slug), ...(bump ? { bumpPriceCents: 990, bumpLabel: "Bump" } : {}) })
+    .returning({ id: offer.id });
+  await t.ownerDb.execute(sql`update offer set product_id = ${productId}, bump_product_id = ${bump ?? null} where id = ${o!.id}`);
+  return o!.id;
+}
+
+async function withLegacyColumns<T>(run: () => Promise<T>): Promise<T> {
+  await t.ownerDb.execute(sql`alter table offer add column product_id uuid, add column bump_product_id uuid`);
+  try {
+    return await run();
+  } finally {
+    await t.ownerDb.execute(sql`alter table offer drop column product_id, drop column bump_product_id`);
+  }
+}
 
 test("backfill: oferta com bump vira main+bump (posição 0); sem bump vira só main; RLS isola por loja", async () => {
   expect(backfill).toHaveLength(2); // um INSERT para o principal e outro para o bump
   const a = await seedStore("A");
   const b = await seedStore("B");
   const [p1, p2, p3] = [await seedProduct(a.storeId, "P1"), await seedProduct(a.storeId, "P2"), await seedProduct(b.storeId, "P3")];
-  const [withBump, noBump, other] = await t.ownerDb
-    .insert(offer)
-    .values([newOffer(a.storeId, "com-bump", p1.id, p2.id), newOffer(a.storeId, "sem-bump", p2.id), newOffer(b.storeId, "outra", p3.id)])
-    .returning({ id: offer.id });
-
-  expect(await t.ownerDb.select().from(offerProduct)).toHaveLength(0);
-  for (const stmt of backfill) await t.ownerDb.execute(sql.raw(stmt));
+  const [withBump, noBump, other] = await withLegacyColumns(async () => {
+    const ids = [await legacyOffer(a.storeId, "com-bump", p1.id, p2.id), await legacyOffer(a.storeId, "sem-bump", p2.id), await legacyOffer(b.storeId, "outra", p3.id)];
+    expect(await t.ownerDb.select().from(offerProduct)).toHaveLength(0);
+    for (const stmt of backfill) await t.ownerDb.execute(sql.raw(stmt));
+    return ids.map((id) => ({ id }));
+  });
 
   const rows = await t.ownerDb.select().from(offerProduct);
   const of = (id: string) =>
@@ -79,7 +89,7 @@ test("backfill: oferta com bump vira main+bump (posição 0); sem bump vira só 
 test("restrições: produto repetido, kind e posição inválidos (causa conferida); cascade ao apagar a oferta", async () => {
   const a = await seedStore("A");
   const p = await seedProduct(a.storeId);
-  const [o] = await t.ownerDb.insert(offer).values(newOffer(a.storeId, "r", p.id)).returning({ id: offer.id });
+  const [o] = await t.ownerDb.insert(offer).values(newOffer(a.storeId, "r")).returning({ id: offer.id });
   const row = { storeId: a.storeId, offerId: o!.id, productId: p.id, kind: "main", position: 0 };
   await t.ownerDb.insert(offerProduct).values(row);
   const q = await seedProduct(a.storeId, "Q");
@@ -98,7 +108,7 @@ test("FK composta: linha da loja A não aponta para oferta nem produto da loja B
   const b = await seedStore("B");
   const pa = await seedProduct(a.storeId, "PA");
   const pb = await seedProduct(b.storeId, "PB");
-  const [oa, ob] = await t.ownerDb.insert(offer).values([newOffer(a.storeId, "fa", pa.id), newOffer(b.storeId, "fb", pb.id)]).returning({ id: offer.id });
+  const [oa, ob] = await t.ownerDb.insert(offer).values([newOffer(a.storeId, "fa"), newOffer(b.storeId, "fb")]).returning({ id: offer.id });
   const base = { storeId: a.storeId, offerId: oa!.id, productId: pa.id, kind: "main", position: 0 };
   expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...base, productId: pb.id }))).toEqual({ code: "23503", constraint: "offer_product_product_fk" });
   expect(await pgError(() => t.ownerDb.insert(offerProduct).values({ ...base, offerId: ob!.id }))).toEqual({ code: "23503", constraint: "offer_product_offer_fk" });
