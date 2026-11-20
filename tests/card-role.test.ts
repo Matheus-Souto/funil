@@ -3,7 +3,7 @@
 //  2. os casos de `payWithCard` (à vista, parcelado, recusa, desconhecido + liquidação, limite e disjuntor) com o `db`
 //     do app apontado para o papel, num describe parametrizado (`app` é o controle: o mesmo caso com o papel completo).
 // O preparo (loja, oferta, pedido, conexão) roda com o papel `app`, antes de trocar o `db`; as conferências, com o dono.
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
@@ -592,5 +592,65 @@ describe("aviso de cartão recusado no Telegram com o papel card", () => {
     expect(attempts.map((a) => a.status)).toEqual(["declined", "declined", "declined"]);
     const jobs = await t.ownerDb.select().from(job).where(sql`${job.payload}->>'orderId' = ${order.id}`);
     expect(jobs.map((j) => [j.type, j.payload, j.storeId])).toEqual([["notify_telegram", { event: "card_declined", orderId: order.id }, shop.storeId]]);
+  });
+});
+
+describe("aviso do Telegram nunca derruba o pagamento (política antiga do job, sem notify_telegram)", () => {
+  const fake = createFakeAsaas();
+  let shop: { storeId: string; offerId: string };
+  let declined: Order;
+  let approvedOrder: Order;
+  let out = "";
+  let stdout: ReturnType<typeof spyOn>;
+  beforeAll(async () => {
+    shop = await seedAsaasStore(fake);
+    declined = await newCardOrder(shop.storeId, shop.offerId, email());
+    approvedOrder = await newCardOrder(shop.storeId, shop.offerId, email());
+    // O card sobe antes de o app aplicar o rls.sql novo: a política ainda recusa notify_telegram.
+    await t.ownerDb.execute(sql`drop policy job_card_insert on job`);
+    await t.ownerDb.execute(sql`create policy job_card_insert on job for insert to card with check (
+      store_id = nullif(current_setting('app.store_id', true), '')::uuid and type in ('deliver_order', 'meta_event', 'notify_seller'))`);
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+  }, HEAVY_TEST_MS);
+  afterAll(async () => {
+    await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+    await t.ownerDb.execute(sql`select card_role_grants()`);
+  });
+  beforeEach(() => {
+    out = "";
+    stdout = spyOn(process.stdout, "write").mockImplementation(((s: string) => ((out += String(s)), true)) as never);
+  });
+  afterEach(() => {
+    stdout.mockRestore();
+    setAsaasFetchForTests();
+  });
+
+  test("recusa: a tentativa fecha como recusada e a recusa é contada, sem o job do Telegram", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    fake.fail("POST /payments", 400, "Transação não autorizada", "invalid_creditCard");
+    try {
+      const r = await payWithCard({ storeId: shop.storeId }, input(declined.publicId, { number: luhn("453000000000001") }), {
+        ...fastDeps,
+        verifyTurnstile: async () => true,
+      });
+      expect(r.status).toBe("declined");
+    } finally {
+      fake.clearFailures();
+    }
+    const attempts = await t.ownerDb.select().from(cardAttempt).where(eq(cardAttempt.orderId, declined.id));
+    expect(attempts.map((a) => a.status)).toEqual(["declined"]);
+    const counted = await t.ownerDb.select().from(rateLimit).where(eq(rateLimit.key, `card:decline:store:${shop.storeId}`));
+    expect(counted).toHaveLength(1);
+    expect(await jobTypes(declined.id)).toEqual([]);
+    expect(out).toContain("aviso do Telegram não enfileirado");
+  });
+
+  test("aprovação: o pedido fica pago e os jobs da confirmação saem, sem o do Telegram", async () => {
+    setAsaasFetchForTests(fake.fetch);
+    const r = await payWithCard({ storeId: shop.storeId }, input(approvedOrder.publicId), fastDeps);
+    expect(r).toEqual({ status: "approved" });
+    expect((await orderRow(approvedOrder.id)).status).toBe("paid");
+    expect(await jobTypes(approvedOrder.id)).toEqual(["deliver_order", "meta_event", "notify_seller"]);
+    expect(out).toContain("aviso do Telegram não enfileirado");
   });
 });

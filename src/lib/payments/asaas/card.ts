@@ -505,15 +505,23 @@ async function closeAttempt(
  * Aviso "cartão recusado" no Telegram da loja: só na primeira recusa do pedido (um teste de cartões com muitas recusas
  * gera no máximo um job por pedido; a marca em `telegram_notice` garante um envio). Vai sempre para a fila: o papel
  * `card` não lê a conexão do Telegram, e o job confere no envio se o evento está ligado e se o pedido segue sem pagar.
+ * Num savepoint: se o enfileiramento falhar (ex.: política antiga do `job` enquanto o app não aplicou o rls.sql), a
+ * recusa continua registrada e contada; só o aviso se perde, com log.
  */
 async function enqueueDeclineNotice(tx: Tx, storeId: string, orderId: string, attemptId: string): Promise<void> {
-  const [earlier] = await tx
-    .select({ id: cardAttempt.id })
-    .from(cardAttempt)
-    .where(and(eq(cardAttempt.orderId, orderId), eq(cardAttempt.status, "declined"), ne(cardAttempt.id, attemptId)))
-    .limit(1);
-  if (earlier) return;
-  await enqueue(tx, { storeId, type: "notify_telegram", payload: { event: "card_declined", orderId } });
+  try {
+    await tx.transaction(async (sp) => {
+      const [earlier] = await sp
+        .select({ id: cardAttempt.id })
+        .from(cardAttempt)
+        .where(and(eq(cardAttempt.orderId, orderId), eq(cardAttempt.status, "declined"), ne(cardAttempt.id, attemptId)))
+        .limit(1);
+      if (earlier) return;
+      await enqueue(sp as Tx, { storeId, type: "notify_telegram", payload: { event: "card_declined", orderId } });
+    });
+  } catch (error) {
+    log.error("aviso do Telegram não enfileirado", { orderId, event: "card_declined", error });
+  }
 }
 
 function resultOf(a: Attempt): CardResult {
