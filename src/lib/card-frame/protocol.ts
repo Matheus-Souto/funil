@@ -45,6 +45,8 @@ export type ParentMsg =
 
 export type FrameMsg =
   | { t: "funil-card:ready" }
+  /** Enter num campo do iframe: o checkout faz o mesmo que o botão "Pagar" (valida, cria o pedido e paga). */
+  | { t: "funil-card:submit" }
   | { t: "funil-card:height"; px: number }
   | { t: "funil-card:validated"; id: string; ok: boolean; fields: string[] }
   | {
@@ -126,6 +128,8 @@ export function parseFrameMsg(data: unknown): FrameMsg | null {
   switch (get(d, "t")) {
     case "funil-card:ready":
       return { t: "funil-card:ready" };
+    case "funil-card:submit":
+      return { t: "funil-card:submit" };
     case "funil-card:height": {
       const px = int(get(d, "px"), 0, 4000);
       return px === null ? null : { t: "funil-card:height", px };

@@ -233,6 +233,13 @@ export function mountCardForm(deps: FormDeps): void {
     f.installments.wrap,
   );
   form.addEventListener("submit", (e) => e.preventDefault());
+  // Enter num campo (não no seletor de parcelas, nem compondo texto): o checkout faz o mesmo que o botão "Pagar".
+  // Sem botão de envio aqui, o navegador não envia o formulário sozinho; a mensagem só leva o tipo.
+  form.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing || !(e.target instanceof win.HTMLInputElement)) return;
+    e.preventDefault();
+    broadcast({ t: "funil-card:submit" });
+  });
   root.replaceChildren(form, el(doc, "p", { class: "lockNote" }, icon(doc, "lock", "lockIcon", 15), "Os dados do cartão não ficam salvos."));
 
   // ---- estado ----

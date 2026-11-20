@@ -83,6 +83,8 @@ export interface FrameControllerDeps {
   newId: () => string;
   onStatus: (s: FrameStatus) => void;
   onHeight: (px: number) => void;
+  /** Enter num campo do iframe (`submit`): o checkout faz o mesmo que o botão "Pagar". */
+  onSubmit?: () => void;
 }
 
 export interface CardFrameController {
@@ -173,6 +175,10 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
           return;
         case "funil-card:height":
           d.onHeight(msg.px);
+          return;
+        case "funil-card:submit":
+          // Só do iframe já pronto (origem e janela conferidas acima).
+          if (status === "ready") d.onSubmit?.();
           return;
         case "funil-card:validated":
         case "funil-card:result": {

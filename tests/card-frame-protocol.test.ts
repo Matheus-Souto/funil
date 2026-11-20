@@ -70,6 +70,11 @@ describe("parseParentMsg", () => {
 });
 
 describe("parseFrameMsg", () => {
+  test("submit (Enter num campo do iframe): só o tipo, chaves extras somem; o pai nunca manda submit", () => {
+    expect(parseFrameMsg({ t: `${P}submit`, number: "4111111111111111", cvv: "123" })).toEqual({ t: `${P}submit` });
+    expect(parseParentMsg({ t: `${P}submit` })).toBeNull();
+  });
+
   test("ready e height", () => {
     expect(parseFrameMsg({ t: `${P}ready`, number: "4" })).toEqual({ t: `${P}ready` });
     expect(parseFrameMsg({ t: `${P}height`, px: 0 })).toEqual({ t: `${P}height`, px: 0 });

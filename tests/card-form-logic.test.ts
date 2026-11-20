@@ -330,6 +330,28 @@ describe("formulário no iframe", () => {
     expect(ev.defaultPrevented).toBe(true);
   });
 
+  test("Enter num campo do iframe avisa o checkout (submit, a cada origem permitida), que paga como o botão; IME, seletor e outras teclas não", () => {
+    const { w, doc, posted, input } = setup();
+    const before = posted.length;
+    const key = (el: Element, init: Record<string, unknown> = {}) => {
+      const ev = new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+      el.dispatchEvent(ev as unknown as Event);
+      return ev;
+    };
+    expect(key(input("cvv")).defaultPrevented).toBe(true);
+    const submits = () => posted.slice(before).filter((p) => p.msg.t === "funil-card:submit");
+    expect(submits()).toEqual([
+      { msg: { t: "funil-card:submit" }, origin: SHOP },
+      { msg: { t: "funil-card:submit" }, origin: OTHER_SHOP },
+    ]);
+    key(input("cardNumber"), { isComposing: true });
+    key(doc.getElementById("installments") as unknown as Element);
+    key(input("cvv"), { key: "a" });
+    expect(submits()).toHaveLength(2);
+    key(input("holderName"));
+    expect(submits()).toHaveLength(4);
+  });
+
   test("máscaras do checkout atual", () => {
     const { type, input } = setup();
     type("cardNumber", "4111111111111111999");

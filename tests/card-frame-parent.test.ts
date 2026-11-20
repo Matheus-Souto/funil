@@ -44,6 +44,7 @@ function harness() {
   const posted: ParentMsg[] = [];
   const statuses: string[] = [];
   const heights: number[] = [];
+  let submits = 0;
   const timers: { fn: () => void; ms: number; live: boolean }[] = [];
   let seq = 0;
   const frameWindow: { current: unknown } = { current: win };
@@ -59,6 +60,7 @@ function harness() {
     newId: () => `id-${++seq}`,
     onStatus: (s) => statuses.push(s),
     onHeight: (px) => heights.push(px),
+    onSubmit: () => submits++,
   });
   const fire = (ms: number) => {
     for (const t of timers.filter((x) => x.live && x.ms === ms)) {
@@ -68,10 +70,28 @@ function harness() {
   };
   const send = (data: unknown, over: { origin?: string; source?: unknown } = {}) =>
     ctrl.handle({ origin: over.origin ?? ORIGIN, source: "source" in over ? over.source : win, data });
-  return { ctrl, posted, statuses, heights, timers, fire, send, frameWindow };
+  return { ctrl, posted, statuses, heights, timers, fire, send, frameWindow, submits: () => submits };
 }
 
 describe("controlador do iframe", () => {
+  test("submit (Enter num campo do iframe): chama onSubmit só da origem e da janela do iframe, e só depois do ready", () => {
+    const h = harness();
+    h.ctrl.setConfig({ totalCents: 990, maxInstallments: 1 });
+    h.ctrl.start();
+    h.send({ t: "funil-card:submit" });
+    expect(h.submits()).toBe(0); // antes do ready
+    h.send({ t: "funil-card:ready" });
+    h.send({ t: "funil-card:submit" }, { origin: "https://outra.test" });
+    h.send({ t: "funil-card:submit" }, { source: {} });
+    h.send({ t: "funil-card:submit" }, { source: null });
+    expect(h.submits()).toBe(0);
+    h.send({ t: "funil-card:submit", number: "4111111111111111" });
+    expect(h.submits()).toBe(1);
+    h.ctrl.dispose();
+    h.send({ t: "funil-card:submit" });
+    expect(h.submits()).toBe(1);
+  });
+
   test("ready: manda config (total e parcelas atuais) e fica pronto; altura vem de height", () => {
     const h = harness();
     h.ctrl.setConfig({ totalCents: 990, maxInstallments: 3 });

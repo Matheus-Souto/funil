@@ -198,6 +198,8 @@ export function CheckoutForm(props: {
   const frameCtrl = useRef<CardFrameController | null>(null);
   const [frameKey, setFrameKey] = useState(0);
   const [frameStatus, setFrameStatus] = useState<FrameStatus>("loading");
+  // Enter num campo do iframe (`submit`): o mesmo que o botão "Pagar". Atualizado a cada render (ver o efeito abaixo).
+  const submitFromFrame = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (viewed.current) return;
@@ -234,6 +236,7 @@ export function CheckoutForm(props: {
         onHeight: (px) => {
           iframe.style.height = `${px}px`;
         },
+        onSubmit: () => submitFromFrame.current(),
       });
       const onMessage = (ev: MessageEvent) => ctrl.handle(ev);
       window.addEventListener("message", onMessage);
@@ -372,8 +375,13 @@ export function CheckoutForm(props: {
     setFormError(outcome.message);
   }
 
-  async function onSubmit(ev: FormEvent) {
+  function onSubmit(ev: FormEvent) {
     ev.preventDefault();
+    void submit();
+  }
+
+  /** O "Pagar" (botão, Enter num campo do checkout ou Enter num campo do iframe do cartão). */
+  async function submit() {
     if (busy) return;
     const e = validate(method);
     if (method === "card") {
@@ -403,6 +411,13 @@ export function CheckoutForm(props: {
       setBusy(false);
     }
   }
+
+  // Só com o cartão escolhido (o iframe fica escondido no Pix); `submit` confere o resto (ocupado, iframe pronto).
+  useEffect(() => {
+    submitFromFrame.current = () => {
+      if (method === "card") void submit();
+    };
+  });
 
   if (declined) {
     return (
