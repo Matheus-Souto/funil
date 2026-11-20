@@ -337,21 +337,49 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
 
      No `.env`: `CADDYFILE=Caddyfile.multi` e `CLOUDFLARE_API_TOKEN=...`; no DNS, um registro `*` (curinga) apontando
      para o servidor. Depois `docker compose up -d --build`. Domínios próprios de lojas entram como blocos extras numa
-     cópia `deploy/Caddyfile.local` do `Caddyfile.multi` (`loja.com.br { reverse_proxy app:3000 }`).
+     cópia `deploy/Caddyfile.local` do `Caddyfile.multi`, com o mesmo corte da rota antiga do cartão dos outros sites
+     (sem ele, uma aba antiga que mande o cartão para `/api/checkout/card` faz os bytes chegarem ao app):
+
+     ```
+     loja.com.br {
+     	header Strict-Transport-Security "max-age=31536000"
+     	encode zstd gzip
+     	@legacyCard {
+     		path /api/checkout/card
+     	}
+     	respond @legacyCard 404
+     	reverse_proxy app:3000
+     }
+     ```
    - Nas duas opções, um `Caddyfile.local` copiado antes do cartão isolado precisa da linha `import card/*.caddy` no fim
-     para servir o `pagar.` (seção 12).
+     para servir o `pagar.` e do bloco `@legacyCard` em cada site do app (seção 12).
 4. No modo multi, o SMTP de cada loja só aceita servidores públicos nas portas 587, 465, 2525 ou 25.
 
-## 12. Cartão isolado (`CARD_ISOLATED=1`, experimental)
+## 12. Cartão (serviço isolado `pagar.`)
 
-> **Experimental: não ligue em produção até a versão que inclui o E2E do cartão isolado (PR 2).** Desligado (padrão),
-> tudo segue como antes.
+O cartão é sempre digitado num formulário (iframe) servido por um serviço pequeno e separado, o container `card`, num
+domínio próprio (`pagar.`): o número, a validade e o CVV não passam pelo processo do app (painel, PDF, e-mail, fila).
+O E2E de cada versão faz a compra com cartão por esse iframe. **Para vender com cartão, configure esta seção**: sem
+ela (sem `CARD_ORIGIN`), a instalação sobe normalmente, mas o cartão fica indisponível: o checkout mostra só Pix (uma
+oferta só de cartão fica fora do ar), o editor de oferta não deixa ligar o cartão e a visão geral do painel avisa que
+falta configurar o serviço de cartão.
 
-Com ele ligado, o número, a validade e o CVV deixam de passar pelo processo do app (painel, PDF, e-mail, fila): o
-checkout embute um formulário (iframe) servido por um serviço pequeno e separado, o container `card`, num domínio
-próprio (`pagar.`). É uma redução de risco, não de escopo PCI: no mesmo servidor, app e `card` dividem host, Docker e
-Caddy, e o app continua no escopo (detalhes, o que falta para reduzir o escopo e as regras de firewall e do Postgres
-que você precisa aplicar: `docs/seguranca-pagamento.md`, "Cartão isolado").
+É uma redução de risco, não de escopo PCI: no mesmo servidor, app e `card` dividem host, Docker e Caddy, e o app
+continua no escopo (detalhes, o que falta para reduzir o escopo e as regras de firewall e do Postgres que você precisa
+aplicar: `docs/seguranca-pagamento.md`, "Cartão isolado"). As chaves abaixo são tão sensíveis quanto o `SECRET`.
+
+### Atualizar para esta versão (quem já vende com cartão)
+
+Nas versões anteriores, o cartão era digitado no próprio checkout (ou no iframe, com `CARD_ISOLATED=1`). Nesta, o
+formulário antigo saiu: **sem `CARD_ORIGIN` configurada, o cartão some do checkout na hora da atualização.** Por isso,
+ANTES de atualizar (seção 10, "Atualizar"):
+
+- **Já usava `CARD_ISOLATED=1`:** nada a fazer além da atualização. `CARD_ISOLATED` e `COMPOSE_PROFILES=card` deixam
+  de ter efeito (pode apagar as duas do `.env`); o `card` sobe sempre.
+- **Vendia com cartão no formulário antigo:** faça os passos 1 a 3 da ordem de ativação abaixo (DNS do `pagar.`, as
+  variáveis no `.env` e, com `Caddyfile.local`, a linha `import card/*.caddy` e o bloco `@legacyCard`) e só então
+  atualize (passo 4). Se atualizar antes, o checkout segue vendendo com Pix e o painel avisa até você configurar.
+- **Só vende com Pix:** nada a fazer. O `card` sobe desligado (só responde à verificação de saúde).
 
 **1. DNS.** Um registro a mais, como o do checkout (seção 2), apontando para o mesmo servidor:
 
@@ -375,7 +403,8 @@ escopo PCI (`docs/seguranca-pagamento.md`).
 **Turnstile (seção 3).** O desafio anti-robô aparece no checkout, não no `pagar.` (o formulário do cartão não carrega
 nada da Cloudflare): a lista de hostnames do widget no painel da Cloudflare continua com o domínio do checkout (no
 `multi`, o `PLATFORM_DOMAIN`, que cobre as lojas em subdomínio, e cada domínio próprio de loja). O `pagar.` não precisa
-estar nela.
+estar nela. O `card` confere o token e também o host em que o desafio foi resolvido: só vale o do checkout da loja do
+pedido.
 
 **2. Variáveis no `.env`.** Gere cada chave com o comando ao lado (um valor diferente para cada uma; as três chaves
 `SECRET`, `CARD_TICKET_KEY` e `ASAAS_SEAL_KEY` precisam ser diferentes entre si) e guarde-as junto com o `SECRET`, no
@@ -383,8 +412,6 @@ gerenciador de senhas, nunca com os backups:
 
 | Variável | Valor |
 |---|---|
-| `COMPOSE_PROFILES` | `card` (sobe o container `card`) |
-| `CARD_ISOLATED` | `1` |
 | `CARD_ORIGIN` | `https://pagar.checkout.minhaloja.com.br` (no `multi`: `https://pagar.plataforma.com.br`) |
 | `CARD_TICKET_KEY` | `openssl rand -hex 32` (assina o bilhete de cada pedido; o serviço confere) |
 | `ASAAS_SEAL_KEY` | `openssl rand -hex 32` (cifra a chave do Asaas das lojas para o serviço abrir sem o `SECRET`) |
@@ -395,8 +422,8 @@ gerenciador de senhas, nunca com os backups:
 1. DNS do `pagar.` criado e respondendo (`ping pagar.checkout.minhaloja.com.br` mostra o IP do servidor).
    Planeje também as regras do servidor que o compose não aplica (saída de rede do `card`, entrada no Postgres vinda
    da rede `card` e logs guardados por 12 meses: `docs/seguranca-pagamento.md`, "Cartão isolado").
-2. As seis linhas acima no `.env`, de uma vez. A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`: é aí que o app
-   passa a cifrar a chave do Asaas com ela (avisos abaixo).
+2. As quatro linhas acima no `.env`, de uma vez. Com a `ASAAS_SEAL_KEY`, o app passa a cifrar a chave do Asaas com
+   ela (avisos abaixo).
 3. **Se usa `CADDYFILE=Caddyfile.local`** (Cloudflare com proxy, lista fixa de lojas): se a sua cópia ainda não
    termina com a linha abaixo (cópias feitas antes do cartão isolado não têm), acrescente no fim do
    `deploy/Caddyfile.local`:
@@ -407,7 +434,15 @@ gerenciador de senhas, nunca com os backups:
 
    Uma vez só: confira antes com `grep -c 'import card/' deploy/Caddyfile.local` (deve mostrar `0` para acrescentar;
    `1` = já está). Sem a linha, o Caddy não serve o `pagar.` (o checkout mostra "Pagamento com cartão indisponível
-   agora"); com ela duas vezes, o Caddy não sobe (problemas comuns, seção 13).
+   agora"); com ela duas vezes, o Caddy não sobe (problemas comuns, seção 13). Confira também que cada site do app na
+   sua cópia tem o bloco `@legacyCard` do `deploy/Caddyfile` (ele corta a rota antiga do cartão antes do app):
+
+   ```
+   @legacyCard {
+   	path /api/checkout/card
+   }
+   respond @legacyCard 404
+   ```
 4. `docker compose up -d --build`. O app reinicia, a migração dá login ao papel `card` com a `CARD_DB_PASSWORD` e a
    chave do Asaas de cada loja passa a ser cifrada com a `ASAAS_SEAL_KEY` (log: "conexões Asaas re-seladas"). O
    `card` pode aparecer `unhealthy` por alguns segundos, até o app terminar a migração.
@@ -417,63 +452,62 @@ gerenciador de senhas, nunca com os backups:
 6. Uma compra de cartão de teste (valor baixo) no celular. Se o formulário do cartão não aparecer em 10 segundos, o
    checkout mostra "Pagamento com cartão indisponível agora" e oferece o Pix: confira o DNS e `docker compose logs card`.
 
-O Caddy só serve o domínio do cartão com `CARD_ORIGIN` definida: o compose monta o `deploy/Caddyfile.card` como
+O `card` sobe sempre; sem `CARD_ORIGIN`, fica desligado (só o `/healthz`, sem banco). O Caddy só serve o domínio do
+cartão com `CARD_ORIGIN` definida: o compose monta o `deploy/Caddyfile.card` como
 `/etc/caddy/card/site.caddy`, que o `import card/*.caddy` do fim do `deploy/Caddyfile` (e do `Caddyfile.multi`) pega;
 sem `CARD_ORIGIN`, o glob não acha nada e o Caddy sobe igual. O container `card` fica numa rede só com o Postgres e o
 Caddy (não fala com o app direto; só pelo Caddy, como qualquer visitante), sem volume, com raiz só leitura, sem
 capabilities, 192 MB de memória e sem core dump.
 
-**Avisos (leia antes de ligar):**
+**Avisos (leia antes de configurar):**
 
-- **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois da primeira subida com o isolamento ligado. Sem ela (ou com
+- **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois da primeira subida com ela. Sem ela (ou com
   outra), o app e o `card` recusam subir com `ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão Asaas de N
   loja(s); restaure a chave correta`. Restaure o valor do gerenciador de senhas.
-- **Desligar** com a mesma versão do sistema é seguro: no `.env`, `CARD_ISOLATED=0`, tire `card` de
-  `COMPOSE_PROFILES` e apague a `CARD_ORIGIN` (senão o Caddy segue servindo o `pagar.`, com erro 502); depois guarde
-  os logs do `card` (remover o container apaga os logs dele, e o PCI pede 12 meses, requisito 10.5.1) e remova-o:
+- **Parar de vender com cartão:** desligue o cartão em cada oferta (editor da oferta) e, no `.env`, apague a
+  `CARD_ORIGIN` (mantenha a `ASAAS_SEAL_KEY`: as conexões Asaas seguem cifradas com ela). Antes, guarde os logs do
+  `card` (recriar o container apaga os logs dele, e o PCI pede 12 meses, requisito 10.5.1):
 
   ```sh
   docker compose logs --no-color --timestamps card > card-$(date +%F).log
-  docker compose stop card && docker compose rm -f card
   docker compose up -d
   ```
 
   Guarde o arquivo fora do servidor (com os backups). Com um driver de log persistente no Docker
-  (`docs/seguranca-pagamento.md`, "Logs do `card`"), o export é só uma cópia a mais.
-
-  O checkout volta ao formulário antigo e a chave do Asaas continua abrindo (mantenha a `ASAAS_SEAL_KEY` no `.env`).
-  Desligando de vez, tire também o login do papel `card` (a migração não tira sozinha):
+  (`docs/seguranca-pagamento.md`, "Logs do `card`"), o export é só uma cópia a mais. O `card` volta a subir
+  desligado. Tire também o login do papel `card` (a migração não tira sozinha):
   `docker compose exec -T postgres psql -U owner -d funil -c 'alter role card nologin'`.
 - **Voltar para uma versão do sistema anterior ao isolamento trava o Asaas das lojas** se as conexões continuarem
-  cifradas com a `ASAAS_SEAL_KEY` (a versão antiga não as abre: Pix e cartão do Asaas param). Para voltar sem travar,
-  ainda na versão atual:
-  1. desligue o isolamento (item acima), mantendo a `ASAAS_SEAL_KEY` no `.env`;
-  2. regrave as conexões Asaas no formato antigo (só mostra contagens, nunca chaves):
+  cifradas com a `ASAAS_SEAL_KEY` (a versão antiga não as abre: Pix e cartão do Asaas param). Esta versão cifra de
+  novo a cada início do app, então a ordem importa:
+  1. com o app desta versão no ar, regrave as conexões Asaas no formato antigo (só mostra contagens, nunca chaves):
 
      ```sh
      docker compose exec app asaas-unseal
      ```
 
-     Ela recusa rodar com `CARD_ISOLATED=1` (o app cifraria tudo de novo no próximo boot). Se disser que alguma
-     conexão não pôde ser regravada, veja `docker compose logs app` (a loja aparece no log) e cole a chave de API do
-     Asaas dessa loja em Conexões → Asaas antes de seguir;
-  3. só então volte a versão.
+     A saída aparece **neste terminal** (não em `docker compose logs app`). Se disser que alguma conexão não pôde ser
+     regravada, as lojas estão nas linhas logo acima, no mesmo terminal: cole a chave de API do Asaas dessa loja em
+     Conexões → Asaas antes de seguir;
+  2. logo em seguida, volte a versão (sem reiniciar o app desta versão no meio: se ele reiniciar, rode a CLI de novo).
 
-  Se já voltou sem rodar a CLI: volte para a versão atual com `CARD_ISOLATED=0`, rode a CLI e volte de novo (ou cole
-  a chave de API do Asaas de cada loja em Conexões → Asaas).
+  Se já voltou sem rodar a CLI: volte para a versão atual, rode a CLI e volte de novo (ou cole a chave de API do Asaas
+  de cada loja em Conexões → Asaas).
 - **Restaurar um backup** (seção 10) exige o mesmo `SECRET` **e** a mesma `ASAAS_SEAL_KEY`. Além dos erros de
   `CREATE POLICY ... TO card` já descritos (esperados), nada muda: o app recria o papel `card` com a
   `CARD_DB_PASSWORD` ao iniciar.
 - **Atualizar** é igual (seção 10): o `docker compose build --pull` monta também a imagem do `card`. Recriar o
   container apaga os logs dele no driver padrão do Docker: veja "Logs do `card`" em `docs/seguranca-pagamento.md`.
-- **A rota antiga do cartão** (`/api/checkout/card`) para no Caddy com `CARD_ISOLATED=1` (o compose passa a flag ao
-  Caddy). Num `deploy/Caddyfile.local` copiado antes desta versão, copie também o bloco `@legacyCard` do
-  `deploy/Caddyfile` para dentro de cada site do app; sem ele, o app responde 404 sem ler o corpo, mas os bytes chegam
-  ao processo dele.
+- **A rota antiga do cartão** (`/api/checkout/card`) saiu do app e para sempre no Caddy (bloco `@legacyCard`). Num
+  `deploy/Caddyfile.local` copiado antes desta versão, copie o bloco do `deploy/Caddyfile` para dentro de cada site do
+  app (um bloco antigo com a linha `expression ... CARD_ISOLATED ...` deixa de valer: tire essa linha); sem ele, o app
+  responde 404 sem ler o corpo, mas os bytes chegam ao processo dele.
 
 ## 13. Problemas comuns
 
-- **Cartão isolado: o checkout mostra "Pagamento com cartão indisponível agora"**: confira, nesta ordem, o DNS do
+- **O checkout não mostra o cartão e o painel avisa "falta configurar o serviço de cartão"**: a instalação está sem
+  `CARD_ORIGIN` (ou o `.env` não foi relido). Configure a seção 12 e rode `docker compose up -d`.
+- **Cartão: o checkout mostra "Pagamento com cartão indisponível agora"**: confira, nesta ordem, o DNS do
   `pagar.`, `docker compose ps` (`card` "healthy"), `docker compose logs card` e, se usa `CADDYFILE=Caddyfile.local`,
   se ele tem no fim a linha `import card/*.caddy` (seção 12). Teste com
   `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.<seu domínio>/form.js` (deve mostrar `200`).
@@ -498,6 +532,14 @@ capabilities, 192 MB de memória e sem core dump.
 - **O app não sobe e o log diz `APP_DB_PASSWORD` ou `POSTGRES_PASSWORD`:** gere com `openssl rand -hex 24` (a imagem
   recusa senhas com menos de 16 caracteres e os valores de desenvolvimento). Trocar `POSTGRES_PASSWORD` depois da
   primeira subida exige trocar também a senha no banco (`ALTER ROLE owner PASSWORD '...'`).
+- **O app não sobe e o log mostra `lock timeout` (ou `canceling statement due to lock timeout`) logo depois de
+  `migrate`:** a migração precisa de uma trava rápida numa tabela e desiste em 5 s se outra sessão está usando essa
+  tabela há muito tempo (um `pg_dump` de backup em andamento, um `psql` aberto numa transação, uma consulta longa). O
+  container tenta de novo sozinho; se o erro se repetir, espere o backup terminar ou ache quem segura a tabela:
+  `docker compose exec -T postgres psql -U owner -d funil -c "select pid, state, now() - xact_start as tempo,
+  left(query, 60) from pg_stat_activity where datname = 'funil' and xact_start is not null order by xact_start"`.
+  Feche a sessão (ou `select pg_terminate_backend(<pid>)` nela, se for sua e puder ser interrompida) e rode
+  `docker compose up -d app`.
 - **O log diz "Variáveis de ambiente inválidas":** a mensagem lista o nome da variável. Corrija no `.env` e rode
   `docker compose up -d` de novo.
 - **Certificado HTTPS não sai:** o DNS ainda não aponta para o servidor, as portas 80/443 estão fechadas no firewall
@@ -510,7 +552,7 @@ capabilities, 192 MB de memória e sem core dump.
 - `deploy/Dockerfile`: monta com Bun (instalação e `next build`) e roda só com **Node 22** (`node:22.23-slim`), como o
   usuário não-root `node`, com o `tini` como PID 1 (repassa o sinal de parada; o compose dá 30 s para encerrar). O Bun não vai para a imagem final: as duas linhas de comando que rodam no servidor
   (migrações e `store-create`) são empacotadas para Node no build (menos de 1 MB, contra ~107 MB do binário do Bun).
-- Estágio `card` do mesmo `deploy/Dockerfile` (`target: card` no compose, só com `COMPOSE_PROFILES=card`): o serviço
+- Estágio `card` do mesmo `deploy/Dockerfile` (`target: card` no compose; sobe sempre, desligado sem `CARD_ORIGIN`): o serviço
   de cartão num arquivo só (`bun run card:build`: `server.js`, `form.js`, `form.css`), sem `node_modules` nem nada do
   app, com `tini`, usuário `node` e verificação de saúde em `GET /healthz`. O compose dá 90 s para encerrar (uma
   cobrança em curso leva até ~75 s).

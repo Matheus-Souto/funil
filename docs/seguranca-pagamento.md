@@ -1,24 +1,24 @@
 # Segurança das páginas de pagamento
 
 Páginas do comprador: `/c/<oferta>` (checkout: nome, e-mail, celular, CPF e, no cartão, número, validade e CVV) e
-`/o/<pedido>` (pedido e obrigado). Com o cartão isolado (`CARD_ISOLATED=1`, experimental), os campos do cartão saem
-do checkout e vão para a página do iframe, `CARD_ORIGIN/form/<loja>`, servida pelo container `card` (seção "Cartão
-isolado"). Referências: PCI DSS 4.0 requisitos 6.4.3 (inventário, autorização e integridade dos scripts da página de
+`/o/<pedido>` (pedido e obrigado). Os campos do cartão não ficam no checkout: ficam na página do iframe,
+`CARD_ORIGIN/form/<loja>`, servida pelo container `card` (seção "Cartão isolado"). Referências: PCI DSS 4.0 requisitos 6.4.3 (inventário, autorização e integridade dos scripts da página de
 pagamento) e 11.6.1 (detecção de mudanças nos cabeçalhos de segurança e scripts).
 
 ## Escopo PCI real: SAQ D (o cartão passa pelo servidor)
 
-No cartão "transparente", o navegador envia número, validade e CVV em JSON para `POST /api/checkout/card`; o processo
-Node do app recebe, valida e repassa ao Asaas. Nada disso é gravado (banco, log, fila, cache, mensagem de erro: ver
-`src/lib/payments/asaas/card.ts`), mas **transmitir e processar** PAN/CVV coloca o sistema inteiro no ambiente de
-dados do titular (CDE). Por isso:
+No cartão "transparente", o navegador envia número, validade e CVV em JSON ao `POST /api/card` do serviço de cartão
+(`card`, no domínio `pagar.`), que valida e repassa ao Asaas. Nada disso é gravado (banco, log, fila, cache, mensagem
+de erro: ver `src/lib/payments/asaas/card.ts`), mas **transmitir e processar** PAN/CVV num servidor da instalação
+coloca esse servidor inteiro no ambiente de dados do titular (CDE). Por isso:
 
 - **Questionário de autoavaliação: SAQ D** (não SAQ A nem A-EP, que valem só quando a página não envia o cartão ao
   servidor da loja). Os requisitos 6.4.3 e 11.6.1 abaixo continuam valendo, mas são uma parte pequena do SAQ D.
-- **Tudo o que roda no mesmo servidor entra no escopo:** o processo Node (que também serve o painel, valida PDFs
-  enviados pelo vendedor, fala SMTP e roda a fila), o Caddy (termina o TLS), o Postgres na mesma rede do compose, o
-  sistema operacional do host, a memória, o swap e os core dumps. Uma falha em qualquer um (pacote npm do painel
-  comprometido, PDF malicioso que escape do worker, acesso ao host) expõe os cartões em trânsito de todas as lojas.
+- **Tudo o que roda no mesmo servidor entra no escopo:** o `card`, o app (que serve o checkout que embute o iframe,
+  o painel, valida PDFs enviados pelo vendedor, fala SMTP e roda a fila), o Caddy (termina o TLS), o Postgres na mesma
+  rede do compose, o sistema operacional do host, a memória, o swap e os core dumps. Uma falha em qualquer um (pacote
+  npm do painel comprometido que troque o iframe por um formulário falso, acesso ao host) expõe os cartões de todas as
+  lojas.
 - **`MODE=multi`: o operador da instalação vira provedor de serviço** que processa cartões de terceiros (as lojas).
   Isso exige o SAQ D para provedores de serviço (ou o relatório de conformidade feito por auditor, o ROC, conforme o
   volume anual de transações), contratos com cada loja dizendo quais requisitos são responsabilidade de quem, e
@@ -34,25 +34,23 @@ dados do titular (CDE). Por isso:
   sem acesso às tabelas de outras lojas. **No host:** o swap que o guia cria serve à montagem da imagem; com RAM de
   sobra, desligue-o depois (`swapoff -a` e remova a linha do `/etc/fstab`) ou use swap cifrado. Não tire o
   `memswap_limit` nem o `ulimits` do `compose.yaml`.
-- **Próximo passo:** o cartão isolado (seção abaixo), que tira o cartão do processo principal, é **experimental**:
-  não ligue em produção até a versão que inclui o E2E do cartão isolado (PR 2). Mesmo ligado, no mesmo servidor o
+- **Próximo passo:** o cartão isolado (seção abaixo) já tira o cartão do processo principal, mas no mesmo servidor o
   escopo continua o descrito aqui (a seção abaixo explica por quê); o que reduz o escopo é o `card` num host separado
   com teste de segmentação.
 
-## Cartão isolado (`CARD_ISOLATED=1`): o que muda (experimental)
+## Cartão isolado: como funciona
 
-> **Experimental.** Não ligue em produção até a versão que inclui o E2E do cartão isolado (PR 2). Até lá, vale o
-> escopo da seção anterior.
-
-Com o isolamento ligado (passo a passo em `docs/instalacao.md`, seção 12), o comprador digita o cartão num iframe do
-domínio `pagar.` (`CARD_ORIGIN`), servido pelo container `card`: um processo Node pequeno (`src/card-service/`), sem
-painel, PDF, SMTP nem Meta, que recebe o `POST /api/card` e cobra no Asaas. No fluxo novo, o app (Next) não recebe
+O cartão é sempre digitado num iframe do domínio `pagar.` (`CARD_ORIGIN`; passo a passo em `docs/instalacao.md`,
+seção 12), servido pelo container `card`: um processo Node pequeno (`src/card-service/`), sem painel, PDF, SMTP nem
+Meta, que recebe o `POST /api/card` e cobra no Asaas. Sem `CARD_ORIGIN`, a instalação não oferece cartão (só Pix). O
+E2E de cada versão faz a compra com cartão por esse iframe. O app (Next) não recebe
 número, validade, CVV nem nome impresso (nem por URL, cabeçalho, `postMessage` ou bundle); ele só emite um bilhete
 assinado do pedido (`CARD_TICKET_KEY`, com o total e as parcelas que o iframe confere) e recebe do iframe o resultado
-(aprovado, recusado). A rota antiga (`POST /api/checkout/card`) responde 404 sem ler o corpo; o Caddy da instalação
-padrão (`deploy/Caddyfile` e `deploy/Caddyfile.multi`) já a corta antes do app. Numa cópia `Caddyfile.local` sem
-esse bloco (ou com outro proxy na frente), os bytes que uma aba aberta antes da troca mandar ainda chegam ao socket do
-Next, que os descarta sem ler.
+(aprovado, recusado). A rota antiga (`POST /api/checkout/card`) saiu do app (o build é conferido: nenhum arquivo do
+servidor do Next tem a rota nem a cobrança); uma rota de API inexistente responde 404 sem corpo e sem ler a
+requisição. O Caddy da instalação padrão (`deploy/Caddyfile` e `deploy/Caddyfile.multi`) corta essa rota antes do
+app. Numa cópia `Caddyfile.local` sem esse bloco (ou com outro proxy na frente), os bytes que uma aba aberta antes da
+atualização mandar ainda chegam ao socket do Next, que os descarta sem ler.
 
 ### Escopo: menos risco, o mesmo escopo enquanto tudo estiver no mesmo servidor
 
@@ -79,7 +77,7 @@ Next, que os descarta sem ler.
   não alcança o ambiente do cartão; no `MODE=multi` (provedor de serviço), o teste de segmentação se repete **a cada 6
   meses** (11.4.6). Sem o teste, responda ao questionário com o escopo do servidor inteiro.
 - **Escopo confirmado todo ano (12.5.2) e diagrama de fluxo de dados atualizado (1.2.4):** revise esta seção e o
-  diagrama abaixo pelo menos uma vez a cada 12 meses e a cada mudança significativa (ligar ou desligar o isolamento,
+  diagrama abaixo pelo menos uma vez a cada 12 meses e a cada mudança significativa (configurar ou tirar o cartão,
   trocar de servidor, ligar o proxy da Cloudflare, levar o `card` para outro host). Registre a data e quem revisou.
 
 Fluxo de dados do cartão (o mesmo servidor; `[CDE]` marca o que vê o cartão em claro):
@@ -116,7 +114,12 @@ Fluxo de dados do cartão (o mesmo servidor; `[CDE]` marca o que vê o cartão e
   lê o corpo inteiro antes de repassar (um corpo enviado devagar não prende as conexões do serviço) e nada mais vai
   para ele.
 - **Papel `card` no Postgres** (`src/lib/db/rls.sql`, `card_role_grants`): sem `BYPASSRLS`, só o necessário para
-  cobrar, no máximo 10 conexões e consultas de até 10 s. Tabelas novas não ganham permissão para ele.
+  cobrar e no máximo 10 conexões. O `statement_timeout` padrão de 10 s do papel só corta consultas presas por erro do
+  próprio serviço: **não é controle contra um `card` comprometido**, que o desfaz com `SET statement_timeout` na
+  sessão dele (o teto de conexões vale, porque é do papel). Tabelas novas não ganham permissão para ele.
+- **Turnstile:** o token só vale se o siteverify da Cloudflare disser que o desafio foi resolvido num host do checkout
+  da loja do pedido (`hostname` da resposta): um token resolvido em outro site com a mesma chave de site, ou no
+  checkout de outra loja da plataforma, é recusado.
 
 **Limites conhecidos** (do desenho; aceitos):
 
@@ -160,26 +163,25 @@ Suspeita de invasão do `card` (ou do host): guarde os logs antes de qualquer co
    `card`; o `card` reinicia com ela).
 4. **Chave secreta do Turnstile** (`TURNSTILE_SECRET`): gere outra no painel da Cloudflare e troque no `.env`.
 5. **`ASAAS_SEAL_KEY`:** não há rotação automática (limitação conhecida). Com o `card` comprometido, a chave vazou junto
-   com acesso de leitura às conexões; o que protege as lojas é o item 1. Para trocá-la mesmo assim: desligue o
-   isolamento (`CARD_ISOLATED=0`, `docker compose up -d`), rode `docker compose exec app asaas-unseal` (volta tudo
-   para `v1`, com o `SECRET`), troque a `ASAAS_SEAL_KEY` no `.env` e ligue o isolamento de novo: no boot, o app re-sela
-   tudo com a chave nova.
+   com acesso de leitura às conexões; o que protege as lojas é o item 1. Para trocá-la mesmo assim:
+   `docker compose stop card`, `docker compose exec app asaas-unseal` (volta tudo para `v1`, com o `SECRET`; a saída
+   vai para o terminal), troque a `ASAAS_SEAL_KEY` no `.env` e `docker compose up -d`: no boot, o app re-sela tudo com
+   a chave nova e o `card` volta com ela. Entre a CLI e a subida, o cartão responde "indisponível" (sem cobrança).
 
 **Avisos operacionais:**
 
-- **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois que o app re-selou as conexões (primeira subida com
-  `CARD_ISOLATED=1`). O app e o `card` recusam subir com "ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão
+- **A `ASAAS_SEAL_KEY` não pode mudar nem sumir** depois que o app re-selou as conexões (primeira subida com ela). O app e o `card` recusam subir com "ASAAS_SEAL_KEY ausente ou diferente da que selou a conexão
   Asaas de N loja(s); restaure a chave correta". Guarde-a com o `SECRET`, fora dos backups. (Troca planejada: item 5
   acima.)
-- **A `ASAAS_SEAL_KEY` só tem efeito com `CARD_ISOLATED=1`.** Com `CARD_ISOLATED=0` o app grava a chave do Asaas com
-  o `SECRET` (`v1`), mesmo com a `ASAAS_SEAL_KEY` presente; só com `CARD_ISOLATED=1` ela passa a ser cifrada com a
-  chave própria (`a1`) e a re-selagem roda. O `card` não abre `v1`: o boot dele registra quantas conexões ainda estão
-  assim, e o pagamento dessas lojas responde "indisponível" (sem cobrança).
-- **Rollback:** voltar para `CARD_ISOLATED=0` na mesma versão é seguro (o app ainda abre `a1` com a chave). Voltar
-  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback:
-  desligue o isolamento na versão atual, rode a CLI `asaas-unseal` (`docker compose exec app asaas-unseal`; regrava
-  `a1` em `v1` com o `SECRET`, loja a loja, idempotente, só contagens no log) e só então volte a imagem.
-  Desligando de vez: `alter role card nologin` (`docs/instalacao.md`, seção 12).
+- **Com a `ASAAS_SEAL_KEY` definida**, o app grava a chave do Asaas cifrada com ela (`a1`) e, a cada início, re-sela
+  as que ainda estão com o `SECRET` (`v1`). O `card` não abre `v1`: o boot dele registra quantas conexões ainda estão
+  assim, e o pagamento dessas lojas responde "indisponível" (sem cobrança) até o próximo início do app.
+- **Rollback:** voltar para a versão anterior desta (com `CARD_ISOLATED`) é seguro: ela abre `a1` com a chave. Voltar
+  para uma **imagem anterior ao isolamento** trava o Asaas das lojas re-seladas (ela não conhece `a1`). Rollback: com o
+  app desta versão no ar, rode a CLI `asaas-unseal` (`docker compose exec app asaas-unseal`; regrava `a1` em `v1` com o
+  `SECRET`, loja a loja, idempotente, só contagens, no terminal de quem roda) e troque a imagem logo em seguida (esta
+  versão re-sela tudo em `a1` a cada início). Parando de vender com cartão de vez: `alter role card nologin`
+  (`docs/instalacao.md`, seção 12).
 - **Logs do `card` (10.5.1, guardar 12 meses):** o driver de log padrão do Docker apaga os logs quando o container é
   recriado (`docker compose up -d --build` numa atualização, `docker compose rm`). Configure um driver persistente no
   Docker do host (por exemplo, `journald` no `/etc/docker/daemon.json`, com o journal guardado por 12 meses) ou envie
@@ -203,7 +205,7 @@ semana** em produção. Para cada loja, ele busca no próprio domínio da loja o
 - o inventário de scripts do HTML: só `/_next/static/*` do próprio domínio, `https://connect.facebook.net` e (com
   Turnstile) `https://challenges.cloudflare.com`; todo script inline com o nonce daquela resposta.
 
-Com o cartão isolado (`CARD_ISOLATED=1`), confere também a página do iframe de cada loja, `CARD_ORIGIN/form/<loja>`
+Com o serviço de cartão configurado (`CARD_ORIGIN`), confere também a página do iframe de cada loja, `CARD_ORIGIN/form/<loja>`
 (página `/form`):
 
 - o cabeçalho `Content-Security-Policy` é exatamente o de `cardFormCsp` (`src/card-service/page.ts`), com o
@@ -224,7 +226,7 @@ Com o cartão isolado (`CARD_ISOLATED=1`), confere também a página do iframe d
 O resultado (um hash do cabeçalho normalizado e do inventário, e os códigos de problema) fica em `page_check`. Quando
 muda, o vendedor recebe um aviso no painel e por e-mail (`monitor_pagina_pagamento`, com a página, `/c`, `/o` ou
 `/form`, e o código: `csp_ausente`, `csp_diferente`, `script_nao_autorizado`, `script_sem_nonce`, `script_inline` ou
-`inventario_mudou`). Ligar o isolamento muda a política do checkout (entra o `frame-src`): o aviso de `/c` sai uma vez. Uma atualização do
+`inventario_mudou`). Configurar o cartão (`CARD_ORIGIN`) muda a política do checkout (entra o `frame-src`): o aviso de `/c` sai uma vez. Uma atualização do
 sistema que mude a política ou os scripts também dispara o aviso uma vez: confira que a mudança veio da atualização.
 Página fora do ar ou resposta diferente de 200 só vai para o log (não é mudança de página). O servidor precisa
 conseguir acessar o próprio domínio público (o normal numa VPS); se não conseguir, o log mostra "página
@@ -243,7 +245,7 @@ img-src 'self' data: https://www.facebook.com
 frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'
 ```
 
-Os itens entre colchetes só entram com o Turnstile configurado (`TURNSTILE_SITE_KEY`). Com o cartão isolado, o
+Os itens entre colchetes só entram com o Turnstile configurado (`TURNSTILE_SITE_KEY`). Com o cartão configurado, o
 `frame-src` ganha também o `CARD_ORIGIN` (o checkout embute o iframe). Em `next dev` entra também
 `'unsafe-eval'` (o React usa eval para as pilhas de erro; nunca em produção). O smoke E2E reprova qualquer violação
 de CSP no console nas páginas do comprador e confere o cabeçalho (nonce diferente a cada requisição; painel sem CSP de
@@ -259,7 +261,9 @@ base-uri 'none'; form-action 'none'; frame-ancestors <origens do checkout da loj
 
 Nenhum código de terceiro roda no documento dos campos do cartão: o Turnstile, quando a loja usa, aparece no checkout
 (página do app, que já o libera na CSP acima) e o token vai ao iframe na mensagem `pay`; o iframe o repassa no corpo
-do `POST /api/card` e o `card` o confere na Cloudflare.
+do `POST /api/card` e o `card` o confere na Cloudflare (inclusive o host em que o desafio foi resolvido). A cor da loja
+chega ao iframe na mensagem `config` (só `#rrggbb`) e vira variável CSS pelo CSSOM (`style.setProperty`), que a
+`style-src 'self'` permite; atributo `style` e `<style>` inline continuam bloqueados.
 
 ## Inventário de scripts da página de pagamento
 
@@ -269,7 +273,7 @@ do `POST /api/card` e o `card` o confere na Cloudflare.
 | Scripts inline do Next (dados do RSC, `self.__next_f`) | própria, inline | sempre | hidratação das páginas | só executam com o nonce da requisição |
 | Meta Pixel `fbevents.js` (e a configuração do pixel que ele busca) | `https://connect.facebook.net` | só com Pixel configurado (oferta ou loja) | medir anúncios (spec 7.8: InitiateCheckout, AddPaymentInfo, Purchase; deduplicado com a API de Conversões) | `fbq('set','autoConfig',false,<pixel>)` antes do `init` (desliga a configuração automática de eventos: cliques em botões e metadados da página); a correspondência avançada automática (leitura de e-mail/telefone digitados) NÃO é coberta pelo autoConfig e fica desligada no Gerenciador de Eventos (seção abaixo); eventos só com `currency`, `value` e `payment_type` (tipados como valores simples em `src/lib/tracking/fbq.ts`); nenhum dado do formulário; carregado por código próprio (`src/lib/tracking/fbq.ts`), sem HTML inline |
 | Cloudflare Turnstile `api.js` | `https://challenges.cloudflare.com` | só se configurado E a API do cartão pedir o desafio (muitas tentativas); sempre no checkout (`/c`), também com o cartão isolado, nunca na página do iframe | antifraude de teste de cartões | o desafio roda em iframe da Cloudflare; script e frame só dessa origem; com o cartão isolado, o token vai ao iframe no `pay` |
-| Formulário do cartão `form.js` (página do iframe, cartão isolado) | domínio do cartão (`CARD_ORIGIN`, `'self'` do iframe) | com `CARD_ISOLATED=1`, na página `/form/<loja>` | campos do cartão e envio ao `POST /api/card` do mesmo domínio | o **único** script da página do iframe; build do próprio projeto (`bun run card:build`), servido só pelo container `card`; único `fetch` relativo (`/api/card`) |
+| Formulário do cartão `form.js` (página do iframe, cartão isolado) | domínio do cartão (`CARD_ORIGIN`, `'self'` do iframe) | com `CARD_ORIGIN`, na página `/form/<loja>` | campos do cartão e envio ao `POST /api/card` do mesmo domínio | o **único** script da página do iframe; build do próprio projeto (`bun run card:build`), servido só pelo container `card`; único `fetch` relativo (`/api/card`) |
 
 Não há outros scripts de terceiros. `public/t.js` NÃO roda nestas páginas: ele é embutido pelo vendedor na página de
 vendas externa. O painel (`/admin`) e o download (`/d/<token>`) não carregam o Pixel nem terceiros (o download tem CSP
