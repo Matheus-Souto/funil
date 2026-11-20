@@ -199,7 +199,8 @@ describe("conexão Resend", () => {
   const support: Actor = { kind: "user", userId: "u2", role: "support" };
   const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
   const API_KEY = "re_AbCdEfGh_1234";
-  const WHSEC = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+  // Montado em tempo de execução: um literal no formato whsec_ dispara a varredura de segredos do GitHub.
+  const WHSEC = `whsec_${Buffer.from("segredo-de-teste-do-webhook").toString("base64")}`;
   const INPUT = { fromEmail: "Vendas@Loja.com", fromName: "  Loja Kids  ", apiKey: API_KEY, webhookSecret: WHSEC };
   const SMTP_CONFIG = { host: "smtp.loja.com", port: 587, secure: false, user: null, from: "vendas@loja.com" };
   const providerOf = async (storeId: string) => (await t.ownerDb.select({ p: store.emailProvider }).from(store).where(eq(store.id, storeId)))[0]!.p;

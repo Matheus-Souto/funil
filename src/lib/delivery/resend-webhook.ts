@@ -1,4 +1,5 @@
 // Webhook de status do Resend (assinado no padrão Svix): grava entregue/devolvido/spam no `email_log` da loja.
+import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction, runAction } from "@/lib/actions/core";
@@ -11,8 +12,11 @@ import { verifySvix } from "./svix";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUS = { "email.delivered": "delivered", "email.bounced": "bounced", "email.complained": "complained" } as const;
 type EventType = keyof typeof STATUS;
-/** Segredo de mentira: sem conexão/segredo a loja ainda gasta um HMAC (não vaza por tempo qual caso ocorreu). */
-const DECOY_SECRET = "whsec_ZGVjb3ktc2VjcmV0LW5vLXN0b3Jl";
+/**
+ * Segredo de mentira: sem conexão/segredo a loja ainda gasta um HMAC (não vaza por tempo qual caso ocorreu). Gerado por
+ * processo: um literal no formato whsec_ dispara a varredura de segredos do GitHub.
+ */
+const DECOY_SECRET = `whsec_${randomBytes(24).toString("base64")}`;
 
 const eventBody = z.object({
   type: z.string(),
