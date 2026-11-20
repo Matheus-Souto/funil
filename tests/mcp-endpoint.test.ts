@@ -436,10 +436,8 @@ describe("limites", () => {
     const s = await seedPanelStore();
     const tok = await mkToken(s.storeId, "reader");
     const other = await mkToken(s.storeId, "reader");
-    for (let i = 0; i < 120; i++) {
-      const res = await handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE);
-      if (res.status !== 200) throw new Error(`requisição ${i + 1}: ${res.status}`);
-    }
+    // Em ondas de 2 (o máximo de simultâneas por token): metade das idas e voltas de 120 em série.
+    await inWaves(120, 2, 200, () => handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE));
     const limited = await handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE);
     expect(limited.status).toBe(429);
     expect(limited.headers.get(WAIT_HEADER)).toBe("60");
