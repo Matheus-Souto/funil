@@ -1,3 +1,5 @@
+import type { ActionErrorCode } from "@/lib/actions/core";
+
 /**
  * Lê o corpo da requisição em streaming com teto de bytes; `null` se passar do limite (declarado ou real).
  * Ao passar do limite cancela o stream: nunca guarda mais que `maxBytes` mais um pedaço.
@@ -27,3 +29,14 @@ export async function readCapped(req: Request, maxBytes: number): Promise<string
   const bytes = await readBytesCapped(req, maxBytes);
   return bytes === null ? null : Buffer.from(bytes).toString("utf8");
 }
+
+/** Código do ActionError → status HTTP das rotas de upload de PDF (painel e link do MCP). */
+export const UPLOAD_ERROR_STATUS: Record<ActionErrorCode, number> = {
+  invalid_input: 400,
+  forbidden: 403,
+  not_found: 404,
+  conflict: 409,
+  approval_required: 403,
+  provider_error: 502,
+  rate_limited: 429,
+};

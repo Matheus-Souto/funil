@@ -69,7 +69,7 @@ describe("classificação", () => {
       expect(names.has(name)).toBe(true);
       expect(reason.length).toBeGreaterThan(5);
     }
-    expect(Object.keys(MCP_EXCLUDED).sort()).toEqual(["approvals.request", "orders.export", "products.create"]);
+    expect(Object.keys(MCP_EXCLUDED).sort()).toEqual(["approvals.request", "orders.export", "products.completeUpload", "products.create"]);
   });
 
   // Escritas diretas (não sensíveis) que o MCP expõe; qualquer outra escrita nova precisa ser decidida aqui.
@@ -79,6 +79,7 @@ describe("classificação", () => {
     "connections_testSmtp",
     "connections_testTelegram",
     "orders_resend",
+    "products_createUploadLink",
     "products_update",
   ];
   const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read", "approvals.request"];

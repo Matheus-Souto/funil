@@ -21,6 +21,7 @@ export const TOKEN_ROLE_LABEL: Record<Role, string> = { reader: "Leitor", traffi
 export const MCP_EXCLUDED: Record<string, string> = {
   "orders.export": "CSV com dados do comprador",
   "products.create": "recebe o arquivo; use products_createUploadLink",
+  "products.completeUpload": "chamada pela URL de upload",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
 };
 

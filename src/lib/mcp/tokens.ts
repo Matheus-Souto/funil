@@ -22,7 +22,7 @@ export function mintMcpToken(storeId: string): { token: string; hash: string; la
 }
 
 /** 32 hex → UUID com hífens (8-4-4-4-12). */
-const toUuid = (h: string) => `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+export const toUuid = (h: string) => `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 
 /**
  * Loja, token e papel do token, ou `null` (formato inválido, loja inexistente, hash desconhecido ou revogado: o

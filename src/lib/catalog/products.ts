@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, defineAction } from "@/lib/actions/core";
+import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { offer, offerProduct, product } from "@/lib/db/schema";
 import { sha256Bytes } from "@/lib/crypto";
 import type { PdfInspection } from "@/lib/pdf/core";
@@ -39,12 +39,14 @@ export async function checkPdfBytes(bytes: Uint8Array): Promise<string | null> {
   return null;
 }
 
-const pdfBytes = z.instanceof(Uint8Array);
+export const pdfBytes = z.instanceof(Uint8Array);
 
 const fileKeyFor = (storeId: string, productId: string) => `products/${storeId}/${productId}.pdf`;
 
 const name = z.string().trim().min(1).max(200);
 const fileName = z.string().trim().min(1).max(200);
+/** Regras do nome do produto e do nome do arquivo (o link de upload do MCP valida igual a `products.create`). */
+export { name as productName, fileName as productFileName };
 const id = z.uuid();
 
 const view = {
@@ -55,6 +57,45 @@ const view = {
   createdAt: product.createdAt,
 };
 
+/**
+ * Validação do PDF de um produto novo, no `prepare` da ação (CPU, antes de abrir a transação): problema no arquivo vira
+ * `invalid_input` com a mensagem de `checkPdfBytes`; fila do Worker cheia vira `rate_limited`.
+ */
+export async function assertProductPdf(bytes: Uint8Array): Promise<void> {
+  let problem: string | null;
+  try {
+    problem = await checkPdfBytes(bytes);
+  } catch (e) {
+    if (e instanceof PdfBusyError) throw new ActionError("rate_limited", "Outro PDF está sendo processado agora. Tente de novo em instantes.");
+    throw e;
+  }
+  if (problem) throw new ActionError("invalid_input", problem);
+}
+
+/** Linha do produto novo (na transação da ação). O arquivo vai depois, com `putProductFile`, como último passo. */
+export async function insertProductRow(ctx: Ctx, p: { name: string; fileName: string; bytes: Uint8Array }) {
+  const productId = randomUUID();
+  const [row] = await ctx.tx
+    .insert(product)
+    .values({
+      id: productId,
+      storeId: ctx.storeId,
+      name: p.name,
+      fileKey: fileKeyFor(ctx.storeId, productId),
+      fileName: p.fileName,
+      fileSize: p.bytes.length,
+      fileSha256: sha256Bytes(p.bytes),
+    })
+    .returning(view);
+  return row!;
+}
+
+/** Grava o PDF do produto. Último passo de `run`: se a gravação falhar, a exceção desfaz a transação. */
+export const putProductFile = (storeId: string, productId: string, bytes: Uint8Array) => storage.put(fileKeyFor(storeId, productId), bytes);
+
+/** Remove o PDF órfão (compensação: falha depois do put, na auditoria ou no commit). */
+export const removeProductFile = (storeId: string, productId: string) => storage.delete(fileKeyFor(storeId, productId));
+
 export const createProduct = defineAction({
   name: "products.create",
   description: "Cria um produto digital a partir de um PDF (bytes; chega pela rota de upload autenticada).",
@@ -63,30 +104,13 @@ export const createProduct = defineAction({
   // O arquivo nunca vai para a auditoria: só nome, nome do arquivo e tamanho.
   auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: i.file.length }),
   // Validação do PDF (CPU) antes de abrir a transação.
-  async prepare(_call, input) {
-    let problem: string | null;
-    try {
-      problem = await checkPdfBytes(input.file);
-    } catch (e) {
-      if (e instanceof PdfBusyError) throw new ActionError("rate_limited", "Outro PDF está sendo processado agora. Tente de novo em instantes.");
-      throw e;
-    }
-    if (problem) throw new ActionError("invalid_input", problem);
-  },
+  prepare: (_call, input) => assertProductPdf(input.file),
   async run(ctx, input) {
-    const bytes = input.file;
-    const productId = randomUUID();
-    const fileKey = fileKeyFor(ctx.storeId, productId);
-    const [row] = await ctx.tx
-      .insert(product)
-      .values({ id: productId, storeId: ctx.storeId, name: input.name, fileKey, fileName: input.fileName, fileSize: bytes.length, fileSha256: sha256Bytes(bytes) })
-      .returning(view);
-    // Último passo: se a gravação falhar, a exceção desfaz a transação.
-    await storage.put(fileKey, bytes);
-    return row!;
+    const row = await insertProductRow(ctx, { name: input.name, fileName: input.fileName, bytes: input.file });
+    await putProductFile(ctx.storeId, row.id, input.file);
+    return row;
   },
-  // Falha depois do put (auditoria ou commit): remove o arquivo órfão.
-  compensate: (call, _input, out) => storage.delete(fileKeyFor(call.storeId, out.id)),
+  compensate: (call, _input, out) => removeProductFile(call.storeId, out.id),
 });
 
 export const updateProduct = defineAction({

@@ -13,6 +13,7 @@ import "@/lib/delivery/resend";
 import "@/lib/delivery/resend-webhook";
 import "@/lib/mcp/approvals";
 import "@/lib/mcp/tokens";
+import "@/lib/mcp/uploads";
 import "@/lib/metrics";
 import "@/lib/notify/telegram-connection";
 import "@/lib/orders/panel";

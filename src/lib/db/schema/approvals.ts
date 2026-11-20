@@ -66,5 +66,8 @@ export const uploadLink = pgTable(
   (t) => [
     check("upload_link_name_check", sql`char_length(${t.name}) between 1 and 200`),
     check("upload_link_file_name_check", sql`char_length(${t.fileName}) between 1 and 200`),
+    // Links abertos da loja (teto por loja) e links do token na última hora (teto por token).
+    index("upload_link_store_open_idx").on(t.storeId, t.expiresAt).where(sql`${t.usedAt} is null`),
+    index("upload_link_token_idx").on(t.tokenId, t.createdAt.desc()),
   ],
 );
