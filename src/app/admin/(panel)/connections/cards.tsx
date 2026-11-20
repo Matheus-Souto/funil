@@ -21,7 +21,7 @@ import {
 
 type Runner = ReturnType<typeof useActionRunner>;
 
-function Head({ icon, title, sub, on, onLabel }: { icon: PanelIconName; title: string; sub: string; on: boolean; onLabel?: string }) {
+function Head({ icon, title, sub, on, onLabel, warn = false }: { icon: PanelIconName; title: string; sub: string; on: boolean; onLabel?: string; warn?: boolean }) {
   return (
     <div className={s.connHead}>
       <span className={s.connIcon}>
@@ -31,7 +31,7 @@ function Head({ icon, title, sub, on, onLabel }: { icon: PanelIconName; title: s
         <h2>{title}</h2>
         <p>{sub}</p>
       </div>
-      <Badge tone={on ? "success" : "neutral"}>{on ? (onLabel ?? "Conectado") : "Não conectado"}</Badge>
+      <Badge tone={on ? (warn ? "warning" : "success") : "neutral"}>{on ? (onLabel ?? "Conectado") : "Não conectado"}</Badge>
     </div>
   );
 }
@@ -79,6 +79,10 @@ function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "
 
 type EmailProvider = "smtp" | "resend";
 const PROVIDER_LABEL: Record<EmailProvider, string> = { smtp: "SMTP", resend: "Resend" };
+
+/** Selo do cartão de e-mail: o ativo só fica verde quando consegue enviar; ativo inutilizável vira aviso. */
+const providerBadge = (active: boolean, usable: boolean) =>
+  active ? (usable ? { onLabel: "Ativo" } : { onLabel: "Ativo, com problema", warn: true }) : { onLabel: "Conectado" };
 
 /** Troca o provedor de e-mail ativo da loja. Só aparece para quem pode alterar conexões, com o provedor já configurado e ainda inativo. */
 function UseProvider({ provider }: { provider: EmailProvider }) {
@@ -384,11 +388,14 @@ export function SmtpCard({
   canWrite,
   defaultTo,
   active,
+  usable,
 }: {
   data: { host: string; port: number; secure: boolean; user: string | null; from: string; password: "configured" | null } | null;
   canWrite: boolean;
   defaultTo: string;
   active: boolean;
+  /** O provedor ativo consegue enviar (`connectionsStatus.emailUsable`). */
+  usable: boolean;
 }) {
   const [editing, setEditing] = useState(!data);
   const [f, setF] = useState({ host: data?.host ?? "", port: String(data?.port ?? 587), secure: data?.secure ?? false, user: data?.user ?? "", password: "", from: data?.from ?? "" });
@@ -398,7 +405,7 @@ export function SmtpCard({
   const test = useActionRunner();
   return (
     <section className={s.card} aria-label="E-mail (SMTP)" id="smtp">
-      <Head icon="mail" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" on={Boolean(data)} onLabel={active ? "Ativo" : "Conectado"} />
+      <Head icon="mail" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" on={Boolean(data)} {...providerBadge(active, usable)} />
       {editing && canWrite ? (
         <form
           className={s.stack}
@@ -534,12 +541,14 @@ export function SmtpCard({
 type ResendData = {
   fromEmail: string;
   fromName: string | null;
-  apiKey: { last4: string } | "unreadable" | null;
-  webhookSecret: { last4: string } | null;
+  /** `configured` para quem não tem connections.write (os finais só vão para quem pode alterar a conexão). */
+  apiKey: { last4: string } | "configured" | "unreadable" | null;
+  webhookSecret: { last4: string } | "configured" | null;
   webhookUrl: string;
 };
 
 const RESEND_EVENTS = "email.delivered, email.bounced e email.complained";
+const last4Of = (v: { last4: string } | "configured" | "unreadable" | null | undefined) => (typeof v === "object" && v !== null ? v.last4 : null);
 
 /** Cada loja usa a própria conta do Resend. Chave e segredo do webhook nunca voltam do servidor: só os 4 últimos caracteres. */
 export function ResendCard({
@@ -548,12 +557,15 @@ export function ResendCard({
   defaultTo,
   storeName,
   active,
+  usable,
 }: {
   data: ResendData | null;
   canWrite: boolean;
   defaultTo: string;
   storeName: string;
   active: boolean;
+  /** O provedor ativo consegue enviar (`connectionsStatus.emailUsable`). */
+  usable: boolean;
 }) {
   const [editing, setEditing] = useState(!data);
   const [f, setF] = useState({ fromEmail: data?.fromEmail ?? "", fromName: data?.fromName ?? "", apiKey: "", webhookSecret: "" });
@@ -561,12 +573,12 @@ export function ResendCard({
   const [confirm, setConfirm] = useState(false);
   const run = useActionRunner();
   const test = useActionRunner();
-  const keyLast4 = data && data.apiKey !== "unreadable" ? (data.apiKey?.last4 ?? null) : null;
+  const keyLast4 = last4Of(data?.apiKey);
   const needsKey = !data || data.apiKey === null || data.apiKey === "unreadable";
   const keep = (last4: string | null) => (last4 ? `configurado (final ${last4}): deixe em branco para manter` : "");
   return (
     <section className={s.card} aria-label="E-mail (Resend)" id="resend">
-      <Head icon="mail" title="E-mail (Resend)" sub="Envia o acesso ao comprador e o aviso de venda pela sua conta do Resend" on={Boolean(data)} onLabel={active ? "Ativo" : "Conectado"} />
+      <Head icon="mail" title="E-mail (Resend)" sub="Envia o acesso ao comprador e o aviso de venda pela sua conta do Resend" on={Boolean(data)} {...providerBadge(active, usable)} />
       {editing && canWrite ? (
         <form
           className={s.stack}
@@ -607,7 +619,7 @@ export function ResendCard({
               type="password"
               autoComplete="new-password"
               value={f.webhookSecret}
-              placeholder={keep(data?.webhookSecret?.last4 ?? null) || "whsec_…"}
+              placeholder={keep(last4Of(data?.webhookSecret)) || "whsec_…"}
               onChange={(e) => setF({ ...f, webhookSecret: e.target.value })}
             />
             <span className={s.hint}>Opcional, mas sem ele o painel não recebe a entrega nem a devolução dos e-mails.</span>
@@ -627,9 +639,9 @@ export function ResendCard({
         <div className={s.rows} style={{ marginTop: 12 }}>
           <Row k="Remetente">{data.fromName ? `${data.fromName} <${data.fromEmail}>` : data.fromEmail}</Row>
           <Row k="Chave">
-            {data.apiKey === "unreadable" ? "ilegível: cole a chave de novo" : data.apiKey ? `final ${data.apiKey.last4}` : "—"}
+            {data.apiKey === "unreadable" ? "ilegível: cole a chave de novo" : data.apiKey === "configured" ? <Configured /> : data.apiKey ? `final ${data.apiKey.last4}` : "—"}
           </Row>
-          <Row k="Webhook">{data.webhookSecret ? `final ${data.webhookSecret.last4}` : "não configurado"}</Row>
+          <Row k="Webhook">{data.webhookSecret === "configured" ? <Configured /> : data.webhookSecret ? `final ${data.webhookSecret.last4}` : "não configurado"}</Row>
         </div>
       ) : (
         <p className={s.muted}>Ainda não configurado.</p>

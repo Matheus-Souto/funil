@@ -162,7 +162,7 @@ export async function testSmtpAction(to: string) {
 
 export async function saveResendAction(input: unknown) {
   const panel = await requirePanelActor();
-  return call(panel, saveResend, input, () => "Resend salvo.");
+  return call(panel, saveResend, input, (o) => (o.activated ? "Resend salvo e ativado." : "Resend salvo."));
 }
 
 export async function testResendAction(to: string) {

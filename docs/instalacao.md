@@ -219,8 +219,9 @@ Em vez do SMTP, a loja pode enviar pelo Resend. A plataforma não fornece Resend
 3. **Webhook (entrega e devolução):** em Webhooks no Resend, crie um webhook com os eventos `email.delivered`,
    `email.bounced` e `email.complained`, apontando para a URL mostrada no cartão do painel. Copie o segredo
    (`whsec_…`) e cole em `Segredo do webhook`.
-4. **Usar este provedor:** salvar não troca o envio. O botão **Usar este provedor** (no cartão do Resend ou do SMTP)
-   passa os e-mails de acesso e os avisos de venda a sair pelo provedor escolhido, um por vez.
+4. **Usar este provedor:** com o SMTP já conectado, salvar o Resend não troca o envio (numa loja sem SMTP, o Resend
+   já fica ativo ao salvar). O botão **Usar este provedor** (no cartão do Resend ou do SMTP) passa os e-mails de acesso
+   e os avisos de venda a sair pelo provedor escolhido: só um provedor fica ativo; o outro deixa de ser usado.
 
 ## 8. Meta (Pixel e API de Conversões)
 

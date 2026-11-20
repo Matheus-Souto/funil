@@ -2,13 +2,13 @@
 // logo sem SSRF. A chave vai SÓ no header `Authorization`; a mensagem de erro vem só do status HTTP (nunca do corpo da
 // resposta) e o log leva só o status. Nada aqui toca o banco nem roda dentro de transação.
 // Também guarda a conexão, a escolha do provedor ativo e o teste (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
-import { and, eq } from "drizzle-orm";
+import { and, eq, notExists } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
-import { IntegrationSecretUnreadable, getIntegration, saveIntegration } from "@/lib/integrations";
+import { IntegrationSecretUnreadable, getIntegration, readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
 import type { MailMessage } from "./mailer";
@@ -17,6 +17,8 @@ import { oneLine } from "./templates";
 const RESEND_URL = "https://api.resend.com/emails";
 const TIMEOUT_MS = 15_000;
 const MAX_NAME = 100;
+/** Maior id de mensagem aceito na resposta (cabe em `email_log.provider_message_id` e no `email_id` do webhook). */
+const MAX_ID = 100;
 
 export interface ResendSettings {
   apiKey: string;
@@ -93,6 +95,8 @@ export async function sendViaResend(
         text: msg.text,
       }),
       signal,
+      // Destino fixo: um redirecionamento levaria a chave (Authorization) a outro host.
+      redirect: "error",
     });
   } catch {
     // Nunca repassa o erro da rede (texto do runtime; pode trazer detalhes da requisição).
@@ -101,11 +105,13 @@ export async function sendViaResend(
     throw providerError(0);
   }
   if (!res.ok) {
+    // O corpo do erro nunca é lido (pode ecoar dados); só é descartado para liberar a conexão.
+    await res.body?.cancel().catch(() => {});
     log.warn("Resend recusou o envio", { status: res.status });
     throw providerError(res.status);
   }
   const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-  if (typeof body?.id !== "string" || !body.id) {
+  if (typeof body?.id !== "string" || !body.id || body.id.length > MAX_ID) {
     log.warn("Resend recusou o envio", { status: res.status });
     throw providerError(0);
   }
@@ -150,6 +156,11 @@ function parseSealed(secret: string | null): { apiKey: string; webhookSecret: st
 
 const last4 = (v: string | null) => (v ? v.slice(-4) : null);
 
+/** SMTP utilizável: os mesmos campos que `loadSmtp` exige (host, porta e remetente). */
+export function smtpConfigUsable(c: IntegrationConfig | undefined): boolean {
+  return typeof c?.host === "string" && c.host !== "" && typeof c.port === "number" && c.port > 0 && typeof c.from === "string" && c.from !== "";
+}
+
 export const saveResend = defineAction({
   name: "connections.saveResend",
   description: "Conecta o Resend da loja (remetente, chave de API e segredo do webhook): campo omitido mantém o valor guardado.",
@@ -174,6 +185,14 @@ export const saveResend = defineAction({
     const current = await loadResend(ctx.tx, ctx.storeId);
     const apiKey = input.apiKey ?? current?.apiKey;
     if (!apiKey) throw new ActionError("invalid_input", "Informe a chave de API do Resend.", [{ path: ["apiKey"], message: "Informe a chave de API do Resend." }]);
+    if (!current && !input.webhookSecret) {
+      // Segredo guardado que não abre (SECRET trocado): manter o webhook em silêncio o apagaria. Pede o segredo de novo.
+      const stored = await readIntegration(ctx.tx, ctx.storeId, "resend");
+      if (stored?.unreadable && stored.config.webhookSecretLast4 != null) {
+        const message = "O segredo guardado não pode ser lido: cole de novo o segredo do webhook (whsec_…).";
+        throw new ActionError("invalid_input", message, [{ path: ["webhookSecret"], message }]);
+      }
+    }
     const webhookSecret = input.webhookSecret ?? current?.webhookSecret ?? null;
     const config = {
       fromEmail: input.fromEmail,
@@ -182,7 +201,19 @@ export const saveResend = defineAction({
       webhookSecretLast4: last4(webhookSecret),
     };
     await saveIntegration(ctx.tx, ctx.storeId, "resend", config, JSON.stringify({ apiKey, webhookSecret }));
-    return config;
+    // Loja sem SMTP que ainda está no padrão (smtp): o Resend é o único provedor possível, então já fica ativo.
+    const activated = await ctx.tx
+      .update(store)
+      .set({ emailProvider: "resend" })
+      .where(
+        and(
+          eq(store.id, ctx.storeId),
+          eq(store.emailProvider, "smtp"),
+          notExists(ctx.tx.select({ kind: integration.kind }).from(integration).where(and(eq(integration.storeId, ctx.storeId), eq(integration.kind, "smtp")))),
+        ),
+      )
+      .returning({ id: store.id });
+    return { ...config, activated: activated.length > 0 };
   },
 });
 
@@ -193,8 +224,14 @@ export const setEmailProvider = defineAction({
   permission: "connections.write",
   sensitive: true,
   async run(ctx, { provider }) {
-    const [conn] = await ctx.tx.select({ kind: integration.kind }).from(integration).where(and(eq(integration.storeId, ctx.storeId), eq(integration.kind, provider)));
-    if (!conn) throw new ActionError("invalid_input", `Configure o ${provider === "smtp" ? "SMTP" : "Resend"} antes de ativá-lo.`, [{ path: ["provider"] }]);
+    const label = provider === "smtp" ? "SMTP" : "Resend";
+    // Só ativa conexão que o envio consegue usar (o botão escondido no painel não protege o MCP).
+    const conn = await readIntegration(ctx.tx, ctx.storeId, provider);
+    if (conn?.unreadable) {
+      throw new ActionError("invalid_input", `A conexão ${label} não pode ser lida: salve as credenciais de novo antes de ativá-la.`, [{ path: ["provider"] }]);
+    }
+    const usable = provider === "resend" ? conn !== null && (await loadResend(ctx.tx, ctx.storeId)) !== null : smtpConfigUsable(conn?.config);
+    if (!usable) throw new ActionError("invalid_input", `Configure o ${label} antes de ativá-lo.`, [{ path: ["provider"] }]);
     await ctx.tx.update(store).set({ emailProvider: provider }).where(eq(store.id, ctx.storeId));
     return { provider };
   },
