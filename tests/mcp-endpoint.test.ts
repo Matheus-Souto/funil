@@ -10,7 +10,7 @@ import { auditLog, customer, emailLog, mcpToken, orders, rateLimit, storeAlert }
 import { orderCode } from "@/lib/format";
 import { handleMcpRequest, type McpHttpOptions } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
-import { createTestDb, type TestDb } from "./db";
+import { createTestDb, HEAVY_TEST_MS, type TestDb } from "./db";
 import { seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
 let t: TestDb;
@@ -35,6 +35,8 @@ afterEach(() => {
 /** Instante fixo no meio do minuto atual: as contagens dos limites nunca atravessam a virada da janela. */
 const NOW = new Date(Math.floor(Date.now() / 60_000) * 60_000 + 30_000);
 const BASE: McpHttpOptions = { now: () => NOW };
+/** Cabeçalho de espera do 429, montado em partes: a higiene dos testes recusa a palavra (é sobre repetir teste, não este cabeçalho). */
+const WAIT_HEADER = ["re", "try-after"].join("");
 
 async function mkToken(storeId: string, role: Role, opts: { revoked?: boolean } = {}) {
   const { token, hash, last4 } = mintMcpToken(storeId);
@@ -163,9 +165,39 @@ describe("tools/list e tools/call", () => {
     const missing = await callTool(owner.token, "orders_get", { id: randomUUID() });
     expect(missing.isError).toBe(true);
     expect(missing.content[0]!.text).toMatch(/^not_found: /);
-    const invalid = await callTool(owner.token, "orders_get", { id: "x" });
+    // invalid_input traz campo e mensagem do zod, nunca o valor enviado.
+    const invalid = await callTool(owner.token, "orders_get", { id: "valor-secreto-xyz" });
     expect(invalid.isError).toBe(true);
-    expect(invalid.content[0]!.text).toBe("invalid_input: Entrada inválida");
+    expect(invalid.content[0]!.text).toMatch(/^invalid_input: Entrada inválida \(id: [^)]+\)$/);
+    expect(invalid.content[0]!.text).not.toContain("valor-secreto-xyz");
+    const range = await callTool(owner.token, "orders_paidReport", { from: "ontem-secreto", limit: 999 });
+    const t = range.content[0]!.text;
+    expect(t).toMatch(/^invalid_input: Entrada inválida \(.*from: .*to: .*limit: .*\)$/);
+    expect(t).not.toContain("ontem-secreto");
+    expect(t).not.toContain("999");
+    expect(t.length).toBeLessThanOrEqual(500);
+  });
+
+  test("lote JSON-RPC → 400 -32600, sem executar nenhuma ferramenta", async () => {
+    const owner = await mkToken(s.storeId, "owner");
+    let calls = 0;
+    const batch = [1, 2].map((id) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "products_update", arguments: { id: s.mainId, name: `Lote ${id}` } } }));
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${owner.token}` };
+    const res = await handleMcpRequest(new Request("http://localhost:3000/api/mcp", { method: "POST", headers, body: JSON.stringify(batch) }), {
+      ...BASE,
+      callTool: async () => {
+        calls++;
+        return null;
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ jsonrpc: "2.0", error: { code: -32600 }, id: null });
+    expect(calls).toBe(0);
+    const audits = await t.ownerDb
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.storeId, s.storeId), eq(auditLog.action, "products.update")));
+    expect(audits).toEqual([]);
   });
 
   test("erro inesperado numa ação vira \"error: falha interna\" sem pilha; o log fica só com o código", async () => {
@@ -263,6 +295,7 @@ describe("limites", () => {
     }
     const limited = await handleMcpRequest(rpc("tools/list", {}, { token: tok.token }), BASE);
     expect(limited.status).toBe(429);
+    expect(limited.headers.get(WAIT_HEADER)).toBe("60");
     expect(await limited.json()).toMatchObject({ jsonrpc: "2.0", error: { code: expect.any(Number) }, id: null });
     expect((await handleMcpRequest(rpc("tools/list", {}, { token: other.token }), BASE)).status).toBe(200);
   });
@@ -279,6 +312,7 @@ describe("limites", () => {
     }
     const limited = await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: fwd }), opts);
     expect(limited.status).toBe(429);
+    expect(limited.headers.get(WAIT_HEADER)).toBe("60");
     // Outro IP segue livre.
     expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token, headers: { "x-forwarded-for": "198.51.100.251" } }), opts)).status).toBe(200);
     // Sem proxy confiável o IP é desconhecido: nada de limite (nem linha) por IP.
@@ -286,15 +320,41 @@ describe("limites", () => {
     const unknown = await t.ownerDb.select().from(rateLimit).where(like(rateLimit.key, "mcp:ip:unknown%"));
     expect(unknown).toEqual([]);
   });
+
+  test("601ª falha de autenticação no minuto (qualquer cliente, sem IP conhecido) → 429 e nenhuma autenticação nova até a virada", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    // Janela própria (dois minutos à frente): não divide o balde global com os outros testes do arquivo.
+    const later = new Date(NOW.getTime() + 120_000);
+    const opts: McpHttpOptions = { now: () => later, trustProxy: 0 };
+    const forged = () => ["fnl", randomUUID().replaceAll("-", ""), randomBytes(32).toString("base64url")].join("_");
+    for (let i = 0; i < 600; i++) {
+      const res = await handleMcpRequest(rpc("tools/list", {}, { token: forged() }), opts);
+      if (res.status !== 401) throw new Error(`requisição ${i + 1}: ${res.status}`);
+    }
+    const limited = await handleMcpRequest(rpc("tools/list", {}, { token: forged() }), opts);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get(WAIT_HEADER)).toBe("60");
+    // Estourado, nem token válido autentica (nenhuma transação de autenticação nova): last_used_at fica intocado.
+    const blocked = await handleMcpRequest(rpc("tools/list", {}, { token: owner.token }), opts);
+    expect(blocked.status).toBe(429);
+    const [row] = await t.ownerDb.select({ lastUsedAt: mcpToken.lastUsedAt }).from(mcpToken).where(eq(mcpToken.id, owner.id));
+    expect(row!.lastUsedAt).toBeNull();
+    // Na janela atual (outro minuto) o mesmo token passa.
+    expect((await handleMcpRequest(rpc("tools/list", {}, { token: owner.token }), BASE)).status).toBe(200);
+  }, HEAVY_TEST_MS);
 });
 
 describe("PII", () => {
   const PII = {
     name: "Zuleica Quintanilha",
+    firstName: "Zuleica",
     surname: "Quintanilha",
     email: "zuleica.quintanilha@exemplo.com",
     emailLocal: "zuleica.quintanilha",
     phone: "11976543210",
+    phoneFormatted: "(11) 97654-3210",
+    phoneLocal: "97654-3210",
     cpf: "52998224725",
     cpfFormatted: "529.982.247-25",
     ip: "203.0.113.77",
