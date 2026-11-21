@@ -11,16 +11,36 @@ import styles from "./dialog.module.css";
 
 /** Mirrors the open state so the content can stay mounted while it animates out, and retarget mid-flight if it is reopened or closed early. */
 const OpenContext = createContext<boolean | null>(null);
-/** This dialog's close and the close of the dialog it was opened from (portals keep React context, so nesting is known). */
-const CloseContext = createContext<{ close: () => void; parentClose: (() => void) | null } | null>(null);
+/** One dialog in the nesting tree: its close, and the dialogs opened from it that are open right now (in opening order). */
+interface Nesting { close: () => void; openChildren: Set<Nesting> }
+/** This dialog and the dialog it was opened from (portals keep React context, so nesting is known). */
+const CloseContext = createContext<{ self: Nesting; parent: Nesting | null } | null>(null);
+
+/** The dialog on top of this one: its most recently opened open child, followed down to the last level. */
+function topmostChild(node: Nesting): Nesting | null {
+  let top: Nesting | null = null;
+  for (let next = [...node.openChildren].at(-1); next; next = [...next.openChildren].at(-1)) top = next;
+  return top;
+}
 
 export function Dialog({ open: openProp, defaultOpen = false, onOpenChange, ...props }: ComponentPropsWithoutRef<typeof DialogPrimitive.Root>) {
   const [uncontrolled, setUncontrolled] = useState(defaultOpen);
   const open = openProp ?? uncontrolled;
   const setOpen = useCallback((next: boolean) => { if (openProp === undefined) setUncontrolled(next); onOpenChange?.(next); }, [openProp, onOpenChange]);
+  const latest = useRef(setOpen);
+  useLayoutEffect(() => { latest.current = setOpen; }, [setOpen]);
+  const [self] = useState<Nesting>(() => ({ close: () => latest.current(false), openChildren: new Set() }));
   const outer = useContext(CloseContext);
-  const close = useMemo(() => ({ close: () => setOpen(false), parentClose: outer?.close ?? null }), [setOpen, outer]);
-  return <CloseContext.Provider value={close}><OpenContext.Provider value={open}><DialogPrimitive.Root {...props} open={open} onOpenChange={setOpen}/></OpenContext.Provider></CloseContext.Provider>;
+  const parent = outer?.self ?? null;
+  // Registered in a layout effect, so it is in place before the dialog paints. Radix only learns about a new layer in a
+  // passive effect, after paint: an Escape pressed in that gap goes to the dialog underneath, which must close this one.
+  useLayoutEffect(() => {
+    if (!open || !parent) return;
+    parent.openChildren.add(self);
+    return () => { parent.openChildren.delete(self); };
+  }, [open, parent, self]);
+  const nesting = useMemo(() => ({ self, parent }), [self, parent]);
+  return <CloseContext.Provider value={nesting}><OpenContext.Provider value={open}><DialogPrimitive.Root {...props} open={open} onOpenChange={setOpen}/></OpenContext.Provider></CloseContext.Provider>;
 }
 
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -46,12 +66,17 @@ function SwapText({ text }: { text: string }) {
 export function DialogContent({ title, description, children, className, onPointerDownOutside, onEscapeKeyDown, ...props }: DialogContentProps) {
   const open = useContext(OpenContext);
   const nesting = useContext(CloseContext);
-  // While this dialog animates out it is still the top layer, so Radix hands it the next Escape. That press is meant for
-  // the dialog underneath (a confirm closing on top of a form): pass it down instead of swallowing it. The leaving copy is
-  // frozen with the props of its last open render, so the current state is read through the ref below, not the closure.
   const escape: DialogContentProps["onEscapeKeyDown"] = event => {
     onEscapeKeyDown?.(event);
-    if (change.current.open === false) { event.preventDefault(); nesting?.parentClose?.(); }
+    if (event.defaultPrevented || !nesting) return;
+    // A dialog opened on top owns this press, even when Radix handed it here because the new layer is not registered yet.
+    const top = topmostChild(nesting.self);
+    if (top) { event.preventDefault(); top.close(); return; }
+    // While this dialog animates out it is still the top layer, so Radix hands it the next Escape. That press is meant for
+    // the dialog underneath (a confirm closing on top of a form): pass it down. Only when the exit began before this key:
+    // the press that closes the dialog must not close the one below too. The leaving copy is frozen with the props of its
+    // last open render, so the current state is read through the ref below, not the closure.
+    if (change.current.open === false && change.current.at < event.timeStamp) { event.preventDefault(); nesting.parent?.close(); }
   };
   const reduced = useReducedMotion();
   // When the open state last changed. Radix waits for the click before treating a press as outside, and a press on the trigger
