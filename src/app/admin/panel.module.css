@@ -2673,3 +2673,14 @@
 .legend span.legendIcon {
   flex: none;
 }
+
+.splitStretch {
+  align-items: stretch;
+}
+.funnelCard {
+  display: flex;
+  flex-direction: column;
+}
+.funnelCard .funnelStats {
+  margin-top: auto;
+}

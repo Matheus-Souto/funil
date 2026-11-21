@@ -137,14 +137,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           <Kpi layout="cell" art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
         </section>
 
-        <div className={s.splitWide}>
-          <section className={s.card}>
+        <div className={`${s.splitWide} ${s.splitStretch}`}>
+          <section className={`${s.card} ${s.funnelCard}`}>
             <div className={s.cardHead}>
               <h2>
                 <Art name="funil" size={28} className={s.cardArt} />
                 Conversão do checkout
               </h2>
-              <small>visitas → pedidos → pagos</small>
             </div>
             {m.views + m.orders + m.paid > 0 ? (
               <FunnelChart views={m.views} orders={m.orders} paid={m.paid} />
@@ -175,7 +174,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 <Art name="pagos" size={28} className={s.cardArt} />
                 Por método
               </h2>
-              <small>receita · pagos</small>
             </div>
             <DonutChart rows={methods.map((r) => ({ label: METHOD_LABEL[r.k], cents: r.revenueCents, paid: r.paid }))} />
             <ul className={s.legend}>
@@ -195,10 +193,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 </li>
               ))}
             </ul>
-            <p className={s.hint} style={{ marginTop: 14 }}>
-              Cartão: {plural(m.byMethod.card_asaas.paid, "pago", "pagos")} de {plural(m.byMethod.card_asaas.orders, "pedido", "pedidos")} (
-              {pct(m.byMethod.card_asaas.paid, m.byMethod.card_asaas.orders)}).
-            </p>
           </section>
         </div>
 
@@ -209,7 +203,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 <Art name="receita" size={28} className={s.cardArt} />
                 Receita por dia
               </h2>
-              <small>R$</small>
             </div>
             {period === "hoje" ? (
               <p className={s.chartEmpty}>
@@ -228,9 +221,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 <Art name="origem" size={28} className={s.cardArt} />
                 Por origem
               </h2>
-              <small>utm_source · pagos</small>
             </div>
-            {m.bySource.length ? <RankChart mono rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
+            {m.bySource.length ? <RankChart kind="source" rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
           </section>
           <section className={s.card}>
             <div className={s.cardHead}>
@@ -238,12 +230,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 <Art name="indicacao" size={28} className={s.cardArt} />
                 Por indicação
               </h2>
-              <small>?ref= · pagos</small>
             </div>
-            {m.byRef.length ? <RankChart mono rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
-            <p className={s.hint} style={{ marginTop: 14 }}>
-              {plural(m.paid - m.byRef.reduce((a, r) => a + r.paid, 0), "venda", "vendas")} sem indicação.
-            </p>
+            {m.byRef.length ? <RankChart kind="ref" rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
           </section>
         </div>
       </div>

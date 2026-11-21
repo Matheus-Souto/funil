@@ -25,6 +25,9 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | lucide-react (ícones do painel) | 1.77.0 | ISC |
 | @radix-ui/react-tooltip, -dialog, -dropdown-menu | 1.x | MIT |
 
+Logos das plataformas no gráfico "Por origem" (`src/app/admin/brand-icons.ts`): caminhos SVG do Simple Icons 16.38.0,
+CC0-1.0 (https://simpleicons.org). As marcas pertencem aos donos; aparecem só para identificar a origem do tráfego.
+
 Componentes copiados para `src/components/arc` (Arc, https://uiarc.dev, só a parte grátis): MIT, Copyright (c) Elia
 Kuratli. Itens Arc Pro não entram neste repositório (a licença deles proíbe redistribuir).
 
