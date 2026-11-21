@@ -11,6 +11,7 @@ import {
   Clock,
   CreditCard,
   ListFilter,
+  MessageCircleCheck,
   Maximize2,
   Minimize2,
   QrCode,
@@ -29,6 +30,9 @@ import s from "./panel.module.css";
 const OPTION_ICONS: Record<string, LucideIcon> = {
   "em-uso": CircleCheck,
   "sem-oferta": CircleMinus,
+  "lead-open": Clock,
+  "lead-contacted": MessageCircleCheck,
+  "lead-converted": CircleCheck,
   pending: Clock,
   paid: CircleCheck,
   expired: TimerOff,
