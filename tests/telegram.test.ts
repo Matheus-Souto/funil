@@ -1063,6 +1063,16 @@ describe("abandono antes do pagamento no Telegram", () => {
     expect((await leadRowOf(offLead.id))!.notifiedAt).toBeNull();
   });
 
+  test("contato vencido (expires_at no passado, ainda não varrido): não envia, não marca e o log diz \"vencido\"", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const lead = await leadNotice(shop, { expiresAt: new Date(Date.now() - 60_000) });
+    const calls = fakeTg(okFor);
+    await runLeadJob(shop, lead.id);
+    expect(calls).toHaveLength(0);
+    expect((await leadRowOf(lead.id))!.notifiedAt).toBeNull();
+    expect(out).toContain("vencido");
+  });
+
   test("loja sem conexão do Telegram: não envia", async () => {
     const bare = await seedShop({ telegram: false });
     const lead = await leadNotice(bare);

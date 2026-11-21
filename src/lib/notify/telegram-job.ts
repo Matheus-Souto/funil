@@ -165,7 +165,7 @@ async function prepareOrder(storeId: string, event: OrderEvent, orderId: string,
 }
 
 /**
- * Decide, para um contato do checkout, se o aviso sai. Ordem: existência, estado, marca, conexão, flag, prazo e e-mail
+ * Decide, para um contato do checkout, se o aviso sai. Ordem: existência, validade (30 dias), estado, marca, conexão, flag, prazo e e-mail
  * repetido; o teto por hora vem POR ÚLTIMO, para só contar o que de fato vai sair (um contato pulado por qualquer outra
  * regra não gasta o teto). Valor = preço atual da oferta; nome = mesmo critério do aviso de pedido (mais de um produto
  * principal -> o nome da oferta). Nada do contato (e-mail, celular) entra no texto nem no log.
@@ -173,10 +173,20 @@ async function prepareOrder(storeId: string, event: OrderEvent, orderId: string,
 async function prepareLead(storeId: string, leadId: string, afterMinutes: number): Promise<Prepared> {
   return withStore(storeId, async (tx) => {
     const [l] = await tx
-      .select({ id: checkoutLead.id, status: checkoutLead.status, notifiedAt: checkoutLead.notifiedAt, createdAt: checkoutLead.createdAt, emailHash: checkoutLead.emailHash, offerId: checkoutLead.offerId })
+      .select({
+        id: checkoutLead.id,
+        status: checkoutLead.status,
+        notifiedAt: checkoutLead.notifiedAt,
+        createdAt: checkoutLead.createdAt,
+        emailHash: checkoutLead.emailHash,
+        offerId: checkoutLead.offerId,
+        expired: sql<boolean>`${checkoutLead.expiresAt} <= now()`,
+      })
       .from(checkoutLead)
       .where(eq(checkoutLead.id, leadId));
     if (!l) return { skip: "contato_inexistente" };
+    // Passou dos 30 dias e a varredura ainda não apagou: não avisa.
+    if (l.expired) return { skip: "vencido" };
     if (l.status !== "open") return { skip: `contato_${l.status}` };
     if (l.notifiedAt) return { skip: "ja_enviado" };
     const conn = await loadTelegram(tx, storeId);

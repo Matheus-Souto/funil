@@ -514,6 +514,16 @@ describe("leads.list", () => {
     expect((await runAction(listLeads, panelCall(outra.storeId), { q: leadCode(a.id) })).total).toBe(0);
   });
 
+  test("contato vencido (expires_at no passado, ainda não varrido) não aparece na lista nem no total, nem na busca", async () => {
+    const s = await seedCapture();
+    const live = await insertLead(s);
+    const expired = await insertLead(s, { expiresAt: new Date(Date.now() - 60_000) });
+    const out = await runAction(listLeads, panelCall(s.storeId), {});
+    expect([out.total, out.items.map((i) => i.id)]).toEqual([1, [live.id]]);
+    expect((await runAction(listLeads, panelCall(s.storeId), { q: expired.email! })).total).toBe(0);
+    expect((await runAction(listLeads, panelCall(s.storeId), { q: leadCode(expired.id) })).total).toBe(0);
+  });
+
   test("busca por e-mail respeita o filtro de status", async () => {
     const s = await seedCapture();
     const a = await insertLead(s, { status: "contacted" });
@@ -534,6 +544,13 @@ describe("leads.markContacted, leads.delete e leads.forgetEmail", () => {
     expect(await code(runAction(markLeadContacted, panelCall(s.storeId), { id: randomUUID() }))).toBe("not_found");
     const outra = await seedCapture();
     expect(await code(runAction(markLeadContacted, panelCall(outra.storeId), { id: a.id }))).toBe("not_found");
+  });
+
+  test("markContacted de contato vencido → not_found e nada muda", async () => {
+    const s = await seedCapture();
+    const expired = await insertLead(s, { expiresAt: new Date(Date.now() - 60_000) });
+    expect(await code(runAction(markLeadContacted, panelCall(s.storeId), { id: expired.id }))).toBe("not_found");
+    expect((await rowsOf(s.storeId))[0]).toMatchObject({ id: expired.id, status: "open" });
   });
 
   test("delete apaga só o contato pedido; de outra loja ou inexistente → not_found", async () => {
@@ -628,6 +645,15 @@ describe("sweep_leads", () => {
     await expect(quebra({} as never, new AbortController().signal)).rejects.toThrow(/sweep_leads falhou em 1 loja/);
     expect(await leftIds(a.storeId)).toEqual(new Set([a1.id]));
     expect((await leftIds(b.storeId)).has(b1.id)).toBe(false);
+  });
+
+  test("cadência: de hora em hora (como o sweep_mcp), e o primeiro já ao subir o worker", async () => {
+    const { SWEEP_LEADS_EVERY_MS, SWEEP_MCP_EVERY_MS, sweepLeadsRunAt } = await import("@/lib/jobs/worker");
+    expect(SWEEP_LEADS_EVERY_MS).toBe(60 * 60 * 1000);
+    expect(SWEEP_LEADS_EVERY_MS).toBe(SWEEP_MCP_EVERY_MS);
+    const now = Date.UTC(2026, 10, 21, 12, 0, 0);
+    expect(sweepLeadsRunAt(true, now).getTime()).toBe(now);
+    expect(sweepLeadsRunAt(false, now).getTime()).toBe(now + SWEEP_LEADS_EVERY_MS);
   });
 
   test("o tipo sweep_leads está registrado no worker", async () => {

@@ -3,9 +3,10 @@
 //   (6 hex, qualquer caixa) ou o e-mail exato (normalizado, comparado pelo `email_hash`: nunca busca parcial em e-mail).
 //   O contato convertido mostra o código do pedido como o painel já o mostra e não tem e-mail nem celular.
 // - `leads.markContacted`, `leads.delete` e `leads.forgetEmail`: a auditoria grava só `{ leadId }` ou `{ emailHash }`.
-// - `sweepLeadsJob`: a retenção de 30 dias (`expires_at`), loja a loja.
+// - `sweepLeadsJob`: a retenção de 30 dias (`expires_at`), loja a loja, de hora em hora. Entre uma varredura e outra, o
+//   contato vencido já não aparece na lista nem pode ser marcado como contatado.
 import { createHash } from "node:crypto";
-import { and, count, desc, eq, lt, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gt, lt, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { db, withStore } from "@/lib/db/client";
@@ -22,11 +23,14 @@ const CODE_FORMAT = /^[0-9a-f]{6}$/i;
 const leadStatus = z.enum(["open", "contacted", "converted"]);
 const id = z.object({ id: z.uuid() });
 
+/** Ainda dentro dos 30 dias: vencido e não varrido ainda (a varredura é de hora em hora) não aparece nem muda. */
+const notExpired = () => gt(checkoutLead.expiresAt, sql`now()`);
+
 /** Mesmo cálculo de `leadCode`, no banco: 6 primeiros hex do UUID sem hífen, minúsculos. */
 const codeSql = sql`left(replace(${checkoutLead.id}::text, '-', ''), 6)`;
 
 function where(input: { status?: z.infer<typeof leadStatus>; q?: string }): SQL | undefined {
-  const parts: (SQL | undefined)[] = [];
+  const parts: (SQL | undefined)[] = [notExpired()];
   if (input.status) parts.push(eq(checkoutLead.status, input.status));
   if (input.q) {
     parts.push(CODE_FORMAT.test(input.q) ? sql`${codeSql} = ${input.q.toLowerCase()}` : eq(checkoutLead.emailHash, sha256(input.q.toLowerCase())));
@@ -85,7 +89,7 @@ export const markLeadContacted = defineAction({
   permission: "leads.write",
   auditInput: (i) => ({ leadId: i.id }),
   async run(ctx, { id: leadId }) {
-    const [row] = await ctx.tx.select({ status: checkoutLead.status }).from(checkoutLead).where(eq(checkoutLead.id, leadId)).for("update");
+    const [row] = await ctx.tx.select({ status: checkoutLead.status }).from(checkoutLead).where(and(eq(checkoutLead.id, leadId), notExpired())).for("update");
     if (!row) throw new ActionError("not_found", "Contato não encontrado");
     if (row.status === "converted") throw new ActionError("conflict", "Este contato já virou pedido");
     if (row.status === "open") await ctx.tx.update(checkoutLead).set({ status: "contacted", updatedAt: new Date() }).where(eq(checkoutLead.id, leadId));

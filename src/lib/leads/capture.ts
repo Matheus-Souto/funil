@@ -25,7 +25,7 @@ import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { checkRateLimit, ipRateKey } from "@/lib/payments/ratelimit";
 import { normalizeBrMobile, validEmail } from "@/lib/validation/br";
 
-/** Retenção do contato: a linha vence 30 dias depois de criada (varredura diária). */
+/** Retenção do contato: a linha vence 30 dias depois de criada (varredura de hora em hora; vencido já some da lista e do aviso antes dela). */
 export const LEAD_TTL_DAYS = 30;
 export const LEAD_LIMITS = { newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20, forgetPerIpPerHour: 20 } as const;
 const HOUR = 3600;

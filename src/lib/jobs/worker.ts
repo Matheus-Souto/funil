@@ -7,14 +7,19 @@ export const WORKER_INTERVAL_MS = 2000;
 export const EXPIRE_EVERY_MS = 5 * 60 * 1000;
 /** Varredura das cópias carimbadas: uma por dia (agendada para daqui a 24 h sempre que não houver outra na fila). */
 export const SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
-/** Retenção dos contatos de checkout abandonado (30 dias): uma varredura por dia. */
-export const SWEEP_LEADS_EVERY_MS = 24 * 60 * 60 * 1000;
 /** Varredura da fila de aprovação e dos links de upload do MCP: uma por hora. */
 export const SWEEP_MCP_EVERY_MS = 60 * 60 * 1000;
+/** Retenção dos contatos de checkout abandonado (30 dias): uma varredura por hora, como o sweep_mcp. */
+export const SWEEP_LEADS_EVERY_MS = SWEEP_MCP_EVERY_MS;
+
+/** Quando agendar o sweep_leads: ao subir o worker, já (nada vencido espera uma hora); depois, de hora em hora. */
+export function sweepLeadsRunAt(startup: boolean, nowMs: number = Date.now()): Date {
+  return new Date(startup ? nowMs : nowMs + SWEEP_LEADS_EVERY_MS);
+}
 
 /**
- * Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders a cada 5 min, sweep_watermarks e sweep_leads diários, sweep_mcp
- * de hora em hora, pci_page_monitor semanal). Devolve a função de parada.
+ * Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders a cada 5 min, sweep_watermarks diário, sweep_mcp e
+ * sweep_leads de hora em hora (o sweep_leads, o primeiro já ao subir), pci_page_monitor semanal). Devolve a função de parada.
  */
 export function startWorker(): () => void {
   let busy = false;
@@ -29,7 +34,7 @@ export function startWorker(): () => void {
       busy = false;
     }
   };
-  const schedule = () => {
+  const schedule = (startup = false) => {
     void scheduleOnce("expire_orders").catch((e: unknown) => log.error("falha ao agendar expire_orders", { error: e }));
     void scheduleOnce("sweep_watermarks", new Date(Date.now() + SWEEP_EVERY_MS)).catch((e: unknown) =>
       log.error("falha ao agendar sweep_watermarks", { error: e }),
@@ -37,7 +42,7 @@ export function startWorker(): () => void {
     void scheduleOnce("sweep_mcp", new Date(Date.now() + SWEEP_MCP_EVERY_MS)).catch((e: unknown) =>
       log.error("falha ao agendar sweep_mcp", { error: e }),
     );
-    void scheduleOnce("sweep_leads", new Date(Date.now() + SWEEP_LEADS_EVERY_MS)).catch((e: unknown) =>
+    void scheduleOnce("sweep_leads", sweepLeadsRunAt(startup)).catch((e: unknown) =>
       log.error("falha ao agendar sweep_leads", { error: e }),
     );
     // PCI DSS 11.6.1: cabeçalhos e scripts das páginas de pagamento conferidos em produção, toda semana.
@@ -45,7 +50,7 @@ export function startWorker(): () => void {
       log.error("falha ao agendar pci_page_monitor", { error: e }),
     );
   };
-  schedule();
+  schedule(true);
   const a = setInterval(() => void tick(), WORKER_INTERVAL_MS);
   const b = setInterval(() => void schedule(), EXPIRE_EVERY_MS);
   a.unref();

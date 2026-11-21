@@ -741,7 +741,7 @@ copiar e adaptar:
 
 Guarde esse registro junto com os documentos de privacidade da loja.
 
-**Prazo.** Todo contato é apagado 30 dias depois da captura (rotina diária), esteja ele aberto, contatado ou convertido.
+**Prazo.** Todo contato é apagado 30 dias depois da captura (rotina de hora em hora; vencido, já some do painel e não gera aviso), esteja ele aberto, contatado ou convertido.
 Se a pessoa **compra** (cria o pedido), o contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o
 pedido; o registro some com os 30 dias.
 
