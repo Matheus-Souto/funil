@@ -177,6 +177,12 @@ const buyerEmail = (tag: string) => `comprador.${tag}.${stamp}@exemplo.com`;
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 390, height: 844 };
 /** Código curto do pedido no painel (#XXXXXXXX): 8 primeiros caracteres alfanuméricos do id público, em maiúsculas. */
+/** Escolhe uma opção num menu do painel (Select do Arc: botão "combobox" que abre a lista de opções). */
+async function pickOption(page: Page, name: string, option: string) {
+  await page.getByRole("combobox", { name, exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
+}
+
 const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
 
 test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
@@ -313,15 +319,15 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
       await page.goto("/admin/offers/nova");
       await page.getByLabel("Nome da oferta").fill("Maná bíblico para crianças");
       await page.getByLabel("Preço", { exact: true }).fill("9,90");
-      await page.getByLabel("Produto entregue").selectOption({ label: "Maná bíblico · versão básica" });
+      await pickOption(page, "Produto entregue", "Maná bíblico · versão básica");
       await page.getByLabel("Endereço (slug)").fill(o.slug);
       await page.getByLabel("Cartão de crédito").check();
-      if (o.maxInstallments) await page.getByLabel("Parcelas máximas no cartão").selectOption(String(o.maxInstallments));
+      if (o.maxInstallments) await pickOption(page, "Parcelas máximas no cartão", `até ${o.maxInstallments}x`);
       await page.locator("label", { hasText: o.manual ? /^Manual$/ : /^Asaas \(automático\)$/ }).click();
       await expect(page.getByLabel(o.manual ? "Manual" : "Asaas (automático)", { exact: true })).toBeChecked();
       if (o.bump) {
         await page.getByLabel("Oferecer order bump").check();
-        await page.getByLabel("Produto do bump").selectOption({ label: "Maná bíblico · versão completa" });
+        await pickOption(page, "Produto do bump", "Maná bíblico · versão completa");
         await page.getByLabel("Preço do acréscimo").fill("17,10");
         await page.getByLabel("Título da caixa").fill("Quero a versão completa");
       }
@@ -1078,10 +1084,10 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     /** Preenche uma lista de produtos do editor: a 1ª linha já existe; cada nova linha entra pelo botão e é escolhida. */
     async function pick(names: string[], first: string, nth: (n: number) => string, add: string) {
-      await page.getByRole("combobox", { name: first, exact: true }).selectOption({ label: names[0]! });
+      await pickOption(page, first, names[0]!);
       for (let i = 1; i < names.length; i++) {
         await page.getByRole("button", { name: add, exact: true }).click();
-        await page.getByRole("combobox", { name: nth(i + 1), exact: true }).selectOption({ label: names[i]! });
+        await pickOption(page, nth(i + 1), names[i]!);
       }
     }
 
@@ -1102,9 +1108,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
     // Gravada na ordem: o editor recarregado mostra as 6 linhas como foram escolhidas.
-    await expect(page.getByRole("combobox", { name: "Produto entregue", exact: true }).locator("option:checked")).toHaveText(KIDS[0]!.name);
+    await expect(page.getByRole("combobox", { name: "Produto entregue", exact: true })).toContainText(KIDS[0]!.name);
     for (let n = 2; n <= KIDS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n}`, exact: true }).locator("option:checked")).toHaveText(KIDS[n - 1]!.name);
+      await expect(page.getByRole("combobox", { name: `Produto ${n}`, exact: true })).toContainText(KIDS[n - 1]!.name);
     }
     await shot(page, "p12d-oferta-completo-6-produtos-1280");
 
@@ -1112,7 +1118,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.goto("/admin/offers/nova");
     await page.getByLabel("Nome da oferta").fill("Almanaque Bíblico Kids");
     await page.getByLabel("Preço", { exact: true }).fill("9,90");
-    await page.getByRole("combobox", { name: "Produto entregue", exact: true }).selectOption({ label: KIDS[0]!.name });
+    await pickOption(page, "Produto entregue", KIDS[0]!.name);
     await page.getByLabel("Endereço (slug)").fill("almanaque-kids");
     await page.getByLabel("Cartão de crédito").check();
     await page.locator("label", { hasText: /^Manual$/ }).click();
@@ -1130,9 +1136,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.getByRole("button", { name: "Criar oferta" }).click();
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Produto do bump", exact: true }).locator("option:checked")).toHaveText(KITS[0]!.name);
+    await expect(page.getByRole("combobox", { name: "Produto do bump", exact: true })).toContainText(KITS[0]!.name);
     for (let n = 2; n <= KITS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n} do bump`, exact: true }).locator("option:checked")).toHaveText(KITS[n - 1]!.name);
+      await expect(page.getByRole("combobox", { name: `Produto ${n} do bump`, exact: true })).toContainText(KITS[n - 1]!.name);
     }
     await shot(page, "p12e-oferta-almanaque-bump-5-kits-1280");
   });
