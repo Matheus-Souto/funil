@@ -2,11 +2,13 @@
 
 // Fila de aprovação do MCP: pedidos pendentes (aprovar e executar, ou recusar) e o histórico. O resumo já vem mascarado
 // da ação `approvals.list`; aqui só se exibe. Sem regra de negócio: tudo passa pelas actions do painel.
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Badge } from "../../blocks";
 import s from "../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../ui";
 import { approveRequestAction, rejectRequestAction } from "../actions";
+import { decideThenRefresh } from "./decision";
 
 export interface ApprovalRow {
   id: string;
@@ -14,9 +16,10 @@ export interface ApprovalRow {
   agentRole: string;
   description: string;
   tool: string;
-  action: string;
   fields: Array<{ label: string; value: string }>;
   notes: string[];
+  /** Texto no lugar do resumo para quem não decide este pedido (o resumo nem vem da ação). */
+  hiddenSummary: string | null;
   status: string;
   createdAt: string;
   expiresAt: string;
@@ -64,6 +67,8 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
   const [target, setTarget] = useState<ApprovalRow | null>(null);
   const approve = useActionRunner();
   const reject = useActionRunner();
+  // Falha ao aprovar ou recusar também muda o pedido (outro decidiu, venceu, a execução falhou): recarrega a lista.
+  const router = useRouter();
   const closeApprove = () => {
     approve.setMsg(null);
     setTarget(null);
@@ -93,7 +98,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                       Pedido em {r.createdAt} · expira em {r.expiresAt}
                     </small>
                   </div>
-                  <Summary fields={r.fields} notes={r.notes} />
+                  {r.hiddenSummary ? <p className={s.muted}>{r.hiddenSummary}</p> : <Summary fields={r.fields} notes={r.notes} />}
                   <div className={s.formActions}>
                     <button
                       type="button"
@@ -115,13 +120,13 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                       aria-label={`Recusar o pedido: ${r.description}`}
                       onClick={() => {
                         approve.setMsg(null);
-                        return reject.run(() => rejectRequestAction(r.id));
+                        return decideThenRefresh(() => reject.run(() => rejectRequestAction(r.id)), () => router.refresh());
                       }}
                     >
                       Recusar
                     </button>
                   </div>
-                  {r.canDecide ? null : <p className={s.hint}>Só quem pode <code className={s.mono}>{r.action}</code> decide este pedido.</p>}
+                  {r.canDecide ? null : <p className={s.hint}>Só quem tem permissão para “{r.description}” decide este pedido.</p>}
                 </div>
               </article>
             ))}
@@ -180,7 +185,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
               onClick={async () => {
                 if (!target) return;
                 reject.setMsg(null);
-                const r = await approve.run(() => approveRequestAction(target.id));
+                const r = await decideThenRefresh(() => approve.run(() => approveRequestAction(target.id)), () => router.refresh());
                 if (r.ok) setTarget(null);
               }}
             >

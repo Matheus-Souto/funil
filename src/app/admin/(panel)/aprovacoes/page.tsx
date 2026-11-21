@@ -3,7 +3,7 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { dateTimeSP } from "@/lib/format";
-import { listApprovals } from "@/lib/mcp/approvals";
+import { HIDDEN_SUMMARY, listApprovals } from "@/lib/mcp/approvals";
 import { TOKEN_ROLE_LABEL } from "@/lib/mcp/tools";
 import { PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
@@ -24,9 +24,9 @@ export default async function ApprovalsPage() {
     agentRole: TOKEN_ROLE_LABEL[r.tokenRole] ?? r.tokenRole,
     description: r.description,
     tool: r.tool,
-    action: r.action,
-    fields: r.summary.fields,
-    notes: r.summary.notes,
+    fields: r.summary?.fields ?? [],
+    notes: r.summary?.notes ?? [],
+    hiddenSummary: r.summary === null ? HIDDEN_SUMMARY : null,
     status: r.status,
     createdAt: dateTimeSP(r.createdAt),
     expiresAt: dateTimeSP(r.expiresAt),
@@ -42,7 +42,10 @@ export default async function ApprovalsPage() {
         <div className={s.banner} data-tone="info" role="note">
           <PIcon name="shield-check" />
           <div>
-            <p>Os pedidos valem por 7 dias. Ao aprovar, a ação roda agora, em seu nome. Chaves e senhas aparecem só pelos 4 últimos caracteres.</p>
+            <p>
+              Os pedidos valem por 7 dias. Ao aprovar, a ação roda agora, em seu nome. Chaves e senhas aparecem só pelos 4 últimos caracteres; a chave
+              Pix aparece inteira, para você conferir para onde vai o dinheiro.
+            </p>
           </div>
         </div>
       </div>
