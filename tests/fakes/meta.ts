@@ -1,7 +1,10 @@
 // API de Conversões do Meta falsa (Graph API): usada pelos testes (como `fetch` injetado) e pelo smoke E2E
 // (e2e/fakes/asaas-server.ts a serve em /meta). Só o que o app usa:
-//   GET  /<versão>/<pixelId>?fields=id                 -> { id } (validação do token ao salvar a conexão)
 //   POST /<versão>/<pixelId>/events  { data, test_event_code? } -> { events_received }
+//     Evento sem `event_time` -> 400, código 100, subcódigo 2804019 (como o Meta; o app usa isso para testar o token).
+//   GET  /<versão>/<pixelId> -> 400 "(#100) Missing Permission": como o token padrão da API de Conversões (gerado no
+//     Gerenciador de Eventos), que envia eventos mas não pode ler o Pixel.
+// Pixel negado (`denyPixel`): o token não tem permissão nele -> 400 "(#100) Missing Permission".
 // Token SÓ no header `Authorization: Bearer` (token na query ou no corpo é recusado: nunca em URL/log).
 // Token errado: 400 com o formato de erro do Graph (code 190).
 
@@ -23,11 +26,13 @@ export interface FakeMeta {
   rawBodies: string[];
   /** Próximas N respostas falham com este status/código do Graph (status 0 = falha de rede). */
   failNext(times: number, status?: number, code?: number): void;
+  /** O token deixa de ter permissão neste Pixel (eventos recusados com "(#100) Missing Permission"). */
+  denyPixel(pixelId: string): void;
   fetch: typeof fetch;
 }
 
-const graphError = (status: number, code: number, message: string) =>
-  Response.json({ error: { message, type: "OAuthException", code, fbtrace_id: "AfakeTrace" } }, { status });
+const graphError = (status: number, code: number, message: string, subcode?: number) =>
+  Response.json({ error: { message, type: "OAuthException", code, ...(subcode !== undefined ? { error_subcode: subcode } : {}), fbtrace_id: "AfakeTrace" } }, { status });
 
 export function createFakeMeta(opts: { token?: string; prefix?: string } = {}): FakeMeta {
   const token = opts.token ?? "fake-meta-token";
@@ -37,6 +42,7 @@ export function createFakeMeta(opts: { token?: string; prefix?: string } = {}): 
   const rawUrls: string[] = [];
   const rawBodies: string[] = [];
   let failures: { times: number; status: number; code: number } = { times: 0, status: 500, code: 2 };
+  const denied = new Set<string>();
 
   async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
@@ -57,10 +63,11 @@ export function createFakeMeta(opts: { token?: string; prefix?: string } = {}): 
     const [, version, pixelId, events_] = m as unknown as [string, string, string, string | undefined];
     if (req.method === "GET" && !events_) {
       if (bearer !== token) return graphError(400, 190, "Invalid OAuth access token");
-      return Response.json({ id: pixelId });
+      return graphError(400, 100, "(#100) Missing Permission");
     }
     if (req.method === "POST" && events_) {
       if (bearer !== token) return graphError(400, 190, "Invalid OAuth access token");
+      if (denied.has(pixelId)) return graphError(400, 100, "(#100) Missing Permission");
       type Body = { data?: unknown; test_event_code?: unknown };
       const body = ((): Body | null => {
         try {
@@ -70,6 +77,10 @@ export function createFakeMeta(opts: { token?: string; prefix?: string } = {}): 
         }
       })();
       if (!body || !Array.isArray(body.data) || body.data.length === 0) return graphError(400, 100, "Invalid parameter");
+      // Como o Meta: o lote inteiro é recusado se algum evento não tem event_time.
+      if ((body.data as Record<string, unknown>[]).some((ev) => typeof ev?.event_time !== "number")) {
+        return graphError(400, 100, "Invalid parameter", 2804019);
+      }
       for (const ev of body.data as MetaReceived["event"][]) {
         events.push({ version, pixelId, event: ev, ...(typeof body.test_event_code === "string" ? { testEventCode: body.test_event_code } : {}) });
       }
@@ -86,6 +97,9 @@ export function createFakeMeta(opts: { token?: string; prefix?: string } = {}): 
     rawBodies,
     failNext(times, status = 500, code = 2) {
       failures = { times, status, code };
+    },
+    denyPixel(pixelId) {
+      denied.add(pixelId);
     },
     fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.signal?.aborted) throw init.signal.reason ?? new Error("aborted");

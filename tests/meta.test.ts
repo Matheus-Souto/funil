@@ -142,11 +142,12 @@ describe("buildMetaUserData", () => {
 });
 
 describe("connections.saveMeta", () => {
-  test("testa o token no Meta (GET no pixel) e guarda o token selado; auditoria sem o token", async () => {
+  test("testa o token no Meta (evento incompleto de propósito, nada gravado) e guarda o token selado; auditoria sem o token", async () => {
     const shop = await seedShop({ meta: false });
     const out = await runAction(saveMeta, panel(shop.storeId), { pixelId: PIXEL, accessToken: meta.token, testEventCode: "TEST123" });
     expect(out).toEqual({ pixelId: PIXEL, testEventCode: "TEST123", hasAccessToken: true });
-    expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/${PIXEL}` }]);
+    expect(meta.requests).toEqual([{ method: "POST", path: `/${META_GRAPH_VERSION}/${PIXEL}/events` }]);
+    expect(meta.events).toHaveLength(0); // o teste não vira evento
     const [row] = await t.ownerDb.select().from(integration).where(and(eq(integration.storeId, shop.storeId), eq(integration.kind, "meta")));
     expect(row!.config).toEqual({ pixelId: PIXEL, testEventCode: "TEST123" });
     expect(row!.secret).not.toContain(meta.token);
@@ -185,9 +186,23 @@ describe("connections.saveMeta", () => {
     const o = await paidOrder(shop);
     await runMetaJobs(o.id);
     expect(meta.events).toHaveLength(1);
-    expect(meta.rawUrls.length).toBeGreaterThanOrEqual(2); // GET de validação + POST do evento
+    expect(meta.rawUrls.length).toBeGreaterThanOrEqual(2); // teste do token + POST do evento
     for (const u of meta.rawUrls) expect(u).not.toContain(meta.token);
     for (const b of meta.rawBodies) expect(b).not.toContain(meta.token);
+  });
+
+  test("token padrão da API de Conversões (envia eventos, não lê o Pixel) é aceito; Pixel sem permissão é recusado", async () => {
+    const shop = await seedShop({ meta: false });
+    // O Meta falso recusa a leitura do Pixel com esse token, como o real (produção, 21/11/2026).
+    const read = await meta.fetch(`https://graph.facebook.com/${META_GRAPH_VERSION}/${PIXEL}?fields=id`, { headers: { Authorization: `Bearer ${meta.token}` } });
+    expect(((await read.json()) as { error: { message: string } }).error.message).toContain("Missing Permission");
+    expect((await runAction(saveMeta, panel(shop.storeId), { pixelId: PIXEL, accessToken: meta.token })).hasAccessToken).toBe(true);
+    meta.denyPixel("5550001112");
+    const e = await fail(runAction(saveMeta, panel(shop.storeId), { pixelId: "5550001112", accessToken: meta.token }));
+    expect(e.code).toBe("provider_error");
+    expect(e.message).toContain("código 100");
+    const [row] = await t.ownerDb.select().from(integration).where(and(eq(integration.storeId, shop.storeId), eq(integration.kind, "meta")));
+    expect((row!.config as { pixelId: string }).pixelId).toBe(PIXEL); // nada mudou
   });
 
   test("sem token novo: mantém o guardado (e o valida de novo para o pixel informado)", async () => {
@@ -195,7 +210,7 @@ describe("connections.saveMeta", () => {
     meta.requests.length = 0;
     const out = await runAction(saveMeta, panel(shop.storeId), { pixelId: "999999999" });
     expect(out.hasAccessToken).toBe(true);
-    expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/999999999` }]);
+    expect(meta.requests).toEqual([{ method: "POST", path: `/${META_GRAPH_VERSION}/999999999/events` }]);
   });
 });
 
@@ -205,7 +220,7 @@ test("connections.testMeta: sem conexão conflict; com conexão valida o token g
   const shop = await seedShop();
   meta.requests.length = 0;
   expect(await runAction(testMeta, panel(shop.storeId), {})).toEqual({ ok: true });
-  expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/${PIXEL}` }]);
+  expect(meta.requests).toEqual([{ method: "POST", path: `/${META_GRAPH_VERSION}/${PIXEL}/events` }]);
   meta.failNext(1, 400, 190);
   expect((await fail(runAction(testMeta, panel(shop.storeId), {}))).code).toBe("provider_error");
 }, HEAVY_TEST_MS);
@@ -412,7 +427,7 @@ describe("offers.setPixel (pixel próprio da oferta)", () => {
     meta.failNext(1, 400, 100);
     const e = await fail(runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "5550001112" }));
     expect(e.code).toBe("provider_error");
-    expect(meta.requests).toEqual([{ method: "GET", path: `/${META_GRAPH_VERSION}/5550001112` }]);
+    expect(meta.requests).toEqual([{ method: "POST", path: `/${META_GRAPH_VERSION}/5550001112/events` }]);
     expect((await runAction(getPublicOffer, pub(shop.storeId), { slug: shop.slug })).pixelId).toBe(PIXEL);
     expect((await fail(runAction(setOfferPixel, panel(shop.storeId), { id: shop.offerId, pixelId: "abc" }))).code).toBe("invalid_input");
   });
