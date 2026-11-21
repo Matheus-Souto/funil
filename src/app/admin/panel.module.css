@@ -929,21 +929,18 @@
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 13px;
+  gap: 5px;
+  padding: 3px 8px 3px 6px;
+  border-radius: 7px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 18px;
   white-space: nowrap;
   background: var(--color-surface-2);
   color: var(--color-text-muted);
 }
-.badge::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
+.badge svg {
+  flex: none;
 }
 .badge[data-tone="success"] {
   background: var(--color-success-soft);
@@ -2683,4 +2680,38 @@
 }
 .funnelCard .funnelStats {
   margin-top: auto;
+}
+
+/* Rodapé das tabelas com paginação (table-pager.tsx) */
+.pagerInfo {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.pagerControls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tableFoot[data-pending="true"] .pagerInfo {
+  opacity: 0.6;
+}
+@media (max-width: 700px) {
+  .tableFoot {
+    flex-wrap: wrap;
+  }
+}
+
+/* Por método: rosca em cima e legenda espaçada até o fim do cartão (mesma altura do funil) */
+.methodCard {
+  display: flex;
+  flex-direction: column;
+}
+.methodCard .legend {
+  flex: 1;
+  justify-content: space-evenly;
+  gap: 12px;
+  margin-top: 16px;
+}
+.methodCard .legend li {
+  padding: 4px 0;
 }

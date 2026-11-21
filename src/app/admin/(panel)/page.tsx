@@ -168,7 +168,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
             </dl>
           </section>
 
-          <section className={s.card}>
+          <section className={`${s.card} ${s.methodCard}`}>
             <div className={s.cardHead}>
               <h2>
                 <Art name="pagos" size={28} className={s.cardArt} />

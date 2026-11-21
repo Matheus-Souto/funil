@@ -5,19 +5,25 @@ import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { fileSize } from "@/lib/format";
 import { Art, PageHead } from "../../blocks";
-import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { ProductUpload } from "./upload";
+import { TablePager } from "../../table-pager";
+import { parsePage, parsePerPage } from "../../per-page";
+import type { Param } from "@/lib/panel-params";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Produtos" };
 
 const DAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" });
 
-export default async function ProductsPage() {
+export default async function ProductsPage({ searchParams }: { searchParams: Promise<{ pagina?: Param; por?: Param }> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
   const products = await runAction(listProducts, call, {});
+  const sp = await searchParams;
+  const perPage = parsePerPage(sp.por);
+  const page = parsePage(sp.pagina, products.length, perPage);
+  const shown = products.slice((page - 1) * perPage, page * perPage);
   const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
   const usedIn = (id: string) =>
     offers
@@ -27,7 +33,7 @@ export default async function ProductsPage() {
 
   return (
     <>
-      <PageHead title="Produtos" sub="Os arquivos que suas ofertas entregam." />
+      <PageHead title="Produtos" sub="Os arquivos que suas ofertas entregam. Cada comprador baixa uma cópia com o próprio nome e e-mail." />
       <div className={s.stack}>
         {products.length > 0 ? (
           <section className={`${s.card} ${s.cardFlush}`}>
@@ -41,7 +47,7 @@ export default async function ProductsPage() {
                 </tr>
               </thead>
               <tbody>
-                {products.map((p) => (
+                {shown.map((p) => (
                   <tr key={p.id}>
                     <td>
                       <span className={s.productCell}>
@@ -58,10 +64,7 @@ export default async function ProductsPage() {
                 ))}
               </tbody>
             </table>
-            <div className={s.tableFoot} style={{ justifyContent: "flex-start" }}>
-              <PIcon name="file-text" size={16} />
-              Cada comprador baixa uma cópia com o próprio nome e e-mail no rodapé das páginas.
-            </div>
+            <TablePager page={page} perPage={perPage} total={products.length} />
           </section>
         ) : (
           <section className={`${s.card} ${s.empty}`}>

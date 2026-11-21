@@ -14,17 +14,21 @@ import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { ColumnFilter, TableShell } from "./table-controls";
+import { TablePager } from "../../table-pager";
+import { parsePerPage } from "../../per-page";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
 
-type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param };
+type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param; por?: Param };
 
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Search> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
-  const { statuses, methods, q, page } = parseOrderMultiFilters(await searchParams);
-  const data = await runAction(listOrders, call, { statuses, methods, q, page });
+  const sp = await searchParams;
+  const { statuses, methods, q, page } = parseOrderMultiFilters(sp);
+  const perPage = parsePerPage(sp.por);
+  const data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
   const canExport = hasPermission(panel.actor.role, "orders.export");
 
   const failed = await runAction(listDeliveryFailures, call, {});
@@ -82,8 +86,6 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     );
   }
 
-  const from = data.total === 0 ? 0 : (page - 1) * data.pageSize + 1;
-  const to = Math.min(data.total, page * data.pageSize);
   return (
     <>
       <PageHead
@@ -182,31 +184,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             </ul>
           </>
         )}
-        <div className={s.tableFoot}>
-          <span>
-            Mostrando {from}–{to} de {data.total}
-          </span>
-          <div>
-            {page > 1 ? (
-              <Link className={s.btn} href={`/admin/orders${qs({ pagina: String(page - 1) })}`}>
-                Anterior
-              </Link>
-            ) : (
-              <span className={s.btn} aria-disabled="true">
-                Anterior
-              </span>
-            )}
-            {to < data.total ? (
-              <Link className={s.btn} href={`/admin/orders${qs({ pagina: String(page + 1) })}`}>
-                Próxima
-              </Link>
-            ) : (
-              <span className={s.btn} aria-disabled="true">
-                Próxima
-              </span>
-            )}
-          </div>
-        </div>
+        <TablePager page={page} perPage={perPage} total={data.total} />
       </TableShell>
     </>
   );

@@ -4,20 +4,39 @@ import Link from "next/link";
 import { statusLabel, statusTone } from "@/lib/orders/labels";
 import { PIcon } from "./icons";
 import Image from "next/image";
+import { CircleCheck, CircleMinus, CircleX, Clock, Info, RotateCcw, ShieldAlert, TimerOff, type LucideIcon } from "lucide-react";
 import { KpiNumber } from "./charts";
 import s from "./panel.module.css";
 
+type Tone = "success" | "warning" | "danger" | "info" | "neutral";
+
+/** Ícone de cada status de pedido (o mesmo do filtro da lista). */
+const STATUS_ICON: Record<string, LucideIcon> = {
+  paid: CircleCheck,
+  pending: Clock,
+  expired: TimerOff,
+  declined: CircleX,
+  refunded: RotateCcw,
+  disputed: ShieldAlert,
+};
+const TONE_ICON: Record<Tone, LucideIcon> = { success: CircleCheck, warning: Clock, danger: CircleX, info: Info, neutral: CircleMinus };
+
 export function StatusBadge({ status, method, label }: { status: string; method: string; label?: string }) {
+  const tone = statusTone(status, method);
+  const Icon = STATUS_ICON[status] ?? TONE_ICON[tone];
   return (
-    <span className={s.badge} data-tone={statusTone(status, method)}>
+    <span className={s.badge} data-tone={tone}>
+      <Icon size={14} strokeWidth={2} aria-hidden="true" />
       {label ?? statusLabel(status, method)}
     </span>
   );
 }
 
-export function Badge({ tone, children }: { tone?: "success" | "warning" | "danger" | "info" | "neutral"; children: ReactNode }) {
+export function Badge({ tone, children }: { tone?: Tone; children: ReactNode }) {
+  const Icon = TONE_ICON[tone ?? "neutral"];
   return (
     <span className={s.badge} data-tone={tone}>
+      <Icon size={14} strokeWidth={2} aria-hidden="true" />
       {children}
     </span>
   );

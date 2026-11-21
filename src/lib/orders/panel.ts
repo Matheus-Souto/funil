@@ -56,8 +56,13 @@ function where(
 
 export const listOrders = defineAction({
   name: "orders.list",
-  description: "Lista pedidos (50 por página, mais recentes primeiro) com filtros de status e método e busca por e-mail ou nome.",
-  input: z.object({ ...filters, page: z.number().int().min(1).max(10_000).default(1) }),
+  description: "Lista pedidos (50 por página por padrão, mais recentes primeiro) com filtros de status e método e busca por e-mail ou nome.",
+  input: z.object({
+    ...filters,
+    page: z.number().int().min(1).max(10_000).default(1),
+    // Tamanho da página (o painel escolhe 10, 25, 50 ou 100); sem ele, 50 como antes (MCP).
+    pageSize: z.union([z.literal(10), z.literal(25), z.literal(50), z.literal(100)]).default(PAGE_SIZE),
+  }),
   permission: "orders.read",
   audit: false,
   async run(ctx, input) {
@@ -96,13 +101,13 @@ export const listOrders = defineAction({
       .innerJoin(offer, eq(offer.id, orders.offerId))
       .where(where(input, true))
       .orderBy(desc(orders.createdAt), desc(orders.id))
-      .limit(PAGE_SIZE)
-      .offset((input.page - 1) * PAGE_SIZE);
+      .limit(input.pageSize)
+      .offset((input.page - 1) * input.pageSize);
     return {
       items: rows.map(({ publicId, ...r }) => ({ ...r, code: orderCode(publicId) })),
       total: total?.n ?? 0,
       page: input.page,
-      pageSize: PAGE_SIZE,
+      pageSize: input.pageSize,
       counts,
     };
   },

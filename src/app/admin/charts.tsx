@@ -241,7 +241,7 @@ export function DonutChart({ rows }: { rows: Array<{ label: string; cents: numbe
   const data = rows.filter((r) => r.cents > 0);
   return (
     <EChart
-      height={200}
+      height={230}
       label={`Receita por método: ${rows.map((r) => `${r.label} ${brl(r.cents)}`).join("; ")}`}
       option={(t) => ({
         animationDuration: 700,
