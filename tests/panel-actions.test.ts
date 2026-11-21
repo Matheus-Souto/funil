@@ -76,6 +76,38 @@ describe("orders.list", () => {
     expect(all.items[0]).not.toHaveProperty("buyerCpf");
   });
 
+  test("vários status e métodos (statuses/methods): filtra; counts ignora o status e respeita o método", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { status: "pending", method: "pix_manual", name: "A" });
+    await seedOrder(s, { status: "paid", method: "pix_manual", name: "B" });
+    await seedOrder(s, { status: "expired", method: "pix_manual", name: "C" });
+    await seedOrder(s, { status: "paid", method: "card_asaas", name: "D" });
+    const names = (r: { items: Array<{ buyerName: string }> }) => r.items.map((o) => o.buyerName).sort();
+    const r1 = await runAction(listOrders, panelCall(s.storeId), { page: 1, statuses: ["pending", "paid"] });
+    expect(names(r1)).toEqual(["A", "B", "D"]);
+    expect(r1.total).toBe(3);
+    expect(r1.counts).toMatchObject({ all: 4, pending: 1, paid: 2, expired: 1 });
+    const r2 = await runAction(listOrders, panelCall(s.storeId), { page: 1, statuses: ["paid"], methods: ["pix_manual"] });
+    expect(names(r2)).toEqual(["B"]);
+    expect(r2.counts).toMatchObject({ all: 3, pending: 1, paid: 1, expired: 1 });
+    const r3 = await runAction(listOrders, panelCall(s.storeId), { page: 1, methods: ["pix_manual", "card_asaas"] });
+    expect(r3.total).toBe(4);
+    expect(await fails(runAction(listOrders, panelCall(s.storeId), { page: 1, statuses: ["pago"] } as never))).toBe("invalid_input");
+  });
+
+  test("pageSize 10/25/50/100: limite e deslocamento da página; outro tamanho é recusado", async () => {
+    const s = await seedPanelStore();
+    await seedManyOrders(s, 30, new Date(Date.now() - 60 * 60_000));
+    const p1 = await runAction(listOrders, panelCall(s.storeId), { page: 1, pageSize: 25 });
+    expect(p1.items).toHaveLength(25);
+    expect(p1.pageSize).toBe(25);
+    const p2 = await runAction(listOrders, panelCall(s.storeId), { page: 2, pageSize: 25 });
+    expect(p2.items).toHaveLength(5);
+    expect(new Set([...p1.items, ...p2.items].map((o) => o.id)).size).toBe(30);
+    expect((await runAction(listOrders, panelCall(s.storeId), { page: 3, pageSize: 10 })).items).toHaveLength(10);
+    expect(await fails(runAction(listOrders, panelCall(s.storeId), { page: 1, pageSize: 20 } as never))).toBe("invalid_input");
+  });
+
   test("isolamento: não lista pedidos de outra loja", async () => {
     const a = await seedPanelStore("A");
     const b = await seedPanelStore("B");
@@ -224,6 +256,18 @@ describe("botões do pedido por papel", () => {
 });
 
 describe("exportação CSV", () => {
+  test("vários status (statuses) e métodos: a planilha sai só com eles", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { status: "pending", method: "pix_manual", name: "Pendente" });
+    await seedOrder(s, { status: "paid", method: "pix_manual", name: "Pago Pix" });
+    await seedOrder(s, { status: "paid", method: "card_asaas", name: "Pago cartão" });
+    await seedOrder(s, { status: "expired", method: "pix_manual", name: "Expirado" });
+    const rows = await runAction(exportOrders, panelCall(s.storeId), { statuses: ["pending", "paid"] });
+    expect(rows.map((r) => r.name).sort()).toEqual(["Pago Pix", "Pago cartão", "Pendente"]);
+    const pix = await runAction(exportOrders, panelCall(s.storeId), { statuses: ["pending", "paid"], methods: ["pix_manual"] });
+    expect(pix.map((r) => r.name).sort()).toEqual(["Pago Pix", "Pendente"]);
+  });
+
   test("colunas do brief, sem CPF; fórmulas neutralizadas; support sem orders.export", async () => {
     const s = await seedPanelStore();
     await seedOrder(s, { status: "paid", hasBump: true, name: "=HYPERLINK(\"x\")", cpf: "52998224725", utmSource: "ig", utmCampaign: "stories", ref: "joao" });

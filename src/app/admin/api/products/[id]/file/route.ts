@@ -7,9 +7,10 @@ import { UPLOAD_ERROR_STATUS } from "@/lib/http";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /admin/api/products/<id>/file: o PDF de um produto para o painel (miniatura e "Ver PDF", desenhados pelo pdf.js).
- * Sessão do painel + permissão products.read (ação `products.file`). Sempre como anexo e com CSP sandbox: o navegador
- * nunca abre o PDF enviado pela loja na origem do painel.
+ * GET /admin/api/products/<id>/file: o PDF original de um produto para o "Ver PDF" do painel (desenhado pelo pdf.js).
+ * Sessão do painel + ação `products.file` (products.write: dono e admin, com auditoria). Sempre como anexo; a CSP com
+ * `sandbox` que chega ao navegador vem do next.config.ts (regra própria desta rota: a da rota abaixo não substitui a de
+ * /admin), e o teste E2E confere o cabeçalho real.
  */
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
   // Sessão antes de tudo (nem os parâmetros são lidos sem login).

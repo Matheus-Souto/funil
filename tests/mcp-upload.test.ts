@@ -10,7 +10,7 @@ import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { listProducts } from "@/lib/catalog/products";
 import { sha256 } from "@/lib/crypto";
-import { auditLog, mcpToken, uploadLink } from "@/lib/db/schema";
+import { auditLog, mcpToken, product, uploadLink } from "@/lib/db/schema";
 import { handleMcpRequest } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
 import { mcpTools } from "@/lib/mcp/tools";
@@ -223,6 +223,9 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect(Object.keys(body).sort()).toEqual(["fileName", "fileSize", "id", "name"]);
     expect(body).toMatchObject({ name: "Curso", fileName: "Curso.pdf", fileSize: VALID_PDF.length });
     expect((await list(storeId)).map((p) => p.id)).toEqual([body.id]);
+    // O número de páginas contado na validação vai para o produto também por este caminho (painel mostra "N páginas").
+    const [prod] = await t.ownerDb.select({ pageCount: product.pageCount }).from(product).where(eq(product.id, body.id));
+    expect(prod!.pageCount).toBe(1);
     const [row] = await t.ownerDb.select().from(uploadLink).where(eq(uploadLink.keyHash, sha256(key)));
     expect(row!.productId).toBe(body.id);
     expect(row!.usedAt).not.toBeNull();

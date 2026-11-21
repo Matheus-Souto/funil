@@ -8,6 +8,7 @@ import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
 import { auditLog, offer, offerProduct, product, store } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
+import { backfillPageCounts } from "@/lib/catalog/page-count";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, readProductFile, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import {
@@ -41,6 +42,7 @@ afterAll(async () => {
 const owner: Actor = { kind: "user", userId: "u1", role: "owner" };
 const traffic: Actor = { kind: "user", userId: "u2", role: "traffic" };
 const support: Actor = { kind: "user", userId: "u3", role: "support" };
+const admin: Actor = { kind: "user", userId: "u4", role: "admin" };
 const pub: Actor = { kind: "public" };
 
 const pdfBytes = () => VALID_PDF;
@@ -208,16 +210,45 @@ describe("products.pageCount", () => {
     expect(list.find((x) => x.id === p.id)?.pageCount).toBe(3);
   });
 });
+describe("backfillPageCounts (produtos antigos sem page_count)", () => {
+  test("preenche só os nulos da loja; arquivo ausente fica nulo e vai para a lista de falhas", async () => {
+    const { storeId } = await seedStore();
+    const a = await call(createProduct, storeId, owner, { name: "Antigo", fileName: "a.pdf", file: await makePdf(4) });
+    const b = await call(createProduct, storeId, owner, { name: "Sem arquivo", fileName: "b.pdf", file: await makePdf(2) });
+    const c = await call(createProduct, storeId, owner, { name: "Novo", fileName: "c.pdf", file: await makePdf(1) });
+    await withStore(storeId, (tx) => tx.update(product).set({ pageCount: null }).where(sql`${product.id} in (${a.id}, ${b.id})`));
+    await withStore(storeId, (tx) => tx.update(product).set({ pageCount: 99 }).where(eq(product.id, c.id)));
+    const [bRow] = await withStore(storeId, (tx) => tx.select({ fileKey: product.fileKey }).from(product).where(eq(product.id, b.id)));
+    await storage.delete(bRow!.fileKey);
+    const r = await backfillPageCounts({ storeId });
+    expect(r.updated).toBe(1);
+    expect(r.failed.map((f) => f.productId)).toEqual([b.id]);
+    const rows = await withStore(storeId, (tx) => tx.select({ id: product.id, pageCount: product.pageCount }).from(product));
+    const by = Object.fromEntries(rows.map((x) => [x.id, x.pageCount]));
+    expect(by).toEqual({ [a.id]: 4, [b.id]: null, [c.id]: 99 });
+    expect((await backfillPageCounts({ storeId })).updated).toBe(0);
+  }, HEAVY_TEST_MS);
 
-describe("products.file (PDF para o painel)", () => {
-  test("devolve os bytes e o nome do arquivo; support lê, sem permissão não; outra loja e excluído viram not_found", async () => {
+  test("roda como job a cada subida (backfill_page_count registrado no worker)", async () => {
+    const { getHandlers } = await import("@/lib/jobs/handlers");
+    const { backfillPageCountJob } = await import("@/lib/catalog/page-count");
+    expect(getHandlers().backfill_page_count).toBe(backfillPageCountJob);
+  });
+});
+
+
+describe("products.file (PDF original para o painel)", () => {
+  test("só dono e admin baixam, com auditoria só do id; support, tráfego e público não; outra loja e excluído viram not_found", async () => {
     const { storeId } = await seedStore();
     const raw = await makePdf(2);
     const p = await call(createProduct, storeId, owner, { name: "Guia", fileName: "guia.pdf", file: raw });
-    const out = await call(readProductFile, storeId, support, { id: p.id });
+    const out = await call(readProductFile, storeId, owner, { id: p.id });
     expect(out.fileName).toBe("guia.pdf");
     expect(Buffer.from(out.bytes).equals(Buffer.from(raw))).toBe(true);
-    expect(await code(call(readProductFile, storeId, pub, { id: p.id }))).toBe("forbidden");
+    expect((await call(readProductFile, storeId, admin, { id: p.id })).fileName).toBe("guia.pdf");
+    const audits = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "products.file")));
+    expect(audits.filter((a) => a.ok).map((a) => a.input)).toEqual([{ productId: p.id }, { productId: p.id }]);
+    for (const actor of [support, traffic, pub]) expect(await code(call(readProductFile, storeId, actor, { id: p.id }))).toBe("forbidden");
     const other = await seedStore();
     expect(await code(call(readProductFile, other.storeId, owner, { id: p.id }))).toBe("not_found");
     await call(deleteProduct, storeId, owner, { id: p.id });

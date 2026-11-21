@@ -20,6 +20,13 @@ const config: NextConfig = {
           { key: "X-Frame-Options", value: "DENY" },
         ],
       },
+      // PDF original de um produto (visualizador do painel). Vem depois da regra de /admin porque o Next aplica as duas e a
+      // última vence na mesma chave; o cabeçalho que a rota devolve não substitui o daqui. `sandbox`: o navegador nunca
+      // executa o PDF enviado pela loja (ou por um agente, pelo link de upload) na origem do painel.
+      {
+        source: "/admin/api/products/:id/file",
+        headers: [{ key: "Content-Security-Policy", value: "frame-ancestors 'none'; sandbox" }],
+      },
       {
         source: "/t.js",
         headers: [

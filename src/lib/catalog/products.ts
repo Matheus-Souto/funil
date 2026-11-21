@@ -159,10 +159,12 @@ export const listProducts = defineAction({
 /** PDF de um produto da loja, para o painel mostrar a miniatura e o visualizador ("Ver PDF"). Fora do MCP. */
 export const readProductFile = defineAction({
   name: "products.file",
-  description: "Arquivo PDF de um produto (só o painel: miniatura e visualizador).",
+  description: "PDF original de um produto, sem carimbo (só o painel: visualizador \"Ver PDF\").",
   input: z.object({ id }),
-  permission: "products.read",
-  audit: false,
+  // O arquivo sem carimbo é o que a pirataria quer: só quem pode alterar o catálogo (dono e admin) baixa, e cada
+  // download fica na auditoria (só o id do produto, nunca os bytes).
+  permission: "products.write",
+  auditInput: (i) => ({ productId: i.id }),
   async run(ctx, input) {
     const [row] = await ctx.tx
       .select({ id: product.id, fileName: product.fileName })
