@@ -6,7 +6,7 @@ import { listOffers } from "@/lib/catalog/offers";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { brl } from "@/lib/format";
 import { metricsBreakdown, periodRange } from "@/lib/metrics";
-import { Badge, PageHead } from "../../blocks";
+import { Art, Badge, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
@@ -42,9 +42,7 @@ export default async function OffersPage() {
       <div className={s.stack}>
         {offers.length === 0 ? (
           <section className={`${s.card} ${s.empty}`}>
-            <div className={s.emptyIcon}>
-              <PIcon name="tag" size={26} />
-            </div>
+            <Art name="ticket" />
             <h2>Nenhuma oferta ainda</h2>
             <p>A oferta define o preço, os métodos de pagamento e o produto entregue. Envie o PDF em Produtos e crie a primeira.</p>
           </section>

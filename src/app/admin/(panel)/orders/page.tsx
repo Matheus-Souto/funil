@@ -9,7 +9,7 @@ import { listDeliveryFailures } from "@/lib/alerts";
 import { listOrders } from "@/lib/orders/panel";
 import { parseOrderFilters, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
+import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
@@ -45,9 +45,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       <>
         <PageHead title="Pedidos" sub="Nenhum pedido ainda" />
         <section className={`${s.card} ${s.empty}`}>
-          <div className={s.emptyIcon}>
-            <PIcon name="inbox" size={26} />
-          </div>
+          <Art name="pedidos" />
           <h2>Os pedidos aparecem aqui</h2>
           <p>Cada pessoa que preencher o checkout vira um pedido, mesmo antes de pagar. Assim você vê quem desistiu e quem pagou.</p>
           <ol className={s.steps} style={{ width: "min(460px, 100%)", textAlign: "left", marginTop: 12 }}>

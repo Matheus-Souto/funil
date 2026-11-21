@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { needsSetup } from "@/lib/stores";
 import { setupAction } from "../actions";
 import { PIcon } from "../icons";
+import { Art } from "../blocks";
 import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +30,7 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
       <main className={s.setup}>
         <div>
           <span className={s.eyebrow}>Configuração inicial</span>
+          <Art name="funil" size={120} className={s.authArt} />
           <h1>Sua loja pronta para vender em 4 passos</h1>
           <ol className={s.wizard}>
             {STEPS.map((x, i) => (

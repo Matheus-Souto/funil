@@ -40,6 +40,9 @@
   --series-5: #4a90d9;
   --chart-grid: #e8eded;
   --sidebar: #ffffff;
+  --tooltip-bg: #173a3b;
+  --tooltip-fg: #ffffff;
+  --tooltip-border: transparent;
 
   --font-display: var(--font-inter), system-ui, sans-serif;
   --font-body: var(--font-inter), system-ui, sans-serif;
@@ -91,6 +94,9 @@
   --series-5: #c4a7ff;
   --chart-grid: #1a1a1a;
   --sidebar: #000000;
+  --tooltip-bg: #1c1c1c;
+  --tooltip-fg: #f2f5f4;
+  --tooltip-border: #2c2c2c;
   --shadow-resting: none;
   --shadow-raised: 0 6px 18px rgb(0 0 0 / 0.6);
   --shadow-floating: 0 20px 48px rgb(0 0 0 / 0.7);
@@ -133,6 +139,9 @@
     --series-5: #c4a7ff;
     --chart-grid: #1a1a1a;
     --sidebar: #000000;
+    --tooltip-bg: #1c1c1c;
+    --tooltip-fg: #f2f5f4;
+    --tooltip-border: #2c2c2c;
     --shadow-resting: none;
     --shadow-raised: 0 6px 18px rgb(0 0 0 / 0.6);
     --shadow-floating: 0 20px 48px rgb(0 0 0 / 0.7);

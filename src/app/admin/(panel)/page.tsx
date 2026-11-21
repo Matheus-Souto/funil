@@ -15,7 +15,7 @@ import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
 import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { Kpi, PageHead, deltaOf } from "../blocks";
+import { Art, Kpi, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
@@ -300,9 +300,7 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
             </ol>
           </section>
           <section className={`${s.card} ${s.empty}`}>
-            <div className={s.emptyIcon}>
-              <PIcon name="receipt" size={26} />
-            </div>
+            <Art name="receita" />
             <h2>Nenhuma venda ainda</h2>
             <p>{checkout ? "Quando alguém comprar, os números aparecem aqui. Divulgue o link do checkout:" : "Quando alguém comprar, os números aparecem aqui."}</p>
             {checkout ? <CopyField text={checkout} /> : null}

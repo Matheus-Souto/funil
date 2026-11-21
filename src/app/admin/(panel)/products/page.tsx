@@ -4,7 +4,7 @@ import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { fileSize } from "@/lib/format";
-import { PageHead } from "../../blocks";
+import { Art, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { ProductUpload } from "./upload";
@@ -66,7 +66,11 @@ export default async function ProductsPage() {
             </div>
           </section>
         ) : (
-          <p className={s.muted}>Nenhum produto ainda. Envie o PDF que o comprador vai receber.</p>
+          <section className={`${s.card} ${s.empty}`}>
+            <Art name="produto" />
+            <h2>Nenhum produto ainda</h2>
+            <p>Envie o PDF que o comprador vai receber. Cada um baixa uma cópia com o próprio nome e e-mail.</p>
+          </section>
         )}
         {canWrite ? <ProductUpload /> : null}
       </div>

@@ -4,7 +4,7 @@
 // da ação `approvals.list`; aqui só se exibe. Sem regra de negócio: tudo passa pelas actions do painel.
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { Badge } from "../../blocks";
+import { Art, Badge } from "../../blocks";
 import s from "../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../ui";
 import { approveRequestAction, rejectRequestAction } from "../actions";
@@ -81,7 +81,12 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
           <h2 id="aprov-pendentes" className={s.sectionTitle}>
             Pendentes
           </h2>
-          {pending.length === 0 ? <p className={s.muted}>Nenhum pedido de agente esperando aprovação.</p> : null}
+          {pending.length === 0 ? (
+            <div className={s.emptyInline}>
+              <Art name="aprovacoes" size={88} />
+              <p className={s.muted}>Nenhum pedido de agente esperando aprovação.</p>
+            </div>
+          ) : null}
           <div className={s.stack}>
             {pending.map((r) => (
               <article key={r.id} className={s.card} aria-label={`Pedido de ${r.agent}: ${r.description}`}>

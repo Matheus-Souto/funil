@@ -30,6 +30,14 @@ export function deltaOf(cur: number, prev: number): { pct: number | null; tone: 
   return { pct, tone: pct > 0 ? "up" : pct < 0 ? "down" : "flat" };
 }
 
+/** Ilustrações 3D do painel (public/admin/art/<nome>.webp, 240×240, fundo transparente). */
+export type ArtName = "receita" | "pedidos" | "pagos" | "ticket" | "produto" | "aprovacoes" | "agentes" | "funil";
+
+/** Ilustração decorativa (estados vazios, login): escondida dos leitores de tela. */
+export function Art({ name, size = 112, className }: { name: ArtName; size?: number; className?: string }) {
+  return <Image className={className ?? s.emptyArt} src={`/admin/art/${name}.webp`} alt="" width={size} height={size} aria-hidden="true" />;
+}
+
 export function Kpi({
   label,
   value,
@@ -48,12 +56,12 @@ export function Kpi({
   delta?: ReturnType<typeof deltaOf>;
   compare?: string;
   empty?: boolean;
-  /** Ilustração 3D do card (public/admin/kpi/<nome>.webp). */
-  art?: "receita" | "pedidos" | "pagos" | "ticket";
+  /** Ilustração 3D do card (public/admin/art/<nome>.webp). */
+  art?: ArtName;
 }) {
   return (
     <div className={s.kpi} data-empty={empty ? "true" : undefined} data-art={art ? "true" : undefined}>
-      {art ? <Image className={s.kpiArt} src={`/admin/kpi/${art}.webp`} alt="" width={72} height={72} aria-hidden="true" priority /> : null}
+      {art ? <Image className={s.kpiArt} src={`/admin/art/${art}.webp`} alt="" width={72} height={72} aria-hidden="true" priority /> : null}
       <div className={s.kpiLabel}>{label}</div>
       <div className={s.kpiValue}>{amount !== undefined ? <KpiNumber value={amount} money={money} /> : value}</div>
       {delta && compare ? (
