@@ -1195,6 +1195,43 @@ describe("abandono antes do pagamento no Telegram", () => {
       expect(await leadJobs(bare.storeId)).toHaveLength(0);
     });
 
+    test("quem já tem pedido da mesma oferta nas últimas 24 h não vira contato nem aviso; outra oferta ou pedido com mais de 24 h vira", async () => {
+      const shop = await captureShop({ leadAbandoned: true });
+      const orderFor = (email: string) =>
+        withStore(shop.storeId, (tx) =>
+          createOrder(systemCtx(shop.storeId, tx), {
+            offerId: shop.offerId,
+            withBump: false,
+            method: "pix_manual",
+            customer: { ...BUYER, email },
+            touch: { first: null, last: {} },
+            clientIp: "203.0.113.7",
+            userAgent: "teste",
+          }),
+        );
+      const leadsOf = () => t.ownerDb.select().from(checkoutLead).where(eq(checkoutLead.storeId, shop.storeId));
+
+      // Gerou o Pix (pedido pendente) e reabriu o link: outra chave, o mesmo e-mail (outra caixa), a mesma oferta.
+      const buyer = `comprou-${crypto.randomUUID()}@example.com`;
+      await orderFor(buyer);
+      expect(await save(shop, { leadKey: crypto.randomUUID(), email: ` ${buyer.toUpperCase()} ` })).toEqual({ created: false, leadId: null });
+      expect(await leadsOf()).toHaveLength(0);
+      expect(await leadJobs(shop.storeId)).toHaveLength(0);
+
+      // O mesmo e-mail em outra oferta da loja continua virando contato.
+      const otherSlug = `o-${crypto.randomUUID()}`;
+      await t.ownerDb.insert(offer).values({ storeId: shop.storeId, slug: otherSlug, name: "Outra oferta", priceCents: 990, methods: ["pix"], pixMode: "manual" });
+      expect((await save({ storeId: shop.storeId, slug: otherSlug }, { leadKey: crypto.randomUUID(), email: buyer })).created).toBe(true);
+      expect(await leadJobs(shop.storeId)).toHaveLength(1);
+
+      // Pedido da mesma oferta com mais de 24 h: vira contato.
+      const old = `antigo-${crypto.randomUUID()}@example.com`;
+      const oldOrder = await orderFor(old);
+      await t.ownerDb.update(orders).set({ createdAt: new Date(Date.now() - 25 * 60 * MIN) }).where(eq(orders.id, oldOrder.id));
+      expect((await save(shop, { leadKey: crypto.randomUUID(), email: old })).created).toBe(true);
+      expect(await leadJobs(shop.storeId)).toHaveLength(2);
+    });
+
     test("celular sozinho (sem linha) não cria linha nem job", async () => {
       const shop = await captureShop({ leadAbandoned: true });
       await save(shop, { leadKey: crypto.randomUUID(), phone: LEAD_PHONE });

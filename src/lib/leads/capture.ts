@@ -3,6 +3,7 @@
 // - `checkout.saveLead` (público, sem auditoria): só com a captura ligada na loja (`store.lead_capture`, que exige o
 //   e-mail público de privacidade). Upsert por `(store_id, key_hash)`: a `leadKey` do visitante é o que dá direito de
 //   alterar a linha (saber o e-mail não basta). Celular sozinho só atualiza linha existente. Linha convertida não muda.
+//   Quem já fez pedido da mesma oferta nas últimas 24 h (cliente da loja com o mesmo e-mail) não vira contato novo.
 //   Ao CRIAR a linha (nunca ao atualizar), agenda o aviso `lead_abandoned` do Telegram para criada + prazo, na mesma
 //   transação, se a loja tem o evento ligado (lê só a config pública; o job confere tudo de novo no envio).
 // - `checkout.forgetLead` (público, sem auditoria): "Não salvar meus dados" apaga a linha da chave (nunca a convertida);
@@ -12,11 +13,11 @@
 //   tentativa). As chaves usam o `key_hash`, nunca e-mail, celular nem a `leadKey` em claro.
 // - Nunca grava e-mail, celular nem `leadKey` em log ou auditoria (as duas ações são `audit: false`).
 import { createHash } from "node:crypto";
-import { and, eq, inArray, or, type SQL } from "drizzle-orm";
+import { and, eq, gt, inArray, or, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { UNKNOWN_IP } from "@/lib/client-ip";
-import { checkoutLead, offer, store } from "@/lib/db/schema";
+import { checkoutLead, customer, offer, orders, store } from "@/lib/db/schema";
 import { enqueue } from "@/lib/jobs";
 import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
@@ -27,6 +28,8 @@ export const LEAD_TTL_DAYS = 30;
 export const LEAD_LIMITS = { newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20 } as const;
 const HOUR = 3600;
 const DAY_MS = 86_400_000;
+/** Quem fez pedido da mesma oferta nesta janela (qualquer status) não vira contato numa visita nova. */
+const RECENT_ORDER_MS = DAY_MS;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
@@ -73,6 +76,27 @@ async function touchLead(ctx: Ctx, keyHash: string, input: { email?: string; pho
     .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.keyHash, keyHash), inArray(checkoutLead.status, ["open", "contacted"])))
     .returning({ id: checkoutLead.id });
   return row?.id ?? null;
+}
+
+/**
+ * A pessoa já fez pedido desta oferta nas últimas 24 h (qualquer status: gerou o Pix e reabriu o link, por exemplo)?
+ * O cliente é o da loja com o mesmo e-mail normalizado (único por loja).
+ */
+async function orderedRecently(ctx: Ctx, offerId: string, email: string): Promise<boolean> {
+  const [hit] = await ctx.tx
+    .select({ id: orders.id })
+    .from(orders)
+    .innerJoin(customer, eq(customer.id, orders.customerId))
+    .where(
+      and(
+        eq(orders.storeId, ctx.storeId),
+        eq(orders.offerId, offerId),
+        eq(customer.email, email),
+        gt(orders.createdAt, new Date(Date.now() - RECENT_ORDER_MS)),
+      ),
+    )
+    .limit(1);
+  return hit !== undefined;
 }
 
 /**
@@ -136,6 +160,8 @@ export const checkoutSaveLead = defineAction({
     }
     // Celular sozinho nunca cria linha; contato novo respeita os limites de IP e de loja.
     if (input.email === undefined) return { created: false, leadId: null };
+    // Já tem pedido desta oferta (visita nova depois de gerar o Pix): não é abandono antes de comprar.
+    if (await orderedRecently(ctx, o.id, input.email)) return { created: false, leadId: null };
     if (!prepared.newOk) throw new ActionError("rate_limited", "Muitos contatos novos");
 
     const [row] = await ctx.tx
