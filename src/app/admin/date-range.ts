@@ -1,5 +1,5 @@
 // Período do Dashboard escolhido no calendário: ?de=AAAA-MM-DD&ate=AAAA-MM-DD (dias de São Paulo, os dois inclusos).
-// Links antigos com ?periodo=hoje|7d|30d continuam valendo. Sem parâmetros: os últimos 7 dias. Puro (sem banco): só
+// Links antigos com ?periodo=hoje|7d|30d continuam valendo. Sem parâmetros: o mês atual. Puro (sem banco): só
 // converte datas; o servidor usa o resultado nas ações de métricas.
 
 const DAY_MS = 86_400_000;
@@ -41,9 +41,13 @@ export function parseDashboardRange(sp: { de?: string; ate?: string; periodo?: s
   if (valid(sp.de) && valid(sp.ate)) {
     de = sp.de <= sp.ate ? sp.de : sp.ate;
     ate = sp.de <= sp.ate ? sp.ate : sp.de;
+  } else if (sp.periodo === "hoje" || sp.periodo === "7d" || sp.periodo === "30d") {
+    // Links antigos (?periodo=): os mesmos dias de antes.
+    de = addDays(today, sp.periodo === "hoje" ? 0 : sp.periodo === "30d" ? -29 : -6);
+    ate = today;
   } else {
-    const back = sp.periodo === "hoje" ? 0 : sp.periodo === "30d" ? 29 : 6;
-    de = addDays(today, -back);
+    // Padrão: o mês atual, do dia 1 até hoje.
+    de = `${today.slice(0, 8)}01`;
     ate = today;
   }
   if (ate > today) ate = today;

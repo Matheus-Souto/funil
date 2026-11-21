@@ -6,7 +6,6 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { pendingApprovalsCount } from "@/lib/mcp/approvals";
-import { ROLE_LABEL } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
 import { PIcon } from "../icons";
@@ -74,7 +73,7 @@ export default async function PanelLayout({ children }: { children: ReactNode })
       </header>
       <PanelShell
         items={items}
-        id={{ storeName: id.storeName, roleLabel: ROLE_LABEL[role], userName: id.userName, userEmail: id.userEmail }}
+        id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail }}
         logout={logoutAction}
         initialCollapsed={jar.get("funil-sidebar")?.value === "collapsed"}
         initialTheme={theme === "light" || theme === "dark" ? theme : undefined}

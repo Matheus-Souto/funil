@@ -67,7 +67,6 @@ function Tip({ show, label, children }: { show: boolean; label: string; children
 
 export interface ShellIdentity {
   storeName: string;
-  roleLabel: string;
   userName: string;
   userEmail: string;
 }
@@ -176,14 +175,13 @@ export function PanelShell({
           </Tip>
         </div>
 
-        <Tip show={collapsed} label={`${id.storeName} · ${id.roleLabel}`}>
+        <Tip show={collapsed} label={id.storeName}>
           <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados e foto da loja em Configurações"}>
             <span className={s.storeMark} aria-hidden="true">
               {id.storeName.slice(0, 1).toUpperCase()}
             </span>
             <span className={s.storeText}>
               <b>{id.storeName}</b>
-              <small>{id.roleLabel}</small>
             </span>
           </Link>
         </Tip>
@@ -261,10 +259,10 @@ export function PanelShell({
 export function BrandLogo() {
   return (
     <>
-      <Image className={`${s.brandLogo} ${s.onlyLight}`} src="/brand/pingapay-logo-light.webp" alt="" width={132} height={24} priority />
-      <Image className={`${s.brandLogo} ${s.onlyDark}`} src="/brand/pingapay-logo-dark.webp" alt="" width={132} height={24} priority />
-      <Image className={`${s.brandIcon} ${s.onlyLight}`} src="/brand/pingapay-icon-light.webp" alt="" width={28} height={28} />
-      <Image className={`${s.brandIcon} ${s.onlyDark}`} src="/brand/pingapay-icon-dark.webp" alt="" width={28} height={28} />
+      <Image className={`${s.brandLogo} ${s.onlyLight}`} src="/brand/pingapay-logo-light-2.webp" alt="" width={132} height={24} priority unoptimized />
+      <Image className={`${s.brandLogo} ${s.onlyDark}`} src="/brand/pingapay-logo-dark-2.webp" alt="" width={132} height={24} priority unoptimized />
+      <Image className={`${s.brandIcon} ${s.onlyLight}`} src="/brand/pingapay-icon-light-2.webp" alt="" width={28} height={28} unoptimized />
+      <Image className={`${s.brandIcon} ${s.onlyDark}`} src="/brand/pingapay-icon-dark-2.webp" alt="" width={28} height={28} unoptimized />
     </>
   );
 }
