@@ -744,6 +744,8 @@ Guarde esse registro junto com os documentos de privacidade da loja.
 **Prazo.** Todo contato é apagado 30 dias depois da captura, esteja ele aberto, contatado ou convertido (a rotina roda
 de hora em hora; vencido, ele já some do painel e não gera aviso antes disso). Se a pessoa **compra** (cria o pedido), o
 contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o pedido; o registro some com os 30 dias.
+Até vencer, o contato convertido guarda só um **hash** do e-mail (resumo irreversível, não o e-mail), usado apenas para
+não avisar como abandono quem comprou e para atender o pedido de exclusão (**Excluir todos deste e-mail**).
 
 **Onde ver e agir.** No painel, **Contatos** (dono, admin e suporte): filtro por status (Abertos, Contatados, Compraram),
 busca pelo código do contato ou pelo e-mail exato, botão para copiar o e-mail, link do WhatsApp (abre o número da pessoa,
@@ -755,7 +757,7 @@ foram apagados). Tráfego não vê esta página.
 
 **Telegram.** O evento **Abandono antes do pagamento** (caixa própria, desligada por padrão, mesmo prazo do "Carrinho
 abandonado") manda só a oferta, o valor e o código do contato, por exemplo
-`Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #7KQ2MX`. Nunca vão e-mail, celular
+`Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #3FA91C`. Nunca vão e-mail, celular
 nem link. Para achar a pessoa, busque o código em **Contatos**. Sai no máximo um aviso por contato, e há um teto de 30
 avisos por hora por loja (o resto fica só no painel).
 

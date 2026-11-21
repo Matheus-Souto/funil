@@ -1,6 +1,6 @@
 // Captura do contato no checkout (abandono antes de comprar): decide, puro e sem rede, o que mandar ao servidor quando
 // a pessoa sai de um campo. Só vão valores válidos e diferentes do último enviado; o celular só depois de um e-mail
-// enviado (o servidor não cria contato só com celular); depois de "Não salvar meus dados" nada mais é enviado. Também
+// enviado (o servidor não cria contato só com celular) ou junto com ele, se já estava digitado; depois de "Não salvar meus dados" nada mais é enviado. Também
 // monta a entrada do "Não salvar" e guarda essa escolha no navegador (localStorage, sempre em try/catch).
 import { normalizeBrMobile, validEmail } from "@/lib/validation/br";
 
@@ -18,7 +18,10 @@ export function nextLeadSend(
   if (field === "email") {
     if (!validEmail(values.email)) return null;
     const email = values.email.trim().toLowerCase();
-    return email === state.sent.email ? null : { email };
+    if (email === state.sent.email) return null;
+    // Celular válido já digitado (antes do e-mail) e ainda não enviado vai junto: sem isso, só iria no próximo blur dele.
+    const phone = normalizeBrMobile(values.phone);
+    return phone !== null && phone !== state.sent.phone ? { email, phone } : { email };
   }
   if (state.sent.email === null) return null;
   const phone = normalizeBrMobile(values.phone);

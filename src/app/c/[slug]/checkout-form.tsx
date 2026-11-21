@@ -528,7 +528,8 @@ export function CheckoutForm(props: {
                         A {storeName} guarda seu e-mail e celular por até 30 dias para falar com você se a compra não for concluída.
                       </p>
                       <p className={s.leadActions}>
-                        <button type="button" className={s.leadLink} onClick={optOutOfLead}>
+                        {/* Sem roubar o foco no clique: o blur do e-mail não grava o contato antes do opt-out. */}
+                        <button type="button" className={s.leadLink} onMouseDown={(e) => e.preventDefault()} onClick={optOutOfLead}>
                           Não salvar meus dados
                         </button>
                         <span aria-hidden="true"> · </span>
@@ -541,7 +542,7 @@ export function CheckoutForm(props: {
                           <b>Quem trata:</b> {storeName}. <b>Para quê:</b> só para lembrar você desta compra; seus dados não são vendidos nem compartilhados.{" "}
                           <b>Base legal:</b> legítimo interesse (LGPD, art. 7º, IX). <b>Por quanto tempo:</b> até 30 dias; se você concluir a compra, valem os
                           dados do pedido e este registro perde o contato na hora. <b>Seus direitos:</b> peça acesso ou exclusão a qualquer momento por{" "}
-                          {lead.privacyEmail}, ou toque em &quot;Não salvar meus dados&quot;.
+                          <a href={`mailto:${encodeURIComponent(lead.privacyEmail)}`}>{lead.privacyEmail}</a>, ou toque em &quot;Não salvar meus dados&quot;.
                         </p>
                       ) : null}
                     </>

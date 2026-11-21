@@ -197,8 +197,8 @@ describe("textos dos avisos", () => {
     expect(telegramMessage("abandoned", base)).toBe("Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 27,00 — Pix — pedido #AB12CD");
   });
   test("lead_abandoned: texto do brief, sem forma de pagamento (o method é ignorado) e com o código do contato", () => {
-    const lead = { productName: "Almanaque Bíblico Kids", bumpName: null, totalCents: 990, orderCode: leadCode("7kq2mxaa-1111-2222-3333-444455556666"), abandonAfterMinutes: 30 };
-    const want = "Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #7KQ2MX";
+    const lead = { productName: "Almanaque Bíblico Kids", bumpName: null, totalCents: 990, orderCode: leadCode("3fa91caa-1111-2222-3333-444455556666"), abandonAfterMinutes: 30 };
+    const want = "Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #3FA91C";
     expect(telegramMessage("lead_abandoned", lead)).toBe(want);
     expect(telegramMessage("lead_abandoned", { ...lead, method: "card_asaas" })).toBe(want);
   });

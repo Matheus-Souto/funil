@@ -24,6 +24,14 @@ describe("nextLeadSend", () => {
     expect(nextLeadSend(withEmail, "email", { email: "bia@exemplo.com.br", phone: "" })).toEqual({ email: "bia@exemplo.com.br" });
   });
 
+  test("celular válido digitado antes do e-mail: o blur do e-mail manda os dois", () => {
+    expect(nextLeadSend(none, "email", { email: " Ana@Exemplo.com.br ", phone: "(11) 98765-4321" })).toEqual({ email: "ana@exemplo.com.br", phone: "11987654321" });
+    // celular inválido ou já enviado não vai junto
+    expect(nextLeadSend(none, "email", { email: "ana@exemplo.com.br", phone: "(11) 1234" })).toEqual({ email: "ana@exemplo.com.br" });
+    const phoneSent = { optedOut: false, sent: { email: "bia@exemplo.com.br", phone: "11987654321" } };
+    expect(nextLeadSend(phoneSent, "email", values)).toEqual({ email: "ana@exemplo.com.br" });
+  });
+
   test("celular antes de e-mail → null", () => {
     expect(nextLeadSend(none, "phone", values)).toBeNull();
   });
