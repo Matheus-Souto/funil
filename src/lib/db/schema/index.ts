@@ -12,3 +12,4 @@ export * from "./notify";
 export * from "./mcp";
 export * from "./approvals";
 export * from "./leads";
+export * from "./recovery";

@@ -232,6 +232,13 @@
       "when": 1795232213768,
       "tag": "0032_checkout_lead_converted",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1795267527168,
+      "tag": "0033_recovery_email",
+      "breakpoints": true
     }
   ]
 }
