@@ -99,8 +99,10 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                       type="button"
                       className={`${s.btn} ${s.btnPrimary}`}
                       disabled={!r.canDecide || approve.pending || reject.pending}
+                      aria-label={`Aprovar e executar o pedido: ${r.description}`}
                       onClick={() => {
                         approve.setMsg(null);
+                        reject.setMsg(null);
                         setTarget(r);
                       }}
                     >
@@ -111,7 +113,10 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                       className={`${s.btn} ${s.btnDanger}`}
                       disabled={!r.canDecide || approve.pending || reject.pending}
                       aria-label={`Recusar o pedido: ${r.description}`}
-                      onClick={() => reject.run(() => rejectRequestAction(r.id))}
+                      onClick={() => {
+                        approve.setMsg(null);
+                        return reject.run(() => rejectRequestAction(r.id));
+                      }}
                     >
                       Recusar
                     </button>
@@ -171,9 +176,10 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
             <button
               type="button"
               className={`${s.btn} ${s.btnPrimary}`}
-              disabled={approve.pending}
+              disabled={approve.pending || approve.msg?.tone === "error"}
               onClick={async () => {
                 if (!target) return;
+                reject.setMsg(null);
                 const r = await approve.run(() => approveRequestAction(target.id));
                 if (r.ok) setTarget(null);
               }}
