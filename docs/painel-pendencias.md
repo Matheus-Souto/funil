@@ -40,3 +40,13 @@ sempre a mais recente primeiro.
 
 **Sugestão:** um parâmetro `sort` em `listOrders` (ex.: `createdAt`, `total`, com `asc`/`desc`) para os cabeçalhos
 ganharem a seta de ordenar.
+
+## 5. Observado no E2E: conexão reaproveitada no teste do reembolso
+
+Numa rodada do `verify` (21/11/2026), o teste "entrega por e-mail … reembolso revoga" (e2e/smoke.spec.ts, linha do
+`expect.poll` que espera o 410) falhou com `read ECONNRESET` no `request.get` do link de download. O app tinha
+revogado os links certo (log "links de download revogados"); a rodada seguinte, sem mudança, passou.
+
+Causa provável: o `request` do Playwright reaproveita uma conexão keep-alive que o servidor (`next start`) fechou por
+inatividade (~5 s parado durante o diálogo de reembolso). Uma correção possível é fazer essa checagem num contexto de
+requisição novo (`playwright.request.newContext()`) ou com `Connection: close`, em vez de repetir o teste.
