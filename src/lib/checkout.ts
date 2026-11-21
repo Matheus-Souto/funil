@@ -88,6 +88,8 @@ const startInput = z.object({
   fbp: z.string().max(500).optional(),
   /** Id do evento InitiateCheckout gerado na página (o Pixel usa o mesmo): UUID ou 16-64 caracteres url-safe. */
   eventId: z.string().regex(META_EVENT_ID_RE, "eventId inválido").optional(),
+  /** Chave do visitante do `checkout.saveLead` (UUID): o pedido converte o contato guardado por ela. Nunca vai à auditoria. */
+  leadKey: z.uuid().optional(),
   /** Preenchidos pela borda HTTP (nunca pelo navegador). */
   clientIp: z.string().min(1).max(64),
   userAgent: z.string().max(500),
@@ -162,6 +164,7 @@ export const checkoutStart = defineAction({
       fbp: input.fbp,
       clientIp: input.clientIp,
       userAgent: input.userAgent,
+      leadKey: input.leadKey,
     };
     const create = (method: "pix_manual" | "pix_asaas" | "card_asaas", withCpf?: string, fallback = false) => {
       if (method === "pix_manual" ? !limits.manualIpOk : !limits.asaasOk) {

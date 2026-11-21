@@ -6,7 +6,7 @@ import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
-import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
+import { auditLog, offer, offerProduct, product, store } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
@@ -233,6 +233,7 @@ describe("offers", () => {
       bump: { products: [{ name: "Completo" }], priceCents: 1710, label: "Leve o completo" },
       thankYouText: "Obrigado!",
       pixelId: null,
+      leadCapture: null,
     });
     const json = JSON.stringify(res);
     for (const leak of ["fileKey", "file_key", "fileName", "storeId", "products/"]) expect(json).not.toContain(leak);
@@ -243,6 +244,21 @@ describe("offers", () => {
     const main = await mkProduct(storeId);
     await call(createOffer, storeId, owner, offerInput(main.id));
     expect((await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public")).bump).toBeNull();
+  });
+
+  test("getPublic devolve leadCapture só quando a loja tem a captura ligada (com o e-mail de privacidade)", async () => {
+    const { storeId } = await seedStore();
+    const main = await mkProduct(storeId);
+    await call(createOffer, storeId, owner, offerInput(main.id));
+    const read = async () => (await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public")).leadCapture;
+    expect(await read()).toBeNull();
+    // e-mail preenchido com a captura desligada: continua sem aviso
+    await t.ownerDb.update(store).set({ privacyEmail: "privacidade@example.com" }).where(eq(store.id, storeId));
+    expect(await read()).toBeNull();
+    await t.ownerDb.update(store).set({ leadCapture: true }).where(eq(store.id, storeId));
+    expect(await read()).toEqual({ privacyEmail: "privacidade@example.com" });
+    await t.ownerDb.update(store).set({ leadCapture: false }).where(eq(store.id, storeId));
+    expect(await read()).toBeNull();
   });
 
   test("getPublic de oferta inativa ou inexistente é not_found", async () => {

@@ -249,6 +249,7 @@ O que vai em cada mensagem (texto puro, uma linha, sem link):
 | Pix gerado | `Pix gerado: <itens> — <valor> — pedido #<código>` |
 | Cartão recusado | `Cartão recusado: <itens> — <valor> — pedido #<código>` |
 | Carrinho abandonado | `Carrinho abandonado (<N> min sem pagamento): <itens> — <valor> — <forma> — pedido #<código>` |
+| Abandono antes do pagamento (desligado por padrão) | `Abandono antes do pagamento (<N> min): <itens> — <valor> — contato #<código>` (ver "Abandono antes de comprar") |
 
 `<itens>` é o produto (ou o nome da oferta, com mais de um produto principal), mais o bump quando houver. **Nunca** vão
 nome, e-mail, CPF ou telefone do comprador, nem links.
@@ -260,7 +261,8 @@ grupo vê os valores e os produtos das vendas: adicione só quem pode ver esses 
 Nesta versão, **abandono** é o pedido criado e não pago dentro do prazo escolhido (de 10 a 1440 minutos; padrão 30):
 o aviso só sai se o pedido continuar sem pagamento e o mesmo comprador não tiver pago a mesma oferta depois. No **Pix
 manual**, o pedido só conta como pago quando você o libera no painel: pedido pago e ainda não liberado dentro do prazo
-aparece como abandono. O abandono antes de o comprador criar o pedido ainda não existe.
+aparece como abandono. O abandono antes de o comprador criar o pedido é o evento **Abandono antes do pagamento**, que depende
+de a loja ligar a captura de contatos (seção "Abandono antes de comprar").
 
 Se o Telegram passar a recusar os avisos (token revogado, bot removido do grupo), o painel mostra um aviso na tela
 inicial: confira o token e o grupo, salve em Conexões e use **Enviar teste**. O aviso some sozinho quando o teste dá
@@ -686,6 +688,86 @@ limite bloqueia agentes legítimos junto com quem erra. Com `TRUST_PROXY=0`, o I
 vale e as falhas de autenticação caem num balde único para o servidor todo. Além disso, cada token tem o limite próprio
 de 120 requisições por minuto e de 2 requisições ao mesmo tempo (a terceira simultânea recebe 429 e pode tentar de novo
 em 5 segundos); uma consulta que passe de 5 segundos no banco é cortada e volta como erro.
+
+## Abandono antes de comprar
+
+Muita gente digita o e-mail no checkout e sai sem criar o pedido. Com esta opção, a loja guarda o **e-mail e o celular**
+dessa pessoa por até 30 dias, para chamá-la à mão (copiar o e-mail, abrir o WhatsApp) e lembrá-la da compra. Não há
+e-mail automático de recuperação: a loja decide quem contatar.
+
+Isto **não é parecer jurídico**: é o desenho técnico e um roteiro. A loja é a **controladora** dos dados (quem decide
+para que e por quanto tempo guardar) e responde por eles; confirme com seu advogado ou encarregado de dados.
+
+**Como ligar.** Vem **desligado**. Em **Configurações**, preencha **E-mail para pedidos de privacidade** (público: ele
+aparece no aviso do checkout e é por onde o titular pede acesso ou exclusão) e marque **Guardar o contato de quem não
+finaliza a compra**. Sem o e-mail de privacidade, o painel não deixa ligar. Ao desligar, o checkout para de capturar na
+hora; os contatos já guardados seguem até os 30 dias (ou até alguém excluí-los).
+
+**O que é guardado.** Só e-mail e celular, com a oferta e o horário. Nunca nome, CPF, IP nem navegador. A captura
+acontece quando a pessoa sai do campo de e-mail (e, depois, do de celular) com um valor válido, e só se a pessoa não
+tiver tocado em **Não salvar meus dados**.
+
+**O aviso no checkout.** Fica sempre visível, embaixo do campo de e-mail, antes de qualquer coleta:
+
+> A {loja} guarda seu e-mail e celular por até 30 dias para falar com você se a compra não for concluída.
+> **Não salvar meus dados** · **Saiba mais**
+
+O **Saiba mais** abre ali mesmo:
+
+> **Quem trata:** {loja}. **Para quê:** só para lembrar você desta compra; seus dados não são vendidos nem
+> compartilhados. **Base legal:** legítimo interesse (LGPD, art. 7º, IX). **Por quanto tempo:** até 30 dias; se você
+> concluir a compra, valem os dados do pedido e este registro perde o contato na hora. **Seus direitos:** peça acesso
+> ou exclusão a qualquer momento por {e-mail de privacidade}, ou toque em "Não salvar meus dados".
+
+**Não salvar meus dados** para a coleta e apaga: o que foi guardado **nesta visita** e, se o e-mail digitado no campo
+for válido, os contatos **ainda abertos** (ou contatados) da loja com aquele e-mail, de visitas anteriores. A resposta é
+sempre a mesma (não revela se havia algo guardado). A escolha vale **para este navegador**: ao voltar ao checkout nele, a
+página já abre sem capturar. Contato guardado em outro navegador, com outro e-mail, ou que já virou pedido, só pelo
+**e-mail de privacidade** (a loja usa **Excluir todos deste e-mail** em **Contatos**). O aviso passa a dizer "Pronto:
+seus dados não serão guardados antes da compra."
+
+**Base legal: legítimo interesse (LGPD, art. 7º, IX).** Em vez de pedir consentimento, a loja se apoia no legítimo
+interesse de lembrar quem já demonstrou interesse na compra. Esse caminho exige que a loja **registre por escrito** o
+teste de balanceamento (avaliação de que o interesse da loja não atropela os direitos do titular). Modelo curto para
+copiar e adaptar:
+
+| Pergunta | Resposta (adapte à sua loja) |
+|---|---|
+| **Finalidade** | Lembrar, uma vez e à mão, quem começou o checkout de um produto da loja e não concluiu a compra. |
+| **Necessidade** | Só e-mail e celular, que a própria pessoa digitou no checkout. Nada além disso é coletado, e nada é comprado de terceiros. |
+| **Expectativa do titular** | Quem preenche o checkout espera ser lembrado da compra. O aviso aparece antes da coleta e diz quem guarda, para quê e por quanto tempo. |
+| **Salvaguardas** | Aviso prévio e visível; coleta mínima; apagado em 30 dias; botão **Não salvar meus dados** (para a coleta neste navegador e apaga o que foi guardado nesta visita e o que estiver aberto com o e-mail digitado); exclusão por pedido no painel; contato apaga-se na hora quando a pessoa compra; acesso restrito (dono, admin e suporte). |
+| **Conclusão** | O interesse da loja é legítimo e proporcional; o impacto sobre o titular é baixo. Data e responsável pelo registro: ______. |
+
+Guarde esse registro junto com os documentos de privacidade da loja.
+
+**Prazo.** Todo contato é apagado 30 dias depois da captura, esteja ele aberto, contatado ou convertido (a rotina roda
+de hora em hora; vencido, ele já some do painel e não gera aviso antes disso). Se a pessoa **compra** (cria o pedido), o
+contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o pedido; o registro some com os 30 dias.
+Até vencer, o contato convertido guarda só um **hash** do e-mail (um resumo do e-mail, não o e-mail em si; quem já conhece o e-mail consegue confirmar que ele está ali), usado apenas para
+não avisar como abandono quem comprou e para atender o pedido de exclusão (**Excluir todos deste e-mail**).
+
+**Onde ver e agir.** No painel, **Contatos** (dono, admin e suporte): filtro por status (Abertos, Contatados, Compraram),
+busca pelo código do contato ou pelo e-mail exato, botão para copiar o e-mail, link do WhatsApp (abre o número da pessoa,
+sem texto pronto), **Marcar como contatado** e **Excluir**. Para um pedido do titular ("apaguem meus dados"), use
+**Excluir todos deste e-mail** no pé da página: apaga todos os contatos da loja com aquele e-mail. A visão geral mostra
+os números **Contatos capturados** e **Viraram pedido** do período. Como os contatos somem com 30 dias, esses números
+cobrem só os últimos 30 dias: no período de 30 dias eles aparecem sem a comparação com os 30 dias anteriores (que já
+foram apagados). Tráfego não vê esta página.
+
+**Telegram.** O evento **Abandono antes do pagamento** (caixa própria, desligada por padrão, mesmo prazo do "Carrinho
+abandonado") manda só a oferta, o valor e o código do contato, por exemplo
+`Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #3FA91C`. Nunca vão e-mail, celular
+nem link. Para achar a pessoa, busque o código em **Contatos**. Sai no máximo um aviso por contato, e há um teto de 30
+avisos por hora por loja (o resto fica só no painel).
+
+**Agentes de IA (MCP).** O MCP **não vê contatos**: nenhuma ferramenta lista, lê ou apaga e-mail ou celular, em nenhum
+papel. A única coisa que ele recebe são dois **números** em `metrics.summary`: `leads` (contatos capturados no período) e
+`leadsConverted` (quantos viraram pedido), que cobrem só os últimos 30 dias (a retenção dos contatos).
+
+**Proteção contra abuso.** A captura tem limites por IP e por loja (e o **Não salvar meus dados**, por IP e por
+visita); passou do limite, o pedido é ignorado em silêncio (o comprador nunca vê erro). Não há e-mail automático, então um contato falso só causa efeito se a loja o contatar à mão:
+confira antes de escrever para alguém.
 
 ## 14. Problemas comuns
 

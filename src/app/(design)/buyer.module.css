@@ -241,6 +241,39 @@ select.input {
   font-weight: 500;
 }
 
+.leadNotice {
+  margin: -4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+.leadNotice p {
+  margin: 0;
+}
+.leadNotice p + p {
+  margin-top: 4px;
+}
+.leadLink {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--color-brand-strong);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.leadLink:focus-visible {
+  outline: 2px solid var(--color-brand-strong);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.leadMore {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--color-bg);
+}
+
 .checkLine {
   display: flex;
   align-items: center;

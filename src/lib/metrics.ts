@@ -3,7 +3,8 @@
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { checkoutView, orders } from "@/lib/db/schema";
+import { checkoutLead, checkoutView, orders } from "@/lib/db/schema";
+import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
 export const METHODS: readonly Method[] = ["pix_manual", "pix_asaas", "card_asaas"];
@@ -28,6 +29,14 @@ export function periodRange(p: Period, now: Date = new Date(), opts: { previous?
   return { from, to: now };
 }
 
+/**
+ * Os contatos (`leads`, `leadsConverted`) somem com 30 dias: uma janela que começa antes disso conta menos do que houve.
+ * `false` = não compare esses números (ex.: os 30 dias anteriores).
+ */
+export function leadWindowCovered(from: Date, now: Date = new Date()): boolean {
+  return from.getTime() >= now.getTime() - LEAD_TTL_DAYS * DAY_MS;
+}
+
 const range = z
   .object({ from: z.coerce.date(), to: z.coerce.date() })
   .refine((r) => r.from.getTime() <= r.to.getTime(), { message: "O início do período deve ser antes do fim", path: ["to"] });
@@ -47,7 +56,7 @@ type MethodRow = { orders: number; paid: number; revenueCents: number };
 
 export const metricsSummary = defineAction({
   name: "metrics.summary",
-  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref).",
+  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve.",
   input: range,
   permission: "metrics.read",
   audit: false,
@@ -60,6 +69,11 @@ export const metricsSummary = defineAction({
       .select({ n: n() })
       .from(checkoutView)
       .where(and(gte(checkoutView.at, from), lt(checkoutView.at, to)));
+    // Contatos de quem não finalizou a compra: só números (nenhum dado do contato sai daqui).
+    const [l] = await ctx.tx
+      .select({ n: n(), converted: sql<number>`count(*) filter (where ${checkoutLead.status} = 'converted')`.mapWith(Number) })
+      .from(checkoutLead)
+      .where(and(gte(checkoutLead.createdAt, from), lt(checkoutLead.createdAt, to)));
     const createdBy = await ctx.tx.select({ method: orders.method, n: n() }).from(orders).where(created).groupBy(orders.method);
     const paidBy = await ctx.tx
       .select({ method: orders.method, n: n(), cents: money(orders.totalCents) })
@@ -90,6 +104,8 @@ export const metricsSummary = defineAction({
       orders: createdBy.reduce((s, r) => s + r.n, 0),
       paid: paidBy.reduce((s, r) => s + r.n, 0),
       revenueCents: paidBy.reduce((s, r) => s + r.cents, 0),
+      leads: l?.n ?? 0,
+      leadsConverted: l?.converted ?? 0,
       byMethod,
       bySource: sources.sort(byRevenue((x) => x.source)).slice(0, 50),
       byRef: refs

@@ -11,6 +11,8 @@ import "@/lib/delivery/jobs";
 import "@/lib/delivery/mailer";
 import "@/lib/delivery/resend";
 import "@/lib/delivery/resend-webhook";
+import "@/lib/leads/capture";
+import "@/lib/leads/panel";
 import "@/lib/mcp/approvals";
 import "@/lib/mcp/tokens";
 import "@/lib/mcp/uploads";

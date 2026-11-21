@@ -11,3 +11,4 @@ export * from "./security";
 export * from "./notify";
 export * from "./mcp";
 export * from "./approvals";
+export * from "./leads";

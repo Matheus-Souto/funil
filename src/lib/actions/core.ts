@@ -111,7 +111,7 @@ const MCP_STATEMENT_TIMEOUT = "5s";
  * Permissões que um token MCP nunca tem, qualquer que seja o papel (o catálogo do MCP também as deixa de fora): a equipe
  * (e os próprios tokens), uma conta e a decisão da fila de aprovação.
  */
-export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self", "approvals.decide"];
+export const TOKEN_DENIED: readonly Permission[] = ["team.manage", "account.self", "approvals.decide", "leads.read", "leads.write"];
 
 /**
  * Concessão de aprovação: executa uma ação pedida pela fila do MCP (`approval_request`) em nome do aprovador. Só vale

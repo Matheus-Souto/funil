@@ -39,6 +39,8 @@ export default async function PanelLayout({ children }: { children: ReactNode })
     ...(can("orders.read") ? [{ href: "/admin/orders", label: "Pedidos", icon: "receipt" as const, badge: pending }] : []),
     ...(can("offers.read") ? [{ href: "/admin/offers", label: "Ofertas", icon: "tag" as const }] : []),
     ...(can("products.read") ? [{ href: "/admin/products", label: "Produtos", icon: "package" as const }] : []),
+    // Depois de Produtos: no celular as 3 primeiras abas (Visão geral, Pedidos, Ofertas) não mudam; Contatos fica em "Mais".
+    ...(can("leads.read") ? [{ href: "/admin/contatos", label: "Contatos", icon: "mail" as const }] : []),
     ...(can("connections.read")
       ? [
           { href: "/admin/connections", label: "Conexões", icon: "plug" as const, section: "loja" as const },

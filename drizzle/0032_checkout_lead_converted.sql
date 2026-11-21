@@ -1,0 +1,1 @@
+ALTER TABLE "checkout_lead" ADD CONSTRAINT "checkout_lead_converted_check" CHECK ("checkout_lead"."status" <> 'converted' or ("checkout_lead"."email" is null and "checkout_lead"."phone" is null));
