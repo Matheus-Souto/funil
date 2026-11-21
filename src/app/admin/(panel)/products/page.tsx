@@ -3,6 +3,7 @@ import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
+import { fileSize } from "@/lib/format";
 import { PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
@@ -12,7 +13,6 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Produtos" };
 
 const DAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "numeric" });
-const size = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1).replace(".", ",")} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 export default async function ProductsPage() {
   const panel = await requirePanelActor();
@@ -52,7 +52,7 @@ export default async function ProductsPage() {
                       </span>
                     </td>
                     <td className={s.muted}>
-                      {p.fileName} · {size(p.fileSize)}
+                      {p.fileName} · {fileSize(p.fileSize)}
                     </td>
                     <td className={s.muted}>{usedIn(p.id)}</td>
                     <td className={s.muted}>{DAY.format(p.createdAt)}</td>

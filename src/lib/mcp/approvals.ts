@@ -14,7 +14,7 @@ import { db, withStore, type Tx } from "@/lib/db/client";
 import { approvalRequest, mcpToken, store, uploadLink, users } from "@/lib/db/schema";
 import type { JobHandler } from "@/lib/jobs";
 import { log, redact } from "@/lib/log";
-import { summarizeRequest, type ApprovalSummary } from "./approval-summary";
+import { refreshSummary, summarizeRequest, type ApprovalSummary } from "./approval-summary";
 
 /** Entrada da ação-alvo: até 16 KB de JSON. */
 const MAX_ARGS_BYTES = 16 * 1024;
@@ -200,18 +200,20 @@ export const listApprovals = defineAction({
       .where(or(sql`${approvalRequest.status} <> 'pending'`, lte(approvalRequest.expiresAt, sql`now()`)))
       .orderBy(desc(sql`coalesce(${approvalRequest.decidedAt}, ${approvalRequest.expiresAt})`), desc(approvalRequest.id))
       .limit(50);
-    const view = (r: (typeof pending)[number]) => {
+    const view = async (r: (typeof pending)[number]) => {
       const target = registry.get(r.action) as Action<unknown, unknown> | undefined;
+      const decides = r.status === "pending" && canDecide(target, role);
       return {
         ...r,
-        summary: r.summary as ApprovalSummary,
+        // Pendente: ofertas e produtos resolvidos agora (estado atual), com aviso do que mudou desde o pedido.
+        summary: await refreshSummary(ctx.tx, r.summary as ApprovalSummary),
         tokenRole: r.tokenRole as Role,
         tool: toolName(r.action),
         description: target?.description ?? r.action,
-        canDecide: r.status === "pending" && canDecide(target, role),
+        canDecide: decides,
       };
     };
-    return { pending: pending.map(view), history: history.map(view) };
+    return { pending: await Promise.all(pending.map(view)), history: await Promise.all(history.map(view)) };
   },
 });
 

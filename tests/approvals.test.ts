@@ -12,8 +12,8 @@ import { registry } from "@/lib/actions/registry";
 import { updateOffer } from "@/lib/catalog/offers";
 import { open, seal, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { approvalRequest, auditLog, job, mcpToken, offer, uploadLink, users } from "@/lib/db/schema";
-import { orderCode } from "@/lib/format";
+import { approvalRequest, auditLog, job, mcpToken, offer, product, storeAlert, uploadLink, users } from "@/lib/db/schema";
+import { dateSP, dateTimeSP, orderCode } from "@/lib/format";
 import { runDueJobs, enqueue } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { SECRET_FIELDS, SHOWN_IN_FULL, summarizeRequest } from "@/lib/mcp/approval-summary";
@@ -114,6 +114,24 @@ async function seedRow(storeId: string, tokenId: string, extra: Partial<typeof a
   return row!.id;
 }
 
+/** Como o resumo identifica oferta e produto (nome + endereço/arquivo, tamanho, data e id curto). */
+const short = (id: string) => `#${id.slice(0, 8)}`;
+async function offerText(id: string): Promise<string> {
+  const [o] = await t.ownerDb.select().from(offer).where(eq(offer.id, id));
+  return `${o!.name} (/c/${o!.slug}) · ${short(id)}`;
+}
+async function productText(id: string, size = "1 KB"): Promise<string> {
+  const [p] = await t.ownerDb.select().from(product).where(eq(product.id, id));
+  return `${p!.name} — ${p!.fileName} · ${size} · enviado em ${dateSP(p!.createdAt)} · ${short(id)}`;
+}
+async function seedProduct(storeId: string, name: string, fileName = "almanaque.pdf", fileSize = 2_411_725): Promise<string> {
+  const [p] = await t.ownerDb
+    .insert(product)
+    .values({ storeId, name, fileKey: `products/${storeId}/${randomUUID()}.pdf`, fileName, fileSize })
+    .returning({ id: product.id });
+  return p!.id;
+}
+
 const fieldsOf = (summary: unknown) => (summary as { fields: { label: string; value: string }[] }).fields;
 const valueOf = (summary: unknown, label: string) => fieldsOf(summary).find((f) => f.label === label)?.value;
 
@@ -130,10 +148,11 @@ describe("approvals.request", () => {
     expect(row.inputSha256).toBe(sha256(JSON.stringify(args)));
     expect(row.summary).toEqual({
       fields: [
-        { label: "id", value: "Maná bíblico" },
+        { label: "id", value: await offerText(s.offerId) },
         { label: "slug", value: "novo-endereco" },
       ],
       notes: [],
+      refs: [{ label: "id", kind: "offer", ids: [s.offerId], was: ["Maná bíblico"] }],
     });
     const ttl = row.expiresAt.getTime() - before;
     expect(ttl).toBeGreaterThan(7 * DAY_MS - 60_000);
@@ -249,9 +268,9 @@ describe("resumo", () => {
       ).requestId,
     );
     expect(fieldsOf(products.summary)).toEqual([
-      { label: "id", value: "Maná bíblico" },
-      { label: "productIds", value: "Maná básica" },
-      { label: "bump.productIds", value: "Maná completa" },
+      { label: "id", value: await offerText(s.offerId) },
+      { label: "productIds", value: await productText(s.mainId) },
+      { label: "bump.productIds", value: await productText(s.bumpId) },
       { label: "bump.priceCents", value: "R$ 17,10" },
       { label: "bump.label", value: "Leve também" },
       { label: "priceCents", value: "R$ 12,90" },
@@ -281,21 +300,128 @@ describe("resumo", () => {
     );
     expect(summary).toEqual({
       fields: [
-        { label: "id", value: "Maná bíblico" },
+        { label: "id", value: await offerText(s.offerId) },
         { label: "active", value: "sim" },
         { label: "thankYouText", value: "(vazio)" },
         { label: "maxInstallments", value: "3" },
       ],
       notes: ["Reativa a oferta: o link volta a vender"],
+      refs: [{ label: "id", kind: "offer", ids: [s.offerId], was: ["Maná bíblico"] }],
     });
-    const missing = await withStore(storeId, (tx) => summarizeRequest(tx, offersUpdate, { id: randomUUID(), active: false }));
+    const gone = randomUUID();
+    const missing = await withStore(storeId, (tx) => summarizeRequest(tx, offersUpdate, { id: gone, active: false, methods: [] }));
     expect(missing).toEqual({
       fields: [
         { label: "id", value: "(não encontrado)" },
         { label: "active", value: "não" },
+        // Lista vazia não vira texto em branco.
+        { label: "methods", value: "(nenhum)" },
       ],
       notes: [],
+      refs: [{ label: "id", kind: "offer", ids: [gone], was: [null] }],
     });
+  });
+
+  test("resumo: dois produtos de mesmo nome saem distinguíveis (arquivo, tamanho, data e id curto); lista vazia → (nenhum)", async () => {
+    const { s, storeId, request } = await setup();
+    const real = await seedProduct(storeId, "Almanaque Kids", "almanaque.pdf", 2_411_725);
+    const twin = await seedProduct(storeId, "Almanaque Kids", "almanaque-v2.pdf", 4_000);
+    const row = await requestRow((await request("offers.setProducts", { id: s.offerId, productIds: [real, twin], bump: null })).requestId);
+    const value = valueOf(row.summary, "productIds")!;
+    expect(value).toBe([await productText(real, "2,3 MB"), await productText(twin, "4 KB")].join("\n"));
+    const [a, b] = value.split("\n");
+    expect(a).not.toBe(b);
+    expect(a).toContain(short(real));
+    expect(b).toContain(short(twin));
+    expect(a).toMatch(/^Almanaque Kids — almanaque\.pdf · 2,3 MB · enviado em \d{2}\/\d{2}\/\d{4} · #[0-9a-f]{8}$/);
+
+    const offersUpdate = updateOffer as unknown as Action<unknown, unknown>;
+    const empty = await withStore(storeId, (tx) => summarizeRequest(tx, offersUpdate, { id: s.offerId, methods: [] }));
+    expect(valueOf(empty, "methods")).toBe("(nenhum)");
+    const setProducts = registry.get("offers.setProducts") as Action<unknown, unknown>;
+    const noBump = await withStore(storeId, (tx) => summarizeRequest(tx, setProducts, { id: s.offerId, productIds: [real], bump: { productIds: [] } }));
+    expect(valueOf(noBump, "bump.productIds")).toBe("(nenhum)");
+  });
+
+  test("resumo: produto enviado por link de upload leva o selo do agente", async () => {
+    const { s, storeId, tokenId, request } = await setup();
+    const uploaded = await seedProduct(storeId, "Almanaque Kids");
+    const usedAt = new Date(Date.now() - 3_600_000);
+    await t.ownerDb.insert(uploadLink).values({
+      storeId,
+      tokenId,
+      name: "Almanaque Kids",
+      fileName: "almanaque.pdf",
+      keyHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 600_000),
+      usedAt,
+      productId: uploaded,
+    });
+    const row = await requestRow((await request("offers.setProducts", { id: s.offerId, productIds: [uploaded, s.mainId], bump: null })).requestId);
+    const [first, second] = valueOf(row.summary, "productIds")!.split("\n");
+    expect(first).toBe(`${await productText(uploaded, "2,3 MB")} · enviado pelo agente agente em ${dateSP(usedAt)}`);
+    expect(second).toBe(await productText(s.mainId));
+    expect(second).not.toContain("enviado pelo agente");
+  });
+
+  test("resumo: controle, quebra de linha, bidi e invisíveis aparecem escapados (inclusive nomes vindos do banco)", async () => {
+    const { s, storeId, request } = await setup();
+    const tricky = await seedProduct(storeId, "Kids\u202Efdp.exe\u200B\nproductIds: Almanaque Kids", "a\u2066b\u0007.pdf");
+    const row = await requestRow((await request("products.delete", { id: tricky })).requestId);
+    const value = valueOf(row.summary, "id")!;
+    expect(value).toStartWith("Kids⟨U+202E⟩fdp.exe⟨U+200B⟩⟨U+000A⟩productIds: Almanaque Kids — a⟨U+2066⟩b⟨U+0007⟩.pdf · ");
+    expect(value).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/);
+
+    // Valor de texto da entrada também (não imita outra linha "rótulo: valor").
+    const offersUpdate = updateOffer as unknown as Action<unknown, unknown>;
+    const summary = await withStore(storeId, (tx) =>
+      summarizeRequest(tx, offersUpdate, { id: s.offerId, thankYouText: "Obrigado!\r\nactive: não\uFEFF\u2060\u0085" }),
+    );
+    expect(valueOf(summary, "thankYouText")).toBe("Obrigado!⟨U+000D⟩⟨U+000A⟩active: não⟨U+FEFF⟩⟨U+2060⟩⟨U+0085⟩");
+  });
+
+  test("resumo: nome trocado depois do pedido → approvals.list mostra o estado atual e o aviso", async () => {
+    const { s, panel, request } = await setup();
+    const req = await request("offers.setProducts", { id: s.offerId, productIds: [s.mainId], bump: null });
+    const before = await productText(s.mainId);
+    await t.ownerDb.update(product).set({ name: "Almanaque Kids" }).where(eq(product.id, s.mainId));
+    await t.ownerDb.update(offer).set({ name: "Oferta renomeada" }).where(eq(offer.id, s.offerId));
+    // O resumo gravado não muda; a lista resolve de novo.
+    expect(valueOf((await requestRow(req.requestId)).summary, "productIds")).toBe(before);
+    const list = await runAction(listApprovals, panel(), {});
+    const item = list.pending.find((r) => r.id === req.requestId)!;
+    expect(valueOf(item.summary, "productIds")).toBe(await productText(s.mainId));
+    expect(valueOf(item.summary, "id")).toBe(await offerText(s.offerId));
+    expect(item.summary!.notes).toEqual([
+      `A oferta ${short(s.offerId)} mudou desde o pedido: era “Maná bíblico”, agora “Oferta renomeada”. Confira antes de aprovar.`,
+      `O produto ${short(s.mainId)} mudou desde o pedido: era “Maná básica — Maná básica.pdf”, agora “Almanaque Kids — Maná básica.pdf”. Confira antes de aprovar.`,
+    ]);
+    expect(item.summary).not.toHaveProperty("refs");
+  });
+
+  test("resumo: alerts.ack mostra o tipo do aviso e a data; o aviso de segurança da página de pagamento ganha nota", async () => {
+    const { storeId, request } = await setup();
+    const [monitor] = await t.ownerDb
+      .insert(storeAlert)
+      .values({ storeId, kind: "monitor_pagina_pagamento", detail: { page: "/c" } })
+      .returning({ id: storeAlert.id, createdAt: storeAlert.createdAt });
+    const [breaker] = await t.ownerDb
+      .insert(storeAlert)
+      .values({ storeId, kind: "disjuntor_cartao", detail: {} })
+      .returning({ id: storeAlert.id, createdAt: storeAlert.createdAt });
+
+    const sec = await requestRow((await request("alerts.ack", { id: monitor!.id })).requestId);
+    expect(valueOf(sec.summary, "id")).toBe(`A página de pagamento mudou (/c) · criado em ${dateTimeSP(monitor!.createdAt)} · ${short(monitor!.id)}`);
+    expect((sec.summary as { notes: string[] }).notes).toEqual([
+      "Este é o aviso de segurança da página de pagamento: fechá-lo tira do painel o sinal de que o checkout, a página do pedido ou o formulário do cartão mudaram. Só aprove se você já investigou.",
+    ]);
+    expect(JSON.stringify(sec.summary)).not.toContain(monitor!.id);
+
+    const plainAlert = await requestRow((await request("alerts.ack", { id: breaker!.id })).requestId);
+    expect(valueOf(plainAlert.summary, "id")).toBe(`Muitas recusas de cartão em pouco tempo · criado em ${dateTimeSP(breaker!.createdAt)} · ${short(breaker!.id)}`);
+    expect((plainAlert.summary as { notes: string[] }).notes).toEqual([]);
+    const missing = await requestRow((await request("alerts.ack", { id: randomUUID() })).requestId);
+    expect(valueOf(missing.summary, "id")).toBe("(não encontrado)");
   });
 });
 
