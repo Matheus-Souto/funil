@@ -50,7 +50,7 @@ export function deltaOf(cur: number, prev: number): { pct: number | null; tone: 
 }
 
 /** Ilustrações 3D do painel (public/admin/art/<nome>.webp, 240×240, fundo transparente). */
-export type ArtName = "receita" | "pedidos" | "pagos" | "ticket" | "produto" | "aprovacoes" | "agentes" | "funil" | "pdf" | "origem" | "indicacao" | "carteira" | "email" | "avisos";
+export type ArtName = "receita" | "pedidos" | "pagos" | "ticket" | "produto" | "aprovacoes" | "agentes" | "funil" | "pdf" | "origem" | "indicacao" | "carteira" | "email" | "avisos" | "pingaia";
 
 /** Ilustração decorativa (estados vazios, login): escondida dos leitores de tela. */
 export function Art({ name, size = 112, className }: { name: ArtName; size?: number; className?: string }) {

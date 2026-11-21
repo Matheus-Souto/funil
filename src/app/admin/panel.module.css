@@ -191,37 +191,44 @@
   font-size: 11px;
   color: var(--color-text-muted);
 }
+/* Botão da PingaIA: destacado com um tom suave de lima (é a porta de entrada da assistente). */
 .ai {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 34px;
-  margin-top: 4px;
-  padding: 0 10px;
-  border-radius: 8px;
+  height: 40px;
+  margin-top: 6px;
+  padding: 0 8px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 35%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
   color: var(--color-text-muted);
   font: inherit;
   font-size: 13px;
-  border: 0;
-  background: none;
   white-space: nowrap;
   cursor: not-allowed;
   text-align: left;
+  transition: background-color 150ms var(--ease-standard);
 }
-.ai svg {
+.ai:hover {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+.aiArt {
   flex: none;
-  color: var(--color-primary-ink);
+  width: 26px;
+  height: 26px;
+  margin: -4px 0 -4px -4px;
+  pointer-events: none;
 }
-.ai .navLabel:first-of-type {
+.ai b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.aiLabel {
   flex: 1;
-}
-.ai kbd {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 1px 5px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .navWrap {
   flex: 1;
@@ -342,11 +349,40 @@
 }
 .userFoot {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 2px 0;
+  border-top: 1px solid var(--color-border);
+}
+/* Linha do usuário: avatar, nome e e-mail (abaixo da fileira de ícones). */
+.userRow {
+  display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 4px 0;
-  border-top: 1px solid var(--color-border);
+  min-width: 0;
+  padding: 4px 4px 2px;
+}
+/* Botões pequenos e sem borda da fileira de ícones (tema, configurações, senha, sair). */
+.footBtn {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-standard), color 120ms var(--ease-standard);
+}
+.footBtn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+.footBtn:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: 1px;
 }
 .avatar {
   display: grid;
@@ -382,9 +418,8 @@
 .userActions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 2px;
-  width: 100%;
+  gap: 6px;
+  padding: 0 2px;
 }
 .iconBtn {
   display: grid;
@@ -426,6 +461,11 @@
 .shell[data-collapsed="true"] .ai {
   justify-content: center;
   padding: 0;
+  border-color: transparent;
+  background: none;
+}
+.shell[data-collapsed="true"] .aiArt {
+  margin: 0;
 }
 .shell[data-collapsed="true"] .navSep {
   height: 1px;
@@ -440,11 +480,17 @@
   background: none;
 }
 .shell[data-collapsed="true"] .userFoot {
-  flex-direction: column;
-  padding: 12px 0 0;
+  align-items: center;
+  padding: 10px 0 0;
 }
 .shell[data-collapsed="true"] .userActions {
   flex-direction: column;
+  gap: 4px;
+  padding: 0;
+}
+.shell[data-collapsed="true"] .userRow {
+  justify-content: center;
+  padding: 6px 0 2px;
 }
 
 .mobileTop,
@@ -2503,12 +2549,21 @@
 
 /* Botões de ícone da sidebar menores (tema, senha, sair, recolher) */
 .sidebar .iconBtn,
+/* O botão de tema (Arc) com a mesma cara dos outros ícones da fileira: sem borda nem fundo. */
 .userActions :global(button) {
   width: 30px;
   height: 30px;
   min-height: 30px;
   padding: 0;
+  border: 0;
   border-radius: 8px;
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+}
+.userActions :global(button):hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
 }
 
 .thPending {
