@@ -16,7 +16,7 @@ import type { Job } from "@/lib/jobs";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { recordEvent } from "@/lib/payments/ratelimit";
 import { mailboxHash, mailboxKey, simpleAddress } from "@/lib/recovery/rules";
-import { createRecoveryScanHandler } from "@/lib/recovery/scan";
+import { createRecoveryScanHandler, scanStore } from "@/lib/recovery/scan";
 import { createRecoverySendHandler } from "@/lib/recovery/send";
 import { unsubscribe } from "@/lib/recovery/unsubscribe";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -305,7 +305,7 @@ describe("recovery_scan", () => {
     const s = await shop();
     const due = await lead(s, ago(61 * MIN));
     const early = await lead(s, ago(59 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows).toHaveLength(1);
     const r = rows[0]!;
@@ -322,7 +322,7 @@ describe("recovery_scan", () => {
     expect(r.unsubHash).toBe(sha(payload.unsubToken));
     expect(rows.some((x) => x.leadId === early.id)).toBe(false);
     // Uma segunda varredura não repete o lembrete.
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toHaveLength(1);
     expect(await sendJobsOf(s.storeId)).toHaveLength(1);
   });
@@ -330,7 +330,7 @@ describe("recovery_scan", () => {
   test("lead criado há 7 h → nada (janela de 6 h)", async () => {
     const s = await shop();
     await lead(s, ago(7 * HOUR));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toHaveLength(0);
   });
 
@@ -339,7 +339,7 @@ describe("recovery_scan", () => {
     await lead(s, ago(2 * HOUR), { status: "converted", email: null, phone: null });
     await lead(s, ago(2 * HOUR), { status: "contacted" });
     await lead(s, ago(2 * HOUR), { expiresAt: ago(MIN) });
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toHaveLength(0);
   });
 
@@ -375,7 +375,7 @@ describe("recovery_scan", () => {
     await pixOrder(s, ago(40 * MIN), { expiresAt: new Date(NOW.getTime() + 50 * MIN) });
     await pixOrder(s, ago(40 * MIN), { status: "paid" });
     await pixOrder(s, ago(29 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: "pix", orderId: due.id, leadId: null, offerId: s.offerId, status: "queued" });
@@ -390,7 +390,7 @@ describe("recovery_scan", () => {
     const one = await cardOrder(s, first);
     const four = await cardOrder(s, ago(40 * MIN), { declines: 4 });
     const recent = await cardOrder(s, ago(29 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows).toHaveLength(2);
     const ok = rows.find((r) => r.orderId === one.id)!;
@@ -411,7 +411,7 @@ describe("recovery_scan", () => {
     await t.ownerDb.update(orders).set({ createdAt: ago(3 * DAY_MS) }).where(eq(orders.id, old.id));
     const edge = await cardOrder(s, ago(31 * MIN));
     await t.ownerDb.update(orders).set({ createdAt: ago(29 * HOUR) }).where(eq(orders.id, edge.id));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: edge.id, kind: "card", status: "queued" }]);
   });
 
@@ -419,7 +419,7 @@ describe("recovery_scan", () => {
     const s = await shop();
     await recordEvent(cardBreakerKey(s.storeId), ago(HOUR));
     const o = await cardOrder(s, ago(31 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: o.id, status: "skipped", skipReason: "cartao_suspeito" }]);
     expect(await sendJobsOf(s.storeId)).toHaveLength(0);
   });
@@ -428,7 +428,7 @@ describe("recovery_scan", () => {
     const s = await shop();
     await recordEvent(cardBreakerKey(s.storeId), ago(3 * HOUR));
     const o = await cardOrder(s, ago(31 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: o.id, status: "queued" }]);
   });
 
@@ -459,7 +459,7 @@ describe("recovery_scan", () => {
     expect((await rowsOf(now.storeId)).filter((r) => r.orderId === a.id)).toMatchObject([{ status: "skipped", skipReason: "cartao_suspeito" }]);
     expect(await sendJobsOf(now.storeId)).toHaveLength(0);
     expect((await rowsOf(later.storeId)).filter((r) => r.orderId === b.id)).toHaveLength(0);
-    await scan(new Date(NOW.getTime() + 3 * HOUR));
+    await scanStore(later.storeId, new Date(NOW.getTime() + 3 * HOUR));
     expect((await rowsOf(later.storeId)).filter((r) => r.orderId === b.id)).toMatchObject([{ status: "skipped", skipReason: "cartao_suspeito" }]);
     expect(await sendJobsOf(later.storeId)).toHaveLength(0);
   });
@@ -492,7 +492,7 @@ describe("recovery_scan", () => {
     for (let i = 0; i < 3; i++) await recordEvent(cardDeclineIpKey(calmIp), ago(90 * MIN - i * MIN));
     const busy = await cardOrder(s, ago(31 * MIN), { ip: busyIp });
     const calm = await cardOrder(s, ago(31 * MIN), { ip: calmIp });
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows.find((r) => r.orderId === busy.id)).toMatchObject({ status: "skipped", skipReason: "cartao_suspeito" });
     expect(rows.find((r) => r.orderId === calm.id)).toMatchObject({ status: "queued" });
@@ -501,7 +501,7 @@ describe("recovery_scan", () => {
   test("IP desconhecido → skipped cartao_suspeito", async () => {
     const s = await shop();
     const o = await cardOrder(s, ago(31 * MIN), { ip: "unknown" });
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: o.id, status: "skipped", skipReason: "cartao_suspeito" }]);
   });
 
@@ -509,7 +509,7 @@ describe("recovery_scan", () => {
     const s = await shop();
     const o = await pixOrder(s, ago(31 * MIN));
     await t.ownerDb.insert(recoveryEmail).values(pastRow(s, { emailHash: emailHash(o.email), createdAt: ago(2 * HOUR) }));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = (await rowsOf(s.storeId)).filter((r) => r.orderId === o.id);
     expect(rows).toMatchObject([{ kind: "pix", status: "skipped", skipReason: "endereco_24h" }]);
     expect(await sendJobsOf(s.storeId)).toHaveLength(0);
@@ -519,7 +519,7 @@ describe("recovery_scan", () => {
     const s = await shop();
     const o = await pixOrder(s, ago(31 * MIN));
     await t.ownerDb.insert(recoveryEmail).values(pastRow(s, { emailHash: emailHash(o.email), createdAt: ago(2 * HOUR), status: "skipped" }));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).filter((r) => r.orderId === o.id)).toMatchObject([{ status: "queued" }]);
   });
 
@@ -530,7 +530,7 @@ describe("recovery_scan", () => {
     await t.ownerDb
       .insert(recoveryEmail)
       .values([2, 5, 10].map((d) => pastRow(s, { emailHash: h, createdAt: ago(d * DAY_MS) })));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).filter((r) => r.leadId === l.id)).toMatchObject([{ status: "skipped", skipReason: "endereco_30d" }]);
   });
 
@@ -538,11 +538,11 @@ describe("recovery_scan", () => {
     const s = await shop();
     const l = await lead(s, ago(61 * MIN));
     await t.ownerDb.insert(emailOptout).values({ storeId: s.storeId, emailHash: emailHash(l.email), reason: "unsubscribe" });
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ leadId: l.id, status: "skipped", skipReason: "optout" }]);
     expect(await sendJobsOf(s.storeId)).toHaveLength(0);
     // Pulado com linha: a próxima varredura não volta a ele.
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toHaveLength(1);
   });
 
@@ -552,7 +552,7 @@ describe("recovery_scan", () => {
     const ls = [];
     // A mais antiga (pelo momento previsto) é a primeira da varredura.
     for (const [i, email] of variants.entries()) ls.push(await lead(s, ago((63 - i) * MIN), { email, emailHash: sha(email) }));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     const of = (id: string) => rows.find((r) => r.leadId === id);
     expect(of(ls[0]!.id)).toMatchObject({ status: "queued", skipReason: null });
@@ -571,7 +571,7 @@ describe("recovery_scan", () => {
     const ls = [];
     for (const email of ["(c1)victim@x.com", "x,victim@x.com"]) ls.push(await lead(s, ago(61 * MIN), { email, emailHash: sha(email) }));
     const p = await pixOrder(s, ago(31 * MIN), { email: "a;victim@x.com" });
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows).toHaveLength(3);
     for (const l of ls) expect(rows.find((r) => r.leadId === l.id)).toMatchObject({ status: "skipped", skipReason: "endereco_invalido" });
@@ -582,7 +582,7 @@ describe("recovery_scan", () => {
   test("descadastro pelo link de victim+1@gmail.com → próximo candidato victim@gmail.com → skipped optout", async () => {
     const s = await shop();
     await lead(s, ago(61 * MIN), { email: "victim+1@gmail.com", emailHash: sha("victim+1@gmail.com") });
-    await scan();
+    await scanStore(s.storeId, NOW);
     const [j] = await sendJobsOf(s.storeId);
     const token = (j!.payload as { unsubToken: string }).unsubToken;
     const out = await runAction(unsubscribe, { storeId: s.storeId, actor: { kind: "public" }, origin: "public" }, { token, clientIp: "unknown" });
@@ -592,7 +592,7 @@ describe("recovery_scan", () => {
     expect(optouts.map((o) => o.h).sort()).toEqual([sha("victim+1@gmail.com"), sha("victim@gmail.com")].sort());
 
     const next = await lead(s, ago(61 * MIN), { email: "victim@gmail.com", emailHash: sha("victim@gmail.com") });
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).find((r) => r.leadId === next.id)).toMatchObject({ status: "skipped", skipReason: "optout" });
     expect(await sendJobsOf(s.storeId)).toHaveLength(1);
   });
@@ -606,7 +606,7 @@ describe("recovery_scan", () => {
     // Compra de 40 dias atrás não conta.
     const old = await pixOrder(s, ago(45 * MIN));
     await seedOrder(s, { status: "paid", email: old.email, createdAt: ago(40 * DAY_MS), paidAt: ago(40 * DAY_MS) });
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows.find((r) => r.leadId === l.id)).toMatchObject({ status: "skipped", skipReason: "ja_comprou" });
     expect(rows.find((r) => r.orderId === pix.id)).toMatchObject({ status: "skipped", skipReason: "ja_comprou" });
@@ -618,7 +618,7 @@ describe("recovery_scan", () => {
     const email = newEmail();
     const older = await pixOrder(s, ago(50 * MIN), { email });
     const newer = await pixOrder(s, ago(35 * MIN), { email });
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows.find((r) => r.orderId === older.id)).toMatchObject({ status: "skipped", skipReason: "pedido_mais_novo" });
     expect(rows.find((r) => r.orderId === newer.id)).toMatchObject({ status: "queued" });
@@ -630,12 +630,12 @@ describe("recovery_scan", () => {
     const s = await shop();
     await t.ownerDb.insert(recoveryEmail).values(Array.from({ length: 60 }, () => pastRow(s)));
     const o = await pixOrder(s, ago(31 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).filter((r) => r.orderId === o.id)).toHaveLength(0);
     expect(await sendJobsOf(s.storeId)).toHaveLength(0);
     // Passada a hora, o mesmo candidato entra.
     await t.ownerDb.update(recoveryEmail).set({ createdAt: ago(2 * HOUR) }).where(eq(recoveryEmail.storeId, s.storeId));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).filter((r) => r.orderId === o.id)).toMatchObject([{ status: "queued" }]);
   });
 
@@ -647,7 +647,7 @@ describe("recovery_scan", () => {
     }
     const card = await cardOrder(s, ago(31 * MIN));
     const pix = await pixOrder(s, ago(31 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     const rows = await rowsOf(s.storeId);
     expect(rows.some((r) => r.orderId === card.id)).toBe(false);
     expect(rows.find((r) => r.orderId === pix.id)).toMatchObject({ status: "queued" });
@@ -672,7 +672,7 @@ describe("recovery_scan", () => {
     const s = await shop({ card: false, lead: false });
     await cardOrder(s, ago(31 * MIN));
     await lead(s, ago(61 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toHaveLength(0);
   });
 
@@ -682,7 +682,7 @@ describe("recovery_scan", () => {
     await cardOrder(s, ago(31 * MIN));
     const pix = await pixOrder(s, ago(31 * MIN));
     await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.offerId));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect((await rowsOf(s.storeId)).map((r) => [r.kind, r.orderId, r.status])).toEqual([["pix", pix.id, "queued"]]);
   });
 
@@ -690,7 +690,7 @@ describe("recovery_scan", () => {
     const s = await shop({ capture: false });
     await lead(s, ago(61 * MIN));
     const o = await pixOrder(s, ago(31 * MIN));
-    await scan();
+    await scanStore(s.storeId, NOW);
     expect(await rowsOf(s.storeId)).toMatchObject([{ kind: "pix", orderId: o.id }]);
   });
 
@@ -751,7 +751,7 @@ describe("recovery_scan", () => {
       const pix = await pixOrder(s, ago(31 * MIN));
       const opted = await pixOrder(s, ago(40 * MIN));
       await t.ownerDb.insert(emailOptout).values({ storeId: s.storeId, emailHash: emailHash(opted.email), reason: "complaint" });
-      await scan();
+      await scanStore(s.storeId, NOW);
       stdout.mockRestore();
       const rows = await rowsOf(s.storeId);
       expect(rows).toHaveLength(3);
@@ -815,7 +815,7 @@ describe("recovery_send", () => {
 
   /** Roda a varredura e devolve a linha `queued`, o job `recovery_send` e o token em claro (a loja tem 1 candidato). */
   async function queued(storeId: string) {
-    await scan();
+    await scanStore(storeId, NOW);
     const rows = await rowsOf(storeId);
     const jobs = await sendJobsOf(storeId);
     expect(rows).toHaveLength(1);

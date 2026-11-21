@@ -251,7 +251,7 @@ async function skipReason(tx: Tx, storeId: string, c: Candidate, hash: string, m
 }
 
 /** Varre uma loja numa transação (com o lock consultivo da loja). */
-async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
+async function scanStoreTx(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
   const storeId = f.id;
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`recovery:${storeId}`}))`);
   const list = await candidates(tx, f, t);
@@ -308,6 +308,23 @@ async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
   if (deferred > 0) log.info("recuperação: teto da hora atingido; o restante fica para a próxima varredura", { storeId, deferred });
 }
 
+const storeFlagColumns = { id: store.id, lead: store.recoveryLead, pix: store.recoveryPix, card: store.recoveryCard, capture: store.leadCapture };
+
+/**
+ * Varre UMA loja (a tabela `store` não tem RLS): lê as chaves da loja e roda a transação com o lock consultivo. Loja
+ * inexistente ou com a recuperação desligada não faz nada. Falha propaga (o laço do handler loga e segue). Relógio
+ * injetável, como no handler. Os testes que só olham uma loja usam esta função em vez de varrer todas as lojas do banco.
+ */
+export async function scanStore(storeId: string, now: Date | (() => Date) = () => new Date()): Promise<void> {
+  const t = typeof now === "function" ? now() : now;
+  const [f] = await db
+    .select(storeFlagColumns)
+    .from(store)
+    .where(and(eq(store.id, storeId), eq(store.recoveryOn, true)));
+  if (!f) return;
+  await withStore(f.id, (tx) => scanStoreTx(tx, f, t));
+}
+
 /**
  * Handler do `recovery_scan`. Relógio injetável (testes). Falha numa loja não impede as demais e NÃO faz o job falhar:
  * relançar devolveria o job ao backoff da fila (60 s a 12 h) e, enquanto ele espera, o agendamento não cria outro,
@@ -319,7 +336,7 @@ export function createRecoveryScanHandler(now: () => Date = () => new Date(), be
     const t = now();
     // A tabela `store` não tem RLS.
     const stores = await db
-      .select({ id: store.id, lead: store.recoveryLead, pix: store.recoveryPix, card: store.recoveryCard, capture: store.leadCapture })
+      .select({ id: store.id })
       .from(store)
       .where(eq(store.recoveryOn, true))
       .orderBy(asc(store.id));
@@ -327,7 +344,7 @@ export function createRecoveryScanHandler(now: () => Date = () => new Date(), be
       if (signal.aborted) break;
       try {
         await beforeStore?.(f.id);
-        await withStore(f.id, (tx) => scanStore(tx, f, t));
+        await scanStore(f.id, t);
       } catch (e) {
         log.error("falha na varredura da recuperação da loja", { storeId: f.id, ...errorFields(e) });
       }
