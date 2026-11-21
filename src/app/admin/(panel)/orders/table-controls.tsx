@@ -2,9 +2,9 @@
 
 // Controles da tabela de pedidos: busca dentro do cartão, filtros no cabeçalho das colunas (como no Excel, com o
 // menu do Arc, marcando várias opções) e o botão de maximizar a tabela. Os filtros ficam na URL
-// (?status=paid&status=pending&method=..., ?q=), aplicados quando o menu fecha.
+// (?status=paid&status=pending&method=..., ?q=), aplicados a cada clique.
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, useTransition, type ReactNode } from "react";
 import {
   CircleCheck,
   Clock,
@@ -54,15 +54,20 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
     setSeen(values.join(","));
     setPicked(values);
   }
-  const toggle = (v: string) => setPicked((cur) => (cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]));
+  const [pending, start] = useTransition();
+  // Cada clique já filtra (o menu continua aberto para marcar mais opções).
+  const toggle = (v: string) => {
+    const next = picked.includes(v) ? picked.filter((x) => x !== v) : [...picked, v];
+    setPicked(next);
+    apply(next);
+  };
   const apply = (next: string[]) => {
-    if ([...next].sort().join(",") === [...values].sort().join(",")) return;
     const p = new URLSearchParams(params.toString());
     p.delete("pagina");
     p.delete(param);
     for (const v of options.map((o) => o.value).filter((v) => next.includes(v))) p.append(param, v);
     const str = p.toString();
-    router.push(`/admin/orders${str ? `?${str}` : ""}`);
+    start(() => router.replace(`/admin/orders${str ? `?${str}` : ""}`, { scroll: false }));
   };
   const active = values.length > 0;
   return (
@@ -71,11 +76,11 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
       align="start"
       triggerClassName={s.thFilter}
       triggerLabel={active ? `${title}: ${values.length} ${values.length === 1 ? "filtro" : "filtros"}. Mudar` : `Filtrar por ${title.toLowerCase()}`}
-      onOpenChange={(open) => !open && apply(picked)}
       trigger={
         <>
           {title}
-          {active ? <span className={s.thCount}>{values.length}</span> : null}
+          {picked.length > 0 ? <span className={s.thCount}>{picked.length}</span> : null}
+          {pending ? <span className={s.thPending} aria-hidden="true" /> : null}
           <ListFilter size={14} strokeWidth={2} aria-hidden="true" data-on={active ? true : undefined} />
         </>
       }
@@ -91,7 +96,16 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
             onSelect: () => toggle(o.value),
           };
         }),
-        { label: "Limpar filtro", separatorBefore: true, disabled: picked.length === 0, onSelect: () => setPicked([]), keepOpen: true },
+        {
+          label: "Limpar filtro",
+          separatorBefore: true,
+          disabled: picked.length === 0,
+          keepOpen: true,
+          onSelect: () => {
+            setPicked([]);
+            apply([]);
+          },
+        },
       ]}
     />
   );
@@ -142,7 +156,13 @@ export function TableShell({
           {total} {total === 1 ? "pedido" : "pedidos"}
           {filtered ? " com estes filtros" : ""}
         </span>
-        <button type="button" className={s.iconBtn} onClick={() => setMax((v) => !v)} aria-label={max ? "Voltar ao tamanho normal" : "Maximizar tabela"} title={max ? "Voltar (Esc)" : "Maximizar"}>
+        <button
+          type="button"
+          className={s.iconBtn}
+          onClick={() => setMax((v) => !v)}
+          aria-label={max ? "Voltar ao tamanho normal" : "Maximizar tabela"}
+          title={max ? "Voltar (Esc)" : "Maximizar"}
+        >
           {max ? <Minimize2 size={16} strokeWidth={1.75} /> : <Maximize2 size={16} strokeWidth={1.75} />}
         </button>
       </div>

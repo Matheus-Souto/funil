@@ -112,7 +112,7 @@ export default async function OffersPage() {
           <PIcon name="link-2" />
           <div>
             <b>Indicações sem afiliado:</b> acrescente <code className={s.mono}>?ref=nome</code> ao link (ex.: …/c/
-            {offers[0]?.slug ?? "sua-oferta"}?ref=ana-paula). As vendas aparecem em Visão geral → Por indicação.
+            {offers[0]?.slug ?? "sua-oferta"}?ref=ana-paula). As vendas aparecem no Dashboard, em Por indicação.
           </div>
         </div>
       </div>

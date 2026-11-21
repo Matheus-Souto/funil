@@ -40,7 +40,7 @@ export default async function PanelLayout({ children }: { children: ReactNode })
   const theme = jar.get("funil-theme")?.value;
 
   const items: NavEntry[] = [
-    ...(can("metrics.read") ? [{ href: "/admin", label: "Visão geral", icon: "layout-dashboard" as const }] : []),
+    ...(can("metrics.read") ? [{ href: "/admin", label: "Dashboard", icon: "layout-dashboard" as const }] : []),
     ...(can("orders.read") ? [{ href: "/admin/orders", label: "Pedidos", icon: "receipt" as const, badge: pending }] : []),
     ...(can("offers.read") ? [{ href: "/admin/offers", label: "Ofertas", icon: "tag" as const }] : []),
     ...(can("products.read") ? [{ href: "/admin/products", label: "Produtos", icon: "package" as const }] : []),

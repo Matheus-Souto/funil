@@ -158,7 +158,7 @@ export function PanelShell({
     <div className={s.shell} data-collapsed={collapsed ? "true" : undefined}>
       <aside className={s.sidebar} aria-label="Menu do painel">
         <div className={s.sideTop}>
-          <Link href="/admin" className={s.brand} aria-label="funil, visão geral">
+          <Link href="/admin" className={s.brand} aria-label="funil, dashboard">
             <span className={s.brandMark} aria-hidden="true">
               f
             </span>
@@ -228,7 +228,12 @@ export function PanelShell({
             <small>{id.userEmail}</small>
           </span>
           <div className={s.userActions}>
-            <ThemeSwitch theme={theme} iconOnly label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"} onThemeChange={(next, _v, trigger) => changeTheme(next, trigger)} />
+            <ThemeSwitch
+              theme={theme}
+              iconOnly
+              label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
+              onThemeChange={(next, _v, trigger) => changeTheme(next, trigger)}
+            />
             <Tip show={collapsed} label="Trocar senha">
               <Link href="/admin/senha" className={s.iconBtn} aria-label="Trocar senha" title={collapsed ? undefined : "Trocar senha"}>
                 <KeyRound size={15} strokeWidth={1.75} />

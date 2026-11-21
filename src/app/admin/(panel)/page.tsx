@@ -18,6 +18,7 @@ import { getStoreSettings } from "@/lib/store-settings";
 import { Art, Kpi, Notice, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
 import { PeriodTabs } from "./period-tabs";
+import { CreditCard, QrCode, Zap } from "lucide-react";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { AckButton, CopyField } from "../ui";
@@ -25,7 +26,7 @@ import { FailedDeliveries } from "../blocks";
 import { ackAlertAction } from "./actions";
 
 export const dynamic = "force-dynamic";
-export const metadata = { title: "Visão geral" };
+export const metadata = { title: "Dashboard" };
 
 const PERIODS: Array<[Period, string]> = [
   ["hoje", "Hoje"],
@@ -88,7 +89,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   return (
     <>
       <PageHead
-        title="Visão geral"
+        title="Dashboard"
         sub={`${id.storeName} · ${period === "hoje" ? "hoje" : rangeLabel(cur.from, now)}`}
         actions={
           <PeriodTabs current={period} items={PERIODS.map(([p, l]) => ({ key: p, label: l, href: p === "7d" ? "/admin" : `/admin?periodo=${p}` }))} />
@@ -139,7 +140,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         <div className={s.splitWide}>
           <section className={s.card}>
             <div className={s.cardHead}>
-              <h2>Conversão do checkout</h2>
+              <h2>
+                <Art name="funil" size={28} className={s.cardArt} />
+                Conversão do checkout
+              </h2>
               <small>visitas → pedidos → pagos</small>
             </div>
             {m.views + m.orders + m.paid > 0 ? (
@@ -149,29 +153,40 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 <span>Nenhuma visita ao checkout no período.</span>
               </p>
             )}
-            <div className={s.funnelFoot}>
-              <span>
-                <b>{pct(m.paid, m.views)}</b> das visitas viraram venda
-              </span>
-              <span>
-                <b>{Math.max(0, unpaid)}</b> pedidos não pagos (Pix pendente ou expirado, cartão recusado)
-              </span>
-              <span>
-                <b>{pct(b.bumpPaid, m.paid)}</b> aceitaram o bump
-              </span>
-            </div>
+            <dl className={s.funnelStats}>
+              <div>
+                <dt>Conversão</dt>
+                <dd>{pct(m.paid, m.views)}</dd>
+              </div>
+              <div title="Pix pendente ou expirado, cartão recusado">
+                <dt>Não pagos</dt>
+                <dd>{Math.max(0, unpaid)}</dd>
+              </div>
+              <div>
+                <dt>Aceitaram o bump</dt>
+                <dd>{pct(b.bumpPaid, m.paid)}</dd>
+              </div>
+            </dl>
           </section>
 
           <section className={s.card}>
             <div className={s.cardHead}>
-              <h2>Por método</h2>
+              <h2>
+                <Art name="pagos" size={28} className={s.cardArt} />
+                Por método
+              </h2>
               <small>receita · pagos</small>
             </div>
             <DonutChart rows={methods.map((r) => ({ label: METHOD_LABEL[r.k], cents: r.revenueCents, paid: r.paid }))} />
             <ul className={s.legend}>
               {methods.map((r) => (
                 <li key={r.k}>
-                  <i style={{ background: r.revenueCents > 0 ? `var(--series-${(methods.filter((x) => x.revenueCents > 0).indexOf(r) % 5) + 1})` : "var(--chart-grid)" }} />
+                  <span
+                    className={s.legendIcon}
+                    style={{ color: r.revenueCents > 0 ? `var(--series-${(methods.filter((x) => x.revenueCents > 0).indexOf(r) % 5) + 1})` : "var(--color-text-muted)" }}
+                  >
+                    <MethodIcon method={r.k} />
+                  </span>
                   <span>{METHOD_LABEL[r.k]}</span>
                   <b>
                     {brl(r.revenueCents)}
@@ -190,7 +205,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         <div className={s.grid3}>
           <section className={s.card}>
             <div className={s.cardHead}>
-              <h2>Receita por dia</h2>
+              <h2>
+                <Art name="receita" size={28} className={s.cardArt} />
+                Receita por dia
+              </h2>
               <small>R$</small>
             </div>
             {period === "hoje" ? (
@@ -206,14 +224,20 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           </section>
           <section className={s.card}>
             <div className={s.cardHead}>
-              <h2>Por origem</h2>
+              <h2>
+                <Art name="origem" size={28} className={s.cardArt} />
+                Por origem
+              </h2>
               <small>utm_source · pagos</small>
             </div>
             {m.bySource.length ? <RankChart mono rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
           </section>
           <section className={s.card}>
             <div className={s.cardHead}>
-              <h2>Por indicação</h2>
+              <h2>
+                <Art name="indicacao" size={28} className={s.cardArt} />
+                Por indicação
+              </h2>
               <small>?ref= · pagos</small>
             </div>
             {m.byRef.length ? <RankChart mono rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
@@ -302,4 +326,10 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
       </div>
     </>
   );
+}
+
+/** Ícone do método de pagamento (o mesmo do filtro da lista de pedidos). */
+function MethodIcon({ method }: { method: OrderMethod }) {
+  const Icon = method === "pix_manual" ? QrCode : method === "pix_asaas" ? Zap : CreditCard;
+  return <Icon size={15} strokeWidth={1.9} aria-hidden="true" />;
 }

@@ -105,9 +105,14 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       ) : null}
       <TableShell q={q} statuses={statuses} methods={methods} total={data.total} filtered={filtered}>
         {data.items.length === 0 ? (
-          <p className={s.empty}>
-            Nenhum pedido com estes filtros. <Link href="/admin/orders">Limpar filtros</Link>
-          </p>
+          <div className={s.empty}>
+            <Art name="pedidos" size={96} />
+            <h2>Nenhum pedido com estes filtros</h2>
+            <p>Tente outra busca ou tire algum filtro das colunas.</p>
+            <Link className={`${s.btn} ${s.btnSm}`} href="/admin/orders">
+              Limpar filtros
+            </Link>
+          </div>
         ) : (
           <>
             <table className={`${s.table} ${s.orderTable}`}>

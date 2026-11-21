@@ -2612,3 +2612,64 @@
   padding: 0;
   border-radius: 8px;
 }
+
+.thPending {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary-ink);
+  animation: th-pulse 0.8s var(--ease-in-out) infinite alternate;
+}
+@keyframes th-pulse {
+  to {
+    opacity: 0.25;
+  }
+}
+
+/* Títulos dos cartões de gráfico com ícone 3D pequeno */
+.cardHead h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cardArt {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin: -4px 0;
+}
+/* Rodapé do funil: três números limpos */
+.funnelStats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+.funnelStats > div {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--color-surface-2);
+}
+.funnelStats dt {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.funnelStats dd {
+  margin: 2px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+}
+.legendIcon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--color-surface-2);
+}
+.legend span.legendIcon {
+  flex: none;
+}

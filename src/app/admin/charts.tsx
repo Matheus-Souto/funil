@@ -13,11 +13,8 @@ let loader: Promise<ECharts> | null = null;
 function loadECharts(): Promise<ECharts> {
   loader ??= (async () => {
     const core = await import("echarts/core");
-    const [{ BarChart, LineChart, PieChart, FunnelChart }, { GraphicComponent, GridComponent, TooltipComponent }, { SVGRenderer }] = await Promise.all([
-      import("echarts/charts"),
-      import("echarts/components"),
-      import("echarts/renderers"),
-    ]);
+    const [{ BarChart, LineChart, PieChart, FunnelChart }, { GraphicComponent, GridComponent, TooltipComponent }, { SVGRenderer }] =
+      await Promise.all([import("echarts/charts"), import("echarts/components"), import("echarts/renderers")]);
     core.use([BarChart, LineChart, PieChart, FunnelChart, GraphicComponent, GridComponent, TooltipComponent, SVGRenderer]);
     return core;
   })();
@@ -35,6 +32,7 @@ export interface ChartTheme {
   onAccent: string;
   series: string[];
   font: string;
+  mono: string;
 }
 
 function readTheme(el: Element): ChartTheme {
@@ -51,6 +49,7 @@ function readTheme(el: Element): ChartTheme {
     onAccent: v("--accent-foreground"),
     series: [v("--series-1"), v("--series-2"), v("--series-3"), v("--series-4"), v("--series-5")],
     font: css.fontFamily,
+    mono: v("--font-mono") || "ui-monospace, monospace",
   };
 }
 
@@ -121,9 +120,9 @@ function tooltip(t: ChartTheme) {
   };
 }
 
-/** Receita por dia: barras arredondadas (até 7 dias) ou área (30 dias), hoje em destaque. */
+/** Receita por dia: barras arredondadas (finas em 30 dias, quando os valores diários variam muito), hoje em destaque. */
 export function RevenueChart({ days }: { days: Array<{ label: string; full: string; cents: number }> }) {
-  const line = days.length > 10;
+  const many = days.length > 10;
   return (
     <EChart
       height={220}
@@ -135,7 +134,7 @@ export function RevenueChart({ days }: { days: Array<{ label: string; full: stri
         tooltip: {
           ...tooltip(t),
           trigger: "axis",
-          axisPointer: { type: line ? "line" : "shadow", lineStyle: { color: t.border }, shadowStyle: { color: t.grid } },
+          axisPointer: { type: "none" },
           formatter: (p: Array<{ dataIndex: number }>) => {
             const d = days[p[0]?.dataIndex ?? 0];
             return d ? `<div style="font-size:12px;color:${t.muted}">${d.full}</div><b style="font-size:14px">${brl(d.cents)}</b>` : "";
@@ -146,8 +145,7 @@ export function RevenueChart({ days }: { days: Array<{ label: string; full: stri
           data: days.map((d) => d.label),
           axisLine: { show: false },
           axisTick: { show: false },
-          axisLabel: { color: t.muted, fontFamily: t.font, fontSize: 12, interval: line ? 4 : 0 },
-          boundaryGap: !line,
+          axisLabel: { color: t.muted, fontFamily: t.font, fontSize: 12, interval: many ? 4 : 0 },
         },
         yAxis: {
           type: "value",
@@ -156,29 +154,15 @@ export function RevenueChart({ days }: { days: Array<{ label: string; full: stri
           splitLine: { lineStyle: { color: t.grid } },
         },
         series: [
-          line
-            ? {
-                type: "line",
-                data: days.map((d) => d.cents),
-                smooth: 0.35,
-                symbol: "circle",
-                symbolSize: 6,
-                showSymbol: false,
-                lineStyle: { width: 2.5, color: t.accentInk },
-                itemStyle: { color: t.accentInk },
-                areaStyle: {
-                  color: { type: "linear", x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: `${t.accent}55` }, { offset: 1, color: `${t.accent}00` }] },
-                },
-              }
-            : {
-                type: "bar",
-                barMaxWidth: 36,
-                data: days.map((d, i) => ({
-                  value: d.cents,
-                  itemStyle: { color: i === days.length - 1 ? t.accent : `${t.accent}66`, borderRadius: [8, 8, 3, 3] },
-                })),
-                emphasis: { itemStyle: { color: t.accent } },
-              },
+          {
+            type: "bar",
+            barMaxWidth: many ? 12 : 36,
+            data: days.map((d, i) => ({
+              value: d.cents,
+              itemStyle: { color: i === days.length - 1 ? t.accent : `${t.accent}80`, borderRadius: many ? [4, 4, 2, 2] : [8, 8, 3, 3] },
+            })),
+            emphasis: { itemStyle: { color: t.accentInk } },
+          },
         ],
       })}
     />
@@ -199,38 +183,49 @@ export function FunnelChart({ views, orders, paid }: { views: number; orders: nu
       label={`Funil do checkout: ${views} visitas, ${orders} pedidos (${pct(orders, views)}), ${paid} pagos (${pct(paid, orders)})`}
       option={(t) => ({
         animationDuration: 700,
-        tooltip: { ...tooltip(t), trigger: "item", formatter: (p: { name: string; value: number }) => `${p.name}<br/><b>${p.value.toLocaleString("pt-BR")}</b>` },
+        tooltip: {
+          ...tooltip(t),
+          trigger: "item",
+          formatter: (p: { dataIndex: number }) => {
+            const st = steps[p.dataIndex];
+            return st ? `${st.name}<br/><b>${st.value.toLocaleString("pt-BR")}</b>${st.rate ? ` · ${st.rate}` : ""}` : "";
+          },
+        },
         series: [
           {
             type: "funnel",
-            left: "2%",
-            right: "2%",
-            top: 4,
-            bottom: 4,
+            left: 0,
+            top: 6,
+            bottom: 6,
+            width: "56%",
             min: 0,
-            max: Math.max(1, views, orders, paid),
-            minSize: "18%",
-            gap: 6,
+            max: 100,
+            minSize: "30%",
+            gap: 4,
             sort: "none",
             funnelAlign: "center",
             label: {
               show: true,
-              position: "inside",
+              position: "right",
               fontFamily: t.font,
-              color: t.text,
               formatter: (p: { dataIndex: number }) => {
                 const st = steps[p.dataIndex];
-                return st ? `{n|${st.value.toLocaleString("pt-BR")}}  {l|${st.name}${st.rate ? ` · ${st.rate}` : ""}}` : "";
+                return st ? `{n|${st.value.toLocaleString("pt-BR")}}  {l|${st.name}}${st.rate ? `\n{r|${st.rate} da etapa anterior}` : ""}` : "";
               },
-              rich: { n: { fontSize: 16, fontWeight: 600, color: t.text }, l: { fontSize: 12, color: t.text } },
+              rich: {
+                n: { fontSize: 18, fontWeight: 600, color: t.text, fontFamily: t.font },
+                l: { fontSize: 13, color: t.text, fontFamily: t.font },
+                r: { fontSize: 12, color: t.muted, fontFamily: t.font, padding: [4, 0, 0, 0] },
+              },
             },
-            itemStyle: { borderWidth: 0, borderRadius: 10 },
+            labelLine: { show: true, length: 14, lineStyle: { color: t.border } },
+            itemStyle: { borderWidth: 0 },
+            emphasis: { label: { show: true } },
+            // Tamanho de cada camada fixo (100, 72, 46): o desenho é só o formato do funil; os números reais vão no rótulo.
             data: steps.map((st, i) => ({
               name: st.name,
-              value: st.value,
-              itemStyle: { color: i === 2 ? t.accent : i === 1 ? `${t.accent}88` : `${t.accent}44` },
-              // Sobre a lima cheia, texto escuro (contraste); nos tons claros, a cor do texto do tema.
-              label: i === 2 ? { rich: { n: { color: t.onAccent }, l: { color: t.onAccent } } } : undefined,
+              value: [100, 72, 46][i],
+              itemStyle: { color: i === 2 ? t.accent : i === 1 ? `${t.accent}99` : `${t.accent}4d` },
             })),
           },
         ],
@@ -249,7 +244,11 @@ export function DonutChart({ rows }: { rows: Array<{ label: string; cents: numbe
       label={`Receita por método: ${rows.map((r) => `${r.label} ${brl(r.cents)}`).join("; ")}`}
       option={(t) => ({
         animationDuration: 700,
-        tooltip: { ...tooltip(t), trigger: "item", formatter: (p: { name: string; value: number; percent: number }) => `${p.name}<br/><b>${brl(p.value)}</b> · ${Math.round(p.percent)}%` },
+        tooltip: {
+          ...tooltip(t),
+          trigger: "item",
+          formatter: (p: { name: string; value: number; percent: number }) => `${p.name}<br/><b>${brl(p.value)}</b> · ${Math.round(p.percent)}%`,
+        },
         graphic: [
           { type: "text", left: "center", top: "40%", style: { text: brl(total), fill: t.text, font: `600 16px ${t.font}`, align: "center" } },
           { type: "text", left: "center", top: "54%", style: { text: "no período", fill: t.muted, font: `400 12px ${t.font}`, align: "center" } },
@@ -261,7 +260,9 @@ export function DonutChart({ rows }: { rows: Array<{ label: string; cents: numbe
             padAngle: data.length > 1 ? 3 : 0,
             itemStyle: { borderRadius: 8 },
             label: { show: false },
-            data: data.length ? data.map((r, i) => ({ name: r.label, value: r.cents, itemStyle: { color: t.series[i % t.series.length] } })) : [{ name: "Sem vendas", value: 1, itemStyle: { color: t.grid } }],
+            data: data.length
+              ? data.map((r, i) => ({ name: r.label, value: r.cents, itemStyle: { color: t.series[i % t.series.length] } }))
+              : [{ name: "Sem vendas", value: 1, itemStyle: { color: t.grid } }],
             emphasis: { scale: true, scaleSize: 4 },
           },
         ],
@@ -273,13 +274,14 @@ export function DonutChart({ rows }: { rows: Array<{ label: string; cents: numbe
 /** Ranking em barras horizontais (origem, indicação). */
 export function RankChart({ rows, mono }: { rows: Array<{ label: string; cents: number; paid: number }>; mono?: boolean }) {
   const ordered = [...rows].reverse();
+  const max = Math.max(1, ...rows.map((r) => r.cents));
   return (
     <EChart
-      height={Math.max(96, rows.length * 40 + 8)}
+      height={Math.max(96, rows.length * 44 + 8)}
       label={rows.map((r) => `${r.label} ${brl(r.cents)} (${r.paid} pagos)`).join("; ")}
       option={(t) => ({
         animationDuration: 700,
-        grid: { left: 0, right: 104, top: 4, bottom: 4, containLabel: true },
+        grid: { left: 0, right: 0, top: 4, bottom: 4, containLabel: true },
         tooltip: {
           ...tooltip(t),
           trigger: "item",
@@ -288,20 +290,49 @@ export function RankChart({ rows, mono }: { rows: Array<{ label: string; cents: 
             return r ? `${r.label}<br/><b>${brl(r.cents)}</b> · ${r.paid} ${r.paid === 1 ? "pago" : "pagos"}` : "";
           },
         },
-        xAxis: { type: "value", show: false, max: (v: { max: number }) => Math.max(1, v.max) },
+        xAxis: { type: "value", show: false, max },
         yAxis: {
           type: "category",
           data: ordered.map((r) => r.label),
           axisLine: { show: false },
           axisTick: { show: false },
-          axisLabel: { color: t.text, fontSize: 13, fontFamily: mono ? "var(--font-mono), monospace" : t.font },
+          axisLabel: { color: t.text, fontSize: 13, margin: 12, fontFamily: mono ? t.mono : t.font },
         },
         series: [
+          // trilho (fundo) com o valor no fim
           {
             type: "bar",
-            barWidth: 18,
-            data: ordered.map((r, i) => ({ value: r.cents, itemStyle: { color: i === ordered.length - 1 ? t.accent : `${t.accent}99`, borderRadius: 9 } })),
-            label: { show: true, position: "right", distance: 10, color: t.text, fontFamily: t.font, fontSize: 13, fontWeight: 600, formatter: (p: { dataIndex: number; value: number }) => `${brl(p.value)}  {n|${ordered[p.dataIndex]?.paid ?? 0}}`, rich: { n: { color: t.muted, fontSize: 12, fontWeight: 400, fontFamily: t.font } } },
+            barWidth: 10,
+            silent: true,
+            z: 1,
+            data: ordered.map(() => max),
+            itemStyle: { color: t.grid, borderRadius: 5 },
+            label: {
+              show: true,
+              position: "insideRight",
+              offset: [0, -16],
+              color: t.text,
+              fontFamily: t.font,
+              fontSize: 12,
+              fontWeight: 600,
+              formatter: (p: { dataIndex: number }) => {
+                const r = ordered[p.dataIndex];
+                return r ? `${brl(r.cents)} {n|· ${r.paid}}` : "";
+              },
+              rich: { n: { color: t.muted, fontSize: 12, fontWeight: 400, fontFamily: t.font } },
+            },
+          },
+          // barra
+          {
+            type: "bar",
+            barWidth: 10,
+            barGap: "-100%",
+            z: 2,
+            data: ordered.map((r, i) => ({
+              value: r.cents,
+              itemStyle: { color: i === ordered.length - 1 ? t.accent : `${t.accent}b3`, borderRadius: 5 },
+            })),
+            emphasis: { itemStyle: { color: t.accentInk } },
           },
         ],
       })}
