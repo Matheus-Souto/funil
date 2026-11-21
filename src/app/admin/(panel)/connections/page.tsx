@@ -28,11 +28,10 @@ export default async function ConnectionsPage() {
             </Notice>
           )}
           {st.turnstile.recommended ? (
-            <Notice
-              tone="warning"
-              title="A loja vende com cartão e o servidor está sem Turnstile. Com muitas recusas de cartão em pouco tempo, cada comprador fica limitado a 3 tentativas por hora em vez de passar pela verificação. Quem instalou o servidor define TURNSTILE_SITE_KEY e TURNSTILE_SECRET no .env (docs/instalacao.md)."
-            >
-              <b>Recomendado:</b> ative a verificação anti-robô (Cloudflare Turnstile) no servidor.
+            <Notice tone="warning">
+              <b>Recomendado:</b> ative a verificação anti-robô (Cloudflare Turnstile). Sem ela, com muitas recusas de cartão em
+              pouco tempo, cada comprador fica limitado a 3 tentativas por hora. Quem instalou o servidor define TURNSTILE_SITE_KEY e
+              TURNSTILE_SECRET no .env (docs/instalacao.md).
             </Notice>
           ) : null}
         </div>

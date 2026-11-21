@@ -4,7 +4,6 @@ import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useLayo
 import type { ClipboardEvent as ReactClipboardEvent, FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion } from "motion/react";
 import type { Transition, Variants } from "motion/react";
-import { Check, ChevronDown } from "lucide-react";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./money-input.module.css";
 
@@ -23,18 +22,14 @@ export interface MoneyInputProps {
   value?: number | null;
   defaultValue?: number | null;
   onValueChange?: (value: number | null, details: MoneyInputDetails) => void;
-  /** ISO 4217 code, such as "USD". */
+  /** ISO 4217 code; the panel uses only "BRL" (the currency menu of the original Arc component was removed). */
   currency?: string;
-  defaultCurrency?: string;
-  onCurrencyChange?: (currency: string) => void;
-  /** Codes offered by the currency menu. Pass one code to hide the menu. */
-  currencies?: string[];
   /** Lowest amount in minor units. Checked when the field loses focus. */
   min?: number;
   /** Highest amount in minor units. Typing past it is refused with a nudge. */
   max?: number;
-  /** Quick add chips in major units. Pass an empty array to hide them. */
-  quickAdd?: number[];
+  /** Shows the allowed range ("Até R$ …") under the field. Off by default: a technical ceiling needs no caption. */
+  showRange?: boolean;
   /** Arrow keys move by this many minor units. Defaults to one major unit; Shift moves ten times as far. */
   step?: number;
   /** Formatting locale. Fixed by default so server and client render the same digits. */
@@ -50,9 +45,9 @@ export interface MoneyInputProps {
   onBlur?: (event: ReactFocusEvent<HTMLInputElement>) => void;
 }
 
-type Source = "type" | "chip" | "key" | "external";
+type Source = "type" | "key" | "external";
 type Part = { key: string; char: string; ghost: boolean };
-type CurrencyInfo = { code: string; symbol: string; position: "prefix" | "suffix"; digits: number; name: string; whole: Intl.NumberFormat; full: Intl.NumberFormat };
+type CurrencyInfo = { code: string; symbol: string; position: "prefix" | "suffix"; digits: number; full: Intl.NumberFormat };
 
 type Bezier = [number, number, number, number];
 const enterEase = [...motionTokens.ease.enter] as Bezier;
@@ -62,7 +57,6 @@ const physical = (visualDuration: number, bounce: number): Transition => {
   const root = (2 * Math.PI) / (visualDuration * 1.2);
   return { type: "spring", stiffness: root * root, damping: 2 * (1 - bounce) * root, mass: 1 };
 };
-const GLIDE = physical(spring.morph.visualDuration, 0);
 /** A sideways kick when a limit refuses the change: the amount strains toward the press and springs home.
  *  motion: a physical refusal cue, a little slower than interface springs so the strain reads. */
 const KICK = physical(.42, 0);
@@ -83,12 +77,7 @@ function currencyInfo(code: string, locale: string): CurrencyInfo {
   const parts = full.formatToParts(1);
   const symbolAt = parts.findIndex(part => part.type === "currency"), numberAt = parts.findIndex(part => part.type === "integer");
   const digits = full.resolvedOptions().maximumFractionDigits ?? 2;
-  let name = code;
-  try { name = new Intl.DisplayNames([locale], { type: "currency" }).of(code) ?? code; } catch { /* older engines keep the code */ }
-  const info: CurrencyInfo = {
-    code, symbol: parts[symbolAt]?.value ?? code, position: symbolAt < numberAt ? "prefix" : "suffix", digits, name: name.charAt(0).toUpperCase() + name.slice(1), full,
-    whole: new Intl.NumberFormat(locale, { style: "currency", currency: code, currencyDisplay: "narrowSymbol", maximumFractionDigits: 0, numberingSystem: "latn" }),
-  };
+  const info: CurrencyInfo = { code, symbol: parts[symbolAt]?.value ?? code, position: symbolAt < numberAt ? "prefix" : "suffix", digits, full };
   infoCache.set(cacheKey, info);
   return info;
 }
@@ -112,13 +101,6 @@ function fromMinor(minor: number | null | undefined, digits: number) {
 }
 /** Settles a draft the way it will be read back: fraction padded to the currency, leading zeros gone. */
 function settle(draft: string, digits: number) { return draft ? fromMinor(toMinor(draft, digits), digits) : ""; }
-/** Carries an amount across currencies with different minor units, keeping the major amount. */
-function convertDraft(draft: string, digits: number) {
-  if (!draft) return "";
-  const [whole = "", fraction] = draft.split(".");
-  if (!digits) return whole || "0";
-  return fraction === undefined ? whole : `${whole}.${fraction.slice(0, digits)}`;
-}
 
 function groupInteger(whole: string, group: string) { return whole.replace(/\B(?=(\d{3})+(?!\d))/g, group); }
 function displayOf(draft: string, symbols: { group: string; decimal: string }) {
@@ -208,12 +190,11 @@ function positionAfter(text: string, count: number, decimal: string) {
 
 /**
  * A currency amount field. Digits group as they are typed without moving the caret, the missing cents wait as faint ghosts
- * so the amount never changes width when it settles, long amounts scale down to fit instead of scrolling, and quick add chips
- * and arrow keys roll the digits. The value comes out in minor units, so $12.50 is 1250.
+ * so the amount never changes width when it settles, long amounts scale down to fit instead of scrolling, and arrow keys roll
+ * the digits. The value comes out in minor units, so R$ 12,50 is 1250.
  */
 export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function MoneyInput({
-  label, hideLabel = false, value, defaultValue = null, onValueChange, currency: currencyProp, defaultCurrency = "USD", onCurrencyChange,
-  currencies = ["USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "INR"], min, max, quickAdd = [10, 50, 100], step: stepProp, locale = "en-US",
+  label, hideLabel = false, value, defaultValue = null, onValueChange, currency = "BRL", min, max, showRange = false, step: stepProp, locale = "pt-BR",
   description, error, disabled = false, name, id, className, onBlur,
 }, forwardedRef) {
   const reduced = useReducedFlag();
@@ -221,9 +202,7 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
   const inputId = id ?? `${uid}-amount`;
   const hintId = `${inputId}-hint`, errorId = `${inputId}-error`, rangeId = `${inputId}-range`;
 
-  const [innerCurrency, setInnerCurrency] = useState(defaultCurrency);
-  const code = currencyProp ?? innerCurrency;
-  const info = useMemo(() => currencyInfo(code, locale), [code, locale]);
+  const info = useMemo(() => currencyInfo(currency, locale), [currency, locale]);
   const symbols = useMemo(() => localeSymbols(locale), [locale]);
   const step = stepProp && stepProp > 0 ? stepProp : pow10(info.digits);
 
@@ -369,7 +348,7 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
     applyRaw(raw, replaceAll ? raw.length : start + inserted.length);
   }
 
-  /* ---------------------------------------------- Steps and chips ---------------------------------------------- */
+  /* ---------------------------------------------- Steps ---------------------------------------------- */
 
   function nudge(amount: number, nextSource: Source) {
     const from = latest.current.minor ?? 0;
@@ -401,78 +380,9 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
     return () => observer.disconnect();
   }, [reduced, scale]);
 
-  /* ---------------------------------------------- Currency menu ---------------------------------------------- */
-
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [activeCode, setActiveCode] = useState(code);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef(new Map<string, HTMLElement>());
-  const options = useMemo(() => currencies.map(entry => currencyInfo(entry, locale)), [currencies, locale]);
-  const canSwitch = options.length > 1;
-
-  const openMenu = () => { if (disabled) return; setActiveCode(code); setMenuOpen(true); };
-  const closeMenu = useCallback((focusButton: boolean) => { setMenuOpen(false); if (focusButton) menuButtonRef.current?.focus({ preventScroll: true }); }, []);
-  useLayoutEffect(() => { if (menuOpen) listRef.current?.focus({ preventScroll: true }); }, [menuOpen]);
-  useEffect(() => {
-    if (!menuOpen) return;
-    const down = (event: PointerEvent) => { if (!menuRef.current?.contains(event.target as Node)) closeMenu(false); };
-    document.addEventListener("pointerdown", down);
-    return () => document.removeEventListener("pointerdown", down);
-  }, [closeMenu, menuOpen]);
-
-  const hy = useMotionValue(0), hh = useMotionValue(0), ho = useMotionValue(0);
-  /** Keyboard moves and type-ahead land the highlight instantly; only the pointer glides it. */
-  const keyNav = useRef(false);
-  useLayoutEffect(() => {
-    const node = menuOpen ? optionRefs.current.get(activeCode) : undefined;
-    if (!node) { ho.jump(0); return; }
-    if (ho.get() < .05 || reduced || keyNav.current) { hy.jump(node.offsetTop); hh.jump(node.offsetHeight); } else { animate(hy, node.offsetTop, GLIDE); animate(hh, node.offsetHeight, GLIDE); }
-    ho.jump(1);
-    node.scrollIntoView?.({ block: "nearest" });
-  }, [activeCode, hh, ho, hy, menuOpen, reduced]);
-
-  function chooseCurrency(next: CurrencyInfo) {
-    closeMenu(true);
-    if (next.code === code) return;
-    const nextDraft = focused ? convertDraft(draft, next.digits) : settle(convertDraft(draft, next.digits), next.digits);
-    const nextMinor = toMinor(nextDraft, next.digits);
-    if (currencyProp === undefined) setInnerCurrency(next.code);
-    onCurrencyChange?.(next.code);
-    setSource("external");
-    setDraft(nextDraft);
-    latest.current = { minor: nextMinor, draft: nextDraft };
-    emit(nextMinor, next);
-    setAnnouncement(`${next.name}${nextMinor === null ? "" : `, ${next.full.format(nextMinor / pow10(next.digits))}`}`);
-  }
-
-  const typeahead = useRef({ buffer: "", at: 0 });
-  function onMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    keyNav.current = true;
-    const at = options.findIndex(option => option.code === activeCode);
-    const go = (index: number) => { event.preventDefault(); setActiveCode(options[Math.max(0, Math.min(options.length - 1, index))]!.code); };
-    switch (event.key) {
-      case "ArrowDown": go(at + 1); return;
-      case "ArrowUp": go(at - 1); return;
-      case "Home": go(0); return;
-      case "End": go(options.length - 1); return;
-      case "Enter": case " ": event.preventDefault(); if (options[at]) chooseCurrency(options[at]); return;
-      case "Escape": event.preventDefault(); event.stopPropagation(); closeMenu(true); return;
-      case "Tab": closeMenu(false); return;
-    }
-    if (event.key.length === 1 && /\w/.test(event.key)) {
-      const now = performance.now(), state = typeahead.current;
-      state.buffer = now - state.at > 600 ? event.key.toLowerCase() : state.buffer + event.key.toLowerCase();
-      state.at = now;
-      const hit = options.find(option => option.code.toLowerCase().startsWith(state.buffer) || option.name.toLowerCase().startsWith(state.buffer));
-      if (hit) { event.preventDefault(); setActiveCode(hit.code); }
-    }
-  }
-
   /* ---------------------------------------------- Messages ---------------------------------------------- */
 
-  const range = min !== undefined && max !== undefined ? `${money(min)} a ${money(max)}` : max !== undefined ? `Até ${money(max)}` : min !== undefined ? `A partir de ${money(min)}` : "";
+  const range = !showRange ? "" : min !== undefined && max !== undefined ? `${money(min)} a ${money(max)}` : max !== undefined ? `Até ${money(max)}` : min !== undefined ? `A partir de ${money(min)}` : "";
   const outOfRange = minor !== null && ((min !== undefined && minor < min) || (max !== undefined && minor > max));
   const belowMin = minor !== null && min !== undefined && minor < min;
   const builtIn = touched && !focused && outOfRange ? belowMin ? `O mínimo é ${money(min ?? 0)}` : `O máximo é ${money(max ?? 0)}` : undefined;
@@ -480,7 +390,6 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
   const invalid = !!message;
   const describedBy = [range ? rangeId : null, description ? hintId : null, message ? errorId : null].filter(Boolean).join(" ") || undefined;
   const instant = source === "type";
-  const chips = quickAdd.filter(amount => amount > 0);
 
   return <div className={[styles.field, className].filter(Boolean).join(" ")} data-disabled={disabled || undefined}>
     <label htmlFor={inputId} className={hideLabel ? styles.srOnly : styles.label}>{label}</label>
@@ -504,45 +413,10 @@ export const MoneyInput = forwardRef<HTMLInputElement, MoneyInputProps>(function
         </motion.div>
       </div>
 
-      {canSwitch ? <div ref={menuRef} className={styles.menuAnchor}>
-        <button ref={menuButtonRef} type="button" className={styles.currencyButton} disabled={disabled} aria-haspopup="listbox" aria-expanded={menuOpen} aria-controls={`${uid}-currencies`}
-          aria-label={`Currency, ${info.name}`} data-open={menuOpen || undefined} onClick={() => (menuOpen ? closeMenu(true) : openMenu())}
-          onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); openMenu(); } }}>
-          <span className={styles.code}>{code}</span>
-          <motion.span className={styles.chevron} aria-hidden="true" initial={false} animate={{ rotate: menuOpen ? 180 : 0 }} transition={reduced ? { duration: 0 } : GLIDE}><ChevronDown size={16} strokeWidth={1.75} /></motion.span>
-        </button>
-        <AnimatePresence>
-          {menuOpen && <motion.div key="menu" className={styles.menu}
-            initial={reduced ? { opacity: 0 } : { opacity: 0, scale: .96, y: -4, filter: `blur(${blur.subtle}px)` }} animate={{ opacity: 1, scale: 1, y: 0, filter: "blur(0px)" }}
-            exit={reduced ? { opacity: 0, transition: { duration: duration.instant } } : { opacity: 0, scale: .97, y: -2, filter: `blur(${blur.subtle}px)`, transition: { duration: duration.instant, ease: standardEase } }}
-            transition={reduced ? { duration: duration.instant } : { ...spring.snappy, opacity: { duration: duration.fast, ease: enterEase }, filter: { duration: duration.fast, ease: enterEase } }}>
-            <div ref={listRef} id={`${uid}-currencies`} className={styles.list} role="listbox" tabIndex={-1} aria-label="Moeda" aria-activedescendant={`${uid}-cur-${activeCode}`} onKeyDown={onMenuKeyDown}>
-              <motion.span className={styles.highlight} style={{ y: hy, height: hh, opacity: ho }} aria-hidden="true" />
-              {options.map(option => <div key={option.code} id={`${uid}-cur-${option.code}`} role="option" aria-selected={option.code === code} className={styles.option}
-                data-active={option.code === activeCode || undefined} ref={node => { if (node) optionRefs.current.set(option.code, node); else optionRefs.current.delete(option.code); }}
-                onPointerMove={event => { keyNav.current = false; if (event.pointerType === "mouse" && option.code !== activeCode) setActiveCode(option.code); }}
-                onPointerDown={event => event.preventDefault()} onClick={() => chooseCurrency(option)}>
-                <span className={styles.optionSymbol} aria-hidden="true">{option.symbol}</span>
-                <span className={styles.optionCode}>{option.code}</span>
-                <span className={styles.optionName}>{option.name}</span>
-                <span className={styles.check} data-on={option.code === code || undefined} aria-hidden="true"><Check size={16} strokeWidth={1.75} /></span>
-              </div>)}
-            </div>
-          </motion.div>}
-        </AnimatePresence>
-      </div> : currencies.length > 1 ? <span className={styles.codeStatic}>{code}</span> : null}
     </div>
 
-    {(chips.length > 0 || range) && <div className={styles.toolbar}>
-      {chips.length > 0 && <div className={styles.chips} role="group" aria-label="Somar rápido">
-        {chips.map(amount => {
-          const add = amount * pow10(info.digits);
-          const atMax = max !== undefined && (minor ?? 0) >= max;
-          return <button key={amount} type="button" className={styles.chip} disabled={disabled} aria-disabled={atMax || undefined} aria-controls={inputId}
-            aria-label={`Somar ${info.whole.format(amount)}`} onClick={() => nudge(add, "chip")}>+{info.whole.format(amount)}</button>;
-        })}
-      </div>}
-      {range && <span id={rangeId} className={styles.range} data-flash={limitFlash > 0 || undefined}>{range}</span>}
+    {range && <div className={styles.toolbar}>
+      <span id={rangeId} className={styles.range} data-flash={limitFlash > 0 || undefined}>{range}</span>
     </div>}
 
     <AnimatePresence initial={false}>

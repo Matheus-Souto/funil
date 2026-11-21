@@ -47,7 +47,6 @@ export function TeamList({ members }: { members: TeamMember[] }) {
       <Dialog
         open={target !== null}
         onClose={() => setTarget(null)}
-        icon="lock"
         title={`Encerrar as sessões de ${target?.name ?? ""}?`}
         footer={
           <>

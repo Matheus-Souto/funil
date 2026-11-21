@@ -83,7 +83,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
                     return (
                       <tr key={p.id}>
                         <td>
-                          <ProductCell id={p.id} name={p.name} pages={p.pageCount} />
+                          <ProductCell name={p.name} pages={p.pageCount} />
                         </td>
                         <td className={s.muted}>
                           {p.fileName} <span className={s.nowrap}>· {fileSize(p.fileSize)}</span>
@@ -106,7 +106,8 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
                         </td>
                         <td className={`${s.muted} ${s.nowrap}`}>{DAY.format(p.createdAt)}</td>
                         <td className={s.num}>
-                          <PdfViewerButton id={p.id} name={p.name} />
+                          {/* PDF original (sem carimbo): só dono e admin (products.file exige products.write). */}
+                          {canWrite ? <PdfViewerButton id={p.id} name={p.name} /> : null}
                         </td>
                       </tr>
                     );

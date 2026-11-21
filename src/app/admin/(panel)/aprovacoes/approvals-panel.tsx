@@ -176,7 +176,6 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
       <Dialog
         open={target !== null}
         onClose={closeApprove}
-        icon="shield-check"
         title={`Aprovar e executar ${target?.description ?? ""} agora?`}
         footer={
           <>

@@ -122,6 +122,7 @@ export function TableShell({
   placeholder,
   searchLabel,
   count,
+  filters,
   children,
 }: {
   q?: string;
@@ -131,6 +132,11 @@ export function TableShell({
   searchLabel: string;
   /** Texto do total ao lado da busca, ex.: "12 pedidos com estes filtros". */
   count: string;
+  /**
+   * Os mesmos filtros do cabeçalho, mostrados na barra só em telas estreitas (onde a tabela vira lista e o cabeçalho
+   * some): quem chega com ?status= aplicado vê o filtro e consegue tirar.
+   */
+  filters?: ReactNode;
   children: ReactNode;
 }) {
   const [max, setMax] = useState(false);
@@ -154,6 +160,7 @@ export function TableShell({
           <input name="q" defaultValue={q} placeholder={placeholder} maxLength={100} aria-label={searchLabel} />
         </form>
         <span className={s.tableCount}>{count}</span>
+        {filters ? <div className={s.barFilters}>{filters}</div> : null}
         <button
           type="button"
           className={s.iconBtn}

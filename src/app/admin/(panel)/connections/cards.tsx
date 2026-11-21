@@ -126,7 +126,6 @@ function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "
     <Dialog
       open={open}
       onClose={onClose}
-      icon="plug"
       title={title}
       footer={
         <>

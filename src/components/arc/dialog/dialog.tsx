@@ -1,7 +1,7 @@
 "use client";
 
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { Transition } from "motion/react";
@@ -11,12 +11,16 @@ import styles from "./dialog.module.css";
 
 /** Mirrors the open state so the content can stay mounted while it animates out, and retarget mid-flight if it is reopened or closed early. */
 const OpenContext = createContext<boolean | null>(null);
+/** This dialog's close and the close of the dialog it was opened from (portals keep React context, so nesting is known). */
+const CloseContext = createContext<{ close: () => void; parentClose: (() => void) | null } | null>(null);
 
 export function Dialog({ open: openProp, defaultOpen = false, onOpenChange, ...props }: ComponentPropsWithoutRef<typeof DialogPrimitive.Root>) {
   const [uncontrolled, setUncontrolled] = useState(defaultOpen);
   const open = openProp ?? uncontrolled;
   const setOpen = useCallback((next: boolean) => { if (openProp === undefined) setUncontrolled(next); onOpenChange?.(next); }, [openProp, onOpenChange]);
-  return <OpenContext.Provider value={open}><DialogPrimitive.Root {...props} open={open} onOpenChange={setOpen}/></OpenContext.Provider>;
+  const outer = useContext(CloseContext);
+  const close = useMemo(() => ({ close: () => setOpen(false), parentClose: outer?.close ?? null }), [setOpen, outer]);
+  return <CloseContext.Provider value={close}><OpenContext.Provider value={open}><DialogPrimitive.Root {...props} open={open} onOpenChange={setOpen}/></OpenContext.Provider></CloseContext.Provider>;
 }
 
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -39,8 +43,15 @@ function SwapText({ text }: { text: string }) {
   </AnimatePresence>;
 }
 
-export function DialogContent({ title, description, children, className, onPointerDownOutside, ...props }: DialogContentProps) {
+export function DialogContent({ title, description, children, className, onPointerDownOutside, onEscapeKeyDown, ...props }: DialogContentProps) {
   const open = useContext(OpenContext);
+  const nesting = useContext(CloseContext);
+  // While this dialog animates out it is still the top layer, so Radix hands it the next Escape. That press is meant for
+  // the dialog underneath (a confirm closing on top of a form): pass it down instead of swallowing it.
+  const escape: DialogContentProps["onEscapeKeyDown"] = event => {
+    onEscapeKeyDown?.(event);
+    if (open === false) { event.preventDefault(); nesting?.parentClose?.(); }
+  };
   const reduced = useReducedMotion();
   // When the open state last changed. Radix waits for the click before treating a press as outside, and a press on the trigger
   // while the dialog leaves reopens it first, so that press must not close it again.
@@ -58,13 +69,13 @@ export function DialogContent({ title, description, children, className, onPoint
   // Under a bare Radix root the open state is unknown here, so CSS keyframes keyed off data-state animate the layers instead.
   if (open === null) return <DialogPrimitive.Portal>
     <DialogPrimitive.Overlay className={`${styles.overlay} ${styles.keyframes}`}/>
-    <DialogPrimitive.Content {...props} onPointerDownOutside={pressOutside} className={`${classes} ${styles.keyframes}`}>{inner}</DialogPrimitive.Content>
+    <DialogPrimitive.Content {...props} onPointerDownOutside={pressOutside} onEscapeKeyDown={escape} className={`${classes} ${styles.keyframes}`}>{inner}</DialogPrimitive.Content>
   </DialogPrimitive.Portal>;
   // The overlay fades while the dialog rises 8px and scales up on a spring. Closing is shorter and quieter, and starts from wherever the entrance is.
   return <AnimatePresence>
     {open && <DialogPrimitive.Portal key="dialog" forceMount>
       <DialogPrimitive.Overlay asChild forceMount><motion.div className={styles.overlay} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: reduced ? fade : leave }} transition={reduced ? fade : { duration: motionTokens.duration.standard, ease: [...motionTokens.ease.enter] }}/></DialogPrimitive.Overlay>
-      <DialogPrimitive.Content {...props} onPointerDownOutside={pressOutside} asChild forceMount>
+      <DialogPrimitive.Content {...props} onPointerDownOutside={pressOutside} onEscapeKeyDown={escape} asChild forceMount>
         <motion.div className={classes} initial={reduced ? { opacity: 0 } : { opacity: 0, y: 8, scale: .96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={reduced ? { opacity: 0, transition: fade } : { opacity: 0, y: 4, scale: .98, transition: leave }} transition={reduced ? fade : { default: motionTokens.spring.smooth, opacity: { duration: motionTokens.duration.fast, ease: [...motionTokens.ease.enter] } }}>{inner}</motion.div>
       </DialogPrimitive.Content>
     </DialogPrimitive.Portal>}

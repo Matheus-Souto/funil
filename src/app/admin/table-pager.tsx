@@ -9,7 +9,7 @@ import { Pagination } from "@/components/arc/pagination/pagination";
 import { PER_PAGE_OPTIONS } from "./per-page";
 import s from "./panel.module.css";
 
-export function TablePager({ page, perPage, total }: { page: number; perPage: number; total: number }) {
+export function TablePager({ page, perPage, total, defaultPerPage = PER_PAGE_OPTIONS[0] }: { page: number; perPage: number; total: number; defaultPerPage?: number }) {
   const router = useRouter();
   const path = usePathname();
   const params = useSearchParams();
@@ -21,7 +21,7 @@ export function TablePager({ page, perPage, total }: { page: number; perPage: nu
     const p = new URLSearchParams(params.toString());
     if (next.por !== undefined) {
       p.delete("pagina");
-      if (next.por === PER_PAGE_OPTIONS[0]) p.delete("por");
+      if (next.por === defaultPerPage) p.delete("por");
       else p.set("por", String(next.por));
     }
     if (next.pagina !== undefined) {

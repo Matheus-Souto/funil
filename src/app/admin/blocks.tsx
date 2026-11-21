@@ -139,10 +139,7 @@ export function BarList({ rows, empty }: { rows: Array<{ label: ReactNode; value
 /** Aviso de entregas por e-mail com falha (avisos da loja e lista de pedidos). */
 export function FailedDeliveries({ items }: { items: Array<{ orderId: string; code: string }> }) {
   return (
-    <Notice
-      tone="danger"
-      title={`A entrega por e-mail falhou ou voltou em ${items.length} ${items.length === 1 ? "pedido" : "pedidos"}. Confira o endereço do comprador e a conexão de e-mail em Conexões, ou reenvie o acesso.`}
-    >
+    <Notice tone="danger">
       <b>E-mail falhou</b> em {items.length} {items.length === 1 ? "pedido" : "pedidos"}:{" "}
       {items.slice(0, 5).map((f, i) => (
         <span key={f.orderId}>
@@ -150,29 +147,28 @@ export function FailedDeliveries({ items }: { items: Array<{ orderId: string; co
           <Link href={`/admin/orders/${f.orderId}`}>#{f.code}</Link>
         </span>
       ))}
+      . Confira o endereço do comprador e a conexão de e-mail, ou reenvie o acesso.
     </Notice>
   );
 }
 
 /**
- * Aviso discreto de uma linha (ponto colorido, texto que corta com "…" e ação no fim). Vários lado a lado dentro de
- * `.noticeStrip`. O texto completo fica no `title` (passar o mouse) para quem quiser ler tudo.
+ * Aviso discreto (ponto colorido, texto e ação no fim). Vários lado a lado dentro de `.noticeStrip`. O texto quebra
+ * linha quando precisa: nada fica só no `title`, que não abre no toque nem no leitor de tela.
  */
 export function Notice({
   tone,
-  title,
   action,
   alert,
   children,
 }: {
   tone: "warning" | "danger" | "info";
-  title?: string;
   action?: ReactNode;
   alert?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className={s.notice} data-tone={tone} title={title} role={alert ? "alert" : undefined}>
+    <div className={s.notice} data-tone={tone} role={alert ? "alert" : undefined}>
       <span className={s.noticeDot} aria-hidden="true" />
       <span className={s.noticeText}>{children}</span>
       {action ? <span className={s.noticeAction}>{action}</span> : null}

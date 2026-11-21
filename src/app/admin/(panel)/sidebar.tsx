@@ -232,7 +232,7 @@ export function PanelShell({
               theme={theme}
               iconOnly
               label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
-              onThemeChange={(next, _v, trigger) => changeTheme(next, trigger)}
+              onThemeChange={(next, trigger) => changeTheme(next, trigger)}
             />
             <Tip show={collapsed} label="Trocar senha">
               <Link href="/admin/senha" className={s.iconBtn} aria-label="Trocar senha" title={collapsed ? undefined : "Trocar senha"}>

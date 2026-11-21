@@ -120,6 +120,9 @@ const comparable = (f: ReturnType<typeof initialForm>) => ({
   bumpLabel: f.bumpOn ? f.bumpLabel.trim() : "",
 });
 
+/** Maior valor em centavos que o banco guarda (integer do Postgres): o campo recusa o que passar disso. */
+const MAX_CENTS = 2_147_483_647;
+
 export function OfferEditor(props: {
   offer: OfferData | null;
   products: ProductOption[];
@@ -135,8 +138,16 @@ export function OfferEditor(props: {
   const router = useRouter();
   const [f, setF] = useState(() => initialForm(offer, products));
   /** Há diferença entre o formulário e a oferta salva (a barra de baixo avisa e permite descartar). */
-  const dirty = !offer || JSON.stringify(comparable(f)) !== JSON.stringify(comparable(initialForm(offer, products)));
+  const changed = JSON.stringify(comparable(f)) !== JSON.stringify(comparable(initialForm(offer, products)));
+  const dirty = !offer || changed;
   const discard = () => offer && setF(initialForm(offer, products));
+  // Sair da página (fechar a aba, recarregar, link externo) com alterações não salvas pede confirmação do navegador.
+  useEffect(() => {
+    if (!changed || !canWrite) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [changed, canWrite]);
   const [slugTouched, setSlugTouched] = useState(Boolean(offer));
   const [pixelOn, setPixelOn] = useState(Boolean(offer?.pixelId));
   const [pixel, setPixel] = useState(offer?.pixelId ?? "");
@@ -436,10 +447,7 @@ export function OfferEditor(props: {
                     label="Preço"
                     value={priceCents}
                     onValueChange={(v) => set("price", v === null ? "" : centsToInput(v))}
-                    currency="BRL"
-                    currencies={["BRL"]}
-                    quickAdd={[]}
-                    locale="pt-BR"
+                    max={MAX_CENTS}
                   />
                 </div>
                 <div className={s.formGrid}>
@@ -499,7 +507,7 @@ export function OfferEditor(props: {
                     </span>
                     <span className={s.payText}>
                       Cartão de crédito
-                      <small>Visa, Mastercard, Elo · até 12x</small>
+                      <small>Visa, Mastercard, Elo · {f.maxInstallments > 1 ? `até ${f.maxInstallments}x` : "à vista"}</small>
                     </span>
                     <input
                       type="checkbox"
@@ -588,10 +596,7 @@ export function OfferEditor(props: {
                       label="Preço do acréscimo"
                       value={parseBrl(f.bumpPrice)}
                       onValueChange={(v) => set("bumpPrice", v === null ? "" : centsToInput(v))}
-                      currency="BRL"
-                      currencies={["BRL"]}
-                      quickAdd={[]}
-                      locale="pt-BR"
+                      max={MAX_CENTS}
                       description={priceCents && bumpCents ? `Total com bump: ${brl(priceCents + bumpCents)}` : undefined}
                     />
                     <div className={s.field}>
@@ -698,7 +703,6 @@ export function OfferEditor(props: {
       <Dialog
         open={dialog === "price"}
         onClose={() => setDialog(null)}
-        icon={changes?.products || changes?.bump ? "package" : "tag"}
         title={dialogText?.title ?? ""}
         footer={
           <>
@@ -756,7 +760,6 @@ export function OfferEditor(props: {
       <Dialog
         open={dialog === "pixel"}
         onClose={() => setDialog(null)}
-        icon="code"
         title={pixelOn ? `Usar o Pixel ${pixel} nesta oferta?` : "Voltar a usar o Pixel da loja?"}
         footer={
           <>

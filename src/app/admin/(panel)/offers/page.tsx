@@ -29,20 +29,13 @@ export default async function OffersPage() {
   const names = (ps: { name: string }[]) => ps.map((p) => p.name).join(" · ");
   const canMetrics = hasPermission(role, "metrics.read");
   const week = periodRange("7d");
-  const stats = canMetrics ? (await runAction(metricsBreakdown, call, week)).byOffer : null;
-  // Vendas de cada oferta por dia (7 dias) para o mini gráfico: a mesma ação, dia a dia. Ver docs/painel-pendencias.md
-  // (o ideal é o servidor devolver isso numa consulta só).
-  const daily = canMetrics
-    ? await Promise.all(
-        Array.from({ length: 7 }, (_, k) => {
-          const from = new Date(week.from.getTime() + k * DAY_MS);
-          const to = new Date(Math.min(from.getTime() + DAY_MS, week.to.getTime()));
-          return runAction(metricsBreakdown, call, { from, to }).then((r) => r.byOffer);
-        }),
-      )
-    : null;
-  const dayLabels = Array.from({ length: 7 }, (_, k) => DAY_LABEL.format(new Date(week.from.getTime() + k * DAY_MS + 12 * 3_600_000)));
-  const trend = (offerId: string) => daily?.map((day) => day.find((x) => x.offerId === offerId)?.paid ?? 0) ?? [];
+  // Uma chamada: números da semana por oferta e as vendas de cada oferta por dia (mini gráfico).
+  const week7 = canMetrics ? await runAction(metricsBreakdown, call, week) : null;
+  const stats = week7?.byOffer ?? null;
+  const days = week7?.byDay.map((d) => d.day) ?? [];
+  const sold = new Map(week7?.byOfferDay.map((r) => [`${r.offerId}|${r.day}`, r.paid]) ?? []);
+  const dayLabels = Array.from({ length: days.length }, (_, k) => DAY_LABEL.format(new Date(week.from.getTime() + k * DAY_MS + 12 * 3_600_000)));
+  const trend = (offerId: string) => days.map((day) => sold.get(`${offerId}|${day}`) ?? 0);
   const base = storeBaseUrl((await getPanelIdentity(panel)).store);
 
   return (

@@ -15,7 +15,7 @@ import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { ColumnFilter, TableShell } from "../../table-controls";
 import { TablePager } from "../../table-pager";
-import { PER_PAGE_OPTIONS, parsePerPage } from "../../per-page";
+import { ORDERS_PER_PAGE, parsePerPage } from "../../per-page";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
@@ -27,7 +27,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   const call = { ...panel, origin: "panel" as const };
   const sp = await searchParams;
   const { statuses, methods, q, page: requested } = parseOrderMultiFilters(sp);
-  const perPage = parsePerPage(sp.por);
+  const perPage = parsePerPage(sp.por, ORDERS_PER_PAGE);
   let page = requested;
   let data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
   // ?pagina= além do fim (link antigo, pedidos que sumiram do filtro): mostra a última página em vez de "nenhum pedido".
@@ -50,6 +50,17 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     return str ? `?${str}` : "";
   };
   const filtered = Boolean(statuses.length || methods.length || q);
+  const methodFilter = <ColumnFilter title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />;
+  const statusFilter = (
+    <ColumnFilter
+      title="Status"
+      param="status"
+      values={statuses}
+      options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
+        .filter((k) => k !== "disputed" || data.counts.disputed > 0)
+        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k], icon: k }))}
+    />
+  );
 
   if (data.counts.all === 0 && !methods.length && !q) {
     const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
@@ -113,10 +124,21 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       ) : null}
       <TableShell
         q={q}
-        keep={{ status: statuses, method: methods, por: perPage === PER_PAGE_OPTIONS[0] ? [] : [String(perPage)] }}
+        keep={{ status: statuses, method: methods, por: perPage === ORDERS_PER_PAGE ? [] : [String(perPage)] }}
         placeholder="Buscar por nome ou e-mail"
         searchLabel="Buscar pedidos"
         count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
+        filters={
+          <>
+            {statusFilter}
+            {methodFilter}
+            {statuses.length || methods.length ? (
+              <Link className={s.linkBtn} href={`/admin/orders${q ? `?q=${encodeURIComponent(q)}` : ""}`}>
+                Limpar filtros
+              </Link>
+            ) : null}
+          </>
+        }
       >
         {data.items.length === 0 ? (
           <div className={s.empty}>
@@ -135,22 +157,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <th scope="col">Pedido</th>
                   <th scope="col">Cliente</th>
                   <th scope="col">Oferta</th>
-                  <th scope="col">
-                    <ColumnFilter title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />
-                  </th>
+                  <th scope="col">{methodFilter}</th>
                   <th scope="col" className={s.num}>
                     Valor
                   </th>
-                  <th scope="col">
-                    <ColumnFilter
-                      title="Status"
-                      param="status"
-                      values={statuses}
-                      options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
-                        .filter((k) => k !== "disputed" || data.counts.disputed > 0)
-                        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k], icon: k }))}
-                    />
-                  </th>
+                  <th scope="col">{statusFilter}</th>
                   <th scope="col">Data</th>
                 </tr>
               </thead>
@@ -196,7 +207,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             </ul>
           </>
         )}
-        <TablePager page={page} perPage={perPage} total={data.total} />
+        <TablePager page={page} perPage={perPage} total={data.total} defaultPerPage={ORDERS_PER_PAGE} />
       </TableShell>
     </>
   );

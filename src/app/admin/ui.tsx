@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState, useTransition, type ReactNode } from 
 import { useRouter } from "next/navigation";
 import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
 import type { ActionResult } from "./result";
-import { PIcon, type PanelIconName } from "./icons";
+import { PIcon } from "./icons";
 import s from "./panel.module.css";
 
 /**
@@ -17,7 +17,6 @@ export function Dialog({
   open,
   onClose,
   title,
-  icon,
   tone,
   children,
   footer,
@@ -25,7 +24,6 @@ export function Dialog({
   open: boolean;
   onClose: () => void;
   title: string;
-  icon?: PanelIconName;
   tone?: "danger";
   children: ReactNode;
   footer: ReactNode;
@@ -45,7 +43,7 @@ export function Dialog({
           }
         }}
       >
-        <div className={s.dialogBody} data-tone={tone} data-icon={icon}>
+        <div className={s.dialogBody} data-tone={tone}>
           {children}
         </div>
         <div className={s.dialogActions}>{footer}</div>

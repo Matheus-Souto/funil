@@ -94,7 +94,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         {pending > 0 ? (
           <Notice
             tone="warning"
-            title={`${pending} ${pending === 1 ? "pedido com Pix manual aguarda" : "pedidos com Pix manual aguardam"} você conferir no extrato e liberar.`}
             action={<Link href="/admin/orders?status=pending&method=pix_manual">Conferir</Link>}
           >
             <b>
@@ -108,7 +107,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
             key={a.id}
             tone="danger"
             alert
-            title={`${a.title}. ${a.body}`}
             action={
               <>
                 {a.orderId ? <Link href={`/admin/orders/${a.orderId}`}>Ver pedido</Link> : null}
@@ -265,7 +263,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 /** Aviso de cartão indisponível (instalação sem o serviço de cartão; docs/instalacao.md, seção 12). */
 function CardSetupBanner() {
   return (
-    <Notice tone="danger" alert title={`Cartão fora do checkout. ${CARD_SETUP_NOTICE}`}>
+    <Notice tone="danger" alert>
       <b>Cartão fora do checkout</b> {CARD_SETUP_NOTICE}
     </Notice>
   );

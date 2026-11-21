@@ -7,13 +7,11 @@ import { motionTokens } from "../lib/motion-tokens";
 import { Button } from "../button/button";
 import styles from "./theme-switch.module.css";
 
-export type ThemeSwitchVariant = "reveal" | "eclipse" | "split" | "rise";
 export type Theme = "light" | "dark";
 
 export interface ThemeSwitchProps {
   theme: Theme;
-  variant?: ThemeSwitchVariant;
-  onThemeChange: (next: Theme, variant: ThemeSwitchVariant, trigger: HTMLElement) => void;
+  onThemeChange: (next: Theme, trigger: HTMLElement) => void;
   label?: string;
   iconOnly?: boolean;
 }
@@ -56,11 +54,11 @@ function ThemeIcon({ theme, reduced, settled }: { theme: Theme; reduced: boolean
   );
 }
 
-export function ThemeSwitch({ theme, variant = "reveal", onThemeChange, label, iconOnly = false }: ThemeSwitchProps) {
+export function ThemeSwitch({ theme, onThemeChange, label, iconOnly = false }: ThemeSwitchProps) {
   const reduced = useReducedMotion() ?? false;
   const settled = useSettled();
   const next = theme === "light" ? "dark" : "light";
-  const classes = [styles.themeSwitch, styles[variant], iconOnly ? styles.iconOnly : "", settled ? styles.settled : ""].join(" ");
+  const classes = [styles.themeSwitch, iconOnly ? styles.iconOnly : "", settled ? styles.settled : ""].join(" ");
 
   return (
     <Button
@@ -71,7 +69,7 @@ export function ThemeSwitch({ theme, variant = "reveal", onThemeChange, label, i
       data-theme={theme}
       aria-label={label ?? `Switch to ${next} mode`}
       aria-pressed={theme === "dark"}
-      onClick={event => onThemeChange(next, variant, event.currentTarget)}
+      onClick={event => onThemeChange(next, event.currentTarget)}
     >
       <span className={styles.iconWrap}><ThemeIcon theme={theme} reduced={reduced} settled={settled} /></span>
       {!iconOnly && <span className={styles.label}>Switch theme</span>}

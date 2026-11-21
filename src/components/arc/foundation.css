@@ -27,7 +27,7 @@
   --accent-subtle: oklch(33% 0 0 / .1);
   --accent-foreground: var(--background);
   /* Selection controls (switch, checkbox, radio, slider). --control-on fills a chosen control; --control-glyph is the check or dot drawn on it;
-     thumbs stay white in both states so they always read against the track. Tuned per accent below so white thumbs hold on every hue. */
+     thumbs stay white in both states so they always read against the track. */
   --control-on: oklch(23% 0 0);
   --control-glyph: oklch(100% 0 0);
   --control-track: oklch(89.5% 0 0);
@@ -156,41 +156,7 @@
   --arc-gradient-ink: linear-gradient(100deg, oklch(82% .07 300), oklch(86% .065 70));
 }
 
-:root[data-accent="neutral"] { --accent: oklch(33% 0 0); --accent-strong: oklch(24% 0 0); --accent-subtle: oklch(33% 0 0 / .1); }
-:root[data-accent="violet"] { --accent: #7747ff; --accent-strong: #5528ce; --accent-subtle: rgb(119 71 255 / .13); }
-:root[data-accent="blue"] { --accent: #0562ef; --accent-strong: #074db7; --accent-subtle: rgb(5 98 239 / .12); }
-:root[data-accent="green"] { --accent: #0db879; --accent-strong: #087c54; --accent-subtle: rgb(13 184 121 / .13); --accent-foreground: #102016; }
-:root[data-accent="amber"] { --accent: #f3ad20; --accent-strong: #9c6300; --accent-subtle: rgb(243 173 32 / .16); --accent-foreground: #20190d; }
-:root[data-accent="orange"] { --accent: #f48120; --accent-strong: #aa4700; --accent-subtle: rgb(244 129 32 / .13); --accent-foreground: #17130f; }
-:root[data-accent="coral"] { --accent: #f15f55; --accent-strong: #b92c27; --accent-subtle: rgb(241 95 85 / .14); --accent-foreground: #21110f; }
-:root[data-accent="rose"] { --accent: #ed4e9d; --accent-strong: #ae2570; --accent-subtle: rgb(237 78 157 / .14); --accent-foreground: #250f1b; }
-:root[data-theme="dark"][data-accent="neutral"] { --accent: oklch(80% 0 0); --accent-strong: oklch(91% 0 0); --accent-subtle: oklch(80% 0 0 / .13); }
-:root[data-theme="dark"][data-accent="violet"] { --accent: #a78bff; --accent-strong: #c7b7ff; --accent-subtle: rgb(119 71 255 / .22); }
-:root[data-theme="dark"][data-accent="blue"] { --accent: #6ba3ff; --accent-strong: #a4c7ff; --accent-subtle: rgb(5 98 239 / .22); }
-:root[data-theme="dark"][data-accent="green"] { --accent: #53dca6; --accent-strong: #93efd0; --accent-subtle: rgb(13 184 121 / .2); }
-:root[data-theme="dark"][data-accent="amber"] { --accent: #ffcb62; --accent-strong: #ffe0a1; --accent-subtle: rgb(243 173 32 / .2); }
-:root[data-theme="dark"][data-accent="orange"] { --accent: #ffad5e; --accent-strong: #ffd0a0; --accent-subtle: rgb(244 129 32 / .2); --accent-foreground: #17130f; }
-:root[data-theme="dark"][data-accent="coral"] { --accent: #ff9386; --accent-strong: #ffc1ba; --accent-subtle: rgb(241 95 85 / .2); }
-:root[data-theme="dark"][data-accent="rose"] { --accent: #ff8bc5; --accent-strong: #ffc0df; --accent-subtle: rgb(237 78 157 / .2); }
 
-/* Selection control fills per accent. Light: the accent, deepened slightly where a white thumb needs it. Dark: a mid tone instead of the pastel
-   text accent, so white thumbs and checks keep contrast without a neon track. Amber keeps a dark glyph because white on yellow washes out. */
-:root[data-accent="neutral"] { --control-on: oklch(23% 0 0); --control-thumb-on: oklch(100% 0 0); --control-glyph: oklch(100% 0 0); }
-:root[data-accent="violet"] { --control-on: #7747ff; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-accent="blue"] { --control-on: #0562ef; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-accent="green"] { --control-on: #10a870; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-accent="amber"] { --control-on: #eda11a; --control-thumb-on: #fff; --control-glyph: #2a1c03; }
-:root[data-accent="orange"] { --control-on: #f07818; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-accent="coral"] { --control-on: #ec564b; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-accent="rose"] { --control-on: #e64494; --control-thumb-on: #fff; --control-glyph: #fff; }
-:root[data-theme="dark"][data-accent="neutral"] { --control-on: oklch(93% 0 0); --control-thumb-on: oklch(19% 0 0); --control-glyph: oklch(19% 0 0); }
-:root[data-theme="dark"][data-accent="violet"] { --control-on: #8a66ff; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #8a66ff; }
-:root[data-theme="dark"][data-accent="blue"] { --control-on: #3b82f6; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #3b82f6; }
-:root[data-theme="dark"][data-accent="green"] { --control-on: #1fae78; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #1fae78; }
-:root[data-theme="dark"][data-accent="amber"] { --control-on: #e8a52a; --control-thumb-on: #fff; --control-glyph: #241803; --control-fill: #e8a52a; }
-:root[data-theme="dark"][data-accent="orange"] { --control-on: #ef873a; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #ef873a; }
-:root[data-theme="dark"][data-accent="coral"] { --control-on: #ec6a60; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #ec6a60; }
-:root[data-theme="dark"][data-accent="rose"] { --control-on: #e457a0; --control-thumb-on: #fff; --control-glyph: #fff; --control-fill: #e457a0; }
 
 /* Chart series palette, shared by every chart. Series 1 is the accent itself; series 2 to 4 rotate its hue at lightness steps
    around it, so they stay distinct for every accent. A neutral accent falls back to a blue. Validated with the dataviz script

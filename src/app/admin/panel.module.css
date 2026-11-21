@@ -2328,6 +2328,7 @@
 }
 .tableBar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
@@ -2454,12 +2455,13 @@
   display: flex;
   flex: 1 1 280px;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  height: 36px;
-  padding: 0 12px;
+  min-height: 36px;
+  padding: 9px 12px;
   border-radius: 10px;
   font-size: 13px;
+  line-height: 18px;
   background: var(--color-surface-2);
   color: var(--color-text-muted);
 }
@@ -2475,15 +2477,14 @@
   flex: none;
   width: 7px;
   height: 7px;
+  margin-top: 5.5px;
   border-radius: 50%;
   background: currentColor;
 }
 .noticeText {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .noticeText a,
 .noticeAction a {
@@ -3214,5 +3215,27 @@
   .productTable th:nth-child(5),
   .productTable td:nth-child(5) {
     display: none;
+  }
+}
+
+/* Filtros das colunas na barra da tabela: só quando o cabeçalho some (tabela de pedidos vira lista abaixo de 900 px). */
+.barFilters {
+  display: none;
+}
+@media (max-width: 900px) {
+  .barFilters {
+    display: flex;
+    order: 3;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .barFilters .thFilter {
+    margin: 0;
+    padding: 5px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    font-size: 13px;
   }
 }

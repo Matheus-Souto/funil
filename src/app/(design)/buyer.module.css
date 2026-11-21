@@ -794,7 +794,7 @@ select.input {
   padding: 14px 12px;
   border-radius: var(--radius-lg);
   background: var(--color-brand-soft);
-  border: 2px solid var(--color-brand);
+  border: 2px solid var(--color-brand-strong); /* a lima de 2 px sobre o fundo lima claro ficava em ~1,5:1 */
   text-align: center;
 }
 .uniqueAmount {
@@ -1000,7 +1000,7 @@ select.input {
   font-weight: 600;
 }
 .accessCard {
-  border: 2px solid var(--color-brand);
+  border: 2px solid var(--color-brand-strong);
   background: var(--color-brand-soft);
 }
 .accessTop {

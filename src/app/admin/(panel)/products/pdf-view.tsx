@@ -1,7 +1,7 @@
 "use client";
 
 // Nome do produto com o ícone 3D e o número de páginas, e o visualizador "Ver PDF" (páginas ao lado, página grande no
-// meio, do tamanho da tela, e baixar). O arquivo vem da rota do painel /admin/api/products/<id>/file.
+// meio, do tamanho da tela, e baixar). O arquivo vem da rota do painel /admin/api/products/<id>/file (só dono e admin).
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { ChevronLeft, ChevronRight, Download, Eye } from "lucide-react";
 import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
@@ -11,18 +11,6 @@ import { openPdf, pageAspect, productPdfUrl, startRender, type PdfDoc } from "..
 import s from "../../panel.module.css";
 
 const plural = (n: number) => `${n} ${n === 1 ? "página" : "páginas"}`;
-
-/** Um PDF aberto por produto, compartilhado entre a contagem antiga e o visualizador. */
-const docs = new Map<string, Promise<PdfDoc>>();
-function docFor(id: string): Promise<PdfDoc> {
-  let p = docs.get(id);
-  if (!p) {
-    p = openPdf(productPdfUrl(id));
-    p.catch(() => docs.delete(id));
-    docs.set(id, p);
-  }
-  return p;
-}
 
 /** Página `n` de um PDF desenhada num canvas de largura fixa (redesenha se a largura mudar). */
 function PageCanvas({ doc, n, width, className }: { doc: PdfDoc; n: number; width: number; className?: string }) {
@@ -36,37 +24,14 @@ function PageCanvas({ doc, n, width, className }: { doc: PdfDoc; n: number; widt
   return <canvas ref={ref} className={className} aria-hidden="true" />;
 }
 
-/**
- * Nome do produto com o ícone 3D de PDF e o número de páginas. O número vem do servidor (gravado no envio); só produtos
- * anteriores a isso (`pages` nulo) abrem o PDF no navegador para contar, quando a linha aparece na tela.
- */
-export function ProductCell({ id, name, pages }: { id: string; name: string; pages: number | null }) {
-  const box = useRef<HTMLSpanElement>(null);
-  const [counted, setCounted] = useState<number | null>(null);
-  useEffect(() => {
-    const el = box.current;
-    if (pages !== null || !el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((e) => e.isIntersecting)) return;
-        io.disconnect();
-        docFor(id).then(
-          (d) => setCounted(d.numPages),
-          () => undefined,
-        );
-      },
-      { rootMargin: "200px" },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [id, pages]);
-  const n = pages ?? counted;
+/** Nome do produto com o ícone 3D de PDF e o número de páginas (gravado no envio; "—" enquanto não houver). */
+export function ProductCell({ name, pages }: { name: string; pages: number | null }) {
   return (
     <span className={s.productCell}>
       <Art name="pdf" size={36} className={s.productArt} />
-      <span ref={box} className={s.productCellText}>
+      <span className={s.productCellText}>
         <b>{name}</b>
-        <small>{n !== null ? plural(n) : " "}</small>
+        <small>{pages !== null ? plural(pages) : "—"}</small>
       </span>
     </span>
   );
@@ -97,17 +62,27 @@ export function PdfViewerButton({ id, name }: { id: string; name: string }) {
   const [aspect, setAspect] = useState<number | null>(null);
   const stage = useRef<HTMLDivElement>(null);
   const box = useBoxSize(stage, open && doc !== null);
+  // Abre o PDF quando o visualizador abre e libera tudo (rede, worker, memória) quando fecha: nada fica em cache.
   useEffect(() => {
-    if (!open || doc) return;
+    if (!open) return;
     let alive = true;
-    docFor(id).then(
-      (d) => alive && setDoc(d),
+    let opened: PdfDoc | null = null;
+    openPdf(productPdfUrl(id)).then(
+      (d) => {
+        opened = d;
+        if (alive) setDoc(d);
+        else void d.loadingTask.destroy();
+      },
       () => alive && setFailed(true),
     );
     return () => {
       alive = false;
+      void opened?.loadingTask.destroy();
+      setDoc(null);
+      setFailed(false);
+      setPage(1);
     };
-  }, [open, doc, id]);
+  }, [open, id]);
   useEffect(() => {
     if (!doc) return;
     let alive = true;

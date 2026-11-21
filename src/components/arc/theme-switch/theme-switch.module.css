@@ -22,10 +22,7 @@
 .icon { position: absolute; display: grid; width: 18px; height: 18px; place-items: center; }
 .label { white-space: nowrap; }
 /* Each variant nudges the icon the way its page transition travels, and eases back when the theme returns. */
-.themeSwitch.reveal[data-theme="dark"] .iconWrap { transform: scale(1.08); }
-.themeSwitch.eclipse[data-theme="dark"] .iconWrap { transform: translateX(-2px); }
-.themeSwitch.split[data-theme="dark"] .iconWrap { transform: translateX(1px); }
-.themeSwitch.rise[data-theme="dark"] .iconWrap { transform: translateY(-2px); }
+.themeSwitch[data-theme="dark"] .iconWrap { transform: scale(1.08); }
 @media (prefers-reduced-motion: reduce) {
   .settled .iconWrap { transition: none; }
 }

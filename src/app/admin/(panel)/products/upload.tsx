@@ -177,7 +177,7 @@ function NewProductDialog({ open, onClose, onCreated }: { open: boolean; onClose
             >
               Cancelar
             </button>
-            <button type="button" className={`${s.btn} ${s.btnPrimary}`} disabled={!file || !name.trim()} onClick={send}>
+            <button type="button" className={`${s.btn} ${s.btnPrimary}`} disabled={!file || !name.trim() || tooMany} onClick={send}>
               Criar produto
             </button>
           </>

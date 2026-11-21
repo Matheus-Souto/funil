@@ -174,7 +174,6 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
       <Dialog
         open={target !== null}
         onClose={closeRevoke}
-        icon="lock"
         tone="danger"
         title={`Revogar o token ${target?.name ?? ""}?`}
         footer={
