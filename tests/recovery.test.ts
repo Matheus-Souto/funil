@@ -797,7 +797,14 @@ describe("recovery_send", () => {
   afterAll(() => setMailTransportForTests());
 
   const SMTP = { host: "smtp.exemplo.com", port: 587, secure: false, user: "loja@exemplo.com", password: "senha-smtp-de-teste", from: "contato@loja.com" };
-  const send = (j: Job, at: Date = NOW) => createRecoverySendHandler(() => at)(j, new AbortController().signal);
+  const send = (j: Job, at: Date | (() => Date) = NOW) =>
+    createRecoverySendHandler(typeof at === "function" ? at : () => at)(j, new AbortController().signal);
+  /** Relógio que devolve cada horário numa chamada (o último se repete): reivindicação e depois a falha no envio. */
+  const steps = (...ts: Date[]) => {
+    let i = 0;
+    return () => ts[Math.min(i++, ts.length - 1)]!;
+  };
+  const later = (ms: number) => new Date(NOW.getTime() + ms);
 
   /** Loja com a recuperação ligada e, salvo `smtp: false`, o SMTP (falso) configurado. */
   async function mailShop(f: Flags & { smtp?: boolean } = {}) {
@@ -1133,15 +1140,39 @@ describe("recovery_send", () => {
     expect((await rowOf(row.id)).status).toBe("sent");
   });
 
-  test("erro de rede depois de 2 h → failed", async () => {
+  test("erro de rede que chega depois de 2 h do enfileiramento → failed", async () => {
     const s = await mailShop();
     await lead(s, ago(61 * MIN));
     const { row, job: j } = await queued(s.storeId);
-    await t.ownerDb.update(recoveryEmail).set({ dueAt: ago(121 * MIN) }).where(eq(recoveryEmail.id, row.id));
     sendError = Object.assign(new Error("Connection timeout"), { code: "ETIMEDOUT" });
-    await send(j); // não lança
+    // Reivindicado com 119 min de fila; a falha volta com 121 min.
+    await send(j, steps(later(119 * MIN), later(121 * MIN))); // não lança
     expect(await rowOf(row.id)).toMatchObject({ status: "failed", sentAt: null });
     expect((await logsOf(s.storeId)).map((x) => [x.kind, x.status])).toEqual([["recovery", "failed"]]);
+  });
+
+  test("lembrete criado há 3 h e ainda não enviado → skipped atrasado, nenhum e-mail", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(recoveryEmail).set({ createdAt: ago(3 * HOUR) }).where(eq(recoveryEmail.id, row.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "atrasado", sentAt: null });
+    expect(await logsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("worker parado: a nova tentativa depois de 2 h da fila → skipped atrasado, nenhum e-mail", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    sendError = Object.assign(new Error("Connection timeout"), { code: "ETIMEDOUT" });
+    await expect(send(j)).rejects.toThrow();
+    expect((await rowOf(row.id)).status).toBe("queued");
+    sendError = null;
+    await send(j, later(121 * MIN));
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "atrasado", sentAt: null });
   });
 
   describe("pelo Resend", () => {
@@ -1185,7 +1216,7 @@ describe("recovery_send", () => {
       expect(logs.find((x) => x.status === "sent")!.providerMessageId).toBe("msg_2");
     });
 
-    test("429 e falha de rede (status 0) também são temporários; depois de 2 h → failed", async () => {
+    test("429 e falha de rede (status 0) também são temporários; falha depois de 2 h → failed", async () => {
       const { row, job: j } = await resendShop();
       status = 429;
       await expect(send(j)).rejects.toThrow();
@@ -1195,9 +1226,16 @@ describe("recovery_send", () => {
       }) as unknown as typeof fetch);
       await expect(send(j)).rejects.toThrow();
       expect((await rowOf(row.id)).status).toBe("queued");
-      await t.ownerDb.update(recoveryEmail).set({ dueAt: ago(121 * MIN) }).where(eq(recoveryEmail.id, row.id));
-      await send(j); // não lança
+      await send(j, steps(later(119 * MIN), later(121 * MIN))); // não lança
       expect((await rowOf(row.id)).status).toBe("failed");
+    });
+
+    test("candidato com due_at de 5 h atrás enfileirado agora, 503 → relança e fica queued (janela desde o enfileiramento)", async () => {
+      const { row, job: j } = await resendShop();
+      await t.ownerDb.update(recoveryEmail).set({ dueAt: ago(5 * HOUR) }).where(eq(recoveryEmail.id, row.id));
+      status = 503;
+      await expect(send(j)).rejects.toThrow();
+      expect(await rowOf(row.id)).toMatchObject({ status: "queued", sentAt: null });
     });
 
     test("422 → failed sem relançar", async () => {

@@ -2,14 +2,15 @@
 //
 // 1. Transação curta: reivindica a linha (`queued` -> `sending` com o id do job; o mesmo job pode reivindicar de novo
 //    depois de cair no meio) e confere de novo o caso, porque a fila pode ter rodado bem depois da varredura: token de
-//    descadastro, chave geral e caso ligados, descadastro (hash exato ou da caixa), oferta ativa (contato e cartão),
+//    descadastro, atraso (enfileirado há mais de 120 min: `atrasado`, em qualquer reivindicação, inclusive na nova
+//    tentativa), chave geral e caso ligados, descadastro (hash exato ou da caixa), oferta ativa (contato e cartão),
 //    contato ainda aberto ou pedido ainda pendente, endereço simples, o mesmo endereço da varredura, "já comprou" e
 //    pedido mais novo (as mesmas consultas da varredura, em `checks.ts`). Não vale mais: `skipped` com o motivo. Lê
 //    destinatário (o endereço simples normalizado, nunca o texto cru), loja, produto e valor.
 // 2. Fora de transação: `sendMail` (chave de idempotência = id do lembrete).
 // 3. Resultado: `sent`; `provider_error` definitivo (provedor não configurado, chave ou mensagem recusada) = `failed`
 //    sem relançar; erro temporário (rede, tempo-limite, ou `provider_error` com status 0, 429 ou 5xx) volta a `queued`
-//    e relança enquanto `now < due_at + 120 min` (a fila tenta de novo), depois vira `failed`.
+//    e relança enquanto `now < max(due_at, created_at) + 120 min` (a fila tenta de novo), depois vira `failed`.
 //
 // Log só com `recoveryId`, `storeId`, `kind` e motivo: nunca e-mail, token nem URL. O erro relançado também não leva
 // texto livre do provedor (pode ecoar o destinatário). `email_log` só pelo `logEmail` (sha256 do destinatário).
@@ -36,6 +37,7 @@ const UTM = "utm_source=recuperacao&utm_medium=email&utm_campaign=";
 const GRACE_MS = RECOVERY.sendGraceMin * 60_000;
 
 export type RecoverySendSkipReason =
+  | "atrasado"
   | "desligado"
   | "endereco_invalido"
   | "optout"
@@ -132,6 +134,8 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
     .returning();
   if (!r) return null;
   if (!TOKEN.test(token) || sha256(token) !== r.unsubHash) return { invalidToken: true };
+  // Parado na fila (worker fora do ar) mais que a folga: não sai atrasado, nem numa nova tentativa.
+  if (t.getTime() > r.createdAt.getTime() + GRACE_MS) return { skip: "atrasado" };
 
   const kind = r.kind as RecoveryKind;
   const [s] = await tx
@@ -260,8 +264,12 @@ export function createRecoverySendHandler(now: () => Date = () => new Date()): J
       const t = now();
       const retry = await withStore(storeId, async (tx) => {
         await logEmail(tx, { ...logRow, status: "failed", error, provider });
-        const [r] = await tx.select({ dueAt: recoveryEmail.dueAt }).from(recoveryEmail).where(eq(recoveryEmail.id, recoveryId));
-        const again = !definitive && r !== undefined && t.getTime() < r.dueAt.getTime() + GRACE_MS;
+        const [r] = await tx
+          .select({ dueAt: recoveryEmail.dueAt, createdAt: recoveryEmail.createdAt })
+          .from(recoveryEmail)
+          .where(eq(recoveryEmail.id, recoveryId));
+        // Desde o mais tardio entre o previsto e o enfileirado: candidato enfileirado tarde também tem a sua janela.
+        const again = !definitive && r !== undefined && t.getTime() < Math.max(r.dueAt.getTime(), r.createdAt.getTime()) + GRACE_MS;
         await settle(tx, recoveryId, j.id, { status: again ? "queued" : "failed" });
         return again;
       });
