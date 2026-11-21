@@ -53,7 +53,7 @@ requisição novo (`playwright.request.newContext()`) ou com `Connection: close`
 
 ## 6. Número de páginas de produtos antigos (opcional)
 
-**Hoje:** o envio grava as páginas em `product.page_count` (coluna nova, migração 0031). Produtos enviados antes dela
+**Hoje:** o envio grava as páginas em `product.page_count` (coluna nova, migração 0035). Produtos enviados antes dela
 ficam com nulo, e a página Produtos abre o PDF no navegador só para contar as páginas desses.
 
 **Sugestão (se quiserem tirar esse caminho):** um script único que lê cada PDF do storage, conta as páginas (o mesmo

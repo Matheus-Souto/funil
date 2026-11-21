@@ -1,5 +1,5 @@
 {
-  "id": "226f8c99-ead6-4207-a73c-9cbc14605ed5",
+  "id": "ee058fd3-e93d-4e63-9cc2-f6053c34fbe7",
   "prevId": "a2326636-2e9a-4fc6-aa99-c5ee47f077c0",
   "version": "7",
   "dialect": "postgresql",
@@ -326,6 +326,19 @@
           "notNull": true,
           "default": "'smtp'"
         },
+        "lead_capture": {
+          "name": "lead_capture",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "privacy_email": {
+          "name": "privacy_email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -358,6 +371,10 @@
         "store_email_provider_check": {
           "name": "store_email_provider_check",
           "value": "\"store\".\"email_provider\" in ('smtp','resend')"
+        },
+        "store_lead_capture_check": {
+          "name": "store_lead_capture_check",
+          "value": "not \"store\".\"lead_capture\" or \"store\".\"privacy_email\" is not null"
         }
       },
       "isRLSEnabled": false
@@ -740,12 +757,6 @@
         "file_sha256": {
           "name": "file_sha256",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "page_count": {
-          "name": "page_count",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false
         },
@@ -3295,6 +3306,235 @@
         "upload_link_file_name_check": {
           "name": "upload_link_file_name_check",
           "value": "char_length(\"upload_link\".\"file_name\") between 1 and 200"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.checkout_lead": {
+      "name": "checkout_lead",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "store_id": {
+          "name": "store_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "offer_id": {
+          "name": "offer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key_hash": {
+          "name": "key_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "email_hash": {
+          "name": "email_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'open'"
+        },
+        "order_id": {
+          "name": "order_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "notified_at": {
+          "name": "notified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "telegram_message_id": {
+          "name": "telegram_message_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "checkout_lead_store_key_uniq": {
+          "name": "checkout_lead_store_key_uniq",
+          "columns": [
+            {
+              "expression": "store_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "checkout_lead_store_created_idx": {
+          "name": "checkout_lead_store_created_idx",
+          "columns": [
+            {
+              "expression": "store_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "checkout_lead_store_email_idx": {
+          "name": "checkout_lead_store_email_idx",
+          "columns": [
+            {
+              "expression": "store_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "email_hash",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "checkout_lead_expires_idx": {
+          "name": "checkout_lead_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "checkout_lead_store_id_store_id_fk": {
+          "name": "checkout_lead_store_id_store_id_fk",
+          "tableFrom": "checkout_lead",
+          "tableTo": "store",
+          "columnsFrom": [
+            "store_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "checkout_lead_offer_id_offer_id_fk": {
+          "name": "checkout_lead_offer_id_offer_id_fk",
+          "tableFrom": "checkout_lead",
+          "tableTo": "offer",
+          "columnsFrom": [
+            "offer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "checkout_lead_order_id_orders_id_fk": {
+          "name": "checkout_lead_order_id_orders_id_fk",
+          "tableFrom": "checkout_lead",
+          "tableTo": "orders",
+          "columnsFrom": [
+            "order_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "checkout_lead_status_check": {
+          "name": "checkout_lead_status_check",
+          "value": "\"checkout_lead\".\"status\" in ('open','contacted','converted')"
+        },
+        "checkout_lead_email_check": {
+          "name": "checkout_lead_email_check",
+          "value": "\"checkout_lead\".\"status\" = 'converted' or \"checkout_lead\".\"email\" is not null"
         }
       },
       "isRLSEnabled": false

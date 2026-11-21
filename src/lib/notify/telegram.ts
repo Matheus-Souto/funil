@@ -18,7 +18,7 @@ const MAX_MESSAGE = 1000;
 export const TELEGRAM_TOKEN_RE = /^\d{5,12}:[A-Za-z0-9_-]{30,60}$/;
 export const TELEGRAM_CHAT_RE = /^(?:-?\d{1,20}|@[A-Za-z0-9_]{5,32})$/;
 
-export type TelegramEvent = "sale" | "pix_generated" | "card_declined" | "abandoned";
+export type TelegramEvent = "sale" | "pix_generated" | "card_declined" | "abandoned" | "lead_abandoned";
 
 const ERRORS = {
   token: "O Telegram recusou o token do bot. Confira o token no @BotFather.",
@@ -144,22 +144,30 @@ const METHOD_TEXT: Record<OrderMethod, string> = { pix_asaas: "Pix", pix_manual:
 export const cutChars = (v: string, max: number) => Array.from(v).slice(0, max).join("");
 const name = (v: string) => cutChars(oneLine(v), MAX_NAME);
 
+/** Código curto do contato (6 primeiros hex do UUID sem hífen, maiúsculos): identifica o contato no aviso sem expor dado dele. */
+export const leadCode = (id: string): string => id.replace(/-/g, "").slice(0, 6).toUpperCase();
+
 /**
  * Texto do aviso: só dados da venda (produto, valor, forma e código do pedido). Nunca nome, e-mail, CPF ou telefone do
  * comprador, nem link. Texto puro: nomes em uma linha, até 100 caracteres cada, mensagem até 1.000.
+ * `lead_abandoned` (contato que não chegou a criar pedido): `orderCode` leva o `leadCode` e a forma de pagamento não existe
+ * (`method` é ignorado e pode faltar); nos demais eventos `method` é obrigatório.
  */
 export function telegramMessage(
   event: TelegramEvent,
-  s: { productName: string; bumpName: string | null; totalCents: number; method: OrderMethod; orderCode: string; abandonAfterMinutes?: number },
+  s: { productName: string; bumpName: string | null; totalCents: number; method?: OrderMethod; orderCode: string; abandonAfterMinutes?: number },
 ): string {
   const items = s.bumpName ? `${name(s.productName)} + ${name(s.bumpName)}` : name(s.productName);
   const value = brl(s.totalCents);
-  const how = METHOD_TEXT[s.method];
+  const how = () => {
+    if (!s.method) throw new Error("telegramMessage: forma de pagamento ausente");
+    return METHOD_TEXT[s.method];
+  };
   const order = `pedido #${s.orderCode}`;
   let text: string;
   switch (event) {
     case "sale":
-      text = `Venda: ${items} — ${value} — ${how} — ${order}`;
+      text = `Venda: ${items} — ${value} — ${how()} — ${order}`;
       break;
     case "pix_generated":
       text = `Pix gerado: ${items} — ${value} — ${order}`;
@@ -168,7 +176,10 @@ export function telegramMessage(
       text = `Cartão recusado: ${items} — ${value} — ${order}`;
       break;
     case "abandoned":
-      text = `Carrinho abandonado (${s.abandonAfterMinutes ?? 30} min sem pagamento): ${items} — ${value} — ${how} — ${order}`;
+      text = `Carrinho abandonado (${s.abandonAfterMinutes ?? 30} min sem pagamento): ${items} — ${value} — ${how()} — ${order}`;
+      break;
+    case "lead_abandoned":
+      text = `Abandono antes do pagamento (${s.abandonAfterMinutes ?? 30} min): ${items} — ${value} — contato #${s.orderCode}`;
       break;
   }
   return cutChars(text, MAX_MESSAGE);

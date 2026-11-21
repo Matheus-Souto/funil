@@ -150,6 +150,8 @@ const EMAIL_LABEL: Record<string, [string, string]> = {
   delivery: ["E-mail de acesso enviado", "Falha ao enviar o e-mail de acesso (nova tentativa automática)"],
   seller_notice: ["Aviso enviado ao vendedor", "Falha ao enviar o aviso ao vendedor"],
 };
+/** Lembrete de recuperação de venda (`email_log` kind `recovery`): só na linha do tempo, sem destinatário nem erro. */
+const RECOVERY_LABEL = { sent: "Lembrete de pagamento por e-mail", failed: "Lembrete por e-mail não enviado" } as const;
 
 export interface TimelineEntry {
   at: Date;
@@ -207,6 +209,11 @@ export const getOrderDetail = defineAction({
       .from(emailLog)
       .where(and(eq(emailLog.orderId, o.id), inArray(emailLog.kind, ["delivery", "seller_notice"])))
       .orderBy(asc(emailLog.at), asc(emailLog.id));
+    const reminders = await ctx.tx
+      .select({ status: emailLog.status, at: emailLog.at })
+      .from(emailLog)
+      .where(and(eq(emailLog.orderId, o.id), eq(emailLog.kind, "recovery")))
+      .orderBy(asc(emailLog.at), asc(emailLog.id));
     const audits = await ctx.tx
       .select({ action: auditLog.action, actor: auditLog.actor, input: auditLog.input, at: auditLog.at })
       .from(auditLog)
@@ -238,6 +245,10 @@ export const getOrderDetail = defineAction({
     for (const e of emails) {
       const l = EMAIL_LABEL[e.kind];
       if (l) timeline.push({ at: e.at, kind: `email.${e.status}`, label: e.status === "sent" ? l[0] : l[1] });
+    }
+    for (const r of reminders) {
+      const status = r.status === "sent" ? "sent" : "failed";
+      timeline.push({ at: r.at, kind: `email.${status}`, label: RECOVERY_LABEL[status] });
     }
     timeline.sort((a, b) => b.at.getTime() - a.at.getTime());
 

@@ -222,8 +222,36 @@
     {
       "idx": 31,
       "version": "7",
-      "when": 1795287225342,
-      "tag": "0031_product_page_count",
+      "when": 1795230665227,
+      "tag": "0031_checkout_lead",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1795232213768,
+      "tag": "0032_checkout_lead_converted",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1795267527168,
+      "tag": "0033_recovery_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1795277863453,
+      "tag": "0034_recovery_mailbox_hash",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1795289311234,
+      "tag": "0035_product_page_count",
       "breakpoints": true
     }
   ]

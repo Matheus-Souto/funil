@@ -9,7 +9,7 @@ import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { brl } from "@/lib/format";
-import { metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
@@ -55,7 +55,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   if (lifetime.orders === 0 && lifetime.views === 0) return <EmptyOverview call={call} storeName={id.storeName} />;
 
   const m = await runAction(metricsSummary, call, cur);
-  const prev = await runAction(metricsSummary, call, periodRange(period, now, { previous: true }));
+  const prevRange = periodRange(period, now, { previous: true });
+  const prev = await runAction(metricsSummary, call, prevRange);
+  // Contatos somem com 30 dias: janela anterior que começa antes disso não tem com o que comparar.
+  const leadsCompare = leadWindowCovered(prevRange.from, now) ? COMPARE[period] : undefined;
   const b = await runAction(metricsBreakdown, call, cur);
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
@@ -126,6 +129,36 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           <Kpi layout="cell" art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
           <Kpi layout="cell" art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
         </section>
+
+        {lifetime.leads > 0 ? (
+          <section className={s.grid2} aria-label="Contatos do período">
+            <Kpi label="Contatos capturados" value={String(m.leads)} delta={leadsCompare ? deltaOf(m.leads, prev.leads) : undefined} compare={leadsCompare} />
+            <Kpi
+              label="Viraram pedido"
+              value={String(m.leadsConverted)}
+              delta={leadsCompare ? deltaOf(m.leadsConverted, prev.leadsConverted) : undefined}
+              compare={leadsCompare}
+            />
+          </section>
+        ) : null}
+
+        {lifetime.recovery.sent > 0 ? (
+          <section className={s.grid3} aria-label="Recuperação de vendas por e-mail no período">
+            <Kpi label="Lembretes enviados" value={String(m.recovery.sent)} delta={deltaOf(m.recovery.sent, prev.recovery.sent)} compare={COMPARE[period]} />
+            <Kpi
+              label="Lembretes que viraram venda"
+              value={String(m.recovery.recovered)}
+              delta={deltaOf(m.recovery.recovered, prev.recovery.recovered)}
+              compare={COMPARE[period]}
+            />
+            <Kpi
+              label="Receita recuperada"
+              value={brl(m.recovery.recoveredRevenueCents)}
+              delta={deltaOf(m.recovery.recoveredRevenueCents, prev.recovery.recoveredRevenueCents)}
+              compare={COMPARE[period]}
+            />
+          </section>
+        ) : null}
 
         <div className={`${s.splitWide} ${s.splitStretch}`}>
           <section className={`${s.card} ${s.funnelCard}`}>

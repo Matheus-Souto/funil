@@ -412,6 +412,71 @@ describe("store.updateSettings / store.getSettings", () => {
     expect(got.checkoutBaseUrl).toBe("http://localhost:3000");
   });
 
+  test("captura de contato: ligar sem privacyEmail -> invalid_input no campo; com e-mail liga; getSettings devolve os dois", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    const e = await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true }).then(
+      () => null,
+      (err: unknown) => err as ActionError,
+    );
+    expect(e?.code).toBe("invalid_input");
+    expect((e?.details as { path: string[] }[]).map((d) => d.path)).toEqual([["privacyEmail"]]);
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: null }))).toBe("invalid_input");
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: "não é e-mail" }))).toBe("invalid_input");
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: false, privacyEmail: null });
+
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: " Privacidade@Loja.com.br " });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId, "admin"), {})).toMatchObject({ leadCapture: true, privacyEmail: "privacidade@loja.com.br" });
+
+    // omitidos: mantém; apagar o e-mail com a captura ligada é recusado; desligar e apagar na mesma chamada passa
+    await runAction(updateStoreSettings, panelCall(s.storeId), base);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: true, privacyEmail: "privacidade@loja.com.br" });
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, privacyEmail: null }))).toBe("invalid_input");
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: false, privacyEmail: null });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: false, privacyEmail: null });
+  });
+
+  test("recuperação por e-mail: ligar sem e-mail conectado -> invalid_input no campo; com SMTP salvo liga e getSettings devolve os quatro", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    const all = { on: true, lead: true, pix: true, card: true };
+    const e = await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: all }).then(
+      () => null,
+      (err: unknown) => err as ActionError,
+    );
+    expect(e?.code).toBe("invalid_input");
+    expect(e?.details).toEqual([{ path: ["recovery", "on"], message: "Conecte o e-mail da loja em Conexões antes de ligar." }]);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ recovery: { on: false, lead: true, pix: true, card: true } });
+
+    // SMTP salvo mas incompleto (sem remetente) não conta; o provedor ativo é o que vale (resend sem conexão).
+    await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "smtp", { host: "smtp.exemplo.com", port: 587, secure: false, user: null, from: "" }, "senha"));
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: all }))).toBe("invalid_input");
+    await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "smtp", { host: "smtp.exemplo.com", port: 587, secure: false, user: null, from: "l@e.com" }, "senha"));
+    await t.ownerDb.update(store).set({ emailProvider: "resend" }).where(eq(store.id, s.storeId));
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: all }))).toBe("invalid_input");
+    await t.ownerDb.update(store).set({ emailProvider: "smtp" }).where(eq(store.id, s.storeId));
+
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: all });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId, "admin"), {})).toMatchObject({ recovery: all });
+    // omitido: mantém
+    await runAction(updateStoreSettings, panelCall(s.storeId), base);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ recovery: all });
+  });
+
+  test("recuperação por e-mail: desligar só o caso cartão mantém os outros; já ligada, salvar sem e-mail conectado não bloqueia", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    await withStore(s.storeId, (tx) => saveIntegration(tx, s.storeId, "smtp", { host: "smtp.exemplo.com", port: 587, secure: false, user: null, from: "l@e.com" }, "senha"));
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: { on: true, lead: true, pix: true, card: true } });
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: { on: true, lead: true, pix: true, card: false } });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ recovery: { on: true, lead: true, pix: true, card: false } });
+    // a conexão some depois: manter ligada não exige reconferir; só ligar de novo exige
+    await withStore(s.storeId, (tx) => tx.delete(integration).where(and(eq(integration.storeId, s.storeId), eq(integration.kind, "smtp"))));
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: { on: true, lead: false, pix: true, card: false } });
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: { on: false, lead: false, pix: true, card: false } });
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, recovery: { on: true, lead: false, pix: true, card: false } }))).toBe("invalid_input");
+  });
+
   test("a auditoria registra a mudança", async () => {
     const s = await seedPanelStore();
     await runAction(updateStoreSettings, panelCall(s.storeId), { name: "Loja Nova", notifyEmail: null });

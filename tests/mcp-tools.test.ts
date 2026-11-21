@@ -2,7 +2,7 @@
 // negada a token ou excluída com motivo), lista por papel, nomes, esquemas de entrada e projeções por lista branca
 // (nenhum dado pessoal do comprador sai pelo MCP).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { eq } from "drizzle-orm";
@@ -11,7 +11,7 @@ import { ActionError, defineAction, runAction, TOKEN_DENIED, type Action } from 
 import { hasPermission, ROLE_PERMISSIONS, type Permission, type Role } from "@/lib/actions/permissions";
 import { listActions, registry } from "@/lib/actions/registry";
 import { ownerDb } from "@/lib/db/client";
-import { approvalRequest, auditLog, mcpToken, orders } from "@/lib/db/schema";
+import { approvalRequest, auditLog, checkoutLead, mcpToken, orders, recoveryEmail } from "@/lib/db/schema";
 import { APPROVAL_PREFIX, callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
@@ -132,6 +132,15 @@ describe("classificação", () => {
     }
   });
 
+  test("leads.* em TOKEN_DENIED; nenhum papel (inclusive owner) enxerga ferramenta leads_*", () => {
+    expect(TOKEN_DENIED).toEqual(expect.arrayContaining(["leads.read", "leads.write"]));
+    for (const role of ROLES) {
+      const names = mcpTools(role).map((x) => x.name);
+      expect([role, names.filter((n) => n.startsWith("leads_"))]).toEqual([role, []]);
+      expect([role, mcpTools(role).filter((x) => x.permission === "leads.read" || x.permission === "leads.write").length]).toEqual([role, 0]);
+    }
+  });
+
   test("nenhuma ação excluída, pública, de sistema ou negada a token aparece em nenhum papel", () => {
     const byName = new Map(listActions().map((a) => [a.name, a]));
     for (const role of ROLES) {
@@ -147,6 +156,17 @@ describe("classificação", () => {
     const owner = mcpTools("owner").map((x) => x.action);
     for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "email.applyResendEvent"]) {
       expect(owner).not.toContain(name);
+    }
+  });
+
+  test("recovery.* não aparece como ferramenta em nenhum papel", () => {
+    // As ações do descadastro são públicas (como checkout.saveLead): ficam de fora pela permissão.
+    for (const name of ["recovery.unsubscribeView", "recovery.unsubscribe"]) {
+      expect([name, registry.get(name)?.permission, registry.get(name)?.audit]).toEqual([name, "public", false]);
+    }
+    for (const role of ROLES) {
+      expect([role, mcpTools(role).map((x) => x.action).filter((a) => a.startsWith("recovery."))]).toEqual([role, []]);
+      expect([role, mcpTools(role).map((x) => x.name).filter((n) => n.startsWith("recovery_"))]).toEqual([role, []]);
     }
   });
 
@@ -201,20 +221,37 @@ describe("nomes e esquemas", () => {
       orders: 2,
       paid: 1,
       revenueCents: 990,
+      leads: 4,
+      leadsConverted: 1,
       byMethod: { pix_manual: { ...zero, extra: "x" }, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      recovery: {
+        sent: 3,
+        recovered: 1,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 0, extra: "x" }, pix: { sent: 1, recovered: 1 }, card: { sent: 1, recovered: 0 } },
+        emailHash: "zuleica@exemplo.com",
+      },
       campoNovo: "zuleica@exemplo.com",
     });
-    expect(JSON.stringify(out)).not.toMatch(/campoNovo|zuleica|extra/);
+    expect(JSON.stringify(out)).not.toMatch(/campoNovo|zuleica|extra|emailHash/);
     expect(out).toEqual({
       views: 1,
       orders: 2,
       paid: 1,
       revenueCents: 990,
+      leads: 4,
+      leadsConverted: 1,
       byMethod: { pix_manual: zero, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      recovery: {
+        sent: 3,
+        recovered: 1,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 0 }, pix: { sent: 1, recovered: 1 }, card: { sent: 1, recovered: 0 } },
+      },
     });
   });
 
@@ -385,7 +422,110 @@ describe("callMcpTool", () => {
       { ref: "amigo", paid: 1, revenueCents: 990 },
     ]);
     // Projeção explícita: só as chaves conhecidas.
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "orders", "paid", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+  });
+
+  test("metrics_summary pelo MCP traz leads e leadsConverted como números e nada mais de contato", async () => {
+    const m = await seedPanelStore("Contatos");
+    const email = "contato.sigiloso@exemplo.com";
+    const phone = "21987001122";
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const row = (over: Partial<typeof checkoutLead.$inferInsert>) => ({
+      storeId: m.storeId,
+      offerId: m.offerId,
+      keyHash: sha(randomUUID()),
+      email,
+      emailHash: sha(email),
+      phone,
+      expiresAt: new Date(Date.now() + 30 * 86_400_000),
+      ...over,
+    });
+    await ownerDb.insert(checkoutLead).values([row({}), row({}), row({ email: null, phone: null, status: "converted" })]);
+    const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    const out = (await callMcpTool(tool("reader", "metrics_summary"), call(m.storeId, "reader"), range)) as Record<string, unknown>;
+    expect(out.leads).toBe(3);
+    expect(out.leadsConverted).toBe(1);
+    expect(typeof out.leads).toBe("number");
+    expect(typeof out.leadsConverted).toBe("number");
+    const text = JSON.stringify(out);
+    for (const secret of [email, phone, sha(email), "contato.sigiloso"]) expect(text).not.toContain(secret);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+  });
+
+  test("metrics_summary pelo MCP traz recovery só com números (nenhuma string com @)", async () => {
+    const m = await seedPanelStore("Recuperação MCP");
+    const email = "recupera.sigiloso@exemplo.com";
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const now = Date.now();
+    const order = await seedOrder(m, { status: "paid", email, totalCents: 990, paidAt: new Date(now - 60_000) });
+    const row = (over: Partial<typeof recoveryEmail.$inferInsert>): typeof recoveryEmail.$inferInsert => ({
+      storeId: m.storeId,
+      kind: "lead",
+      offerId: m.offerId,
+      emailHash: sha(email),
+      mailboxHash: sha(email),
+      status: "sent",
+      unsubHash: sha(randomUUID()),
+      dueAt: new Date(now - 3_600_000),
+      sentAt: new Date(now - 3_600_000),
+      expiresAt: new Date(now + 90 * 86_400_000),
+      ...over,
+    });
+    await ownerDb.insert(recoveryEmail).values([row({}), row({ kind: "pix", orderId: order.id })]);
+    const range = { from: new Date(now - 86_400_000).toISOString(), to: new Date(now + 60_000).toISOString() };
+    for (const role of ["reader", "owner"] as const) {
+      const out = (await callMcpTool(tool(role, "metrics_summary"), call(m.storeId, role), range)) as Record<string, unknown>;
+      expect(out.recovery).toEqual({
+        sent: 2,
+        recovered: 2,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 1 }, pix: { sent: 1, recovered: 1 }, card: { sent: 0, recovered: 0 } },
+      });
+      const strings: string[] = [];
+      const walk = (v: unknown): void => {
+        if (typeof v === "string") strings.push(v);
+        else if (v && typeof v === "object") for (const x of Object.values(v)) walk(x);
+      };
+      walk(out.recovery);
+      expect(strings).toEqual([]);
+      const text = JSON.stringify(out);
+      expect(text).not.toContain("@");
+      for (const secret of [email, sha(email), "recupera.sigiloso"]) expect(text).not.toContain(secret);
+    }
+  });
+
+  test("token owner chamando leads_list pelo callMcpTool → forbidden (ferramenta montada à mão); o contato não sai", async () => {
+    const l = await seedPanelStore("Contatos MCP");
+    const email = "outro.contato@exemplo.com";
+    await ownerDb.insert(checkoutLead).values({
+      storeId: l.storeId,
+      offerId: l.offerId,
+      keyHash: randomUUID(),
+      email,
+      emailHash: randomUUID(),
+      phone: "21987003344",
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const base = tool("owner", "orders_list");
+    for (const [name, action, permission] of [
+      ["leads_list", "leads.list", "leads.read"],
+      ["leads_markContacted", "leads.markContacted", "leads.write"],
+      ["leads_delete", "leads.delete", "leads.write"],
+      ["leads_forgetEmail", "leads.forgetEmail", "leads.write"],
+    ] as const) {
+      const forged: McpTool = { ...base, name, action, permission, approval: false };
+      expect([name, await callMcpTool(forged, call(l.storeId), {}).then(() => "ok", codeOf)]).toEqual([name, "forbidden"]);
+      expect([name, await callMcpTool({ ...forged, approval: true }, call(l.storeId, "admin"), { id: randomUUID(), email }).then(() => "ok", codeOf)]).toEqual([name, "forbidden"]);
+    }
+    expect(await ownerDb.select({ id: checkoutLead.id }).from(checkoutLead).where(eq(checkoutLead.storeId, l.storeId))).toHaveLength(1);
+  });
+
+  test("com as ações de leads registradas, nenhum papel (inclusive owner) tem ferramenta leads_*", () => {
+    expect(listActions().map((a) => a.name)).toEqual(expect.arrayContaining(["leads.list", "leads.markContacted", "leads.delete", "leads.forgetEmail"]));
+    for (const role of ROLES) {
+      expect([role, mcpTools(role).map((x) => x.action).filter((a) => a.startsWith("leads."))]).toEqual([role, []]);
+      expect([role, mcpTools(role).map((x) => x.name).filter((n) => n.startsWith("leads_"))]).toEqual([role, []]);
+    }
   });
 
   test("orders_get e orders_list: e-mail de domínio próprio ou com texto injetado sai como x***@***; provedor comum mostra o domínio", async () => {

@@ -67,7 +67,7 @@ export const emailLog = pgTable(
     check("email_log_delivery_status_check", sql`${t.deliveryStatus} in ('delivered','bounced','complained')`),
     index("email_log_provider_message_idx").on(t.storeId, t.providerMessageId),
     check("email_log_status_check", sql`${t.status} in ('sent','failed')`),
-    check("email_log_kind_check", sql`${t.kind} in ('delivery','seller_notice','test')`),
+    check("email_log_kind_check", sql`${t.kind} in ('delivery','seller_notice','test','recovery')`),
     index("email_log_order_idx").on(t.orderId, t.kind),
     index("email_log_job_idx").on(t.jobId),
   ],

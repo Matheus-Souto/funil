@@ -22,7 +22,7 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHead title="Configurações" />
-      <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor }} canWrite={canWrite} />
+      <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "", recovery: st.recovery }} canWrite={canWrite} />
 
       <div className={s.settingsRow} id="script">
         <div>

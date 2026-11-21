@@ -784,7 +784,7 @@ type TelegramData = {
   chatId: string;
   botUsername: string | null;
   token: { last4: string } | "configured" | "unreadable";
-  events: { sale: boolean; pixGenerated: boolean; cardDeclined: boolean; abandoned: boolean };
+  events: { sale: boolean; pixGenerated: boolean; cardDeclined: boolean; abandoned: boolean; leadAbandoned: boolean };
   abandonAfterMinutes: number;
 };
 
@@ -797,6 +797,7 @@ const TELEGRAM_EVENT_OPTIONS = [
   { key: "pixGenerated", label: "Pix gerado" },
   { key: "cardDeclined", label: "Cartão recusado" },
   { key: "abandoned", label: "Carrinho abandonado" },
+  { key: "leadAbandoned", label: "Abandono antes do pagamento" },
 ] as const;
 
 /** Cada loja usa o próprio bot. O token nunca volta do servidor: só os 4 últimos caracteres (ou "configurado"). */
@@ -805,7 +806,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
   const [f, setF] = useState({
     token: "",
     chatId: data?.chatId ?? "",
-    events: data?.events ?? { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false },
+    events: data?.events ?? { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false, leadAbandoned: false },
     minutes: String(data?.abandonAfterMinutes ?? 30),
   });
   const [confirm, setConfirm] = useState(false);
@@ -832,7 +833,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
             Crie um bot no @BotFather, adicione-o ao grupo da equipe e cole aqui o token. O chat id de um grupo é um número negativo
             (supergrupos começam com -100): para vê-lo, adicione o @RawDataBot ao grupo, copie o id e remova esse bot em seguida. Se o grupo
             virar supergrupo, o id muda e é preciso salvar o novo. As mensagens levam só a oferta, o valor, a forma de pagamento e o código do
-            pedido: nenhum dado do comprador.
+            pedido (ou o código do contato, no abandono antes do pagamento): nenhum dado do comprador.
           </p>
           <label className={s.field}>
             <span className={s.label}>Token do bot</span>
@@ -862,7 +863,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
               ))}
             </div>
           </fieldset>
-          {f.events.abandoned ? (
+          {f.events.abandoned || f.events.leadAbandoned ? (
             <label className={s.field}>
               <span className={s.label}>Avisar abandono depois de (minutos)</span>
               <input
@@ -898,7 +899,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
             {data.token === "unreadable" ? "ilegível: cole o token de novo" : data.token === "configured" ? <Configured /> : `final ${data.token.last4}`}
           </Row>
           <Row k="Avisos">{enabled.length > 0 ? enabled.join(", ") : "nenhum ligado"}</Row>
-          {data.events.abandoned ? <Row k="Abandono">depois de {data.abandonAfterMinutes} min</Row> : null}
+          {data.events.abandoned || data.events.leadAbandoned ? <Row k="Abandono">depois de {data.abandonAfterMinutes} min</Row> : null}
         </div>
       ) : (
         <p className={s.muted}>Ainda não configurado.</p>
@@ -936,7 +937,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
               chatId: f.chatId.trim(),
               ...(f.token.trim() ? { token: f.token.trim() } : {}),
               events: f.events,
-              ...(f.events.abandoned ? { abandonAfterMinutes: Number(f.minutes) } : {}),
+              ...(f.events.abandoned || f.events.leadAbandoned ? { abandonAfterMinutes: Number(f.minutes) } : {}),
             }),
           );
           if (r.ok) {
@@ -963,7 +964,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
           if (r.ok) {
             setDisconnect(false);
             setEditing(true);
-            setF({ token: "", chatId: "", events: { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false }, minutes: "30" });
+            setF({ token: "", chatId: "", events: { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false, leadAbandoned: false }, minutes: "30" });
           }
         }}
       >

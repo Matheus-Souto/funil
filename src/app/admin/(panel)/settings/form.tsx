@@ -13,8 +13,8 @@ const HEX = /^#[0-9a-f]{6}$/i;
 const ratio = (n: number) => `${n.toFixed(1).replace(".", ",")}:1`;
 const TEXT_NAME: Record<string, string> = { "#FFFFFF": "Texto branco", "#15201B": "Texto escuro", "#000000": "Texto preto" };
 
-export function SettingsForm({ initial, canWrite }: { initial: { name: string; notifyEmail: string; brandColor: string | null }; canWrite: boolean }) {
-  const [f, setF] = useState({ name: initial.name, notifyEmail: initial.notifyEmail, color: initial.brandColor ?? "" });
+export function SettingsForm({ initial, canWrite }: { initial: { name: string; notifyEmail: string; brandColor: string | null; leadCapture: boolean; privacyEmail: string; recovery: { on: boolean; lead: boolean; pix: boolean; card: boolean } }; canWrite: boolean }) {
+  const [f, setF] = useState({ name: initial.name, notifyEmail: initial.notifyEmail, color: initial.brandColor ?? "", leadCapture: initial.leadCapture, privacyEmail: initial.privacyEmail, recovery: initial.recovery });
   const run = useActionRunner();
   const valid = f.color === "" || HEX.test(f.color);
   const vars = useMemo(() => brandVars(valid && f.color ? f.color : null), [f.color, valid]);
@@ -33,7 +33,14 @@ export function SettingsForm({ initial, canWrite }: { initial: { name: string; n
           return;
         }
         void run.run(() =>
-          updateSettingsAction({ name: f.name.trim(), notifyEmail: f.notifyEmail.trim() || null, brandColor: f.color ? f.color.toUpperCase() : null }),
+          updateSettingsAction({
+            name: f.name.trim(),
+            notifyEmail: f.notifyEmail.trim() || null,
+            brandColor: f.color ? f.color.toUpperCase() : null,
+            leadCapture: f.leadCapture,
+            privacyEmail: f.privacyEmail.trim() || null,
+            recovery: f.recovery,
+          }),
         );
       }}
     >
@@ -105,6 +112,73 @@ export function SettingsForm({ initial, canWrite }: { initial: { name: string; n
                 <span style={{ color: "var(--color-brand-strong)", fontWeight: 600, fontSize: 13 }}>Link e destaque na cor da loja</span>
               </div>
             </div>
+          </div>
+          <div className={s.grid2}>
+            <div className={s.field}>
+              <label className={s.switch}>
+                <input type="checkbox" checked={f.leadCapture} onChange={(e) => setF({ ...f, leadCapture: e.target.checked })} aria-describedby="lead-capture-hint" />
+                Guardar o contato de quem não finaliza a compra
+              </label>
+              <span id="lead-capture-hint" className={s.hint}>
+                E-mail e celular ficam por até 30 dias, com aviso no checkout. Exige o e-mail para pedidos de privacidade.
+              </span>
+            </div>
+            <div className={s.field}>
+              <label className={s.field}>
+                <span className={s.label}>E-mail para pedidos de privacidade</span>
+                <input
+                  className={s.input}
+                  type="email"
+                  value={f.privacyEmail}
+                  maxLength={254}
+                  required={f.leadCapture}
+                  onChange={(e) => setF({ ...f, privacyEmail: e.target.value })}
+                />
+              </label>
+              <span className={s.hint}>Aparece no aviso de privacidade do checkout.</span>
+            </div>
+          </div>
+          <div className={s.field}>
+            <span className={s.label}>Recuperação de vendas por e-mail</span>
+            <label className={s.switch}>
+              <input
+                type="checkbox"
+                checked={f.recovery.on}
+                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, on: e.target.checked } })}
+                aria-describedby="recovery-hint"
+              />
+              Mandar um lembrete por e-mail para quem não concluiu a compra
+            </label>
+            <span id="recovery-hint" className={s.hint}>
+              Sai pelo e-mail da loja (Conexões). Um lembrete por compra, com link para a pessoa não receber mais.
+            </span>
+            <label className={s.switch}>
+              <input
+                type="checkbox"
+                checked={f.recovery.lead}
+                disabled={!f.recovery.on}
+                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, lead: e.target.checked } })}
+              />
+              Digitou o e-mail e saiu antes do pedido (precisa da captura de contato ligada)
+            </label>
+            <label className={s.switch}>
+              <input
+                type="checkbox"
+                checked={f.recovery.pix}
+                disabled={!f.recovery.on}
+                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, pix: e.target.checked } })}
+              />
+              Pix gerado e não pago
+            </label>
+            <label className={s.switch}>
+              <input
+                type="checkbox"
+                checked={f.recovery.card}
+                disabled={!f.recovery.on}
+                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, card: e.target.checked } })}
+              />
+              Cartão recusado
+            </label>
           </div>
           <div className={s.banner} data-tone="neutral">
             <PIcon name="palette" />

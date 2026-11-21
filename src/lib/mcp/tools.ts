@@ -8,7 +8,7 @@ import { z } from "zod";
 import { ActionError, runAction, TOKEN_DENIED, type Action } from "@/lib/actions/core";
 import { hasPermission, type Permission, type Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
-import type { metricsSummary } from "@/lib/metrics";
+import { RECOVERY_CASES, type RecoveryCase, type metricsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
 import { cleanTouch, HIDDEN_LABEL, labelOrHidden, safeLabel } from "@/lib/orders/report";
 import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
@@ -185,6 +185,8 @@ const OVERRIDES: Record<string, Override> = {
         orders: d.orders,
         paid: d.paid,
         revenueCents: d.revenueCents,
+        leads: d.leads,
+        leadsConverted: d.leadsConverted,
         byMethod: Object.fromEntries(
           Object.entries(d.byMethod).map(([k, m]) => [k, { orders: m.orders, paid: m.paid, revenueCents: m.revenueCents }]),
         ),
@@ -195,6 +197,15 @@ const OVERRIDES: Record<string, Override> = {
           ref: label,
           ...r,
         })),
+        // Recuperação por e-mail: só números, campo a campo (quem recebeu o lembrete nunca sai).
+        recovery: {
+          sent: d.recovery.sent,
+          recovered: d.recovery.recovered,
+          recoveredRevenueCents: d.recovery.recoveredRevenueCents,
+          byCase: Object.fromEntries(
+            RECOVERY_CASES.map((k) => [k, { sent: d.recovery.byCase[k].sent, recovered: d.recovery.byCase[k].recovered }]),
+          ) as Record<RecoveryCase, { sent: number; recovered: number }>,
+        },
       };
     },
   },

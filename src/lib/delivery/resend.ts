@@ -13,7 +13,7 @@ import { log } from "@/lib/log";
 import { limitConnectionTest } from "@/lib/mcp/limits";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
 import type { MailMessage } from "./mailer";
-import { oneLine } from "./templates";
+import { cleanHeaders, oneLine } from "./templates";
 
 const RESEND_URL = "https://api.resend.com/emails";
 const TIMEOUT_MS = 15_000;
@@ -94,6 +94,7 @@ export async function sendViaResend(
         subject: oneLine(msg.subject).trim().slice(0, 250),
         html: msg.html,
         text: msg.text,
+        ...(msg.headers ? { headers: cleanHeaders(msg.headers) } : {}),
       }),
       signal,
       // Destino fixo: um redirecionamento levaria a chave (Authorization) a outro host.

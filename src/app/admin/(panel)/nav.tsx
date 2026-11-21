@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { Bot, ClipboardCheck, KeyRound, LayoutDashboard, LogOut, Menu, Package, Plug, ReceiptText, Settings, Tag, Users, type LucideIcon } from "lucide-react";
+import { Bot, ClipboardCheck, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Package, Plug, ReceiptText, Settings, Tag, Users, type LucideIcon } from "lucide-react";
 import s from "../panel.module.css";
 
 const ICONS = {
@@ -12,6 +12,7 @@ const ICONS = {
   receipt: ReceiptText,
   tag: Tag,
   package: Package,
+  mail: Mail,
   plug: Plug,
   settings: Settings,
   "circle-check": ClipboardCheck,

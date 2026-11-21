@@ -4,6 +4,7 @@ import { loadOfferProducts, type ProductRef } from "@/lib/catalog/offer-products
 import { randomToken } from "@/lib/crypto";
 import { customer, offer, orderItem, orders } from "@/lib/db/schema";
 import { enqueue } from "@/lib/jobs";
+import { convertLeads } from "@/lib/leads/capture";
 import { splitCents } from "@/lib/money";
 import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { isUniqueViolation, allocateManualAmount, ALLOCATION_ATTEMPTS } from "@/lib/payments/manual";
@@ -28,6 +29,8 @@ export type CreateOrderInput = {
    * Só `checkout.start` usa.
    */
   asaasPixFallback?: boolean;
+  /** Chave do visitante (a mesma do `checkout.saveLead`): converte o contato guardado dessa página, mesmo com outro e-mail. */
+  leadKey?: string;
 };
 
 /** Bump marcado que não está mais disponível: o checkout mostra a mensagem como veio (ramo `conflict`). */
@@ -134,6 +137,8 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
   };
   await ctx.tx.insert(orderItem).values([...items("main", list.main, o.priceCents), ...(bump ? items("bump", bump.products, bump.priceCents) : [])]);
+  // O contato guardado antes da compra (mesmo e-mail na loja ou mesma chave da página) vira "comprou" e perde e-mail e celular.
+  await convertLeads(ctx.tx, ctx.storeId, { email, leadKey: input.leadKey, orderId: order.id });
   await enqueueTelegramNotices(ctx, order);
   return order;
 }

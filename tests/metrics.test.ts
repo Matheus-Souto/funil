@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
-import { metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
+import { checkoutLead, offer, recoveryEmail } from "@/lib/db/schema";
+import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, seedViews } from "./panel-helpers";
 
@@ -61,6 +63,8 @@ describe("metrics.summary", () => {
       orders: 0,
       paid: 0,
       revenueCents: 0,
+      leads: 0,
+      leadsConverted: 0,
       byMethod: {
         pix_manual: { orders: 0, paid: 0, revenueCents: 0 },
         pix_asaas: { orders: 0, paid: 0, revenueCents: 0 },
@@ -68,7 +72,115 @@ describe("metrics.summary", () => {
       },
       bySource: [],
       byRef: [],
+      recovery: {
+        sent: 0,
+        recovered: 0,
+        recoveredRevenueCents: 0,
+        byCase: { lead: { sent: 0, recovered: 0 }, pix: { sent: 0, recovered: 0 }, card: { sent: 0, recovered: 0 } },
+      },
     });
+  });
+
+  test("leads e leadsConverted contam no período", async () => {
+    const s = await seedPanelStore();
+    const outra = await seedPanelStore();
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const lead = (p: { storeId: string; offerId: string }, over: Partial<typeof checkoutLead.$inferInsert> = {}) => {
+      const email = `contato-${randomUUID()}@example.com`;
+      return { storeId: p.storeId, offerId: p.offerId, keyHash: sha(randomUUID()), email, emailHash: sha(email), expiresAt: new Date(Date.now() + 30 * 24 * HOUR), ...over };
+    };
+    const converted = { email: null, phone: null, status: "converted" };
+    const old = new Date(Date.now() - 10 * 24 * HOUR);
+    await t.ownerDb.insert(checkoutLead).values([
+      lead(s),
+      lead(s, { status: "contacted" }),
+      lead(s, converted),
+      lead(s, { ...converted, createdAt: old }),
+      lead(s, { createdAt: old }),
+      lead(outra, converted),
+    ]);
+    expect(await runAction(metricsSummary, panelCall(s.storeId), window())).toMatchObject({ leads: 3, leadsConverted: 1 });
+    expect(await runAction(metricsSummary, panelCall(outra.storeId), window())).toMatchObject({ leads: 1, leadsConverted: 1 });
+    // o período é por created_at: a janela de 30 dias pega os cinco da loja
+    const wide = { from: new Date(Date.now() - 30 * 24 * HOUR), to: new Date(Date.now() + HOUR) };
+    expect(await runAction(metricsSummary, panelCall(s.storeId), wide)).toMatchObject({ leads: 5, leadsConverted: 2 });
+  });
+
+  test("recovery: sent por caso; Pix pago 2 h depois do lembrete conta como recuperado e soma a receita; pago 8 dias depois não conta; dois lembretes para o mesmo pedido pago não somam a receita duas vezes", async () => {
+    const s = await seedPanelStore();
+    const outra = await seedPanelStore("Outra");
+    const now = Date.now();
+    const at = (ms: number) => new Date(now - ms);
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const mail = (k: string) => `recupera.${k}.${randomUUID().slice(0, 8)}@exemplo.com`;
+    const reminder = (
+      p: { storeId: string; offerId: string },
+      kind: "lead" | "pix" | "card",
+      email: string,
+      over: Partial<typeof recoveryEmail.$inferInsert> = {},
+    ): typeof recoveryEmail.$inferInsert => ({
+      storeId: p.storeId,
+      kind,
+      offerId: p.offerId,
+      emailHash: sha(email),
+      mailboxHash: sha(email),
+      status: "sent",
+      unsubHash: sha(randomUUID()),
+      dueAt: over.sentAt ?? at(HOUR),
+      sentAt: at(HOUR),
+      expiresAt: new Date(now + 90 * 24 * HOUR),
+      ...over,
+    });
+
+    // Pix pago 2 h depois do lembrete: recuperado, 990.
+    const ePix = mail("pix");
+    const pix = await seedOrder(s, { status: "paid", email: ePix, totalCents: 990, paidAt: at(HOUR) });
+    // Cartão pago 8 dias depois do lembrete: não conta.
+    const eCard = mail("card");
+    const card = await seedOrder(s, { status: "paid", email: eCard, totalCents: 5000, method: "card_asaas", paidAt: at(HOUR) });
+    // Mesmo endereço com dois lembretes (contato e Pix) e um pedido pago depois dos dois: 2700 uma vez só.
+    const eTwo = mail("dois");
+    const two = await seedOrder(s, { status: "paid", email: eTwo, totalCents: 2700, hasBump: true, paidAt: at(2 * HOUR) });
+    // Contato lembrado que não comprou; e outro que comprou outra oferta (não conta).
+    const eNone = mail("nada");
+    const eOther = mail("outra-oferta");
+    const [other] = await t.ownerDb
+      .insert(offer)
+      .values({ storeId: s.storeId, slug: `outra-${randomUUID().slice(0, 8)}`, name: "Outra", priceCents: 4000, methods: ["pix"], pixMode: "manual" })
+      .returning({ id: offer.id });
+    await seedOrder({ ...s, offerId: other!.id }, { status: "paid", email: eOther, totalCents: 4000, paidAt: at(HOUR) });
+    // Pedido pago antes do lembrete (mesmo e-mail e oferta): não conta.
+    const eBefore = mail("antes");
+    await seedOrder(s, { status: "paid", email: eBefore, totalCents: 990, paidAt: at(5 * HOUR) });
+
+    await t.ownerDb.insert(recoveryEmail).values([
+      reminder(s, "pix", ePix, { orderId: pix.id, sentAt: at(3 * HOUR) }),
+      reminder(s, "card", eCard, { orderId: card.id, sentAt: at(HOUR + 8 * 24 * HOUR) }),
+      reminder(s, "lead", eTwo, { sentAt: at(5 * HOUR) }),
+      reminder(s, "pix", eTwo, { orderId: two.id, sentAt: at(4 * HOUR) }),
+      reminder(s, "lead", eNone, { sentAt: at(3 * HOUR) }),
+      reminder(s, "lead", eOther, { sentAt: at(3 * HOUR) }),
+      reminder(s, "lead", eBefore, { sentAt: at(4 * HOUR) }),
+      // não enviados: não contam
+      reminder(s, "lead", mail("falhou"), { status: "failed", sentAt: null }),
+      reminder(s, "lead", mail("fila"), { status: "queued", sentAt: null }),
+      reminder(s, "lead", mail("pulado"), { status: "skipped", sentAt: null }),
+      // outra loja, mesmo e-mail do Pix recuperado: não entra nesta loja
+      reminder(outra, "lead", ePix, { sentAt: at(3 * HOUR) }),
+    ]);
+
+    const wide = { from: new Date(now - 10 * 24 * HOUR), to: new Date(now + HOUR) };
+    const m = await runAction(metricsSummary, panelCall(s.storeId), wide);
+    expect(m.recovery).toEqual({
+      sent: 7,
+      recovered: 3,
+      recoveredRevenueCents: 990 + 2700,
+      byCase: { lead: { sent: 4, recovered: 1 }, pix: { sent: 2, recovered: 2 }, card: { sent: 1, recovered: 0 } },
+    });
+    // "no período" = sent_at dentro do período: a janela de 24 h deixa o lembrete do cartão (9 dias atrás) de fora.
+    expect((await runAction(metricsSummary, panelCall(s.storeId), window())).recovery).toMatchObject({ sent: 6, recovered: 3, recoveredRevenueCents: 3690 });
+    // a outra loja só vê o próprio lembrete, sem pedido recuperado
+    expect((await runAction(metricsSummary, panelCall(outra.storeId), wide)).recovery).toMatchObject({ sent: 1, recovered: 0, recoveredRevenueCents: 0 });
   });
 
   test("isolamento: não soma pedidos de outra loja", async () => {
@@ -166,5 +278,22 @@ describe("periodRange", () => {
       from: new Date("2026-09-20T03:00:00.000Z"),
       to: new Date("2026-10-19T12:00:00.000Z"),
     });
+  });
+});
+
+describe("contatos: só os últimos 30 dias existem (retenção)", () => {
+  test("a janela anterior de 30 dias começa antes da retenção: sem comparação; hoje e 7 dias comparam", () => {
+    const now = new Date("2026-11-18T12:00:00Z");
+    expect(leadWindowCovered(periodRange("hoje", now, { previous: true }).from, now)).toBe(true);
+    expect(leadWindowCovered(periodRange("7d", now, { previous: true }).from, now)).toBe(true);
+    expect(leadWindowCovered(periodRange("30d", now, { previous: true }).from, now)).toBe(false);
+    expect(leadWindowCovered(periodRange("30d", now).from, now)).toBe(true);
+    // limite: exatamente 30 dias atrás ainda está coberto; um milissegundo antes, não
+    expect(leadWindowCovered(new Date(now.getTime() - 30 * 86_400_000), now)).toBe(true);
+    expect(leadWindowCovered(new Date(now.getTime() - 30 * 86_400_000 - 1), now)).toBe(false);
+  });
+
+  test("a descrição de metrics.summary avisa que leads e leadsConverted cobrem só os últimos 30 dias", () => {
+    expect(metricsSummary.description).toContain("últimos 30 dias");
   });
 });

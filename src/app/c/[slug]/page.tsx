@@ -45,6 +45,8 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
   const { first, last, ref } = parseTouch(urlOf(slug, sp), { _fbc: jar.get("_fbc")?.value, _fbp: jar.get("_fbp")?.value });
   const touch = { first, last };
   const eventId = randomUUID();
+  // Chave do contato desta visita (só com a captura ligada): é ela que dá direito de alterar ou apagar a linha.
+  const lead = offer.leadCapture ? { key: randomUUID(), privacyEmail: offer.leadCapture.privacyEmail } : null;
   // Sem o serviço de cartão configurado, só Pix (oferta só de cartão: o checkout mostra o cartão indisponível).
   const cardOrigin = cardServiceConfigured(env) ? env.CARD_ORIGIN : null;
   const methods = checkoutMethods(offer.methods, cardOrigin !== null);
@@ -62,6 +64,7 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
         touch={touch}
         refCode={ref}
         eventId={eventId}
+        lead={lead}
         turnstileSiteKey={env.TURNSTILE_SITE_KEY ?? null}
         brandColor={brandColor}
         cardFrame={
