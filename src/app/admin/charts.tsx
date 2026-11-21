@@ -420,7 +420,7 @@ export function KpiNumber({ value, money }: { value: number; money?: boolean }) 
 }
 
 /** Mini gráfico de linha (tendência dos últimos dias), sem eixos; o último ponto em destaque. */
-export function Sparkline({ values, label }: { values: number[]; label: string }) {
+export function Sparkline({ values, days, label }: { values: number[]; days: string[]; label: string }) {
   return (
     <EChart
       height={34}
@@ -430,7 +430,17 @@ export function Sparkline({ values, label }: { values: number[]; label: string }
         grid: { left: 2, right: 4, top: 4, bottom: 4 },
         xAxis: { type: "category", show: false, boundaryGap: false, data: values.map((_, i) => i) },
         yAxis: { type: "value", show: false, min: 0, max: (v: { max: number }) => Math.max(1, v.max) },
-        tooltip: { show: false },
+        tooltip: {
+          ...tooltip(t),
+          trigger: "axis",
+          appendToBody: true,
+          axisPointer: { type: "line", lineStyle: { color: t.border, type: "dashed" } },
+          formatter: (p: Array<{ dataIndex: number }>) => {
+            const i = p[0]?.dataIndex ?? 0;
+            const n = values[i] ?? 0;
+            return `<div style="font-size:12px;color:${t.muted}">${days[i] ?? ""}</div><b style="font-size:14px">${n} ${n === 1 ? "venda" : "vendas"}</b>`;
+          },
+        },
         series: [
           {
             type: "line",
@@ -439,6 +449,7 @@ export function Sparkline({ values, label }: { values: number[]; label: string }
             smoothMonotone: "x",
             symbol: "circle",
             symbolSize: (_: number, p: { dataIndex: number }) => (p.dataIndex === values.length - 1 ? 6 : 0),
+            emphasis: { scale: false, itemStyle: { color: t.accentInk } },
             lineStyle: { width: 2, color: t.accentInk },
             itemStyle: { color: t.accentInk },
             areaStyle: {
@@ -454,7 +465,6 @@ export function Sparkline({ values, label }: { values: number[]; label: string }
                 ],
               },
             },
-            silent: true,
           },
         ],
       })}

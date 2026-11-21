@@ -17,6 +17,8 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "Ofertas" };
 
 const DAY_MS = 86_400_000;
+/** "sáb., 15/11" (São Paulo), na dica do mini gráfico. */
+const DAY_LABEL = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", weekday: "short", day: "2-digit", month: "2-digit" });
 const pct = (a: number, b: number) => (b === 0 ? "—" : `${Math.round((a * 1000) / b) / 10}%`.replace(".", ","));
 
 export default async function OffersPage() {
@@ -39,6 +41,7 @@ export default async function OffersPage() {
         }),
       )
     : null;
+  const dayLabels = Array.from({ length: 7 }, (_, k) => DAY_LABEL.format(new Date(week.from.getTime() + k * DAY_MS + 12 * 3_600_000)));
   const trend = (offerId: string) => daily?.map((day) => day.find((x) => x.offerId === offerId)?.paid ?? 0) ?? [];
   const base = storeBaseUrl((await getPanelIdentity(panel)).store);
 
@@ -109,7 +112,7 @@ export default async function OffersPage() {
                   {stats ? (
                     <>
                       <div className={s.offerSpark}>
-                        <Sparkline values={trend(o.id)} label={`Vendas de ${o.name} nos últimos 7 dias`} />
+                        <Sparkline values={trend(o.id)} days={dayLabels} label={`Vendas de ${o.name} nos últimos 7 dias`} />
                       </div>
                       <div className={s.offerMetric}>
                         <span>Vendas 7d</span>
