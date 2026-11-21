@@ -9,7 +9,7 @@ import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { brl } from "@/lib/format";
-import { metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
@@ -60,7 +60,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   if (lifetime.orders === 0 && lifetime.views === 0) return <EmptyOverview call={call} storeName={id.storeName} />;
 
   const m = await runAction(metricsSummary, call, cur);
-  const prev = await runAction(metricsSummary, call, periodRange(period, now, { previous: true }));
+  const prevRange = periodRange(period, now, { previous: true });
+  const prev = await runAction(metricsSummary, call, prevRange);
+  // Contatos somem com 30 dias: janela anterior que começa antes disso não tem com o que comparar.
+  const leadsCompare = leadWindowCovered(prevRange.from, now) ? COMPARE[period] : undefined;
   const b = await runAction(metricsBreakdown, call, cur);
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
@@ -146,8 +149,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 
         {lifetime.leads > 0 ? (
           <section className={s.grid2} aria-label="Contatos do período">
-            <Kpi label="Contatos capturados" value={String(m.leads)} delta={deltaOf(m.leads, prev.leads)} compare={COMPARE[period]} />
-            <Kpi label="Viraram pedido" value={String(m.leadsConverted)} delta={deltaOf(m.leadsConverted, prev.leadsConverted)} compare={COMPARE[period]} />
+            <Kpi label="Contatos capturados" value={String(m.leads)} delta={leadsCompare ? deltaOf(m.leads, prev.leads) : undefined} compare={leadsCompare} />
+            <Kpi
+              label="Viraram pedido"
+              value={String(m.leadsConverted)}
+              delta={leadsCompare ? deltaOf(m.leadsConverted, prev.leadsConverted) : undefined}
+              compare={leadsCompare}
+            />
           </section>
         ) : null}
 

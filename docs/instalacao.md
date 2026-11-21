@@ -741,15 +741,17 @@ copiar e adaptar:
 
 Guarde esse registro junto com os documentos de privacidade da loja.
 
-**Prazo.** Todo contato é apagado 30 dias depois da captura (rotina de hora em hora; vencido, já some do painel e não gera aviso), esteja ele aberto, contatado ou convertido.
-Se a pessoa **compra** (cria o pedido), o contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o
-pedido; o registro some com os 30 dias.
+**Prazo.** Todo contato é apagado 30 dias depois da captura, esteja ele aberto, contatado ou convertido (a rotina roda
+de hora em hora; vencido, ele já some do painel e não gera aviso antes disso). Se a pessoa **compra** (cria o pedido), o
+contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o pedido; o registro some com os 30 dias.
 
 **Onde ver e agir.** No painel, **Contatos** (dono, admin e suporte): filtro por status (Abertos, Contatados, Compraram),
 busca pelo código do contato ou pelo e-mail exato, botão para copiar o e-mail, link do WhatsApp (abre o número da pessoa,
 sem texto pronto), **Marcar como contatado** e **Excluir**. Para um pedido do titular ("apaguem meus dados"), use
 **Excluir todos deste e-mail** no pé da página: apaga todos os contatos da loja com aquele e-mail. A visão geral mostra
-os números **Contatos capturados** e **Viraram pedido** do período. Tráfego não vê esta página.
+os números **Contatos capturados** e **Viraram pedido** do período. Como os contatos somem com 30 dias, esses números
+cobrem só os últimos 30 dias: no período de 30 dias eles aparecem sem a comparação com os 30 dias anteriores (que já
+foram apagados). Tráfego não vê esta página.
 
 **Telegram.** O evento **Abandono antes do pagamento** (caixa própria, desligada por padrão, mesmo prazo do "Carrinho
 abandonado") manda só a oferta, o valor e o código do contato, por exemplo
@@ -759,7 +761,7 @@ avisos por hora por loja (o resto fica só no painel).
 
 **Agentes de IA (MCP).** O MCP **não vê contatos**: nenhuma ferramenta lista, lê ou apaga e-mail ou celular, em nenhum
 papel. A única coisa que ele recebe são dois **números** em `metrics.summary`: `leads` (contatos capturados no período) e
-`leadsConverted` (quantos viraram pedido).
+`leadsConverted` (quantos viraram pedido), que cobrem só os últimos 30 dias (a retenção dos contatos).
 
 **Proteção contra abuso.** A captura tem limites por IP e por loja (e o **Não salvar meus dados**, por IP e por
 visita); passou do limite, o pedido é ignorado em silêncio (o comprador nunca vê erro). Não há e-mail automático, então um contato falso só causa efeito se a loja o contatar à mão:

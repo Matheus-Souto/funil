@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { checkoutLead } from "@/lib/db/schema";
-import { metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, seedViews } from "./panel-helpers";
 
@@ -195,5 +195,22 @@ describe("periodRange", () => {
       from: new Date("2026-09-20T03:00:00.000Z"),
       to: new Date("2026-10-19T12:00:00.000Z"),
     });
+  });
+});
+
+describe("contatos: só os últimos 30 dias existem (retenção)", () => {
+  test("a janela anterior de 30 dias começa antes da retenção: sem comparação; hoje e 7 dias comparam", () => {
+    const now = new Date("2026-11-18T12:00:00Z");
+    expect(leadWindowCovered(periodRange("hoje", now, { previous: true }).from, now)).toBe(true);
+    expect(leadWindowCovered(periodRange("7d", now, { previous: true }).from, now)).toBe(true);
+    expect(leadWindowCovered(periodRange("30d", now, { previous: true }).from, now)).toBe(false);
+    expect(leadWindowCovered(periodRange("30d", now).from, now)).toBe(true);
+    // limite: exatamente 30 dias atrás ainda está coberto; um milissegundo antes, não
+    expect(leadWindowCovered(new Date(now.getTime() - 30 * 86_400_000), now)).toBe(true);
+    expect(leadWindowCovered(new Date(now.getTime() - 30 * 86_400_000 - 1), now)).toBe(false);
+  });
+
+  test("a descrição de metrics.summary avisa que leads e leadsConverted cobrem só os últimos 30 dias", () => {
+    expect(metricsSummary.description).toContain("últimos 30 dias");
   });
 });

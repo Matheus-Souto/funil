@@ -4,6 +4,7 @@ import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { checkoutLead, checkoutView, orders } from "@/lib/db/schema";
+import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
 export const METHODS: readonly Method[] = ["pix_manual", "pix_asaas", "card_asaas"];
@@ -28,6 +29,14 @@ export function periodRange(p: Period, now: Date = new Date(), opts: { previous?
   return { from, to: now };
 }
 
+/**
+ * Os contatos (`leads`, `leadsConverted`) somem com 30 dias: uma janela que começa antes disso conta menos do que houve.
+ * `false` = não compare esses números (ex.: os 30 dias anteriores).
+ */
+export function leadWindowCovered(from: Date, now: Date = new Date()): boolean {
+  return from.getTime() >= now.getTime() - LEAD_TTL_DAYS * DAY_MS;
+}
+
 const range = z
   .object({ from: z.coerce.date(), to: z.coerce.date() })
   .refine((r) => r.from.getTime() <= r.to.getTime(), { message: "O início do período deve ser antes do fim", path: ["to"] });
@@ -47,7 +56,7 @@ type MethodRow = { orders: number; paid: number; revenueCents: number };
 
 export const metricsSummary = defineAction({
   name: "metrics.summary",
-  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted).",
+  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve.",
   input: range,
   permission: "metrics.read",
   audit: false,
