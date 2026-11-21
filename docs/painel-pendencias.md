@@ -51,11 +51,10 @@ Causa provável: o `request` do Playwright reaproveita uma conexão keep-alive q
 inatividade (~5 s parado durante o diálogo de reembolso). Uma correção possível é fazer essa checagem num contexto de
 requisição novo (`playwright.request.newContext()`) ou com `Connection: close`, em vez de repetir o teste.
 
-## 6. Número de páginas dos PDFs (página Produtos)
+## 6. Número de páginas de produtos antigos (opcional)
 
-**Hoje:** para mostrar "N páginas" embaixo do nome, a tabela de produtos baixa o PDF inteiro de cada linha visível
-(rota `GET /admin/api/products/<id>/file`, ação `products.file`) e conta as páginas no navegador com pdf.js. Para PDFs
-grandes isso pesa.
+**Hoje:** o envio grava as páginas em `product.page_count` (coluna nova, migração 0031). Produtos enviados antes dela
+ficam com nulo, e a página Produtos abre o PDF no navegador só para contar as páginas desses.
 
-**Sugestão:** guardar o número de páginas na tabela `product` no upload (o servidor já abre o PDF com pdf-lib para
-validar) e devolver em `listProducts`; a tabela deixa de baixar o arquivo e só o visualizador "Ver PDF" lê o PDF.
+**Sugestão (se quiserem tirar esse caminho):** um script único que lê cada PDF do storage, conta as páginas (o mesmo
+`inspectPdf` do Worker) e preenche a coluna.

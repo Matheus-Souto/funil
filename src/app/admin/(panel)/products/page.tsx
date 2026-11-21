@@ -83,7 +83,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
                     return (
                       <tr key={p.id}>
                         <td>
-                          <ProductCell id={p.id} name={p.name} />
+                          <ProductCell id={p.id} name={p.name} pages={p.pageCount} />
                         </td>
                         <td className={s.muted}>
                           {p.fileName} <span className={s.nowrap}>· {fileSize(p.fileSize)}</span>

@@ -23,17 +23,42 @@ export async function openPdf(source: string | ArrayBuffer): Promise<PdfDoc> {
   return pdfjs.getDocument(typeof source === "string" ? { url: source } : { data: new Uint8Array(source) }).promise;
 }
 
-/** Desenha a página `n` (1 em diante) no canvas com a largura pedida (em px CSS), nítida em telas de alta densidade. */
-export async function renderPage(doc: PdfDoc, n: number, canvas: HTMLCanvasElement, width: number): Promise<void> {
-  const page = await doc.getPage(n);
-  const base = page.getViewport({ scale: 1 });
-  const ratio = window.devicePixelRatio || 1;
-  const viewport = page.getViewport({ scale: (width / base.width) * ratio });
-  canvas.width = Math.floor(viewport.width);
-  canvas.height = Math.floor(viewport.height);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${Math.floor(viewport.height / ratio)}px`;
-  await page.render({ canvas, viewport }).promise;
+/**
+ * Começa a desenhar a página `n` (1 em diante) no canvas com a largura pedida (em px CSS), nítida em telas de alta
+ * densidade. `cancel` interrompe (ex.: o tamanho mudou antes de terminar); a promessa então rejeita.
+ */
+export function startRender(doc: PdfDoc, n: number, canvas: HTMLCanvasElement, width: number): { promise: Promise<void>; cancel: () => void } {
+  let task: { cancel: () => void } | null = null;
+  let cancelled = false;
+  const promise = doc.getPage(n).then(async (page) => {
+    if (cancelled) throw new Error("cancelado");
+    const base = page.getViewport({ scale: 1 });
+    const ratio = window.devicePixelRatio || 1;
+    const viewport = page.getViewport({ scale: (width / base.width) * ratio });
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${Math.floor(viewport.height / ratio)}px`;
+    const t = page.render({ canvas, viewport });
+    task = t;
+    await t.promise;
+  });
+  return {
+    promise,
+    cancel: () => {
+      cancelled = true;
+      task?.cancel();
+    },
+  };
+}
+
+/** Desenha a página `n` inteira (prévia do envio). */
+export const renderPage = (doc: PdfDoc, n: number, canvas: HTMLCanvasElement, width: number) => startRender(doc, n, canvas, width).promise;
+
+/** Largura ÷ altura da página `n` (para caber na tela sem rolar). */
+export async function pageAspect(doc: PdfDoc, n: number): Promise<number> {
+  const v = (await doc.getPage(n)).getViewport({ scale: 1 });
+  return v.width / v.height;
 }
 
 /** PDF com senha (o servidor também recusa; aqui só para avisar antes de enviar). */
