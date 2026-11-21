@@ -3611,3 +3611,9 @@
   white-space: nowrap;
   overflow-wrap: normal;
 }
+/* Avatar do Arc no rodapé da sidebar, na cor do sistema. */
+.userAvatar {
+  flex: none;
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary-ink) !important;
+}

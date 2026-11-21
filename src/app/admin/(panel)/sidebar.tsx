@@ -5,6 +5,7 @@
 import Link from "next/link";
 import { Art } from "../blocks";
 import { BrandLogo } from "../brand";
+import { Avatar } from "@/components/arc/avatar/avatar";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
@@ -118,12 +119,6 @@ export function PanelShell({
 
   const main = items.filter((i) => !i.section);
   const store = items.filter((i) => i.section === "loja");
-  const initials = id.userName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase())
-    .join("");
 
   const link = (i: NavEntry) => {
     const active = isActive(path, i.href);
@@ -245,9 +240,7 @@ export function PanelShell({
           </div>
           <Tip show={collapsed} label={`${id.userName} · ${id.userEmail}`}>
             <div className={s.userRow}>
-              <span className={s.avatar} aria-hidden="true">
-                {initials || "?"}
-              </span>
+              <Avatar name={id.userName || "?"} size="sm" className={s.userAvatar} />
               <span className={s.userText}>
                 <b>{id.userName}</b>
                 <small>{id.userEmail}</small>
