@@ -3,6 +3,8 @@
 // - `checkout.saveLead` (público, sem auditoria): só com a captura ligada na loja (`store.lead_capture`, que exige o
 //   e-mail público de privacidade). Upsert por `(store_id, key_hash)`: a `leadKey` do visitante é o que dá direito de
 //   alterar a linha (saber o e-mail não basta). Celular sozinho só atualiza linha existente. Linha convertida não muda.
+//   Ao CRIAR a linha (nunca ao atualizar), agenda o aviso `lead_abandoned` do Telegram para criada + prazo, na mesma
+//   transação, se a loja tem o evento ligado (lê só a config pública; o job confere tudo de novo no envio).
 // - `checkout.forgetLead` (público, sem auditoria): "Não salvar meus dados" apaga a linha da chave (nunca a convertida);
 //   chave sem linha também é ok (não revela nada).
 // - `convertLeads`: na criação do pedido (mesma transação) o contato vira `converted` e perde e-mail e celular.
@@ -15,6 +17,8 @@ import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { UNKNOWN_IP } from "@/lib/client-ip";
 import { checkoutLead, offer, store } from "@/lib/db/schema";
+import { enqueue } from "@/lib/jobs";
+import { telegramSettings } from "@/lib/notify/telegram-connection";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
 import { normalizeBrMobile, validEmail } from "@/lib/validation/br";
 
@@ -69,6 +73,22 @@ async function touchLead(ctx: Ctx, keyHash: string, input: { email?: string; pho
     .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.keyHash, keyHash), inArray(checkoutLead.status, ["open", "contacted"])))
     .returning({ id: checkoutLead.id });
   return row?.id ?? null;
+}
+
+/**
+ * Contato criado: agenda o aviso do Telegram para criado + prazo (o prazo vai no payload: o vendedor pode mudá-lo depois).
+ * Só com a conexão do Telegram e o evento ligados agora.
+ */
+async function enqueueLeadNotice(ctx: Ctx, lead: { id: string; createdAt: Date }): Promise<void> {
+  const tg = await telegramSettings(ctx.tx, ctx.storeId);
+  if (!tg?.events.leadAbandoned) return;
+  const afterMinutes = tg.abandonAfterMinutes;
+  await enqueue(ctx.tx, {
+    storeId: ctx.storeId,
+    type: "notify_telegram",
+    payload: { event: "lead_abandoned", leadId: lead.id, afterMinutes },
+    runAt: new Date(lead.createdAt.getTime() + afterMinutes * 60_000),
+  });
 }
 
 export const checkoutSaveLead = defineAction({
@@ -130,8 +150,11 @@ export const checkoutSaveLead = defineAction({
         expiresAt: new Date(Date.now() + LEAD_TTL_DAYS * DAY_MS),
       })
       .onConflictDoNothing({ target: [checkoutLead.storeId, checkoutLead.keyHash] })
-      .returning({ id: checkoutLead.id });
-    if (row) return { created: true, leadId: row.id };
+      .returning({ id: checkoutLead.id, createdAt: checkoutLead.createdAt });
+    if (row) {
+      await enqueueLeadNotice(ctx, row);
+      return { created: true, leadId: row.id };
+    }
     // Outra requisição da mesma chave criou a linha entre a leitura e a gravação: atualiza essa.
     return { created: false, leadId: await touchLead(ctx, prepared.keyHash, input) };
   },

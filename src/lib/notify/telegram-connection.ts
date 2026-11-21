@@ -17,9 +17,11 @@ export interface TelegramEvents {
   pixGenerated: boolean;
   cardDeclined: boolean;
   abandoned: boolean;
+  /** Abandono antes do pagamento: contato guardado no checkout que não chegou a criar pedido. */
+  leadAbandoned: boolean;
 }
 
-export const DEFAULT_TELEGRAM_EVENTS: TelegramEvents = { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false };
+export const DEFAULT_TELEGRAM_EVENTS: TelegramEvents = { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false, leadAbandoned: false };
 export const DEFAULT_ABANDON_MINUTES = 30;
 export const MIN_ABANDON = 10;
 export const MAX_ABANDON = 1440;
@@ -33,7 +35,7 @@ export function parseTelegramConfig(c: IntegrationConfig | undefined): { chatId:
   return {
     chatId: typeof raw.chatId === "string" ? raw.chatId : null,
     botUsername: typeof raw.botUsername === "string" ? raw.botUsername : null,
-    events: { sale: flag("sale"), pixGenerated: flag("pixGenerated"), cardDeclined: flag("cardDeclined"), abandoned: flag("abandoned") },
+    events: { sale: flag("sale"), pixGenerated: flag("pixGenerated"), cardDeclined: flag("cardDeclined"), abandoned: flag("abandoned"), leadAbandoned: flag("leadAbandoned") },
     abandonAfterMinutes: typeof m === "number" && Number.isInteger(m) && m >= MIN_ABANDON && m <= MAX_ABANDON ? m : DEFAULT_ABANDON_MINUTES,
   };
 }
@@ -91,7 +93,7 @@ export const saveTelegram = defineAction({
     chatId: z.string().trim().regex(TELEGRAM_CHAT_RE, "Chat id inválido"),
     /** Omitido: mantém o token guardado. */
     token: z.string().trim().regex(TELEGRAM_TOKEN_RE, "Token do bot inválido").optional(),
-    events: z.object({ sale: z.boolean(), pixGenerated: z.boolean(), cardDeclined: z.boolean(), abandoned: z.boolean() }).partial().optional(),
+    events: z.object({ sale: z.boolean(), pixGenerated: z.boolean(), cardDeclined: z.boolean(), abandoned: z.boolean(), leadAbandoned: z.boolean() }).partial().optional(),
     abandonAfterMinutes: z.number().int().min(MIN_ABANDON).max(MAX_ABANDON).optional(),
   }),
   permission: "connections.write",

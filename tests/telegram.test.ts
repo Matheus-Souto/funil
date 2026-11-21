@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { ackAlert, alertText } from "@/lib/alerts";
 import { runAction, type Actor, type Ctx } from "@/lib/actions/core";
@@ -7,8 +8,9 @@ import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
 import { noticeFor } from "@/lib/delivery/jobs";
 import { orderCode } from "@/lib/format";
-import { auditLog, integration, job, orders, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { auditLog, checkoutLead, integration, job, offer, orders, store, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { runDueJobs, type Job } from "@/lib/jobs";
+import { checkoutSaveLead } from "@/lib/leads/capture";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
 import { transitionOrder } from "@/lib/orders/state";
@@ -17,13 +19,14 @@ import { notifyTelegramJob } from "@/lib/notify/telegram-job";
 import { loadTelegram, removeTelegram, saveTelegram, telegramSettings, testTelegram } from "@/lib/notify/telegram-connection";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
-import { resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
+import { checkRateLimit, resetCardFingerprintsForTests } from "@/lib/payments/ratelimit";
 import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeAsaas, seedAsaasStore } from "./asaas-helpers";
 import {
   TELEGRAM_CHAT_RE,
   TELEGRAM_TOKEN_RE,
   TelegramError,
+  leadCode,
   setTelegramFetchForTests,
   telegramGetMe,
   telegramMessage,
@@ -193,6 +196,15 @@ describe("textos dos avisos", () => {
   test("abandoned", () => {
     expect(telegramMessage("abandoned", base)).toBe("Carrinho abandonado (30 min sem pagamento): Almanaque + 5 Kits — R$ 27,00 — Pix — pedido #AB12CD");
   });
+  test("lead_abandoned: texto do brief, sem forma de pagamento (o method é ignorado) e com o código do contato", () => {
+    const lead = { productName: "Almanaque Bíblico Kids", bumpName: null, totalCents: 990, orderCode: leadCode("7kq2mxaa-1111-2222-3333-444455556666"), abandonAfterMinutes: 30 };
+    const want = "Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #7KQ2MX";
+    expect(telegramMessage("lead_abandoned", lead)).toBe(want);
+    expect(telegramMessage("lead_abandoned", { ...lead, method: "card_asaas" })).toBe(want);
+  });
+  test("leadCode: 6 primeiros hex do UUID sem hífen, maiúsculos", () => {
+    expect(leadCode("0a1b2c3d-4e5f-6789-abcd-ef0123456789")).toBe("0A1B2C");
+  });
   test("sem bump, cartão e Pix manual", () => {
     expect(telegramMessage("sale", { ...base, bumpName: null, method: "card_asaas" })).toBe("Venda: Almanaque — R$ 27,00 — Cartão — pedido #AB12CD");
     expect(telegramMessage("sale", { ...base, method: "pix_manual" })).toContain("— Pix manual —");
@@ -248,7 +260,7 @@ const traffic: Actor = { kind: "user", userId: "u3", role: "traffic" };
 const panel = (storeId: string, actor: Actor = owner) => ({ storeId, actor, origin: "panel" as const });
 const rowOf = async (storeId: string) =>
   (await t.ownerDb.select().from(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, "telegram"))))[0];
-const DEFAULT_EVENTS = { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false };
+const DEFAULT_EVENTS = { sale: true, pixGenerated: false, cardDeclined: false, abandoned: false, leadAbandoned: false };
 
 describe("conexão Telegram", () => {
   test("saveTelegram valida o token no getMe, sela o token, guarda só o final e os eventos padrão; auditoria sem o token", async () => {
@@ -297,12 +309,12 @@ describe("conexão Telegram", () => {
       chatId: "@meu_grupo",
       botUsername: "loja_bot",
       tokenLast4: BOT_TOKEN.slice(-4),
-      events: { sale: true, pixGenerated: true, cardDeclined: false, abandoned: true },
+      events: { sale: true, pixGenerated: true, cardDeclined: false, abandoned: true, leadAbandoned: false },
       abandonAfterMinutes: 45,
     });
     // Só um evento: os demais ficam como estavam; o prazo também.
     const out3 = await runAction(saveTelegram, panel(storeId), { chatId: "@meu_grupo", events: { sale: false } });
-    expect(out3.events).toEqual({ sale: false, pixGenerated: true, cardDeclined: false, abandoned: true });
+    expect(out3.events).toEqual({ sale: false, pixGenerated: true, cardDeclined: false, abandoned: true, leadAbandoned: false });
     expect(out3.abandonAfterMinutes).toBe(45);
     expect((await withStore(storeId, (tx) => loadTelegram(tx, storeId)))!.token).toBe(BOT_TOKEN);
     // Token novo: valida de novo e troca o username.
@@ -959,5 +971,243 @@ describe("outros avisos do Telegram", () => {
     }) as unknown as typeof fetch);
     await Promise.all(paid.map((o) => runJob(shop, "sale", o.id)));
     expect(await openAlerts(shop.storeId)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Abandono antes do pagamento (contato guardado no checkout, ainda sem pedido)
+
+const LEAD_PHONE = "11987654321";
+const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+const LEAD_RATE_KEY = (storeId: string) => `telegram:lead:${storeId}`;
+const leadNotice = (shop: Shop, over: Partial<typeof checkoutLead.$inferInsert> = {}) => {
+  const email = `contato-${crypto.randomUUID()}@example.com`;
+  return t.ownerDb
+    .insert(checkoutLead)
+    .values({
+      storeId: shop.storeId,
+      offerId: shop.offerId,
+      keyHash: sha(crypto.randomUUID()),
+      email,
+      emailHash: sha(email),
+      phone: LEAD_PHONE,
+      // já passou o prazo de 30 min
+      createdAt: new Date(Date.now() - 31 * MIN),
+      expiresAt: new Date(Date.now() + 29 * 86_400_000),
+      ...over,
+    })
+    .returning()
+    .then((r) => r[0]!);
+};
+const leadRowOf = async (id: string) => (await t.ownerDb.select().from(checkoutLead).where(eq(checkoutLead.id, id)))[0];
+async function runLeadJob(shop: Shop, leadId: string, afterMinutes = 30, signal = new AbortController().signal) {
+  const j = { id: crypto.randomUUID(), storeId: shop.storeId, type: "notify_telegram", payload: { event: "lead_abandoned", leadId, afterMinutes } } as unknown as Job;
+  await notifyTelegramJob(j, signal);
+}
+const leadJobs = (storeId: string) =>
+  t.ownerDb.select().from(job).where(and(eq(job.type, "notify_telegram"), eq(job.storeId, storeId), sql`${job.payload}->>'event' = 'lead_abandoned'`));
+const LEAD_TEXT = (id: string) => `Abandono antes do pagamento (30 min): Almanaque — R$ 27,00 — contato #${leadCode(id)}`;
+
+describe("abandono antes do pagamento no Telegram", () => {
+  test("contato aberto depois do prazo: envia o texto; sem e-mail, celular nem dígitos do celular; grava notified_at e o message_id", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const lead = await leadNotice(shop);
+    const calls = fakeTg(okFor);
+    await runLeadJob(shop, lead.id);
+    expect(texts(calls)).toEqual([LEAD_TEXT(lead.id)]);
+    const text = texts(calls)[0]!;
+    expect(text).not.toContain(lead.email!);
+    expect(text).not.toContain("@");
+    expect(text).not.toContain(LEAD_PHONE);
+    expect(text).not.toContain(LEAD_PHONE.slice(2));
+    expect(JSON.stringify(calls[0]!.body)).not.toContain(lead.email!);
+    const after = await leadRowOf(lead.id);
+    expect(after!.notifiedAt).toBeInstanceOf(Date);
+    expect(after!.telegramMessageId).toBe(7);
+    // o contato segue aberto e sem telegram_notice (essa tabela é por pedido)
+    expect(after!.status).toBe("open");
+    expect(await t.ownerDb.select().from(telegramNotice).where(eq(telegramNotice.storeId, shop.storeId))).toHaveLength(0);
+  });
+
+  test("log: só leadId, evento e motivo; nunca e-mail nem celular", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const sent = await leadNotice(shop);
+    const skipped = await leadNotice(shop, { status: "contacted" });
+    fakeTg(okFor);
+    await runLeadJob(shop, sent.id);
+    await runLeadJob(shop, skipped.id);
+    expect(out).toContain(sent.id);
+    expect(out).toContain(skipped.id);
+    for (const l of [sent, skipped]) {
+      expect(out).not.toContain(l.email!);
+      expect(out).not.toContain(LEAD_PHONE);
+    }
+  });
+
+  test("convertido, contatado, apagado, antes do prazo e flag desligada: não envia e não marca", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const converted = await leadNotice(shop, { status: "converted", email: null, phone: null });
+    const contacted = await leadNotice(shop, { status: "contacted" });
+    const gone = await leadNotice(shop);
+    await t.ownerDb.delete(checkoutLead).where(eq(checkoutLead.id, gone.id));
+    const early = await leadNotice(shop, { createdAt: new Date(Date.now() - 29 * MIN) });
+    const calls = fakeTg(okFor);
+    for (const l of [converted, contacted, gone, early]) await runLeadJob(shop, l.id);
+    expect(calls).toHaveLength(0);
+    for (const l of [converted, contacted, early]) expect((await leadRowOf(l.id))!.notifiedAt).toBeNull();
+
+    const off = await seedShop({ events: { leadAbandoned: false, abandoned: true } });
+    const offLead = await leadNotice(off);
+    await runLeadJob(off, offLead.id);
+    expect(calls).toHaveLength(0);
+    expect((await leadRowOf(offLead.id))!.notifiedAt).toBeNull();
+  });
+
+  test("loja sem conexão do Telegram: não envia", async () => {
+    const bare = await seedShop({ telegram: false });
+    const lead = await leadNotice(bare);
+    const calls = fakeTg(okFor);
+    await runLeadJob(bare, lead.id);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("segundo job do mesmo contato: não envia de novo", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const lead = await leadNotice(shop);
+    const calls = fakeTg(okFor);
+    await runLeadJob(shop, lead.id);
+    await runLeadJob(shop, lead.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+  });
+
+  test("outro contato com o mesmo e-mail avisado há menos de 24 h: não envia; há mais de 24 h: envia", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const email = `repetido-${crypto.randomUUID()}@example.com`;
+    const previous = await leadNotice(shop, { email, emailHash: sha(email), notifiedAt: new Date(Date.now() - 23 * 60 * MIN), telegramMessageId: 1 });
+    const again = await leadNotice(shop, { email, emailHash: sha(email) });
+    // O Telegram falso é trocado a cada seedShop: monta a outra loja antes.
+    const other = await seedShop({ events: { leadAbandoned: true } });
+    const foreign = await leadNotice(other, { email, emailHash: sha(email) });
+    const calls = fakeTg(okFor);
+    await runLeadJob(shop, again.id);
+    expect(calls).toHaveLength(0);
+    expect((await leadRowOf(again.id))!.notifiedAt).toBeNull();
+    await t.ownerDb.update(checkoutLead).set({ notifiedAt: new Date(Date.now() - 25 * 60 * MIN) }).where(eq(checkoutLead.id, previous.id));
+    await runLeadJob(shop, again.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+    // mesmo e-mail em outra loja não conta
+    await runLeadJob(other, foreign.id);
+    expect(sendCalls(calls)).toHaveLength(2);
+  });
+
+  test("31º aviso da loja na hora: não envia e não marca; só envio de verdade conta no teto", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const key = LEAD_RATE_KEY(shop.storeId);
+    // Já saíram 29 avisos nesta hora.
+    for (let i = 0; i < 29; i++) expect(await checkRateLimit(key, 30, 3600)).toBe(true);
+    const thirtieth = await leadNotice(shop);
+    const thirtyFirst = await leadNotice(shop);
+    // Contato pulado por outra regra (convertido) não gasta o teto.
+    const skipped = await leadNotice(shop, { status: "converted", email: null, phone: null });
+    // O Telegram falso é trocado a cada seedShop: monta a outra loja antes.
+    const other = await seedShop({ events: { leadAbandoned: true } });
+    const otherLead = await leadNotice(other);
+    const calls = fakeTg(okFor);
+    await runLeadJob(shop, skipped.id);
+    await runLeadJob(shop, thirtieth.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+    await runLeadJob(shop, thirtyFirst.id);
+    expect(sendCalls(calls)).toHaveLength(1);
+    expect((await leadRowOf(thirtyFirst.id))!.notifiedAt).toBeNull();
+    // O teto é por loja.
+    await runLeadJob(other, otherLead.id);
+    expect(sendCalls(calls)).toHaveLength(2);
+  });
+
+  test("falha definitiva (403): um aviso telegram_falhou só, contato sem marca; falha temporária (502): lança", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const a = await leadNotice(shop);
+    const b = await leadNotice(shop);
+    fakeTg(() => json(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked" }));
+    await runLeadJob(shop, a.id);
+    await runLeadJob(shop, b.id);
+    expect(await openAlerts(shop.storeId)).toHaveLength(1);
+    expect((await openAlerts(shop.storeId))[0]!.detail).toEqual({ httpStatus: 403 });
+    expect((await leadRowOf(a.id))!.notifiedAt).toBeNull();
+    fakeTg(() => json(502, { ok: false, error_code: 502, description: "Bad Gateway" }));
+    await expect(runLeadJob(shop, a.id)).rejects.toMatchObject({ kind: "temporary", httpStatus: 502 });
+    expect((await leadRowOf(a.id))!.notifiedAt).toBeNull();
+  });
+
+  test("payload sem prazo ou com leadId inválido é descartado sem enviar", async () => {
+    const shop = await seedShop({ events: { leadAbandoned: true } });
+    const lead = await leadNotice(shop);
+    const calls = fakeTg(okFor);
+    for (const payload of [{ event: "lead_abandoned", leadId: lead.id }, { event: "lead_abandoned", leadId: "nao-e-uuid", afterMinutes: 30 }, { event: "lead_abandoned", orderId: lead.id }]) {
+      await notifyTelegramJob({ id: crypto.randomUUID(), storeId: shop.storeId, type: "notify_telegram", payload } as unknown as Job, new AbortController().signal);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  describe("agendamento pelo saveLead", () => {
+    async function captureShop(events: Record<string, boolean> | null) {
+      const shop = await seedShop(events ? { events } : { telegram: false });
+      await t.ownerDb.update(store).set({ leadCapture: true, privacyEmail: "privacidade@example.com" }).where(eq(store.id, shop.storeId));
+      const [o] = await t.ownerDb.select({ slug: offer.slug }).from(offer).where(eq(offer.id, shop.offerId));
+      return { ...shop, slug: o!.slug };
+    }
+    const pub = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
+    let ipSeq = 0;
+    const save = (shop: { storeId: string; slug: string }, input: Record<string, unknown>) =>
+      runAction(checkoutSaveLead, pub(shop.storeId), { slug: shop.slug, clientIp: `198.51.100.${++ipSeq}`, ...input });
+
+    test("cria a linha: um job lead_abandoned para criado + prazo, com o prazo no payload; a mesma chave de novo não agenda outro", async () => {
+      const shop = await captureShop({ leadAbandoned: true });
+      const leadKey = crypto.randomUUID();
+      const first = await save(shop, { leadKey, email: `novo-${crypto.randomUUID()}@example.com` });
+      expect(first.created).toBe(true);
+      const jobs = await leadJobs(shop.storeId);
+      expect(jobs).toHaveLength(1);
+      const row = (await t.ownerDb.select().from(checkoutLead).where(eq(checkoutLead.storeId, shop.storeId)))[0]!;
+      expect(jobs[0]!.payload).toEqual({ event: "lead_abandoned", leadId: row.id, afterMinutes: 30 });
+      expect(jobs[0]!.runAt.getTime()).toBe(row.createdAt.getTime() + 30 * MIN);
+      // Atualização da mesma chave (celular): nenhum job a mais.
+      const second = await save(shop, { leadKey, phone: LEAD_PHONE });
+      expect(second.created).toBe(false);
+      await save(shop, { leadKey, email: `outro-${crypto.randomUUID()}@example.com` });
+      expect(await leadJobs(shop.storeId)).toHaveLength(1);
+    });
+
+    test("usa o prazo configurado da loja; flag desligada ou sem Telegram: nenhum job", async () => {
+      const custom = await captureShop({ leadAbandoned: true });
+      await runAction(saveTelegram, panel(custom.storeId), { chatId: CHAT, events: { leadAbandoned: true }, abandonAfterMinutes: 45 });
+      await save(custom, { leadKey: crypto.randomUUID(), email: `n-${crypto.randomUUID()}@example.com` });
+      const [j] = await leadJobs(custom.storeId);
+      expect((j!.payload as { afterMinutes: number }).afterMinutes).toBe(45);
+      const row = (await t.ownerDb.select().from(checkoutLead).where(eq(checkoutLead.storeId, custom.storeId)))[0]!;
+      expect(j!.runAt.getTime()).toBe(row.createdAt.getTime() + 45 * MIN);
+
+      const off = await captureShop({ abandoned: true });
+      await save(off, { leadKey: crypto.randomUUID(), email: `n-${crypto.randomUUID()}@example.com` });
+      expect(await leadJobs(off.storeId)).toHaveLength(0);
+      const bare = await captureShop(null);
+      expect((await save(bare, { leadKey: crypto.randomUUID(), email: `n-${crypto.randomUUID()}@example.com` })).created).toBe(true);
+      expect(await leadJobs(bare.storeId)).toHaveLength(0);
+    });
+
+    test("celular sozinho (sem linha) não cria linha nem job", async () => {
+      const shop = await captureShop({ leadAbandoned: true });
+      await save(shop, { leadKey: crypto.randomUUID(), phone: LEAD_PHONE });
+      expect(await leadJobs(shop.storeId)).toHaveLength(0);
+    });
+  });
+
+  test("saveTelegram aceita leadAbandoned, que começa desligado e não mexe nos outros eventos", async () => {
+    const { storeId } = await seedStore("Loja evento novo");
+    fakeTg(okFor);
+    const first = await runAction(saveTelegram, panel(storeId), { chatId: CHAT, token: BOT_TOKEN });
+    expect(first.events.leadAbandoned).toBe(false);
+    const second = await runAction(saveTelegram, panel(storeId), { chatId: CHAT, events: { leadAbandoned: true } });
+    expect(second.events).toEqual({ ...DEFAULT_EVENTS, leadAbandoned: true });
   });
 });
