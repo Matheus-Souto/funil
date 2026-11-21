@@ -159,6 +159,17 @@ describe("classificação", () => {
     }
   });
 
+  test("recovery.* não aparece como ferramenta em nenhum papel", () => {
+    // As ações do descadastro são públicas (como checkout.saveLead): ficam de fora pela permissão.
+    for (const name of ["recovery.unsubscribeView", "recovery.unsubscribe"]) {
+      expect([name, registry.get(name)?.permission, registry.get(name)?.audit]).toEqual([name, "public", false]);
+    }
+    for (const role of ROLES) {
+      expect([role, mcpTools(role).map((x) => x.action).filter((a) => a.startsWith("recovery."))]).toEqual([role, []]);
+      expect([role, mcpTools(role).map((x) => x.name).filter((n) => n.startsWith("recovery_"))]).toEqual([role, []]);
+    }
+  });
+
   test("reader vê só catálogo, métricas e o relatório de vendas pagas", () => {
     expect(
       mcpTools("reader")

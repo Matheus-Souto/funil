@@ -206,12 +206,14 @@ export const PAGE_TOKENS = {
 } as const;
 
 const ICONS = {
-  // Lucide link-2-off, clock, info, file-check e download (lucide-static 0.460.0, ISC).
+  // Lucide link-2-off, clock, info, file-check, download, mail-x e circle-check (lucide-static 0.460.0, ISC).
   "link-off": '<path d="M9 17H7A5 5 0 0 1 7 7"/><path d="M15 7h2a5 5 0 0 1 4 8"/><line x1="8" x2="12" y1="12" y2="12"/><line x1="2" x2="22" y1="2" y2="22"/>',
   clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
   "file-check": '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9 15 2 2 4-4"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+  "mail-x": '<path d="M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h9"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/><path d="m17 17 4 4"/><path d="m21 17-4 4"/>',
+  "circle-check": '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
 };
 const svg = (name: keyof typeof ICONS, size: number) =>
   `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -411,6 +413,10 @@ export async function handleDownloadPost(req: Request, token: string, opts: Down
     return errorPage(e, s);
   }
 }
+
+// Moldura, ícones e cabeçalhos reaproveitados pela página de descadastro (src/lib/recovery/unsubscribe.ts).
+export { frame as storePageFrame, svg as pageIcon, lookOf as storeLookOf, PAGE_HEADERS as STORE_PAGE_HEADERS };
+export type { StoreLook };
 
 /** HEAD /d/[token]: 200 sem tocar em nada (robôs de e-mail). */
 export function handleDownloadHead(): Response {

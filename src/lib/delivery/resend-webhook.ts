@@ -1,16 +1,20 @@
-// Webhook de status do Resend (assinado no padrão Svix): grava entregue/devolvido/spam no `email_log` da loja.
+// Webhook de status do Resend (assinado no padrão Svix): grava entregue/devolvido/spam no `email_log` da loja. Devolvido
+// ou spam também suprime o destinatário (`email_optout` pelo `to_hash`, o mesmo sha256): a recuperação não manda mais
+// lembrete para ele na loja. Vale para qualquer `kind` do `email_log`.
 import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { emailLog } from "@/lib/db/schema";
+import { emailLog, emailOptout } from "@/lib/db/schema";
 import { log } from "@/lib/log";
 import { loadResend } from "./resend";
 import { verifySvix } from "./svix";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUS = { "email.delivered": "delivered", "email.bounced": "bounced", "email.complained": "complained" } as const;
+/** Motivo da supressão em `email_optout` (entregue não suprime). */
+const OPTOUT = { "email.bounced": "bounce", "email.complained": "complaint" } as const;
 type EventType = keyof typeof STATUS;
 /**
  * Segredo de mentira: sem conexão/segredo a loja ainda gasta um HMAC (não vaza por tempo qual caso ocorreu). Gerado por
@@ -26,7 +30,9 @@ const eventBody = z.object({
 
 /**
  * Grava o estado de entrega da mensagem. Precedência no SQL: `delivered` só entra se não há estado; `bounced` e
- * `complained` sempre entram (o último vence entre os dois). Idempotente.
+ * `complained` sempre entram (o último vence entre os dois). `bounced`/`complained` gravam também `email_optout`
+ * (`bounce`/`complaint`) pelo `to_hash` da linha casada, na mesma transação, com on conflict do nothing (fica o primeiro
+ * motivo). Idempotente.
  */
 export const applyResendEvent = defineAction({
   name: "email.applyResendEvent",
@@ -52,7 +58,14 @@ export const applyResendEvent = defineAction({
           status === "delivered" ? sql`${emailLog.deliveryStatus} is null` : undefined,
         ),
       )
-      .returning({ id: emailLog.id });
+      .returning({ id: emailLog.id, toHash: emailLog.toHash });
+    if (p.type !== "email.delivered" && rows.length > 0) {
+      const reason = OPTOUT[p.type];
+      await ctx.tx
+        .insert(emailOptout)
+        .values([...new Set(rows.map((r) => r.toHash))].map((emailHash) => ({ storeId: ctx.storeId, emailHash, reason })))
+        .onConflictDoNothing();
+    }
     return { updated: rows.length };
   },
 });
