@@ -1,5 +1,7 @@
-// Logos das plataformas de origem do tráfego (utm_source) no gráfico "Por origem" e o do Pix (editor de oferta). Caminhos SVG do Simple Icons
-// 16.38.0 (https://simpleicons.org, licença CC0-1.0), embutidos: nenhuma requisição a terceiros.
+// Logos das plataformas de origem do tráfego (utm_source) no gráfico "Por origem", o do Pix (editor de oferta) e os das
+// Conexões. Caminhos SVG do Simple Icons 16.38.0 (https://simpleicons.org, licença CC0-1.0), embutidos: nenhuma
+// requisição a terceiros. O Asaas não está no Simple Icons: o "A" vem do logo do site do Asaas (marca deles, usada só para
+// identificar a integração).
 
 export interface Brand {
   title: string;
@@ -122,6 +124,15 @@ const ALIASES: Record<string, keyof typeof BRANDS> = {
 
 /** Logo do Pix (cartão do método de pagamento no editor de oferta). */
 export const PIX_BRAND: Brand = BRANDS.pix!;
+
+/** Logos das integrações da página Conexões. */
+export const CONNECTION_BRANDS = {
+  pix: BRANDS.pix!,
+  meta: BRANDS.meta!,
+  telegram: BRANDS.telegram!,
+  resend: { title: "Resend", hex: "#000000", path: "M14.679 0c4.648 0 7.413 2.765 7.413 6.434s-2.765 6.434-7.413 6.434H12.33L24 24h-8.245l-8.88-8.44c-.636-.588-.93-1.273-.93-1.86 0-.831.587-1.565 1.713-1.883l4.574-1.224c1.737-.465 2.936-1.81 2.936-3.572 0-2.153-1.761-3.4-3.939-3.4H0V0z" },
+  asaas: { title: "Asaas", hex: "#0038E5", path: "M9.656 5.172L0.800 20.935H3.504L4.608 18.894C5.893 16.540 8.102 15.262 11.887 15.262C15.673 15.262 18.040 16.540 19.324 18.917L20.406 20.935H23.200L13.781 4.208C13.330 3.401 12.699 3.065 11.662 3.065H4.068L5.227 4.244C5.933 4.946 6.487 5.172 7.471 5.172H9.656ZM7.380 13.894L11.955 5.598L16.529 13.872C15.245 13.289 13.622 12.998 11.887 12.998C10.264 12.998 8.687 13.289 7.379 13.894Z" },
+} satisfies Record<string, Brand>;
 
 /** Plataforma de um utm_source (sem diferenciar maiúsculas, espaços, hífens e "ads" no fim); undefined se desconhecida. */
 export function brandOf(source: string): Brand | undefined {
