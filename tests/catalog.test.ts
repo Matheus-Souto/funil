@@ -107,13 +107,13 @@ describe("products", () => {
     expect(await checkPdfBytes(over)).toMatch(/50 MB/);
     expect(await checkPdfBytes(CORRUPT_PDF)).toMatch(/corrompido|inválido/i);
     expect(await checkPdfBytes(ENCRYPTED_PDF)).toMatch(/protegido|criptograf|senha/i);
-    expect(await checkPdfBytes(await makePdf(500))).toBeNull();
-    expect(await checkPdfBytes(await makePdf(501))).toMatch(/500/);
+    expect(await checkPdfBytes(await makePdf(1000))).toBeNull();
+    expect(await checkPdfBytes(await makePdf(1001))).toMatch(/1001 páginas; o máximo é 1000/);
   }, HEAVY_TEST_MS);
 
   test("PDF criptografado, corrompido após %PDF- ou com páginas demais é invalid_input com mensagem clara e nada é criado", async () => {
     const { storeId } = await seedStore();
-    for (const file of [ENCRYPTED_PDF, CORRUPT_PDF, await makePdf(501)]) {
+    for (const file of [ENCRYPTED_PDF, CORRUPT_PDF, await makePdf(1001)]) {
       const err = (await call(createProduct, storeId, owner, { name: "X", fileName: "x.pdf", file }).catch((e) => e)) as ActionError;
       expect(err.code).toBe("invalid_input");
       expect(err.message).toMatch(/PDF/);

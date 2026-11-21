@@ -13,7 +13,8 @@ import s from "../../panel.module.css";
 import { Dialog, Live } from "../../ui";
 
 const MAX = 52_428_800;
-const MAX_PAGES = 500;
+// Mesmos tetos de MAX_PDF_BYTES e MAX_PDF_PAGES (src/lib/catalog/products.ts, que usa o banco e não vai ao navegador).
+const MAX_PAGES = 1000;
 const mb = (n: number) => `${(n / 1_048_576).toFixed(1).replace(".", ",")} MB`;
 
 type Preview = { status: "reading" } | { status: "ok"; pages: number } | { status: "none"; reason: string };
@@ -208,7 +209,7 @@ function NewProductDialog({ open, onClose, onCreated }: { open: boolean; onClose
           <Art name="produto" size={64} className={s.dropArt} />
           <b>Arraste o PDF aqui</b>
           <span className={s.hint}>
-            ou <u>escolha um arquivo</u> · até 50 MB, sem senha, até 500 páginas
+            ou <u>escolha um arquivo</u> · até 50 MB, sem senha, até 1.000 páginas
           </span>
           <input
             ref={input}
