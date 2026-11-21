@@ -57,7 +57,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
             count={`${products.length} ${products.length === 1 ? "produto" : "produtos"}${filtered ? " com estes filtros" : ""}`}
           >
             {products.length > 0 ? (
-              <table className={s.table}>
+              <table className={`${s.table} ${s.productTable}`}>
                 <thead>
                   <tr>
                     <th scope="col">Produto</th>

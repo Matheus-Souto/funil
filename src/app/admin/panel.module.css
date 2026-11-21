@@ -2360,6 +2360,7 @@
 }
 .tableCount {
   flex: 1;
+  white-space: nowrap;
   font-size: 13px;
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
@@ -3201,5 +3202,17 @@
 @media (max-width: 600px) {
   .uploadCard {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Produtos no celular: só nome, status e o botão de ver o PDF (arquivo, ofertas e data ficam para telas maiores). */
+@media (max-width: 700px) {
+  .productTable th:nth-child(2),
+  .productTable td:nth-child(2),
+  .productTable th:nth-child(4),
+  .productTable td:nth-child(4),
+  .productTable th:nth-child(5),
+  .productTable td:nth-child(5) {
+    display: none;
   }
 }
