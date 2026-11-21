@@ -42,7 +42,7 @@ interface Candidate {
   /** Momento previsto do caso: contato criado + 60 min; Pix criado + 30 min; 1ª recusa do cartão + 30 min. */
   dueAt: Date;
   /** Só pix e cartão. */
-  order?: { customerId: string; createdAt: Date; clientIp: string; declines: number };
+  order?: { customerId: string; createdAt: Date; clientIp: string; declines: number; firstDecline?: Date };
 }
 
 interface StoreFlags {
@@ -169,7 +169,7 @@ async function candidates(tx: Tx, f: StoreFlags, t: Date): Promise<Candidate[]> 
         offerId: o.offerId,
         email: o.email,
         dueAt: new Date(o.firstDecline.getTime() + RECOVERY.cardAfterMin * MIN_MS),
-        order: { customerId: o.customerId, createdAt: o.createdAt, clientIp: o.clientIp, declines: o.declines },
+        order: { customerId: o.customerId, createdAt: o.createdAt, clientIp: o.clientIp, declines: o.declines, firstDecline: o.firstDecline },
       });
     }
   }
@@ -193,11 +193,17 @@ async function liveSince(tx: Tx, storeId: string, since: Date, cardOnly = false)
   return Number(row?.n ?? 0);
 }
 
-/** Pedido de cartão com sinal de teste de cartão: muitas recusas no pedido, disjuntor da loja, IP com muitas recusas ou desconhecido. */
+/**
+ * Pedido de cartão com sinal de teste de cartão: muitas recusas no pedido, disjuntor da loja, IP com muitas recusas ou
+ * desconhecido. A janela do disjuntor e das recusas do IP é ancorada na 1ª recusa do pedido (de 2 h antes dela até a
+ * varredura), não só nas 2 h antes da varredura: um candidato avaliado horas depois (worker parado) não perde a
+ * evidência de perto da recusa. A 1ª recusa tem no máximo 6 h; a limpeza do `rate_limit` guarda 24 h.
+ */
 async function cardSuspicious(storeId: string, o: NonNullable<Candidate["order"]>, t: Date): Promise<boolean> {
   if (o.declines > RECOVERY.cardMaxDeclines) return true;
   if (o.clientIp === UNKNOWN_IP) return true;
-  const windowSec = RECOVERY.cardSuspicionWindowHours * 3600;
+  const anchor = o.firstDecline ?? t;
+  const windowSec = Math.max(0, (t.getTime() - anchor.getTime()) / 1000) + RECOVERY.cardSuspicionWindowHours * 3600;
   if (await hadRecentEvent(cardBreakerKey(storeId), windowSec, t)) return true;
   return (await countRecentEvents(cardDeclineIpKey(ipRateKey(o.clientIp)), windowSec, t)) > RECOVERY.cardIpDeclinesMax;
 }
@@ -279,13 +285,15 @@ async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
   let deferred = 0;
 
   for (const c of list) {
+    // Primeiro os motivos de pulo (com linha, definitivo, avaliado com a evidência fresca); a linha `skipped` não gasta
+    // teto. Só depois os tetos: um candidato suspeito nunca fica adiado esperando a evidência sair da janela.
+    const hash = recoveryEmailHash(c.email);
+    const reason = await skipReason(tx, storeId, c, hash, t);
     // Pula sem linha: teto da hora da loja ou do caso cartão (volta na próxima varredura).
-    if (storeCount >= RECOVERY.storePerHour || (c.kind === "card" && cardCount >= RECOVERY.cardPerHour)) {
+    if (reason === null && (storeCount >= RECOVERY.storePerHour || (c.kind === "card" && cardCount >= RECOVERY.cardPerHour))) {
       deferred++;
       continue;
     }
-    const hash = recoveryEmailHash(c.email);
-    const reason = await skipReason(tx, storeId, c, hash, t);
     const token = reason === null ? randomToken(32) : null;
     const [created] = await tx
       .insert(recoveryEmail)

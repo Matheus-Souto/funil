@@ -363,12 +363,64 @@ describe("recovery_scan", () => {
     expect(await sendJobsOf(s.storeId)).toHaveLength(0);
   });
 
-  test("disjuntor de 3 h atrás não conta (janela de 2 h)", async () => {
+  test("disjuntor de 3 h atrás (mais de 2 h antes da 1ª recusa) não conta", async () => {
     const s = await shop();
     await recordEvent(cardBreakerKey(s.storeId), ago(3 * HOUR));
     const o = await cardOrder(s, ago(31 * MIN));
     await scan();
     expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: o.id, status: "queued" }]);
+  });
+
+  test("cartão suspeito (disjuntor há 1 h) adiado pelo teto e reavaliado 3 h depois → skipped cartao_suspeito, sem job", async () => {
+    // Teto do cartão cheio (10 lembretes na última hora) nas duas lojas.
+    const fillCardCap = async (s: Awaited<ReturnType<typeof shop>>) => {
+      for (let i = 0; i < 10; i++) {
+        const o = await seedOrder(s, { status: "pending", method: "card_asaas", createdAt: ago(3 * HOUR) });
+        await t.ownerDb.insert(recoveryEmail).values(pastRow(s, { kind: "card", orderId: o.id }));
+      }
+    };
+    // Avaliado já: o motivo de pulo vem antes do teto (a linha skipped não gasta teto e é definitiva).
+    const now = await shop();
+    await fillCardCap(now);
+    await recordEvent(cardBreakerKey(now.storeId), ago(HOUR));
+    const a = await cardOrder(now, ago(31 * MIN));
+    // Adiado (sem varredura agora) e reavaliado 3 h depois: a janela ancorada na 1ª recusa ainda vê o disjuntor.
+    const later = await shop();
+    await fillCardCap(later);
+    await recordEvent(cardBreakerKey(later.storeId), ago(HOUR));
+    const b = await cardOrder(later, ago(31 * MIN));
+    await createRecoveryScanHandler(
+      () => NOW,
+      async (storeId) => {
+        if (storeId === later.storeId) throw new Error("loja adiada neste teste");
+      },
+    )({} as never, new AbortController().signal).catch(() => undefined);
+    expect((await rowsOf(now.storeId)).filter((r) => r.orderId === a.id)).toMatchObject([{ status: "skipped", skipReason: "cartao_suspeito" }]);
+    expect(await sendJobsOf(now.storeId)).toHaveLength(0);
+    expect((await rowsOf(later.storeId)).filter((r) => r.orderId === b.id)).toHaveLength(0);
+    await scan(new Date(NOW.getTime() + 3 * HOUR));
+    expect((await rowsOf(later.storeId)).filter((r) => r.orderId === b.id)).toMatchObject([{ status: "skipped", skipReason: "cartao_suspeito" }]);
+    expect(await sendJobsOf(later.storeId)).toHaveLength(0);
+  });
+
+  test("evidência só perto da recusa (disjuntor há 4 h, recusa há 4,5 h; IP com 4 recusas há 4,4 h) → skipped cartao_suspeito", async () => {
+    const s = await shop();
+    await recordEvent(cardBreakerKey(s.storeId), ago(4 * HOUR));
+    const o = await cardOrder(s, ago(4.5 * HOUR));
+    const ipShop = await shop();
+    const busyIp = newIp();
+    for (let i = 0; i < 4; i++) await recordEvent(cardDeclineIpKey(busyIp), ago(4.4 * HOUR - i * MIN));
+    const ipOrder = await cardOrder(ipShop, ago(4.5 * HOUR), { ip: busyIp });
+    // Disjuntor de 7 h atrás está a mais de 2 h antes da 1ª recusa (4,5 h): não conta.
+    const old = await shop();
+    await recordEvent(cardBreakerKey(old.storeId), ago(7 * HOUR));
+    const clean = await cardOrder(old, ago(4.5 * HOUR));
+    await scan();
+    expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: o.id, status: "skipped", skipReason: "cartao_suspeito" }]);
+    expect(await rowsOf(ipShop.storeId)).toMatchObject([{ orderId: ipOrder.id, status: "skipped", skipReason: "cartao_suspeito" }]);
+    expect(await rowsOf(old.storeId)).toMatchObject([{ orderId: clean.id, status: "queued" }]);
+    expect(await sendJobsOf(s.storeId)).toHaveLength(0);
+    expect(await sendJobsOf(ipShop.storeId)).toHaveLength(0);
   });
 
   test("IP do pedido com 4 recusas em 2 h → skipped; com 3 → enfileira", async () => {
