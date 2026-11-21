@@ -11,9 +11,10 @@ export const dynamic = "force-dynamic";
  * Sessão do painel + permissão products.read (ação `products.file`). Sempre como anexo e com CSP sandbox: o navegador
  * nunca abre o PDF enviado pela loja na origem do painel.
  */
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
+export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+  // Sessão antes de tudo (nem os parâmetros são lidos sem login).
   const panel = await requirePanelActor();
-  const { id } = await params;
+  const { id } = await ctx.params;
   try {
     const out = await runAction(readProductFile, { ...panel, origin: "panel" }, { id });
     return new Response(out.bytes as unknown as BodyInit, {
