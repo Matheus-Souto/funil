@@ -6,6 +6,7 @@ import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { clientIpFrom } from "@/lib/client-ip";
 import { NEEDS_CPF, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { resolveStore } from "@/lib/stores";
@@ -99,5 +100,34 @@ export async function recordCheckoutViewAction(input: unknown): Promise<void> {
     await runAction(checkoutView, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, { ...body, clientIp: clientIpFrom(h, env.TRUST_PROXY) });
   } catch {
     /* oferta inativa ou entrada inválida: sem registro */
+  }
+}
+
+/**
+ * Guarda o contato de quem digita e-mail ou celular (só com a captura ligada na loja; a regra fica em
+ * `checkout.saveLead`). Melhor esforço: o comprador nunca vê erro. Nada do contato nem a chave vai para log.
+ */
+export async function saveLeadAction(input: unknown): Promise<void> {
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
+  if (!store) return;
+  const body = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  try {
+    await runAction(checkoutSaveLead, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, { ...body, clientIp: clientIpFrom(h, env.TRUST_PROXY) });
+  } catch {
+    /* captura desligada, limite estourado ou entrada inválida: sem registro e sem erro para o comprador */
+  }
+}
+
+/** "Não salvar meus dados": apaga o contato da chave (`checkout.forgetLead`). Melhor esforço, sem erro para o comprador. */
+export async function forgetLeadAction(input: unknown): Promise<void> {
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
+  if (!store) return;
+  const body = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  try {
+    await runAction(checkoutForgetLead, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, { leadKey: body.leadKey });
+  } catch {
+    /* sem registro ou limite: nada a mostrar */
   }
 }

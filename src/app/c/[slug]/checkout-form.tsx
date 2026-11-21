@@ -17,7 +17,7 @@ import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/valid
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
 import { TrustSeals } from "../../(design)/shell";
-import { recordCheckoutViewAction, renewCardTicketAction, startCheckoutAction, type StartResult } from "./actions";
+import { forgetLeadAction, recordCheckoutViewAction, renewCardTicketAction, saveLeadAction, startCheckoutAction, type StartResult } from "./actions";
 import {
   FRAME_UNAVAILABLE_MESSAGE,
   createCardFrameController,
@@ -30,6 +30,7 @@ import {
   type FrameConfig,
   type FrameStatus,
 } from "./card-frame";
+import { nextLeadSend } from "./lead-capture";
 import { checkoutTracking } from "./tracking";
 
 type Touch = { first: Record<string, string> | null; last: Record<string, string> | null };
@@ -66,6 +67,7 @@ function Field(props: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  onBlur?: () => void;
   error?: string;
   hint?: string;
   inputMode?: "text" | "email" | "tel" | "numeric";
@@ -74,7 +76,7 @@ function Field(props: {
   mono?: boolean;
   maxLength?: number;
 }) {
-  const { id, label, value, onChange, error, hint, inputMode, autoComplete, placeholder, maxLength } = props;
+  const { id, label, value, onChange, onBlur, error, hint, inputMode, autoComplete, placeholder, maxLength } = props;
   const msg = error ?? hint;
   return (
     <div className={s.field} data-invalid={error ? "true" : undefined}>
@@ -87,6 +89,7 @@ function Field(props: {
           className={s.input}
           value={value}
           onChange={(e) => onChange(e.target.value)}
+          onBlur={onBlur}
           inputMode={inputMode}
           autoComplete={autoComplete}
           placeholder={placeholder}
@@ -163,13 +166,15 @@ export function CheckoutForm(props: {
   touch: Touch;
   refCode?: string;
   eventId: string;
+  /** Captura do contato ligada na loja: chave desta visita e e-mail de privacidade do aviso; `null` = desligada. */
+  lead: { key: string; privacyEmail: string } | null;
   turnstileSiteKey: string | null;
   /** Cor da loja (#RRGGBB): vai no `config` do iframe do cartão, que a aplica nos campos dele. */
   brandColor: string | null;
   /** Iframe do cartão (`${CARD_ORIGIN}/form/${storeId}`); `null` = sem cartão (a oferta não tem, ou falta o serviço). */
   cardFrame: { origin: string; src: string } | null;
 }) {
-  const { offer, storeName, touch, refCode, eventId, turnstileSiteKey, cardFrame } = props;
+  const { offer, storeName, touch, refCode, eventId, lead, turnstileSiteKey, cardFrame } = props;
   const router = useRouter();
   const hydrated = useHydrated();
   const [method, setMethod] = useState<Method>(props.initialMethod);
@@ -185,6 +190,12 @@ export function CheckoutForm(props: {
   // Remonta o widget depois de usar o token (ele vale uma vez): o próximo captcha pede um desafio novo.
   const [turnstileKey, setTurnstileKey] = useState(0);
   const viewed = useRef(false);
+  // Captura do contato: o que já foi enviado, se a pessoa pediu para não salvar e uma fila para as chamadas irem em
+  // ordem (um "Não salvar" nunca é ultrapassado por uma gravação que ainda estava no ar).
+  const leadSent = useRef<{ email: string | null; phone: string | null }>({ email: null, phone: null });
+  const leadQueue = useRef<Promise<void>>(Promise.resolve());
+  const [optedOut, setOptedOut] = useState(false);
+  const [leadMore, setLeadMore] = useState(false);
   // Pedido de cartão com o bilhete atual (nova tentativa reaproveita o pedido); iframe (remontado ao trocar
   // `frameKey`) e o seu estado.
   const cardOrder = useRef<CardOrder | null>(null);
@@ -203,6 +214,22 @@ export function CheckoutForm(props: {
     viewed.current = true;
     void recordCheckoutViewAction({ slug: offer.slug, touch });
   }, [offer.slug, touch]);
+
+  function captureLead(field: "email" | "phone") {
+    if (!lead) return;
+    const send = nextLeadSend({ optedOut, sent: leadSent.current }, field, { email: v.email, phone: v.phone });
+    if (!send) return;
+    leadSent.current = { email: send.email ?? leadSent.current.email, phone: send.phone ?? leadSent.current.phone };
+    leadQueue.current = leadQueue.current.then(() => saveLeadAction({ slug: offer.slug, leadKey: lead.key, ...send })).catch(() => {});
+  }
+
+  function optOutOfLead() {
+    if (!lead) return;
+    setOptedOut(true);
+    setLeadMore(false);
+    if (leadSent.current.email === null && leadSent.current.phone === null) return;
+    leadQueue.current = leadQueue.current.then(() => forgetLeadAction({ leadKey: lead.key })).catch(() => {});
+  }
 
   const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);
   const brandColor = props.brandColor ?? undefined;
@@ -314,7 +341,7 @@ export function CheckoutForm(props: {
 
   async function payPix() {
     checkoutTracking.onAddPaymentInfo("pix", total);
-    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), touch, ref: refCode, eventId });
+    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
     if (r.ok) {
       router.push(`/o/${r.publicId}`);
       return;
@@ -341,7 +368,7 @@ export function CheckoutForm(props: {
       sig,
       ...(sentToken ? { turnstileToken: sentToken } : {}),
       now: () => Date.now(),
-      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId }),
+      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
       renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });
@@ -477,17 +504,49 @@ export function CheckoutForm(props: {
                 label="E-mail"
                 value={v.email}
                 onChange={set("email")}
+                onBlur={() => captureLead("email")}
                 error={errors.email}
                 hint="É para este e-mail que enviamos o seu acesso."
                 inputMode="email"
                 autoComplete="email"
                 maxLength={254}
               />
+              {lead ? (
+                <div className={s.leadNotice} data-done={optedOut ? "true" : undefined}>
+                  {optedOut ? (
+                    <p role="status">Pronto: seus dados não serão guardados antes da compra.</p>
+                  ) : (
+                    <>
+                      <p>
+                        A {storeName} guarda seu e-mail e celular por até 30 dias para falar com você se a compra não for concluída.
+                      </p>
+                      <p className={s.leadActions}>
+                        <button type="button" className={s.leadLink} onClick={optOutOfLead}>
+                          Não salvar meus dados
+                        </button>
+                        <span aria-hidden="true"> · </span>
+                        <button type="button" className={s.leadLink} aria-expanded={leadMore} aria-controls="lead-more" onClick={() => setLeadMore((x) => !x)}>
+                          Saiba mais
+                        </button>
+                      </p>
+                      {leadMore ? (
+                        <p id="lead-more" className={s.leadMore}>
+                          <b>Quem trata:</b> {storeName}. <b>Para quê:</b> só para lembrar você desta compra; seus dados não são vendidos nem compartilhados.{" "}
+                          <b>Base legal:</b> legítimo interesse (LGPD, art. 7º, IX). <b>Por quanto tempo:</b> até 30 dias; se você concluir a compra, valem os
+                          dados do pedido e este registro perde o contato na hora. <b>Seus direitos:</b> peça acesso ou exclusão a qualquer momento por{" "}
+                          {lead.privacyEmail}, ou toque em &quot;Não salvar meus dados&quot;.
+                        </p>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ) : null}
               <Field
                 id="phone"
                 label="WhatsApp"
                 value={v.phone}
                 onChange={set("phone", maskPhone)}
+                onBlur={() => captureLead("phone")}
                 error={errors.phone}
                 hint="Só para avisos sobre este pedido."
                 inputMode="tel"

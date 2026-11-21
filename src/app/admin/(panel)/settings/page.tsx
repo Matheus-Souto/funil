@@ -22,7 +22,7 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHead title="Configurações" sub="Dados da loja, aparência do checkout e integração com a página de vendas." />
-      <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor }} canWrite={canWrite} />
+      <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "" }} canWrite={canWrite} />
 
       <div className={s.settingsRow} id="script">
         <div>

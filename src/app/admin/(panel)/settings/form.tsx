@@ -13,8 +13,8 @@ const HEX = /^#[0-9a-f]{6}$/i;
 const ratio = (n: number) => `${n.toFixed(1).replace(".", ",")}:1`;
 const TEXT_NAME: Record<string, string> = { "#FFFFFF": "Texto branco", "#15201B": "Texto escuro", "#000000": "Texto preto" };
 
-export function SettingsForm({ initial, canWrite }: { initial: { name: string; notifyEmail: string; brandColor: string | null }; canWrite: boolean }) {
-  const [f, setF] = useState({ name: initial.name, notifyEmail: initial.notifyEmail, color: initial.brandColor ?? "" });
+export function SettingsForm({ initial, canWrite }: { initial: { name: string; notifyEmail: string; brandColor: string | null; leadCapture: boolean; privacyEmail: string }; canWrite: boolean }) {
+  const [f, setF] = useState({ name: initial.name, notifyEmail: initial.notifyEmail, color: initial.brandColor ?? "", leadCapture: initial.leadCapture, privacyEmail: initial.privacyEmail });
   const run = useActionRunner();
   const valid = f.color === "" || HEX.test(f.color);
   const vars = useMemo(() => brandVars(valid && f.color ? f.color : null), [f.color, valid]);
@@ -33,7 +33,13 @@ export function SettingsForm({ initial, canWrite }: { initial: { name: string; n
           return;
         }
         void run.run(() =>
-          updateSettingsAction({ name: f.name.trim(), notifyEmail: f.notifyEmail.trim() || null, brandColor: f.color ? f.color.toUpperCase() : null }),
+          updateSettingsAction({
+            name: f.name.trim(),
+            notifyEmail: f.notifyEmail.trim() || null,
+            brandColor: f.color ? f.color.toUpperCase() : null,
+            leadCapture: f.leadCapture,
+            privacyEmail: f.privacyEmail.trim() || null,
+          }),
         );
       }}
     >
@@ -104,6 +110,31 @@ export function SettingsForm({ initial, canWrite }: { initial: { name: string; n
                 </span>
                 <span style={{ color: "var(--color-brand-strong)", fontWeight: 600, fontSize: 13 }}>Link e destaque na cor da loja</span>
               </div>
+            </div>
+          </div>
+          <div className={s.grid2}>
+            <div className={s.field}>
+              <label className={s.switch}>
+                <input type="checkbox" checked={f.leadCapture} onChange={(e) => setF({ ...f, leadCapture: e.target.checked })} aria-describedby="lead-capture-hint" />
+                Guardar o contato de quem não finaliza a compra
+              </label>
+              <span id="lead-capture-hint" className={s.hint}>
+                E-mail e celular ficam por até 30 dias, com aviso no checkout. Exige o e-mail para pedidos de privacidade.
+              </span>
+            </div>
+            <div className={s.field}>
+              <label className={s.field}>
+                <span className={s.label}>E-mail para pedidos de privacidade</span>
+                <input
+                  className={s.input}
+                  type="email"
+                  value={f.privacyEmail}
+                  maxLength={254}
+                  required={f.leadCapture}
+                  onChange={(e) => setF({ ...f, privacyEmail: e.target.value })}
+                />
+              </label>
+              <span className={s.hint}>Aparece no aviso de privacidade do checkout.</span>
             </div>
           </div>
           <div className={s.banner} data-tone="neutral">
