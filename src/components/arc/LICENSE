@@ -28,9 +28,13 @@ em 21/11/2026. Nenhum item do Arc Pro está neste repositório. Os arquivos fora
 adaptados ao painel (textos em português, tokens do tema, partes não usadas
 removidas).
 
+- accordion         https://uiarc.dev/components/accordion
 - animated-counter  https://uiarc.dev/components/animated-counter
+- avatar            https://uiarc.dev/components/avatar
 - bar-chart         https://uiarc.dev/components/bar-chart
 - button            https://uiarc.dev/components/button
+- color-picker      https://uiarc.dev/components/color-picker (textos em português; opções alpha e contrastLabel)
+- copy-button       https://uiarc.dev/components/copy-button (textos em português)
 - date-range-picker https://uiarc.dev/components/date-range-picker (e lib/use-today.ts)
 - dialog            https://uiarc.dev/components/dialog
 - donut-chart       https://uiarc.dev/components/donut-chart
@@ -41,6 +45,9 @@ removidas).
 - skeleton          https://uiarc.dev/components/skeleton
 - sortable-data-table https://uiarc.dev/components/sortable-data-table (com um espaço para o filtro da coluna no cabeçalho)
 - sparkline         https://uiarc.dev/components/sparkline
+- switch            https://uiarc.dev/components/switch
+- tabs              https://uiarc.dev/components/tabs (textos em português)
+- text-morph        https://uiarc.dev/components/text-morph (usado pelo color-picker)
 - theme-switch      https://uiarc.dev/components/theme-switch
 - tooltip           https://uiarc.dev/components/tooltip
 - foundation.css e lib/motion-tokens.ts: base de tokens que esses componentes usam

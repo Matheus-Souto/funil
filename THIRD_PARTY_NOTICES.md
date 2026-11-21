@@ -23,7 +23,7 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | motion (animações do painel) | 14.14.0 | MIT |
 | lucide-react (ícones do painel) | 1.73.0 | ISC |
 | pdfjs-dist (miniatura e visualizador de PDF do painel) | 6.5.438 | Apache-2.0 |
-| @radix-ui/react-tooltip, -dialog | 1.x | MIT |
+| @radix-ui/react-tooltip, -dialog, -tabs, -switch, -accordion | 1.x | MIT |
 | @radix-ui/react-dropdown-menu, -select | 2.x | MIT |
 
 Logos das plataformas no gráfico "Por origem" e na página Conexões (`src/app/admin/brand-icons.ts`): caminhos SVG do

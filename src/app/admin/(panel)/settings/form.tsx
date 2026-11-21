@@ -204,23 +204,25 @@ export function SettingsPanel({
               </SetText>
               <Switch checked={f.recovery.on} onCheckedChange={(v) => setRecovery({ on: v })} aria-labelledby={`${id}-rec-t`} aria-describedby={`${id}-rec-d`} />
             </div>
-            <div className={s.setSub} role="group" aria-label="Quando mandar o lembrete">
-              <div className={s.setSubRow}>
-                <span id={`${id}-rl`}>
-                  Digitou o e-mail e saiu antes do pedido
-                  <small>Precisa da captura de contato ligada.</small>
-                </span>
-                <Switch checked={f.recovery.lead} disabled={!f.recovery.on} onCheckedChange={(v) => setRecovery({ lead: v })} aria-labelledby={`${id}-rl`} />
+            {f.recovery.on ? (
+              <div className={s.setSub} role="group" aria-label="Quando mandar o lembrete">
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rl`}>
+                    Digitou o e-mail e saiu antes do pedido
+                    <small>Precisa da captura de contato ligada.</small>
+                  </span>
+                  <Switch checked={f.recovery.lead} onCheckedChange={(v) => setRecovery({ lead: v })} aria-labelledby={`${id}-rl`} />
+                </div>
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rp`}>Pix gerado e não pago</span>
+                  <Switch checked={f.recovery.pix} onCheckedChange={(v) => setRecovery({ pix: v })} aria-labelledby={`${id}-rp`} />
+                </div>
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rc`}>Cartão recusado</span>
+                  <Switch checked={f.recovery.card} onCheckedChange={(v) => setRecovery({ card: v })} aria-labelledby={`${id}-rc`} />
+                </div>
               </div>
-              <div className={s.setSubRow}>
-                <span id={`${id}-rp`}>Pix gerado e não pago</span>
-                <Switch checked={f.recovery.pix} disabled={!f.recovery.on} onCheckedChange={(v) => setRecovery({ pix: v })} aria-labelledby={`${id}-rp`} />
-              </div>
-              <div className={s.setSubRow}>
-                <span id={`${id}-rc`}>Cartão recusado</span>
-                <Switch checked={f.recovery.card} disabled={!f.recovery.on} onCheckedChange={(v) => setRecovery({ card: v })} aria-labelledby={`${id}-rc`} />
-              </div>
-            </div>
+            ) : null}
           </fieldset>
         </TabsContent>
 

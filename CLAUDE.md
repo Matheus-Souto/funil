@@ -9,6 +9,7 @@
 - Não edite `.claude/`, `REVIEW.md`, `scripts/verify*`, `e2e/` ou `.github/` em PR que também muda código de produto. Mudanças de verificação vão em PR separado.
 
 ## Produto
+- Página nova ou mudança de tela do painel segue `docs/padrao-de-paginas.md` (componentes do Arc, cores do tema, ícones, textos).
 - Dinheiro sempre em centavos inteiros; nunca ponto flutuante.
 - Toda rota e página nova chama só `runAction`; regra de negócio fica nas ações.
 - Toda tabela nova tem `store_id` e chama `enable_store_rls` (isolamento por loja via RLS).

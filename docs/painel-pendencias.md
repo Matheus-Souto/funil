@@ -1,6 +1,6 @@
 # Painel: pendências no servidor
 
-O redesenho do painel (tema claro/escuro, Arc UI, gráficos em ECharts) foi feito quase todo na interface. Alguns pontos
+O redesenho do painel (tema claro/escuro, componentes e gráficos do Arc UI) foi feito quase todo na interface. Alguns pontos
 funcionam hoje com o que o servidor já entrega, mas ficariam melhores com um ajuste nas ações. Ficam anotados aqui.
 
 Já resolvidos no PR do redesenho: vendas por oferta e dia numa consulta só (`metricsBreakdown.byOfferDay`, mini gráfico
