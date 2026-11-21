@@ -23,7 +23,7 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | echarts (gráficos do painel) | 6.1.0 | Apache-2.0 |
 | motion (animações do painel) | 14.14.0 | MIT |
 | lucide-react (ícones do painel) | 1.77.0 | ISC |
-| @radix-ui/react-tooltip, @radix-ui/react-dialog | 1.x | MIT |
+| @radix-ui/react-tooltip, -dialog, -dropdown-menu | 1.x | MIT |
 
 Componentes copiados para `src/components/arc` (Arc, https://uiarc.dev, só a parte grátis): MIT, Copyright (c) Elia
 Kuratli. Itens Arc Pro não entram neste repositório (a licença deles proíbe redistribuir).
