@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
@@ -11,7 +12,8 @@ import { needsSetup } from "@/lib/stores";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { logoutAction } from "./actions";
-import { SideNav, TabBar, type NavEntry } from "./nav";
+import { TabBar, type NavEntry } from "./nav";
+import { PanelShell } from "./sidebar";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +35,9 @@ export default async function PanelLayout({ children }: { children: ReactNode })
         () => 0,
       )
     : 0;
+
+  const jar = await cookies();
+  const theme = jar.get("funil-theme")?.value;
 
   const items: NavEntry[] = [
     ...(can("metrics.read") ? [{ href: "/admin", label: "Visão geral", icon: "layout-dashboard" as const }] : []),
@@ -65,47 +70,15 @@ export default async function PanelLayout({ children }: { children: ReactNode })
           <PIcon name="sparkles" />
         </button>
       </header>
-      <div className={s.shell}>
-        <aside className={s.sidebar} aria-label="Menu do painel">
-          <Link href="/admin" className={s.brand}>
-            funil
-          </Link>
-          <div className={s.storeBox}>
-            <span>
-              <b>{id.storeName}</b>
-              <small>{ROLE_LABEL[role]}</small>
-            </span>
-          </div>
-          <button type="button" className={s.ai} aria-disabled="true" title="Pergunte à IA chega na próxima fase">
-            <PIcon name="sparkles" />
-            <span>Pergunte à IA</span>
-            <kbd>Ctrl K</kbd>
-          </button>
-          <nav aria-label="Navegação do painel" style={{ display: "contents" }}>
-            <SideNav items={items} />
-          </nav>
-          <div className={s.userFoot}>
-            <span className={s.avatar}>
-              <PIcon name="user" />
-            </span>
-            <span className={s.userText}>
-              <b>{id.userName}</b>
-              <small>{id.userEmail}</small>
-            </span>
-            <Link href={CHANGE_PASSWORD_PATH} className={s.iconBtn} aria-label="Trocar senha" title="Trocar senha">
-              <PIcon name="lock" />
-            </Link>
-            <form action={logoutAction}>
-              <button type="submit" className={s.iconBtn} aria-label="Sair" title="Sair">
-                <PIcon name="log-out" />
-              </button>
-            </form>
-          </div>
-        </aside>
-        <main id="conteudo" className={s.main}>
-          <div className={s.mainInner}>{children}</div>
-        </main>
-      </div>
+      <PanelShell
+        items={items}
+        id={{ storeName: id.storeName, roleLabel: ROLE_LABEL[role], userName: id.userName, userEmail: id.userEmail }}
+        logout={logoutAction}
+        initialCollapsed={jar.get("funil-sidebar")?.value === "collapsed"}
+        initialTheme={theme === "light" || theme === "dark" ? theme : undefined}
+      >
+        {children}
+      </PanelShell>
       <TabBar items={items} logout={logoutAction} />
     </div>
   );

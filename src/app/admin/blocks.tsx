@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { statusLabel, statusTone } from "@/lib/orders/labels";
 import { PIcon } from "./icons";
+import Image from "next/image";
+import { KpiNumber } from "./charts";
 import s from "./panel.module.css";
 
 export function StatusBadge({ status, method, label }: { status: string; method: string; label?: string }) {
@@ -28,11 +30,32 @@ export function deltaOf(cur: number, prev: number): { pct: number | null; tone: 
   return { pct, tone: pct > 0 ? "up" : pct < 0 ? "down" : "flat" };
 }
 
-export function Kpi({ label, value, delta, compare, empty }: { label: string; value: string; delta?: ReturnType<typeof deltaOf>; compare?: string; empty?: boolean }) {
+export function Kpi({
+  label,
+  value,
+  amount,
+  money,
+  delta,
+  compare,
+  empty,
+  art,
+}: {
+  label: string;
+  value: string;
+  /** Valor numérico para o número animado (centavos se `money`). Sem ele, mostra `value` parado. */
+  amount?: number;
+  money?: boolean;
+  delta?: ReturnType<typeof deltaOf>;
+  compare?: string;
+  empty?: boolean;
+  /** Ilustração 3D do card (public/admin/kpi/<nome>.webp). */
+  art?: "receita" | "pedidos" | "pagos" | "ticket";
+}) {
   return (
-    <div className={s.kpi} data-empty={empty ? "true" : undefined}>
+    <div className={s.kpi} data-empty={empty ? "true" : undefined} data-art={art ? "true" : undefined}>
+      {art ? <Image className={s.kpiArt} src={`/admin/kpi/${art}.webp`} alt="" width={72} height={72} aria-hidden="true" priority /> : null}
       <div className={s.kpiLabel}>{label}</div>
-      <div className={s.kpiValue}>{value}</div>
+      <div className={s.kpiValue}>{amount !== undefined ? <KpiNumber value={amount} money={money} /> : value}</div>
       {delta && compare ? (
         <div className={s.delta} data-tone={delta.tone}>
           {delta.tone !== "flat" ? <PIcon name={delta.tone === "up" ? "trending-up" : "trending-down"} size={15} /> : null}

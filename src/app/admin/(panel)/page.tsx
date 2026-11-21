@@ -15,7 +15,8 @@ import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
 import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { BarList, Kpi, PageHead, deltaOf } from "../blocks";
+import { Kpi, PageHead, deltaOf } from "../blocks";
+import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { AckButton, CopyField } from "../ui";
@@ -32,6 +33,7 @@ const PERIODS: Array<[Period, string]> = [
 ];
 const COMPARE: Record<Period, string> = { hoje: "ontem no mesmo horário", "7d": "7 dias anteriores", "30d": "30 dias anteriores" };
 const WEEKDAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "short" });
+const FULL_DAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
 const RANGE = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "numeric", month: "long" });
 /** "12 a 18 de novembro" / "20 de outubro a 18 de novembro". */
 function rangeLabel(from: Date, to: Date): string {
@@ -72,7 +74,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const ticket = m.paid > 0 ? Math.round(m.revenueCents / m.paid) : 0;
   const prevTicket = prev.paid > 0 ? Math.round(prev.revenueCents / prev.paid) : 0;
   const unpaid = m.orders - m.byMethod.pix_manual.paid - m.byMethod.pix_asaas.paid - m.byMethod.card_asaas.paid;
-  const maxDay = Math.max(0, ...b.byDay.map((d) => d.revenueCents));
   const days = PERIOD_DAYS[period];
   const label = (day: string, i: number) => {
     if (i === b.byDay.length - 1) return "hoje";
@@ -138,10 +139,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 
       <div className={s.stack}>
         <section className={s.grid4} aria-label="Números do período">
-          <Kpi label="Receita" value={brl(m.revenueCents)} delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={COMPARE[period]} />
-          <Kpi label="Pedidos" value={String(m.orders)} delta={deltaOf(m.orders, prev.orders)} compare={COMPARE[period]} />
-          <Kpi label="Pagos" value={String(m.paid)} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
-          <Kpi label="Ticket médio" value={brl(ticket)} delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
+          <Kpi art="receita" label="Receita" value={brl(m.revenueCents)} amount={m.revenueCents} money delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={COMPARE[period]} />
+          <Kpi art="pedidos" label="Pedidos" value={String(m.orders)} amount={m.orders} delta={deltaOf(m.orders, prev.orders)} compare={COMPARE[period]} />
+          <Kpi art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
+          <Kpi art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
         </section>
 
         <div className={s.splitWide}>
@@ -150,37 +151,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
               <h2>Conversão do checkout</h2>
               <small>visitas → pedidos → pagos</small>
             </div>
-            <div className={s.funnel}>
-              <div>
-                <span>Visitas ao checkout</span>
-                <b>{m.views.toLocaleString("pt-BR")}</b>
-                <span className={s.bar} aria-hidden="true" style={{ display: "block" }}>
-                  <i style={{ width: "100%" }} />
-                </span>
-              </div>
-              <div className={s.funnelStep} aria-hidden="true">
-                {pct(m.orders, m.views)}
-                <PIcon name="arrow-right" size={16} />
-              </div>
-              <div>
-                <span>Pedidos criados</span>
-                <b>{m.orders.toLocaleString("pt-BR")}</b>
-                <span className={s.bar} aria-hidden="true" style={{ display: "block" }}>
-                  <i style={{ width: `${m.views ? Math.max(2, Math.round((m.orders * 100) / m.views)) : 0}%` }} />
-                </span>
-              </div>
-              <div className={s.funnelStep} aria-hidden="true">
-                {pct(m.paid, m.orders)}
-                <PIcon name="arrow-right" size={16} />
-              </div>
-              <div>
-                <span>Pagos</span>
-                <b>{m.paid.toLocaleString("pt-BR")}</b>
-                <span className={s.bar} aria-hidden="true" style={{ display: "block" }}>
-                  <i style={{ width: `${m.views ? Math.max(2, Math.round((m.paid * 100) / m.views)) : 0}%` }} />
-                </span>
-              </div>
-            </div>
+            {m.views + m.orders + m.paid > 0 ? (
+              <FunnelChart views={m.views} orders={m.orders} paid={m.paid} />
+            ) : (
+              <p className={s.chartEmpty}>
+                <span>Nenhuma visita ao checkout no período.</span>
+              </p>
+            )}
             <div className={s.funnelFoot}>
               <span>
                 <b>{pct(m.paid, m.views)}</b> das visitas viraram venda
@@ -199,9 +176,19 @@ export default async function Overview({ searchParams }: { searchParams: Promise
               <h2>Por método</h2>
               <small>receita · pagos</small>
             </div>
-            <BarList
-              rows={methods.map((r) => ({ label: METHOD_LABEL[r.k], value: r.revenueCents, text: brl(r.revenueCents), extra: r.paid }))}
-            />
+            <DonutChart rows={methods.map((r) => ({ label: METHOD_LABEL[r.k], cents: r.revenueCents, paid: r.paid }))} />
+            <ul className={s.legend}>
+              {methods.map((r) => (
+                <li key={r.k}>
+                  <i style={{ background: r.revenueCents > 0 ? `var(--series-${(methods.filter((x) => x.revenueCents > 0).indexOf(r) % 5) + 1})` : "var(--chart-grid)" }} />
+                  <span>{METHOD_LABEL[r.k]}</span>
+                  <b>
+                    {brl(r.revenueCents)}
+                    <small>{plural(r.paid, "pago", "pagos")}</small>
+                  </b>
+                </li>
+              ))}
+            </ul>
             <p className={s.hint} style={{ marginTop: 14 }}>
               Cartão: {plural(m.byMethod.card_asaas.paid, "pago", "pagos")} de {plural(m.byMethod.card_asaas.orders, "pedido", "pedidos")} (
               {pct(m.byMethod.card_asaas.paid, m.byMethod.card_asaas.orders)}).
@@ -215,44 +202,30 @@ export default async function Overview({ searchParams }: { searchParams: Promise
               <h2>Receita por dia</h2>
               <small>R$</small>
             </div>
-            <div className={s.chart} role="img" aria-label={`Receita por dia: ${b.byDay.map((d) => `${d.day} ${brl(d.revenueCents)}`).join("; ")}`}>
-              {b.byDay.map((d, i) => (
-                <div
-                  key={d.day}
-                  className={s.chartCol}
-                  data-today={i === b.byDay.length - 1 ? "true" : undefined}
-                  data-max={d.revenueCents === maxDay && maxDay > 0 ? "true" : undefined}
-                >
-                  {d.revenueCents === maxDay && maxDay > 0 && days <= 7 ? <b>{brl(d.revenueCents).replace("R$ ", "")}</b> : null}
-                  <i style={{ height: `${maxDay ? Math.round((d.revenueCents * 100) / maxDay) : 0}%` }} />
-                </div>
-              ))}
-            </div>
-            <div className={s.chartLabels} aria-hidden="true">
-              {b.byDay.map((d, i) => (
-                <span key={d.day}>{label(d.day, i)}</span>
-              ))}
-            </div>
+            {period === "hoje" ? (
+              <p className={s.chartEmpty}>
+                <span>
+                  Hoje entrou <b>{brl(m.revenueCents)}</b>. Para comparar os dias, escolha <Link href="/admin">7 dias</Link> ou{" "}
+                  <Link href="/admin?periodo=30d">30 dias</Link>.
+                </span>
+              </p>
+            ) : (
+              <RevenueChart days={b.byDay.map((d, i) => ({ label: label(d.day, i), full: FULL_DAY.format(new Date(`${d.day}T12:00:00Z`)), cents: d.revenueCents }))} />
+            )}
           </section>
           <section className={s.card}>
             <div className={s.cardHead}>
               <h2>Por origem</h2>
               <small>utm_source · pagos</small>
             </div>
-            <BarList
-              rows={m.bySource.slice(0, 6).map((r) => ({ label: <span className={s.mono}>{r.source}</span>, value: r.revenueCents, text: brl(r.revenueCents), extra: r.paid }))}
-              empty="Nenhuma venda paga no período."
-            />
+            {m.bySource.length ? <RankChart mono rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
           </section>
           <section className={s.card}>
             <div className={s.cardHead}>
               <h2>Por indicação</h2>
               <small>?ref= · pagos</small>
             </div>
-            <BarList
-              rows={m.byRef.slice(0, 6).map((r) => ({ label: <span className={s.mono}>{r.ref}</span>, value: r.revenueCents, text: brl(r.revenueCents), extra: r.paid }))}
-              empty="Nenhuma venda com ?ref= no período."
-            />
+            {m.byRef.length ? <RankChart mono rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
             <p className={s.hint} style={{ marginTop: 14 }}>
               {plural(m.paid - m.byRef.reduce((a, r) => a + r.paid, 0), "venda", "vendas")} sem indicação.
             </p>

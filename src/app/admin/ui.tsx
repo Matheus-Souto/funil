@@ -1,15 +1,18 @@
 "use client";
 
-// Peças interativas do painel: diálogo acessível (foco preso, Esc, foco devolvido), botão de copiar, região aria-live
+// Peças interativas do painel: diálogo (Arc), botão de copiar, região aria-live
 // para resultados assíncronos e o "ok" dos avisos. Sem regra de negócio: tudo passa pelas server actions do painel.
-import { useCallback, useEffect, useId, useRef, useState, useTransition, type ReactNode } from "react";
+import { useCallback, useEffect, useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
 import type { ActionResult } from "./result";
 import { PIcon, type PanelIconName } from "./icons";
 import s from "./panel.module.css";
 
-const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
+/**
+ * Diálogo de confirmação do painel, sobre o Dialog do Arc (Radix: foco preso, Esc, foco devolvido, animação de entrada
+ * e saída). O conteúdo vai num portal fora do `.root`, então leva as variáveis do tema junto (`s.themeVars`).
+ */
 export function Dialog({
   open,
   onClose,
@@ -21,71 +24,21 @@ export function Dialog({
 }: {
   open: boolean;
   onClose: () => void;
-  title: ReactNode;
+  title: string;
   icon?: PanelIconName;
   tone?: "danger";
   children: ReactNode;
   footer: ReactNode;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const titleId = useId();
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    if (!open) return;
-    const previous = document.activeElement as HTMLElement | null;
-    const box = ref.current!;
-    const first = box.querySelector<HTMLElement>("[data-autofocus]") ?? box.querySelector<HTMLElement>(FOCUSABLE);
-    first?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const items = [...box.querySelectorAll<HTMLElement>(FOCUSABLE)];
-      if (items.length === 0) return;
-      const a = items[0]!;
-      const z = items[items.length - 1]!;
-      if (e.shiftKey && (document.activeElement === a || !box.contains(document.activeElement))) {
-        e.preventDefault();
-        z.focus();
-      } else if (!e.shiftKey && document.activeElement === z) {
-        e.preventDefault();
-        a.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    const overflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = overflow;
-      previous?.focus?.();
-    };
-  }, [open]);
-
-  if (!open) return null;
   return (
-    <div className={s.overlay} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div ref={ref} className={s.dialog} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <button type="button" className={`${s.iconBtn} ${s.dialogClose}`} onClick={onClose} aria-label="Fechar">
-          <PIcon name="x" />
-        </button>
-        {icon ? (
-          <div className={s.dialogIcon} data-tone={tone}>
-            <PIcon name={icon} size={20} />
-          </div>
-        ) : null}
-        <h2 id={titleId}>{title}</h2>
-        {children}
+    <ArcDialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent title={title} className={`${s.themeVars} ${s.arcDialog}`} aria-describedby={undefined}>
+        <div className={s.dialogBody} data-tone={tone} data-icon={icon}>
+          {children}
+        </div>
         <div className={s.dialogActions}>{footer}</div>
-      </div>
-    </div>
+      </DialogContent>
+    </ArcDialog>
   );
 }
 
