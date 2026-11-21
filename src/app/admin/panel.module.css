@@ -1803,28 +1803,7 @@
   transition: width 0.15s;
 }
 
-/* ---------- Ofertas (editor) ---------- */
-.preview {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  padding: 14px;
-  background: #fff;
-  color: #15201b;
-  box-shadow: var(--shadow-md);
-}
-.previewHead {
-  display: flex;
-  justify-content: space-between;
-  padding-bottom: 10px;
-  margin-bottom: 10px;
-  border-bottom: 1px solid #dde1db;
-  font-size: 12px;
-}
-.previewHead b {
-  font-family: var(--font-display);
-  font-size: 16px;
-  color: var(--color-brand-strong);
-}
+/* ---------- Botão de exemplo na cor da loja (Configurações) ---------- */
 .previewBtn {
   display: block;
   margin-top: 10px;
@@ -1834,18 +1813,6 @@
   color: var(--color-on-brand);
   text-align: center;
   font-weight: 700;
-}
-.previewBump {
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px dashed var(--color-brand-strong);
-  border-radius: var(--radius-md);
-  font-size: 13px;
-}
-.previewIncludes {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: #4b5a53;
 }
 
 /* Linhas de produto do editor de oferta: select + subir/descer/remover. */
@@ -2914,13 +2881,9 @@
 .productLine > .arcField {
   flex: 1;
 }
-/* Prévia do celular acompanha a rolagem do editor */
-.previewCol {
-  position: sticky;
-  top: 24px;
-}
-@media (max-width: 1100px) {
-  .previewCol {
-    position: static;
-  }
+
+/* Editor de oferta: uma coluna só, centralizada */
+.editorCol {
+  max-width: 860px;
+  margin: 0 auto;
 }

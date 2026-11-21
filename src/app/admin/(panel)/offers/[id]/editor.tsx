@@ -5,10 +5,9 @@
 // preço por offers.updatePrice. As duas são sensíveis: diálogo de confirmação que diz o que muda. Endereço por
 // offers.setSlug (sensível; o dono no painel executa direto); os demais campos por offers.update; pixel próprio por
 // offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado. Regras puras em offer-editing.ts.
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { brandVars } from "@/lib/brand";
 import {
   MAX_PRODUCTS_PER_GROUP,
   changeDialog,
@@ -114,8 +113,6 @@ export function OfferEditor(props: {
   offer: OfferData | null;
   products: ProductOption[];
   checkoutBase: string;
-  storeName: string;
-  brandColor: string | null;
   canWrite: boolean;
   canPixel: boolean;
   /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
@@ -170,8 +167,6 @@ export function OfferEditor(props: {
   const link = `${props.checkoutBase}/c/${f.slug || "endereco-da-oferta"}`;
   const nameOf = (id: string) => products.find((p) => p.id === id)?.name ?? "Produto";
   const namesOf = (ids: string[]) => ids.map(nameOf).join(" · ");
-  const productName = productIds.length > 1 ? f.name.trim() || "Oferta" : nameOf(productIds[0] ?? "");
-  const vars = useMemo(() => brandVars(props.brandColor) as CSSProperties, [props.brandColor]);
   /** Produtos já escolhidos em alguma linha (o bump só conta ligado): o mesmo produto não entra duas vezes. */
   const used = new Set([...productIds, ...(f.bumpOn ? bumpProductIds : [])].filter(Boolean));
   const available = products.filter((p) => !p.deleted).map((p) => p.id);
@@ -397,7 +392,7 @@ export function OfferEditor(props: {
         {announce}
       </p>
 
-      <div className={s.split}>
+      <div>
         <div className={s.stack}>
           <form
             className={s.stack}
@@ -686,29 +681,6 @@ export function OfferEditor(props: {
               </div>
             </div>
           ) : null}
-        </div>
-
-        <div className={`${s.stack} ${s.previewCol}`}>
-          <span className={s.eyebrow}>Prévia no celular</span>
-          <div className={s.preview} style={vars} aria-hidden="true">
-            <div className={s.previewHead}>
-              <b>{props.storeName}</b>
-              <span>Pagamento seguro</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span>{productName}</span>
-              <b>{priceCents ? brl(priceCents) : "—"}</b>
-            </div>
-            {productIds.length > 1 ? <p className={s.previewIncludes}>Inclui: {namesOf(productIds.filter(Boolean))}</p> : null}
-            {f.bumpOn && bumpCents ? (
-              <div className={s.previewBump}>
-                <b>{f.bumpLabel || "Acrescentar"}</b> + {brl(bumpCents)}
-              </div>
-            ) : null}
-            <span className={s.previewBtn}>
-              {f.pix ? "Gerar Pix" : "Pagar"} de {priceCents ? brl(priceCents) : "R$ —"}
-            </span>
-          </div>
         </div>
       </div>
 

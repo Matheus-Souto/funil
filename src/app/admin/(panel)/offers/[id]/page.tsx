@@ -9,6 +9,7 @@ import { cardServiceConfigured, env } from "@/lib/env";
 import { firstParam } from "@/lib/panel-params";
 import type { ProductRef } from "@/lib/catalog/offer-products";
 import { OfferEditor, type OfferData, type ProductOption } from "./editor";
+import s from "../../../panel.module.css";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Oferta" };
@@ -16,7 +17,13 @@ export const metadata = { title: "Oferta" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** /admin/offers/nova cria; /admin/offers/<id> edita (ou só mostra, para quem não tem offers.write). */
-export default async function OfferPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ criada?: string | string[] }> }) {
+export default async function OfferPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ criada?: string | string[] }>;
+}) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
   const role = panel.actor.role;
@@ -58,17 +65,17 @@ export default async function OfferPage({ params, searchParams }: { params: Prom
   ];
   const ident = await getPanelIdentity(panel);
   return (
-    <OfferEditor
-      key={offer?.id ?? "nova"}
-      offer={offer}
-      products={products}
-      checkoutBase={storeBaseUrl(ident.store)}
-      storeName={ident.storeName}
-      brandColor={ident.store.brandColor}
-      canWrite={hasPermission(role, "offers.write")}
-      canPixel={hasPermission(role, "tracking.write")}
-      cardAvailable={cardServiceConfigured(env)}
-      created={!isNew && firstParam((await searchParams).criada) === "1"}
-    />
+    <div className={s.editorCol}>
+      <OfferEditor
+        key={offer?.id ?? "nova"}
+        offer={offer}
+        products={products}
+        checkoutBase={storeBaseUrl(ident.store)}
+        canWrite={hasPermission(role, "offers.write")}
+        canPixel={hasPermission(role, "tracking.write")}
+        cardAvailable={cardServiceConfigured(env)}
+        created={!isNew && firstParam((await searchParams).criada) === "1"}
+      />
+    </div>
   );
 }
