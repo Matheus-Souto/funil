@@ -6,8 +6,12 @@ import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
 import { auditLog, checkoutLead, offer, rateLimit, store } from "@/lib/db/schema";
+import { orderCode } from "@/lib/format";
 import { LEAD_LIMITS, LEAD_TTL_DAYS, checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
+import { PAGE_SIZE, createSweepLeadsHandler, deleteLead, forgetLeadEmail, listLeads, markLeadContacted, sweepLeadsJob } from "@/lib/leads/panel";
+import { leadCode } from "@/lib/notify/telegram";
 import { createTestDb, seedStore, type TestDb } from "./db";
+import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -363,5 +367,197 @@ describe("privacidade: log e auditoria", () => {
     }
     expect(out).toContain("ação pública falhou");
     expect(JSON.parse(audit)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Ações do painel e varredura
+
+const insertLead = async (s: { storeId: string; offerId: string }, over: Partial<typeof checkoutLead.$inferInsert> = {}) => {
+  const [r] = await t.ownerDb.insert(checkoutLead).values(leadRow(s.storeId, s.offerId, over)).returning();
+  return r!;
+};
+const auditOf = (storeId: string) => t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId));
+const leftIds = async (storeId: string) => new Set((await t.ownerDb.select({ id: checkoutLead.id }).from(checkoutLead).where(eq(checkoutLead.storeId, storeId))).map((r) => r.id));
+
+describe("leads.list", () => {
+  test("suporte vê e-mail e celular; tráfego → forbidden", async () => {
+    const s = await seedCapture();
+    const row = await insertLead(s, { phone: PHONE_DIGITS });
+    const out = await runAction(listLeads, panelCall(s.storeId, "support"), {});
+    expect(out).toMatchObject({ total: 1, page: 1, pageSize: PAGE_SIZE });
+    expect(out.items).toEqual([
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "open", offerName: "Oferta", email: row.email, phone: PHONE_DIGITS, orderCode: null },
+    ]);
+    expect(await code(runAction(listLeads, panelCall(s.storeId, "traffic"), {}))).toBe("forbidden");
+    expect(await code(runAction(markLeadContacted, panelCall(s.storeId, "traffic"), { id: row.id }))).toBe("forbidden");
+    expect(await code(runAction(deleteLead, panelCall(s.storeId, "traffic"), { id: row.id }))).toBe("forbidden");
+    expect(await code(runAction(forgetLeadEmail, panelCall(s.storeId, "traffic"), { email: row.email! }))).toBe("forbidden");
+    expect((await rowsOf(s.storeId)).length).toBe(1);
+  });
+
+  test("50 por página, mais novos primeiro, filtro por status e isolamento por loja", async () => {
+    const s = await seedCapture();
+    const outra = await seedCapture();
+    await insertLead(outra);
+    const base = Date.now() - 3_600_000;
+    for (let i = 0; i < PAGE_SIZE + 3; i++) await insertLead(s, { createdAt: new Date(base + i * 1000), status: i === 0 ? "contacted" : "open" });
+    const p1 = await runAction(listLeads, panelCall(s.storeId), {});
+    expect([p1.total, p1.items.length]).toEqual([PAGE_SIZE + 3, PAGE_SIZE]);
+    const stamps = p1.items.map((i) => i.createdAt.getTime());
+    expect(stamps).toEqual([...stamps].sort((a, b) => b - a));
+    const p2 = await runAction(listLeads, panelCall(s.storeId), { page: 2 });
+    expect(p2.items).toHaveLength(3);
+    expect(p2.items.at(-1)!.status).toBe("contacted");
+    const contacted = await runAction(listLeads, panelCall(s.storeId), { status: "contacted" });
+    expect([contacted.total, contacted.items.length]).toEqual([1, 1]);
+  });
+
+  test("convertido mostra o código do pedido (como o painel) e nenhum contato", async () => {
+    const p = await seedPanelStore();
+    const order = await seedOrder(p, {});
+    const row = await insertLead(p, { email: null, phone: null, status: "converted", orderId: order.id });
+    const out = await runAction(listLeads, panelCall(p.storeId), { status: "converted" });
+    expect(out.items).toEqual([
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "converted", offerName: "Maná bíblico", email: null, phone: null, orderCode: orderCode(order.publicId) },
+    ]);
+  });
+
+  test("busca: código do contato (qualquer caixa) ou e-mail exato, sem busca parcial", async () => {
+    const s = await seedCapture();
+    const a = await insertLead(s);
+    const b = await insertLead(s);
+    const byCode = await runAction(listLeads, panelCall(s.storeId), { q: ` ${leadCode(a.id).toLowerCase()} ` });
+    expect(byCode.items.map((i) => i.id)).toEqual([a.id]);
+    const byMail = await runAction(listLeads, panelCall(s.storeId), { q: ` ${b.email!.toUpperCase()} ` });
+    expect(byMail.items.map((i) => i.id)).toEqual([b.id]);
+    const partial = await runAction(listLeads, panelCall(s.storeId), { q: b.email!.slice(0, 12) });
+    expect(partial.total).toBe(0);
+    // outro formato de 6 caracteres não casa como código
+    expect((await runAction(listLeads, panelCall(s.storeId), { q: "zzzzzz" })).total).toBe(0);
+    // código de contato de outra loja não aparece
+    const outra = await seedCapture();
+    expect((await runAction(listLeads, panelCall(outra.storeId), { q: leadCode(a.id) })).total).toBe(0);
+  });
+
+  test("busca por e-mail respeita o filtro de status", async () => {
+    const s = await seedCapture();
+    const a = await insertLead(s, { status: "contacted" });
+    expect((await runAction(listLeads, panelCall(s.storeId), { q: a.email!, status: "open" })).total).toBe(0);
+    expect((await runAction(listLeads, panelCall(s.storeId), { q: a.email!, status: "contacted" })).total).toBe(1);
+  });
+});
+
+describe("leads.markContacted, leads.delete e leads.forgetEmail", () => {
+  test("markContacted: open vira contacted, repetir é ok, convertido → conflict, inexistente → not_found", async () => {
+    const s = await seedCapture();
+    const a = await insertLead(s);
+    expect(await runAction(markLeadContacted, panelCall(s.storeId, "support"), { id: a.id })).toEqual({ id: a.id, status: "contacted" });
+    expect((await rowsOf(s.storeId))[0]).toMatchObject({ status: "contacted", email: a.email });
+    expect(await runAction(markLeadContacted, panelCall(s.storeId), { id: a.id })).toEqual({ id: a.id, status: "contacted" });
+    const conv = await insertLead(s, { email: null, status: "converted" });
+    expect(await code(runAction(markLeadContacted, panelCall(s.storeId), { id: conv.id }))).toBe("conflict");
+    expect(await code(runAction(markLeadContacted, panelCall(s.storeId), { id: randomUUID() }))).toBe("not_found");
+    const outra = await seedCapture();
+    expect(await code(runAction(markLeadContacted, panelCall(outra.storeId), { id: a.id }))).toBe("not_found");
+  });
+
+  test("delete apaga só o contato pedido; de outra loja ou inexistente → not_found", async () => {
+    const s = await seedCapture();
+    const outra = await seedCapture();
+    const a = await insertLead(s);
+    const b = await insertLead(s);
+    const alheio = await insertLead(outra);
+    expect(await code(runAction(deleteLead, panelCall(s.storeId), { id: alheio.id }))).toBe("not_found");
+    expect(await code(runAction(deleteLead, panelCall(s.storeId), { id: randomUUID() }))).toBe("not_found");
+    expect(await runAction(deleteLead, panelCall(s.storeId), { id: a.id })).toEqual({ id: a.id });
+    expect(await leftIds(s.storeId)).toEqual(new Set([b.id]));
+    expect(await leftIds(outra.storeId)).toEqual(new Set([alheio.id]));
+  });
+
+  test("forgetEmail apaga só os contatos da loja com aquele e-mail", async () => {
+    const s = await seedCapture();
+    const outra = await seedCapture();
+    const email = mail();
+    const mine1 = await insertLead(s, { email, emailHash: sha(email) });
+    const mine2 = await insertLead(s, { email, emailHash: sha(email), status: "contacted" });
+    const conv = await insertLead(s, { email: null, phone: null, emailHash: sha(email), status: "converted" });
+    const outroEmail = await insertLead(s);
+    const alheio = await insertLead(outra, { email, emailHash: sha(email) });
+
+    const out = await runAction(forgetLeadEmail, panelCall(s.storeId), { email: ` ${email.toUpperCase()} ` });
+    expect(out).toEqual({ deleted: 3 });
+    expect(await leftIds(s.storeId)).toEqual(new Set([outroEmail.id]));
+    expect(await leftIds(outra.storeId)).toEqual(new Set([alheio.id]));
+    expect([mine1.id, mine2.id, conv.id]).toHaveLength(3);
+    // sem contato com o e-mail: zero, sem erro
+    expect(await runAction(forgetLeadEmail, panelCall(s.storeId), { email: mail() })).toEqual({ deleted: 0 });
+    expect(await code(runAction(forgetLeadEmail, panelCall(s.storeId), { email: "  " }))).toBe("invalid_input");
+  });
+
+  test("auditoria sem e-mail nem celular: só leadId, e emailHash", async () => {
+    const s = await seedCapture();
+    const email = mail();
+    const a = await insertLead(s, { email, emailHash: sha(email), phone: PHONE_DIGITS });
+    const b = await insertLead(s);
+    const c = await insertLead(s, { email, emailHash: sha(email), phone: PHONE_DIGITS });
+    await runAction(markLeadContacted, panelCall(s.storeId), { id: a.id });
+    await runAction(deleteLead, panelCall(s.storeId), { id: b.id });
+    await runAction(forgetLeadEmail, panelCall(s.storeId), { email });
+    await runAction(listLeads, panelCall(s.storeId), { q: email });
+    await code(runAction(markLeadContacted, panelCall(s.storeId), { id: c.id })); // já apagado: not_found auditado
+
+    const rows = await auditOf(s.storeId);
+    const byAction = (n: string) => rows.filter((r) => r.action === n);
+    expect(byAction("leads.markContacted").find((r) => r.ok)!.input).toEqual({ leadId: a.id });
+    expect(byAction("leads.delete").map((r) => r.input)).toEqual([{ leadId: b.id }]);
+    expect(byAction("leads.forgetEmail").map((r) => r.input)).toEqual([{ emailHash: sha(email) }]);
+    // leads.list é leitura: não audita (como orders.list)
+    expect(byAction("leads.list")).toHaveLength(0);
+    const text = JSON.stringify(rows);
+    for (const secret of [email, PHONE_DIGITS, "98765"]) expect(text).not.toContain(secret);
+    expect(out).not.toContain(email);
+    expect(out).not.toContain(PHONE_DIGITS);
+  });
+});
+
+describe("sweep_leads", () => {
+  test("apaga só os vencidos, de todas as lojas", async () => {
+    const a = await seedCapture();
+    const b = await seedCapture();
+    const past = new Date(Date.now() - 60_000);
+    const future = new Date(Date.now() + 3_600_000);
+    const a1 = await insertLead(a, { expiresAt: past });
+    const a2 = await insertLead(a, { expiresAt: future });
+    const a3 = await insertLead(a, { expiresAt: past, email: null, phone: null, status: "converted" });
+    const b1 = await insertLead(b, { expiresAt: past, status: "contacted" });
+    const b2 = await insertLead(b, { expiresAt: future });
+
+    await sweepLeadsJob({} as never, new AbortController().signal);
+    expect(await leftIds(a.storeId)).toEqual(new Set([a2.id]));
+    expect(await leftIds(b.storeId)).toEqual(new Set([b2.id]));
+    expect([a1.id, a3.id, b1.id]).toHaveLength(3);
+    // idempotente
+    await sweepLeadsJob({} as never, new AbortController().signal);
+    expect(await leftIds(a.storeId)).toEqual(new Set([a2.id]));
+  });
+
+  test("falha numa loja não impede as outras e o job falha no fim", async () => {
+    const a = await seedCapture();
+    const b = await seedCapture();
+    const past = new Date(Date.now() - 60_000);
+    const a1 = await insertLead(a, { expiresAt: past });
+    const b1 = await insertLead(b, { expiresAt: past });
+    const quebra = createSweepLeadsHandler(async (storeId) => {
+      if (storeId === a.storeId) throw new Error("falha simulada");
+    });
+    await expect(quebra({} as never, new AbortController().signal)).rejects.toThrow(/sweep_leads falhou em 1 loja/);
+    expect(await leftIds(a.storeId)).toEqual(new Set([a1.id]));
+    expect((await leftIds(b.storeId)).has(b1.id)).toBe(false);
+  });
+
+  test("o tipo sweep_leads está registrado no worker", async () => {
+    const { getHandlers } = await import("@/lib/jobs/handlers");
+    expect(getHandlers().sweep_leads).toBe(sweepLeadsJob);
   });
 });

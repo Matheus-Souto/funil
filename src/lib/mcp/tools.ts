@@ -184,6 +184,8 @@ const OVERRIDES: Record<string, Override> = {
         orders: d.orders,
         paid: d.paid,
         revenueCents: d.revenueCents,
+        leads: d.leads,
+        leadsConverted: d.leadsConverted,
         byMethod: Object.fromEntries(
           Object.entries(d.byMethod).map(([k, m]) => [k, { orders: m.orders, paid: m.paid, revenueCents: m.revenueCents }]),
         ),

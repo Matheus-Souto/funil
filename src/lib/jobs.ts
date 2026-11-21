@@ -19,7 +19,8 @@ export type JobType =
   | "sweep_watermarks"
   | "pci_page_monitor"
   | "notify_telegram"
-  | "sweep_mcp";
+  | "sweep_mcp"
+  | "sweep_leads";
 export type Job = typeof job.$inferSelect;
 /** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
 export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;

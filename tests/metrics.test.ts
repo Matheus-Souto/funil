@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
+import { checkoutLead } from "@/lib/db/schema";
 import { metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, seedViews } from "./panel-helpers";
@@ -61,6 +63,8 @@ describe("metrics.summary", () => {
       orders: 0,
       paid: 0,
       revenueCents: 0,
+      leads: 0,
+      leadsConverted: 0,
       byMethod: {
         pix_manual: { orders: 0, paid: 0, revenueCents: 0 },
         pix_asaas: { orders: 0, paid: 0, revenueCents: 0 },
@@ -69,6 +73,31 @@ describe("metrics.summary", () => {
       bySource: [],
       byRef: [],
     });
+  });
+
+  test("leads e leadsConverted contam no período", async () => {
+    const s = await seedPanelStore();
+    const outra = await seedPanelStore();
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const lead = (p: { storeId: string; offerId: string }, over: Partial<typeof checkoutLead.$inferInsert> = {}) => {
+      const email = `contato-${randomUUID()}@example.com`;
+      return { storeId: p.storeId, offerId: p.offerId, keyHash: sha(randomUUID()), email, emailHash: sha(email), expiresAt: new Date(Date.now() + 30 * 24 * HOUR), ...over };
+    };
+    const converted = { email: null, phone: null, status: "converted" };
+    const old = new Date(Date.now() - 10 * 24 * HOUR);
+    await t.ownerDb.insert(checkoutLead).values([
+      lead(s),
+      lead(s, { status: "contacted" }),
+      lead(s, converted),
+      lead(s, { ...converted, createdAt: old }),
+      lead(s, { createdAt: old }),
+      lead(outra, converted),
+    ]);
+    expect(await runAction(metricsSummary, panelCall(s.storeId), window())).toMatchObject({ leads: 3, leadsConverted: 1 });
+    expect(await runAction(metricsSummary, panelCall(outra.storeId), window())).toMatchObject({ leads: 1, leadsConverted: 1 });
+    // o período é por created_at: a janela de 30 dias pega os cinco da loja
+    const wide = { from: new Date(Date.now() - 30 * 24 * HOUR), to: new Date(Date.now() + HOUR) };
+    expect(await runAction(metricsSummary, panelCall(s.storeId), wide)).toMatchObject({ leads: 5, leadsConverted: 2 });
   });
 
   test("isolamento: não soma pedidos de outra loja", async () => {

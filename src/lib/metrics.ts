@@ -3,7 +3,7 @@
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { checkoutView, orders } from "@/lib/db/schema";
+import { checkoutLead, checkoutView, orders } from "@/lib/db/schema";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
 export const METHODS: readonly Method[] = ["pix_manual", "pix_asaas", "card_asaas"];
@@ -47,7 +47,7 @@ type MethodRow = { orders: number; paid: number; revenueCents: number };
 
 export const metricsSummary = defineAction({
   name: "metrics.summary",
-  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref).",
+  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted).",
   input: range,
   permission: "metrics.read",
   audit: false,
@@ -60,6 +60,11 @@ export const metricsSummary = defineAction({
       .select({ n: n() })
       .from(checkoutView)
       .where(and(gte(checkoutView.at, from), lt(checkoutView.at, to)));
+    // Contatos de quem não finalizou a compra: só números (nenhum dado do contato sai daqui).
+    const [l] = await ctx.tx
+      .select({ n: n(), converted: sql<number>`count(*) filter (where ${checkoutLead.status} = 'converted')`.mapWith(Number) })
+      .from(checkoutLead)
+      .where(and(gte(checkoutLead.createdAt, from), lt(checkoutLead.createdAt, to)));
     const createdBy = await ctx.tx.select({ method: orders.method, n: n() }).from(orders).where(created).groupBy(orders.method);
     const paidBy = await ctx.tx
       .select({ method: orders.method, n: n(), cents: money(orders.totalCents) })
@@ -90,6 +95,8 @@ export const metricsSummary = defineAction({
       orders: createdBy.reduce((s, r) => s + r.n, 0),
       paid: paidBy.reduce((s, r) => s + r.n, 0),
       revenueCents: paidBy.reduce((s, r) => s + r.cents, 0),
+      leads: l?.n ?? 0,
+      leadsConverted: l?.converted ?? 0,
       byMethod,
       bySource: sources.sort(byRevenue((x) => x.source)).slice(0, 50),
       byRef: refs
