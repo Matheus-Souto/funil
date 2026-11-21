@@ -24,17 +24,29 @@ const REFUND_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const status = z.enum(ORDER_STATUSES as [OrderStatus, ...OrderStatus[]]);
 const method = z.enum(ORDER_METHODS as [OrderMethod, ...OrderMethod[]]);
-const filters = { status: status.optional(), method: method.optional(), q: z.string().trim().max(100).optional() };
+// `status`/`method`: um valor (MCP e chamadas antigas). `statuses`/`methods`: vários de uma vez (filtros do painel).
+const filters = {
+  status: status.optional(),
+  method: method.optional(),
+  statuses: z.array(status).max(ORDER_STATUSES.length).optional(),
+  methods: z.array(method).max(ORDER_METHODS.length).optional(),
+  q: z.string().trim().max(100).optional(),
+};
 
 /** Texto da busca como literal do LIKE (%, _ e \ não são curingas). */
 const likeLiteral = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const buyerName = sql<string>`coalesce(${orders.buyerName}, ${customer.name})`;
 
-function where(f: { status?: OrderStatus; method?: OrderMethod; q?: string }, withStatus: boolean): SQL | undefined {
+function where(
+  f: { status?: OrderStatus; method?: OrderMethod; statuses?: OrderStatus[]; methods?: OrderMethod[]; q?: string },
+  withStatus: boolean,
+): SQL | undefined {
   const parts: (SQL | undefined)[] = [];
-  if (withStatus && f.status) parts.push(eq(orders.status, f.status));
-  if (f.method) parts.push(eq(orders.method, f.method));
+  if (withStatus && f.statuses?.length) parts.push(inArray(orders.status, f.statuses));
+  else if (withStatus && f.status) parts.push(eq(orders.status, f.status));
+  if (f.methods?.length) parts.push(inArray(orders.method, f.methods));
+  else if (f.method) parts.push(eq(orders.method, f.method));
   if (f.q) {
     const like = likeLiteral(f.q);
     parts.push(or(ilike(buyerName, like), ilike(customer.email, like)));

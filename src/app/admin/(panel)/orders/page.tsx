@@ -3,11 +3,11 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
-import { brl, shortWhenSP as shortWhen } from "@/lib/format";
+import { brl, dateTimeShortSP } from "@/lib/format";
 import { METHOD_LABEL, ORDER_METHODS, STATUS_FILTER_LABEL, type OrderMethod, type OrderStatus } from "@/lib/orders/labels";
 import { listDeliveryFailures } from "@/lib/alerts";
 import { listOrders } from "@/lib/orders/panel";
-import { parseOrderFilters, type Param } from "@/lib/panel-params";
+import { parseOrderMultiFilters, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
@@ -23,21 +23,24 @@ type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param };
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Search> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
-  const { status, method, q, page } = parseOrderFilters(await searchParams);
-  const data = await runAction(listOrders, call, { status, method, q, page });
+  const { statuses, methods, q, page } = parseOrderMultiFilters(await searchParams);
+  const data = await runAction(listOrders, call, { statuses, methods, q, page });
   const canExport = hasPermission(panel.actor.role, "orders.export");
 
   const failed = await runAction(listDeliveryFailures, call, {});
-  const qs = (over: Partial<Record<keyof Search, string | undefined>>) => {
+  /** Query string com os filtros atuais (status e método podem repetir) e a página pedida. */
+  const qs = (over: { pagina?: string } = {}) => {
     const p = new URLSearchParams();
-    const merged = { status, method, q, ...over };
-    for (const [k, v] of Object.entries(merged)) if (v) p.set(k, v);
+    for (const v of statuses) p.append("status", v);
+    for (const v of methods) p.append("method", v);
+    if (q) p.set("q", q);
+    if (over.pagina) p.set("pagina", over.pagina);
     const str = p.toString();
     return str ? `?${str}` : "";
   };
-  const filtered = Boolean(status || method || q);
+  const filtered = Boolean(statuses.length || methods.length || q);
 
-  if (data.counts.all === 0 && !method && !q) {
+  if (data.counts.all === 0 && !methods.length && !q) {
     const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
     const first = offers.find((o) => o.active);
     const base = hasPermission(panel.actor.role, "connections.read") ? (await runAction(getStoreSettings, call, {})).checkoutBaseUrl : null;
@@ -96,11 +99,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         }
       />
       {failed.length > 0 ? (
-        <div className={s.alerts}>
+        <div className={s.noticeStrip}>
           <FailedDeliveries items={failed} />
         </div>
       ) : null}
-      <TableShell q={q} status={status} method={method} total={data.total} filtered={filtered}>
+      <TableShell q={q} statuses={statuses} methods={methods} total={data.total} filtered={filtered}>
         {data.items.length === 0 ? (
           <p className={s.empty}>
             Nenhum pedido com estes filtros. <Link href="/admin/orders">Limpar filtros</Link>
@@ -114,7 +117,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <th scope="col">Cliente</th>
                   <th scope="col">Oferta</th>
                   <th scope="col">
-                    <ColumnFilter title="Método" param="method" value={method} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m] }))} />
+                    <ColumnFilter title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />
                   </th>
                   <th scope="col" className={s.num}>
                     Valor
@@ -123,10 +126,10 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                     <ColumnFilter
                       title="Status"
                       param="status"
-                      value={status}
+                      values={statuses}
                       options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
                         .filter((k) => k !== "disputed" || data.counts.disputed > 0)
-                        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k] }))}
+                        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k], icon: k }))}
                     />
                   </th>
                   <th scope="col">Data</th>
@@ -153,7 +156,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                     <td>
                       <StatusBadge status={o.status} method={o.method} label={o.refundRequestedAt && o.status === "paid" ? "Estorno solicitado" : undefined} />
                     </td>
-                    <td className={`${s.muted} ${s.nowrap}`}>{shortWhen(o.createdAt)}</td>
+                    <td className={`${s.muted} ${s.nowrap}`}>{dateTimeShortSP(o.createdAt)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -165,7 +168,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                     <b>{o.buyerName}</b>
                     <b className={s.money}>{brl(o.manualAmountCents ?? o.totalCents)}</b>
                     <small>
-                      #{o.code} · {METHOD_LABEL[o.method as OrderMethod] ?? o.method} · {shortWhen(o.createdAt)}
+                      #{o.code} · {METHOD_LABEL[o.method as OrderMethod] ?? o.method} · {dateTimeShortSP(o.createdAt)}
                     </small>
                     <StatusBadge status={o.status} method={o.method} />
                   </Link>

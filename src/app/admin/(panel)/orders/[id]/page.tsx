@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { requirePanelActor } from "@/lib/auth/session";
-import { brl, dateTimeSP, shortWhenSP, splitUniqueAmount, validUntilSP } from "@/lib/format";
+import { brl, dateTimeShortSP, dateTimeSP, splitUniqueAmount, validUntilSP } from "@/lib/format";
 import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, paidOnOldAsaasAccount, pixManualExpiry } from "@/lib/orders/labels";
 import { allowedOrderActions, getOrderDetail, type OrderDetail } from "@/lib/orders/panel";
 import { Badge, PageHead, StatusBadge } from "../../../blocks";
@@ -118,7 +118,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                 <div className={`${s.rows} ${s.factRows}`}>
                   <div className={s.row}>
                     <span>Recebido a partir de</span>
-                    <span>{shortWhenSP(d.createdAt)}</span>
+                    <span>{dateTimeShortSP(d.createdAt)}</span>
                   </div>
                   <div className={s.row}>
                     <span>Identificador</span>
@@ -130,7 +130,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                   </div>
                   <div className={s.row}>
                     <span>{late.expired ? "Expirou" : "Expira"}</span>
-                    <span>{d.expiresAt ? (late.expired ? shortWhenSP(d.expiresAt) : validUntilSP(d.expiresAt)) : "—"}</span>
+                    <span>{d.expiresAt ? (late.expired ? dateTimeShortSP(d.expiresAt) : validUntilSP(d.expiresAt)) : "—"}</span>
                   </div>
                 </div>
               </div>
@@ -230,7 +230,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                   <div>
                     {e.label}
                     <small>
-                      {shortWhenSP(e.at)}
+                      {dateTimeShortSP(e.at)}
                       {e.detail ? ` · ${e.detail}` : ""}
                       {e.actorRole ? ` · por ${(ROLE_LABEL as Record<string, string>)[e.actorRole]?.replace("Você é dono", "dono") ?? e.actorRole}` : ""}
                     </small>
@@ -310,7 +310,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                         {e.kind === "delivery" ? "Acesso ao comprador" : "Aviso ao vendedor"} · {e.status === "sent" ? "enviado" : "falhou"}
                         {e.deliveryStatus ? ` · ${DELIVERY_STATUS_LABEL[e.deliveryStatus] ?? e.deliveryStatus}` : ""}
                         <small>
-                          {shortWhenSP(e.at)}
+                          {dateTimeShortSP(e.at)}
                           {e.error ? ` · ${e.error}` : ""}
                         </small>
                       </div>

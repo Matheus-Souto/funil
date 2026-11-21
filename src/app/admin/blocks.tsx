@@ -47,6 +47,7 @@ export function Kpi({
   compare,
   empty,
   art,
+  layout = "card",
 }: {
   label: string;
   value: string;
@@ -58,7 +59,27 @@ export function Kpi({
   empty?: boolean;
   /** Ilustração 3D do card (public/admin/art/<nome>.webp). */
   art?: ArtName;
+  /** "cell": um dos números dentro de `.kpiStrip` (vários KPIs num cartão só, ícone à esquerda). */
+  layout?: "card" | "cell";
 }) {
+  if (layout === "cell") {
+    return (
+      <div className={s.kpiCell}>
+        {art ? <Image className={s.kpiCellArt} src={`/admin/art/${art}.webp`} alt="" width={52} height={52} aria-hidden="true" priority /> : null}
+        <div className={s.kpiCellBody}>
+          <div className={s.kpiLabel}>{label}</div>
+          <div className={s.kpiCellValue}>{amount !== undefined ? <KpiNumber value={amount} money={money} /> : value}</div>
+          {delta && compare ? (
+            <div className={s.delta} data-tone={delta.tone}>
+              {delta.tone !== "flat" ? <PIcon name={delta.tone === "up" ? "trending-up" : "trending-down"} size={14} /> : null}
+              {delta.pct === null ? (delta.tone === "up" ? "novo" : "—") : `${delta.pct > 0 ? "+" : delta.pct < 0 ? "−" : ""}${Math.abs(delta.pct)}%`}
+              <span className={s.deltaCompare}> vs. {compare}</span>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className={s.kpi} data-empty={empty ? "true" : undefined} data-art={art ? "true" : undefined}>
       {art ? <Image className={s.kpiArt} src={`/admin/art/${art}.webp`} alt="" width={72} height={72} aria-hidden="true" priority /> : null}
@@ -99,22 +120,43 @@ export function BarList({ rows, empty }: { rows: Array<{ label: ReactNode; value
 /** Aviso de entregas por e-mail com falha (avisos da loja e lista de pedidos). */
 export function FailedDeliveries({ items }: { items: Array<{ orderId: string; code: string }> }) {
   return (
-    <div className={s.banner} data-tone="danger">
-      <PIcon name="mail" />
-      <div>
-        <b>
-          A entrega por e-mail falhou ou voltou em {items.length} {items.length === 1 ? "pedido" : "pedidos"}.
-        </b>
-        <p>
-          Confira o endereço do comprador e a conexão de e-mail em Conexões, ou reenvie o acesso.{" "}
-          {items.slice(0, 5).map((f, i) => (
-            <span key={f.orderId}>
-              {i > 0 ? ", " : ""}
-              <Link href={`/admin/orders/${f.orderId}`}>#{f.code}</Link>
-            </span>
-          ))}
-        </p>
-      </div>
+    <Notice
+      tone="danger"
+      title={`A entrega por e-mail falhou ou voltou em ${items.length} ${items.length === 1 ? "pedido" : "pedidos"}. Confira o endereço do comprador e a conexão de e-mail em Conexões, ou reenvie o acesso.`}
+    >
+      <b>E-mail falhou</b> em {items.length} {items.length === 1 ? "pedido" : "pedidos"}:{" "}
+      {items.slice(0, 5).map((f, i) => (
+        <span key={f.orderId}>
+          {i > 0 ? ", " : ""}
+          <Link href={`/admin/orders/${f.orderId}`}>#{f.code}</Link>
+        </span>
+      ))}
+    </Notice>
+  );
+}
+
+/**
+ * Aviso discreto de uma linha (ponto colorido, texto que corta com "…" e ação no fim). Vários lado a lado dentro de
+ * `.noticeStrip`. O texto completo fica no `title` (passar o mouse) para quem quiser ler tudo.
+ */
+export function Notice({
+  tone,
+  title,
+  action,
+  alert,
+  children,
+}: {
+  tone: "warning" | "danger" | "info";
+  title?: string;
+  action?: ReactNode;
+  alert?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={s.notice} data-tone={tone} title={title} role={alert ? "alert" : undefined}>
+      <span className={s.noticeDot} aria-hidden="true" />
+      <span className={s.noticeText}>{children}</span>
+      {action ? <span className={s.noticeAction}>{action}</span> : null}
     </div>
   );
 }

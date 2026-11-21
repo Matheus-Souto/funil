@@ -15,7 +15,7 @@ import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
 import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { Art, Kpi, PageHead, deltaOf } from "../blocks";
+import { Art, Kpi, Notice, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
 import { PeriodTabs } from "./period-tabs";
 import { PIcon } from "../icons";
@@ -95,49 +95,45 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         }
       />
 
-      <div className={s.alerts}>
+      <div className={s.noticeStrip}>
         {cardNotice ? <CardSetupBanner /> : null}
         {pending > 0 ? (
-          <div className={s.banner}>
-            <PIcon name="hourglass" />
-            <div>
-              <b>
-                {pending} {pending === 1 ? "pedido com Pix manual aguarda" : "pedidos com Pix manual aguardam"}
-              </b>{" "}
-              você conferir no extrato e liberar.
-            </div>
-            <Link className={s.bannerAction} href="/admin/orders?status=pending&method=pix_manual">
-              Conferir agora →
-            </Link>
-          </div>
+          <Notice
+            tone="warning"
+            title={`${pending} ${pending === 1 ? "pedido com Pix manual aguarda" : "pedidos com Pix manual aguardam"} você conferir no extrato e liberar.`}
+            action={<Link href="/admin/orders?status=pending&method=pix_manual">Conferir</Link>}
+          >
+            <b>
+              {pending} {pending === 1 ? "Pix manual" : "Pix manuais"}
+            </b>{" "}
+            {pending === 1 ? "aguarda" : "aguardam"} conferência
+          </Notice>
         ) : null}
         {alerts?.alerts.map((a) => (
-          <div key={a.id} className={s.banner} data-tone="danger" role="alert">
-            <PIcon name="triangle-alert" />
-            <div>
-              <b>{a.title}</b>
-              <p>
-                {a.body}
-                {a.orderId ? (
-                  <>
-                    {" "}
-                    <Link href={`/admin/orders/${a.orderId}`}>Ver pedido</Link>
-                  </>
-                ) : null}
-              </p>
-            </div>
-            {canAck ? <AckButton onAck={ackAlertAction.bind(null, a.id)} /> : null}
-          </div>
+          <Notice
+            key={a.id}
+            tone="danger"
+            alert
+            title={`${a.title}. ${a.body}`}
+            action={
+              <>
+                {a.orderId ? <Link href={`/admin/orders/${a.orderId}`}>Ver pedido</Link> : null}
+                {canAck ? <AckButton onAck={ackAlertAction.bind(null, a.id)} /> : null}
+              </>
+            }
+          >
+            <b>{a.title}</b> {a.body}
+          </Notice>
         ))}
         {failedDeliveries.length > 0 ? <FailedDeliveries items={failedDeliveries} /> : null}
       </div>
 
       <div className={s.stack}>
-        <section className={s.grid4} aria-label="Números do período">
-          <Kpi art="receita" label="Receita" value={brl(m.revenueCents)} amount={m.revenueCents} money delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={COMPARE[period]} />
-          <Kpi art="pedidos" label="Pedidos" value={String(m.orders)} amount={m.orders} delta={deltaOf(m.orders, prev.orders)} compare={COMPARE[period]} />
-          <Kpi art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
-          <Kpi art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
+        <section className={`${s.card} ${s.kpiStrip}`} aria-label="Números do período">
+          <Kpi layout="cell" art="receita" label="Receita" value={brl(m.revenueCents)} amount={m.revenueCents} money delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={COMPARE[period]} />
+          <Kpi layout="cell" art="pedidos" label="Pedidos" value={String(m.orders)} amount={m.orders} delta={deltaOf(m.orders, prev.orders)} compare={COMPARE[period]} />
+          <Kpi layout="cell" art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
+          <Kpi layout="cell" art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
         </section>
 
         <div className={s.splitWide}>
@@ -234,13 +230,9 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 /** Aviso de cartão indisponível (instalação sem o serviço de cartão; docs/instalacao.md, seção 12). */
 function CardSetupBanner() {
   return (
-    <div className={s.banner} data-tone="danger" role="alert">
-      <PIcon name="triangle-alert" />
-      <div>
-        <b>Cartão fora do checkout</b>
-        <p>{CARD_SETUP_NOTICE}</p>
-      </div>
-    </div>
+    <Notice tone="danger" alert title={`Cartão fora do checkout. ${CARD_SETUP_NOTICE}`}>
+      <b>Cartão fora do checkout</b> {CARD_SETUP_NOTICE}
+    </Notice>
   );
 }
 
@@ -265,7 +257,7 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
     <>
       <PageHead title={`Boas-vindas, ${storeName}`} sub="Sua loja está quase pronta. Falta pouco para a primeira venda." />
       {cardSetupNoticeNeeded(cardServiceConfigured(env), offers) ? (
-        <div className={s.alerts}>
+        <div className={s.noticeStrip}>
           <CardSetupBanner />
         </div>
       ) : null}

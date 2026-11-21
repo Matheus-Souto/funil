@@ -10,7 +10,7 @@ import { createIntegrationSecrets, getIntegration, saveIntegration } from "@/lib
 import { enqueue } from "@/lib/jobs";
 import { pixManualExpiry } from "@/lib/orders/labels";
 import { allowedOrderActions, csvCell, exportOrders, getOrderDetail, listOrders, maskCpf, orderCounts, ordersCsv } from "@/lib/orders/panel";
-import { firstParam, parseOrderFilters } from "@/lib/panel-params";
+import { firstParam, parseOrderFilters, parseOrderMultiFilters } from "@/lib/panel-params";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { alertAsaasKeyRejected } from "@/lib/payments/asaas/webhook";
@@ -364,6 +364,15 @@ describe("parâmetros repetidos na URL", () => {
       page: 2,
     });
     expect(parseOrderFilters({ status: "nada", method: ["?"], pagina: "abc", q: "  " })).toEqual({ q: undefined, status: undefined, method: undefined, page: 1 });
+  });
+  test("filtros de vários valores (painel): repetidos ou separados por vírgula, sem duplicar, inválidos fora", () => {
+    expect(parseOrderMultiFilters({ status: ["paid", "pending,paid", "nada"], method: "pix_manual,card_asaas,x", q: " bia ", pagina: "3" })).toEqual({
+      statuses: ["paid", "pending"],
+      methods: ["pix_manual", "card_asaas"],
+      q: "bia",
+      page: 3,
+    });
+    expect(parseOrderMultiFilters({})).toEqual({ statuses: [], methods: [], q: undefined, page: 1 });
   });
 });
 

@@ -1,6 +1,7 @@
 import { ActionError, runAction } from "@/lib/actions/core";
 import { requirePanelActor } from "@/lib/auth/session";
 import { exportOrders, ordersCsv } from "@/lib/orders/panel";
+import { parseOrderMultiFilters } from "@/lib/panel-params";
 
 export const dynamic = "force-dynamic";
 
@@ -8,9 +9,11 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request): Promise<Response> {
   const panel = await requirePanelActor();
   const p = new URL(req.url).searchParams;
+  // Mesmos filtros da lista, inclusive vários status ou métodos (?status=paid&status=pending).
+  const { statuses, methods } = parseOrderMultiFilters({ status: p.getAll("status"), method: p.getAll("method") });
   const input = {
-    ...(p.get("status") ? { status: p.get("status") } : {}),
-    ...(p.get("method") ? { method: p.get("method") } : {}),
+    ...(statuses.length ? { statuses } : {}),
+    ...(methods.length ? { methods } : {}),
     ...(p.get("q") ? { q: p.get("q") } : {}),
   };
   try {

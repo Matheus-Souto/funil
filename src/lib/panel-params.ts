@@ -7,6 +7,23 @@ export type Param = string | string[] | undefined;
 export const firstParam = (v: Param): string | undefined => (Array.isArray(v) ? v[0] : v);
 
 /** Filtros da lista de pedidos: status/método fora da lista são ignorados; página inválida vira 1. */
+/** Filtros do painel com vários valores: ?status=paid&status=pending (ou "paid,pending"); inválidos são ignorados. */
+export function parseOrderMultiFilters(sp: { status?: Param; method?: Param; q?: Param; pagina?: Param }): {
+  statuses: OrderStatus[];
+  methods: OrderMethod[];
+  q: string | undefined;
+  page: number;
+} {
+  const all = (p: Param) => (p === undefined ? [] : (Array.isArray(p) ? p : [p]).flatMap((v) => v.split(",")).map((v) => v.trim()));
+  const { q, page } = parseOrderFilters(sp);
+  return {
+    statuses: [...new Set(all(sp.status))].filter((v): v is OrderStatus => ORDER_STATUSES.includes(v as OrderStatus)),
+    methods: [...new Set(all(sp.method))].filter((v): v is OrderMethod => ORDER_METHODS.includes(v as OrderMethod)),
+    q,
+    page,
+  };
+}
+
 export function parseOrderFilters(sp: { status?: Param; method?: Param; q?: Param; pagina?: Param }): {
   status: OrderStatus | undefined;
   method: OrderMethod | undefined;

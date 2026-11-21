@@ -67,10 +67,10 @@
 @property --sb {
   syntax: "<length>";
   inherits: true;
-  initial-value: 256px;
+  initial-value: 236px;
 }
 .shell {
-  --sb: 256px;
+  --sb: 236px;
   position: relative;
   display: grid;
   grid-template-columns: var(--sb) minmax(0, 1fr);
@@ -78,7 +78,7 @@
   transition: --sb 280ms var(--ease-standard);
 }
 .shell[data-collapsed="true"] {
-  --sb: 72px;
+  --sb: 64px;
 }
 /* a coluna da sidebar continua até o fim de páginas longas (a sidebar em si é fixa na tela) */
 .shell::before {
@@ -111,8 +111,8 @@
   height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 16px 12px 12px;
+  gap: 2px;
+  padding: 14px 10px 10px;
   overflow: hidden;
 }
 .sideTop {
@@ -120,8 +120,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  height: 40px;
-  margin-bottom: 10px;
+  height: 36px;
+  margin-bottom: 8px;
 }
 .brand {
   display: flex;
@@ -131,7 +131,7 @@
   padding-left: 4px;
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 20px;
+  font-size: 18px;
   letter-spacing: -0.03em;
   color: var(--color-text);
   text-decoration: none;
@@ -140,12 +140,12 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   background: var(--color-primary);
   color: var(--color-on-primary);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 700;
 }
 .brandText,
@@ -159,23 +159,33 @@
 .storeBox {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
+  gap: 9px;
+  padding: 5px 6px;
+  border-radius: 10px;
+  color: inherit;
+  text-decoration: none;
+  transition: background-color 150ms var(--ease-standard);
+}
+.storeBox:hover {
   background: var(--color-surface-2);
 }
 .storeMark {
   display: grid;
   place-items: center;
   flex: none;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  font-size: 14px;
+  width: 26px;
+  height: 26px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-ink);
+  font-size: 12px;
   font-weight: 600;
+}
+.storeMark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .storeText {
   flex: 1;
@@ -185,26 +195,26 @@
   white-space: nowrap;
 }
 .storeText b {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .storeText small {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--color-text-muted);
 }
 .ai {
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
-  margin-top: 6px;
-  padding: 0 14px;
-  border-radius: 10px;
+  gap: 10px;
+  height: 34px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border-radius: 8px;
   color: var(--color-text-muted);
   font: inherit;
-  font-size: 14px;
+  font-size: 13px;
   border: 0;
   background: none;
   white-space: nowrap;
@@ -220,8 +230,8 @@
 }
 .ai kbd {
   font-family: var(--font-mono);
-  font-size: 12px;
-  padding: 2px 6px;
+  font-size: 11px;
+  padding: 1px 5px;
   border-radius: 6px;
   border: 1px solid var(--color-border);
   background: var(--color-surface-2);
@@ -245,11 +255,11 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  height: 40px;
-  padding: 0 14px;
-  border-radius: 10px;
-  font-size: 14px;
+  gap: 10px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text-muted);
   text-decoration: none;
@@ -259,8 +269,16 @@
     color 150ms var(--ease-standard);
 }
 .navItem:hover {
-  background: var(--color-surface-2);
   color: var(--color-text);
+}
+.navItem > :not(.navHover) {
+  position: relative;
+}
+.navHover {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: var(--color-surface-2);
 }
 .navItem[aria-current="page"] {
   background: var(--color-primary-soft);
@@ -273,9 +291,9 @@
 .navItem[aria-current="page"]::before {
   content: "";
   position: absolute;
-  left: -12px;
-  top: 10px;
-  bottom: 10px;
+  left: -10px;
+  top: 9px;
+  bottom: 9px;
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--color-primary);
@@ -293,8 +311,8 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 .navDot {
   position: absolute;
@@ -307,29 +325,29 @@
   box-shadow: 0 0 0 2px var(--sidebar);
 }
 .navSep {
-  height: 28px;
-  margin: 12px 0 2px;
-  padding: 6px 14px 0;
-  font-size: 12px;
+  height: 26px;
+  margin: 10px 0 2px;
+  padding: 6px 10px 0;
+  font-size: 11px;
   font-weight: 500;
   color: var(--color-text-muted);
 }
 .navBadge {
   margin-left: auto;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
   border-radius: 999px;
   background: var(--color-warning-soft);
   color: var(--color-warning);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   display: grid;
   place-items: center;
 }
 .navTag {
   margin-left: auto;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   border: 1px solid var(--color-border);
   padding: 1px 6px;
@@ -347,12 +365,12 @@
   display: grid;
   place-items: center;
   flex: none;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   background: var(--color-primary-soft);
   color: var(--color-primary-ink);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
 }
 .userText {
@@ -363,13 +381,13 @@
   white-space: nowrap;
 }
 .userFoot b {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .userFoot small {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--color-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1208,12 +1226,10 @@
   font-size: 14px;
 }
 .table th {
-  padding: 12px 16px;
+  padding: 11px 16px;
   text-align: left;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--color-text-muted);
   border-bottom: 1px solid var(--color-border);
   white-space: nowrap;
@@ -2444,4 +2460,155 @@
   box-shadow:
     0 0 0 100vmax rgb(0 0 0 / 0.35),
     var(--shadow-floating);
+}
+
+.thCount {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---------- Avisos discretos (uma linha, lado a lado) ---------- */
+.noticeStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.noticeStrip:empty {
+  display: none;
+}
+.notice {
+  display: flex;
+  flex: 1 1 280px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+}
+.notice[data-tone="warning"] {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+.notice[data-tone="danger"] {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+.noticeDot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.noticeText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.noticeText a,
+.noticeAction a {
+  color: inherit;
+  font-weight: 600;
+  text-underline-offset: 2px;
+}
+.noticeAction {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+.noticeAction button {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* ---------- KPIs num cartão só (ícone 3D à esquerda de cada número) ---------- */
+.kpiStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 6px;
+}
+.kpiCell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  transition: background-color 150ms var(--ease-standard);
+}
+.kpiCell:hover {
+  background: var(--color-surface-2);
+}
+.kpiCellArt {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  transition: transform 440ms var(--ease-spring);
+}
+.kpiCell:hover .kpiCellArt {
+  transform: translateY(-3px) rotate(-3deg);
+}
+.kpiCellBody {
+  min-width: 0;
+}
+.kpiCellValue {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kpiCellValue > span {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+.kpiCell .delta {
+  margin-top: 2px;
+  font-size: 12px;
+}
+.kpiCell .deltaCompare {
+  display: none;
+}
+@media (max-width: 1100px) {
+  .kpiStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .kpiCell:hover .kpiCellArt {
+    transform: none;
+  }
+}
+
+/* Botões de ícone da sidebar menores (tema, senha, sair, recolher) */
+.sidebar .iconBtn,
+.userActions :global(button) {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
 }

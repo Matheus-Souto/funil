@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Sparkles } from "lucide-react";
+import { motion, useReducedMotion } from "motion/react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Tooltip } from "@/components/arc/tooltip/tooltip";
 import s from "../panel.module.css";
@@ -86,7 +87,13 @@ export function PanelShell({
   children: ReactNode;
 }) {
   const path = usePathname();
+  const reduced = useReducedMotion();
   const [collapsed, setCollapsed] = useState(initialCollapsed);
+  // Destaque que desliza entre os itens ao passar o mouse (o mesmo efeito do menu de filtros).
+  const [hovered, setHovered] = useState<string | null>(null);
+  const glide = reduced ? { duration: 0 } : ({ type: "spring", visualDuration: 0.16, bounce: 0.15 } as const);
+  const hoverBg = (key: string) =>
+    hovered === key ? <motion.span layoutId="nav-hover" className={s.navHover} transition={glide} aria-hidden="true" /> : null;
   const [theme, changeTheme] = useTheme(initialTheme);
 
   const toggle = useCallback(() => {
@@ -122,9 +129,17 @@ export function PanelShell({
     return (
       <li key={i.href}>
         <Tip show={collapsed} label={i.badge ? `${i.label} (${i.badge})` : i.label}>
-          <Link className={s.navItem} href={i.href} aria-current={active ? "page" : undefined} aria-label={collapsed ? i.label : undefined}>
+          <Link
+            className={s.navItem}
+            href={i.href}
+            aria-current={active ? "page" : undefined}
+            aria-label={collapsed ? i.label : undefined}
+            onMouseEnter={() => setHovered(i.href)}
+            onFocus={() => setHovered(i.href)}
+          >
+            {hoverBg(i.href)}
             <span className={s.navIcon}>
-              <NavIcon name={i.icon} />
+              <NavIcon name={i.icon} size={16} />
               {i.badge && collapsed ? <span className={s.navDot} aria-hidden="true" /> : null}
             </span>
             <span className={s.navLabel}>{i.label}</span>
@@ -158,13 +173,13 @@ export function PanelShell({
               aria-expanded={!collapsed}
               title={collapsed ? undefined : "Recolher menu (Ctrl B)"}
             >
-              {collapsed ? <PanelLeftOpen size={18} strokeWidth={1.75} /> : <PanelLeftClose size={18} strokeWidth={1.75} />}
+              {collapsed ? <PanelLeftOpen size={16} strokeWidth={1.75} /> : <PanelLeftClose size={16} strokeWidth={1.75} />}
             </button>
           </Tip>
         </div>
 
         <Tip show={collapsed} label={`${id.storeName} · ${id.roleLabel}`}>
-          <div className={s.storeBox}>
+          <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados e foto da loja em Configurações"}>
             <span className={s.storeMark} aria-hidden="true">
               {id.storeName.slice(0, 1).toUpperCase()}
             </span>
@@ -172,19 +187,19 @@ export function PanelShell({
               <b>{id.storeName}</b>
               <small>{id.roleLabel}</small>
             </span>
-          </div>
+          </Link>
         </Tip>
 
         <Tip show={collapsed} label="Pergunte à IA (em breve)">
           <button type="button" className={s.ai} aria-disabled="true" title={collapsed ? undefined : "Pergunte à IA chega na próxima fase"}>
-            <Sparkles size={18} strokeWidth={1.75} />
+            <Sparkles size={16} strokeWidth={1.75} />
             <span className={s.navLabel}>Pergunte à IA</span>
             <kbd className={s.navLabel}>Ctrl K</kbd>
           </button>
         </Tip>
 
         <nav aria-label="Navegação do painel" className={s.navWrap}>
-          <ul className={s.nav}>
+          <ul className={s.nav} onMouseLeave={() => setHovered(null)} onBlur={() => setHovered(null)}>
             {main.map(link)}
             <li className={s.navSep} aria-hidden="true">
               <span className={s.navLabel}>Loja</span>
@@ -194,7 +209,7 @@ export function PanelShell({
               <Tip show={collapsed} label="Equipe (em breve)">
                 <span className={s.navItem} aria-disabled="true" title={collapsed ? undefined : "Convites para a equipe chegam na próxima fase"}>
                   <span className={s.navIcon}>
-                    <NavIcon name="users" />
+                    <NavIcon name="users" size={16} />
                   </span>
                   <span className={s.navLabel}>Equipe</span>
                   <span className={`${s.navTag} ${s.navLabel}`}>em breve</span>
@@ -216,13 +231,13 @@ export function PanelShell({
             <ThemeSwitch theme={theme} iconOnly label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"} onThemeChange={(next, _v, trigger) => changeTheme(next, trigger)} />
             <Tip show={collapsed} label="Trocar senha">
               <Link href="/admin/senha" className={s.iconBtn} aria-label="Trocar senha" title={collapsed ? undefined : "Trocar senha"}>
-                <KeyRound size={17} strokeWidth={1.75} />
+                <KeyRound size={15} strokeWidth={1.75} />
               </Link>
             </Tip>
             <form action={logout}>
               <Tip show={collapsed} label="Sair">
                 <button type="submit" className={s.iconBtn} aria-label="Sair" title={collapsed ? undefined : "Sair"}>
-                  <LogOut size={17} strokeWidth={1.75} />
+                  <LogOut size={15} strokeWidth={1.75} />
                 </button>
               </Tip>
             </form>
