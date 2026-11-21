@@ -35,6 +35,9 @@ const OPEN_PER_STORE = 10;
 const LINKS_PER_TOKEN_PER_HOUR = 20;
 const MAX_ATTEMPTS = 5;
 const IP_LIMIT = 30;
+/** Sem IP conhecido (`TRUST_PROXY=0` ou sem cabeçalho do proxy), todos os PUTs dividem um balde global. */
+const GLOBAL_KEY = "mcp:upload:global";
+const GLOBAL_LIMIT = 60;
 const IP_WINDOW_SEC = 60;
 /** Loja usada na consulta quando a chave nem tem o formato: a mesma consulta roda e não acha nada. */
 const NIL_STORE = "00000000-0000-0000-0000-000000000000";
@@ -45,23 +48,25 @@ export function mintUploadKey(storeId: string): { key: string; hash: string } {
 }
 
 /**
- * Loja, link, token e papel do token, ou `null` (formato inválido, loja inexistente, hash desconhecido, vencido, usado ou
+ * Loja, link, token, papel do token e tentativas já feitas, ou `null` (formato inválido, loja inexistente, hash desconhecido, vencido, usado ou
  * token revogado: o chamador não distingue os casos). Uma consulta só, a mesma em todo caso (inclusive formato
  * inválido, na loja nula): o tempo de resposta não diz qual caso foi.
  */
-export async function resolveUploadKey(raw: string): Promise<{ storeId: string; linkId: string; tokenId: string; role: Role } | null> {
+export async function resolveUploadKey(
+  raw: string,
+): Promise<{ storeId: string; linkId: string; tokenId: string; role: Role; attempts: number } | null> {
   const m = KEY_RE.exec(raw);
   const storeId = m ? toUuid(m[1]!) : NIL_STORE;
   const hash = sha256(m ? raw : "");
   const [row] = await withStore(storeId, (tx) =>
     tx
-      .select({ id: uploadLink.id, tokenId: uploadLink.tokenId, role: mcpToken.role })
+      .select({ id: uploadLink.id, tokenId: uploadLink.tokenId, role: mcpToken.role, attempts: uploadLink.attempts })
       .from(uploadLink)
       .innerJoin(mcpToken, eq(mcpToken.id, uploadLink.tokenId))
       .where(and(eq(uploadLink.keyHash, hash), isNull(uploadLink.usedAt), gt(uploadLink.expiresAt, sql`now()`), isNull(mcpToken.revokedAt)))
       .limit(1),
   );
-  return m && row ? { storeId, linkId: row.id, tokenId: row.tokenId, role: row.role as Role } : null;
+  return m && row ? { storeId, linkId: row.id, tokenId: row.tokenId, role: row.role as Role, attempts: row.attempts } : null;
 }
 
 function tokenIdOf(actor: Actor): string {
@@ -109,10 +114,19 @@ export const createUploadLink = defineAction({
   },
 });
 
+/** Link deste token, não usado, no prazo e de token não revogado (a revogação vale antes da inspeção do PDF). */
 const usable = (linkId: string, tokenId: string) =>
-  and(eq(uploadLink.id, linkId), eq(uploadLink.tokenId, tokenId), isNull(uploadLink.usedAt), gt(uploadLink.expiresAt, sql`now()`));
+  and(
+    eq(uploadLink.id, linkId),
+    eq(uploadLink.tokenId, tokenId),
+    isNull(uploadLink.usedAt),
+    gt(uploadLink.expiresAt, sql`now()`),
+    sql`exists (select 1 from ${mcpToken} where ${mcpToken.id} = ${tokenId} and ${mcpToken.revokedAt} is null)`,
+  );
 
 type ProductView = Awaited<ReturnType<typeof insertProductRow>>;
+
+const tooManyAttempts = () => new ActionError("rate_limited", "Tentativas demais neste link de upload. Peça um link novo.");
 
 const gone = () => new ActionError("conflict", "Este link de upload já foi usado ou venceu.");
 
@@ -135,7 +149,7 @@ export const completeUpload = defineAction({
         .returning({ attempts: uploadLink.attempts, name: uploadLink.name, fileName: uploadLink.fileName }),
     );
     if (!link) throw gone();
-    if (link.attempts > MAX_ATTEMPTS) throw new ActionError("rate_limited", "Tentativas demais neste link de upload. Peça um link novo.");
+    if (link.attempts > MAX_ATTEMPTS) throw tooManyAttempts();
     await assertProductPdf(input.file);
     return { name: link.name, fileName: link.fileName };
   },
@@ -145,7 +159,7 @@ export const completeUpload = defineAction({
     const [claimed] = await ctx.tx
       .update(uploadLink)
       .set({ usedAt: sql`now()` })
-      .where(and(usable(input.linkId, tokenId), sql`exists (select 1 from ${mcpToken} where ${mcpToken.id} = ${tokenId} and ${mcpToken.revokedAt} is null)`))
+      .where(usable(input.linkId, tokenId))
       .returning({ id: uploadLink.id });
     if (!claimed) throw gone();
     const row = await insertProductRow(ctx, { name: link.name, fileName: link.fileName, bytes: input.file });
@@ -168,21 +182,25 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
   Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
 
 /**
- * PUT /api/mcp/upload/[key]. Ordem: método → limite por IP (antes de consultar a chave, contra varredura) → chave (404
- * com o MESMO corpo em todo caso de falha) → Content-Type → corpo em streaming com teto de 50 MB → `products.completeUpload`
- * como o token que pediu o link. Nenhuma regra de negócio aqui; a chave nunca vai para log.
+ * PUT /api/mcp/upload/[key]. Ordem: método → limite por IP, ou global sem IP conhecido (antes de consultar a chave,
+ * contra varredura) → chave (404 com o MESMO corpo em todo caso de falha) → tentativas esgotadas (429 sem ler o corpo; o
+ * teto vale de fato no `prepare` da ação) → Content-Type → corpo em streaming com teto de 50 MB →
+ * `products.completeUpload` como o token que pediu o link. A chave nunca vai para log.
  */
 export async function handleUploadRequest(req: Request, key: string, opts: UploadHttpOptions = {}): Promise<Response> {
   if (req.method !== "PUT") return json(405, { error: "Método não permitido. Envie o PDF com PUT." }, { allow: "PUT" });
   const now = opts.now ?? (() => new Date());
 
   const ip = clientIpFrom(req.headers, opts.trustProxy ?? env.TRUST_PROXY);
-  if (ip !== UNKNOWN_IP && !(await checkRateLimit(`mcp:upload:ip:${ipRateKey(ip)}`, IP_LIMIT, IP_WINDOW_SEC, now()))) {
+  const [limitKey, limit] = ip === UNKNOWN_IP ? [GLOBAL_KEY, GLOBAL_LIMIT] : [`mcp:upload:ip:${ipRateKey(ip)}`, IP_LIMIT];
+  if (!(await checkRateLimit(limitKey, limit, IP_WINDOW_SEC, now()))) {
     return json(429, { error: "Muitas requisições. Tente de novo em um minuto." }, { "retry-after": String(IP_WINDOW_SEC) });
   }
 
   const link = await resolveUploadKey(key);
   if (!link) return json(404, { error: "Link de upload inválido ou vencido." });
+  // Link que já gastou as tentativas: recusa sem ler o corpo (senão cada PUT ainda guardaria até 50 MB na memória).
+  if (link.attempts >= MAX_ATTEMPTS) return json(UPLOAD_ERROR_STATUS.rate_limited, { error: tooManyAttempts().message });
   if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/pdf")) {
     return json(415, { error: "Envie o PDF com Content-Type application/pdf." });
   }

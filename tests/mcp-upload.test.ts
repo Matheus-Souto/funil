@@ -14,7 +14,7 @@ import { auditLog, mcpToken, uploadLink } from "@/lib/db/schema";
 import { handleMcpRequest } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
 import { mcpTools } from "@/lib/mcp/tools";
-import { createUploadLink, handleUploadRequest, mintUploadKey, resolveUploadKey } from "@/lib/mcp/uploads";
+import { completeUpload, createUploadLink, handleUploadRequest, mintUploadKey, resolveUploadKey } from "@/lib/mcp/uploads";
 import { createTestDb, HEAVY_TEST_MS, seedStore, type TestDb } from "./db";
 import { VALID_PDF } from "./pdf-fixtures";
 
@@ -77,7 +77,7 @@ async function createLink(storeId: string, actor: Actor, name = "Curso"): Promis
   return link.uploadUrl.slice(`${BASE}/api/mcp/upload/`.length);
 }
 
-function put(key: string, body: BodyInit | null, opts: { headers?: Record<string, string>; method?: string; trustProxy?: number } = {}) {
+function put(key: string, body: BodyInit | null, opts: { headers?: Record<string, string>; method?: string; trustProxy?: number; now?: Date } = {}) {
   const req = new Request(`${BASE}/api/mcp/upload/${key}`, {
     method: opts.method ?? "PUT",
     headers: { "content-type": "application/pdf", ...opts.headers },
@@ -85,7 +85,7 @@ function put(key: string, body: BodyInit | null, opts: { headers?: Record<string
     // @ts-expect-error necessário para corpo em stream no runtime
     duplex: "half",
   });
-  return handleUploadRequest(req, key, { now: () => NOW, trustProxy: opts.trustProxy ?? 0 });
+  return handleUploadRequest(req, key, { now: () => opts.now ?? NOW, trustProxy: opts.trustProxy ?? 0 });
 }
 
 /** Corpo infinito de pedaços de 1 MB que conta quantos pedaços foram puxados. */
@@ -245,7 +245,7 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect(await list(a.storeId)).toEqual([]);
     expect(await list(b.storeId)).toEqual([]);
     // A chave certa resolve para a loja, o link e o token dela.
-    expect(await resolveUploadKey(valid)).toMatchObject({ storeId: b.storeId, tokenId: tokB.id, role: "owner", linkId: expect.any(String) });
+    expect(await resolveUploadKey(valid)).toMatchObject({ storeId: b.storeId, tokenId: tokB.id, role: "owner", linkId: expect.any(String), attempts: 0 });
   });
 
   test("não PDF → 400 e a chave segue valendo; 6ª tentativa → 429; Content-Type errado → 415; acima de 50 MB → 413", async () => {
@@ -257,11 +257,18 @@ describe("PUT /api/mcp/upload/[key]", () => {
       expect([i, res.status]).toEqual([i, 400]);
       expect(((await res.json()) as { error: string }).error).toMatch(/PDF/);
     }
-    const sixth = await put(key, VALID_PDF as BodyInit);
+    // A 6ª é recusada pela rota antes de ler o corpo (sem guardar até 50 MB na memória a cada PUT).
+    const sixthBody = endless();
+    const sixth = await put(key, sixthBody.body);
     expect(sixth.status).toBe(429);
+    expect(sixthBody.state.pulls).toBe(0);
     expect(await list(storeId)).toEqual([]);
     const [row] = await t.ownerDb.select().from(uploadLink).where(eq(uploadLink.keyHash, sha256(key)));
-    expect(row).toMatchObject({ attempts: 6, usedAt: null });
+    expect(row).toMatchObject({ attempts: 5, usedAt: null });
+    // E a ação também recusa a 6ª por conta própria (a rota só evita ler o corpo).
+    const direct = runAction(completeUpload, { storeId, actor: tok.actor, origin: "mcp" }, { linkId: row!.id, file: VALID_PDF });
+    expect(await codeOf(direct)).toBe("rate_limited");
+    expect(await list(storeId)).toEqual([]);
 
     // Content-Type e tamanho são recusados antes da ação: não gastam tentativa nem a chave.
     const fresh = await createLink(storeId, tok.actor, "Outro");
@@ -277,6 +284,18 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect((await put(fresh, VALID_PDF as BodyInit)).status).toBe(201);
     expect((await list(storeId)).map((p) => p.name)).toEqual(["Outro"]);
   }, HEAVY_TEST_MS);
+
+  test("token revogado depois de resolver a chave: a ação recusa antes de contar a tentativa e de inspecionar o PDF", async () => {
+    const { storeId } = await seedStore();
+    const tok = await mkToken(storeId);
+    const key = await createLink(storeId, tok.actor);
+    const link = await resolveUploadKey(key);
+    await t.ownerDb.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, tok.id));
+    const r = runAction(completeUpload, { storeId, actor: tok.actor, origin: "mcp" }, { linkId: link!.linkId, file: Buffer.from("texto") });
+    expect(await codeOf(r)).toBe("conflict");
+    const [row] = await t.ownerDb.select().from(uploadLink).where(eq(uploadLink.keyHash, sha256(key)));
+    expect(row).toMatchObject({ attempts: 0, usedAt: null });
+  });
 
   test("dois PUTs simultâneos válidos → um produto só", async () => {
     const { storeId } = await seedStore();
@@ -305,5 +324,24 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect(blocked.status).toBe(429);
     // Outro IP segue passando, e a chave não foi gasta.
     expect((await put(key, VALID_PDF as BodyInit, { trustProxy: 1, headers: { "x-forwarded-for": "192.0.2.10" } })).status).toBe(201);
+  }, HEAVY_TEST_MS);
+
+  test("sem IP conhecido: balde global, 61ª requisição no minuto → 429 antes de consultar a chave", async () => {
+    const { storeId } = await seedStore();
+    const tok = await mkToken(storeId);
+    const key = await createLink(storeId, tok.actor);
+    // Outra janela (10 min depois): os PUTs sem IP dos outros testes não contam aqui.
+    const later = new Date(NOW.getTime() + 600_000);
+    const forged = () => `${KEY_PREFIX}${randomUUID().replaceAll("-", "")}_${randomBytes(32).toString("base64url")}`;
+    for (let i = 0; i < 60; i++) {
+      const res = await put(forged(), VALID_PDF as BodyInit, { now: later });
+      expect([i, res.status]).toEqual([i, 404]);
+    }
+    const { state, body } = endless();
+    const blocked = await put(key, body, { now: later });
+    expect(blocked.status).toBe(429);
+    expect(state.pulls).toBe(0);
+    // Com IP conhecido o balde global não vale, e a chave segue valendo.
+    expect((await put(key, VALID_PDF as BodyInit, { now: later, trustProxy: 1, headers: { "x-forwarded-for": "192.0.2.20" } })).status).toBe(201);
   }, HEAVY_TEST_MS);
 });
