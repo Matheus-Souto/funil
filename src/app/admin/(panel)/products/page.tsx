@@ -33,7 +33,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
 
   return (
     <>
-      <PageHead title="Produtos" sub="Os arquivos que suas ofertas entregam. Cada comprador baixa uma cópia com o próprio nome e e-mail." />
+      <PageHead title="Produtos" />
       <div className={s.stack}>
         {products.length > 0 ? (
           <section className={`${s.card} ${s.cardFlush}`}>

@@ -36,15 +36,6 @@ const PERIODS: Array<[Period, string]> = [
 const COMPARE: Record<Period, string> = { hoje: "ontem no mesmo horário", "7d": "7 dias anteriores", "30d": "30 dias anteriores" };
 const WEEKDAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "short" });
 const FULL_DAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
-const RANGE = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "numeric", month: "long" });
-/** "12 a 18 de novembro" / "20 de outubro a 18 de novembro". */
-function rangeLabel(from: Date, to: Date): string {
-  const a = RANGE.format(from);
-  const b = RANGE.format(to);
-  const [da, ...ma] = a.split(" ");
-  const [, ...mb] = b.split(" ");
-  return ma.join(" ") === mb.join(" ") ? `${da} a ${b}` : `${a} a ${b}`;
-}
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 const pct = (a: number, b: number) => (b === 0 ? "—" : `${Math.round((a * 1000) / b) / 10}%`.replace(".", ","));
@@ -90,7 +81,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
     <>
       <PageHead
         title="Dashboard"
-        sub={`${id.storeName} · ${period === "hoje" ? "hoje" : rangeLabel(cur.from, now)}`}
         actions={
           <PeriodTabs current={period} items={PERIODS.map(([p, l]) => ({ key: p, label: l, href: p === "7d" ? "/admin" : `/admin?periodo=${p}` }))} />
         }
@@ -267,7 +257,7 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
   const done = steps.filter((x) => x.done).length;
   return (
     <>
-      <PageHead title={`Boas-vindas, ${storeName}`} sub="Sua loja está quase pronta. Falta pouco para a primeira venda." />
+      <PageHead title={`Boas-vindas, ${storeName}`} />
       {cardSetupNoticeNeeded(cardServiceConfigured(env), offers) ? (
         <div className={s.noticeStrip}>
           <CardSetupBanner />

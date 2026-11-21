@@ -29,7 +29,6 @@ export default async function OffersPage() {
     <>
       <PageHead
         title="Ofertas"
-        sub="Cada oferta tem seu próprio checkout. Coloque o link no botão da página de vendas."
         actions={
           hasPermission(role, "offers.write") ? (
             <Link className={`${s.btn} ${s.btnPrimary}`} href="/admin/offers/nova">

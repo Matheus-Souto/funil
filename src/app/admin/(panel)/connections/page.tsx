@@ -20,7 +20,7 @@ export default async function ConnectionsPage() {
   const { userEmail, storeName } = await getPanelIdentity(panel);
   return (
     <>
-      <PageHead title="Conexões" sub="Chaves e tokens ficam criptografados e nunca são exibidos de novo: só aparece “configurado” ou o final da chave." />
+      <PageHead title="Conexões" />
       {st.emailUsable ? null : (
         <div className={s.alerts}>
           <div className={s.banner} data-tone="danger" role="alert" id="email-inutilizavel">

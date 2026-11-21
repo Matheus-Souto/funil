@@ -31,7 +31,7 @@ export default async function TokensPage() {
   }));
   return (
     <>
-      <PageHead title="Agentes (MCP)" sub="Tokens para um agente de IA consultar a loja pelo protocolo MCP." />
+      <PageHead title="Agentes (MCP)" />
       <div className={s.alerts}>
         <div className={s.banner} data-tone="info" role="note">
           <PIcon name="shield-check" />

@@ -21,7 +21,7 @@ export default async function SettingsPage() {
   const host = new URL(st.checkoutBaseUrl).host;
   return (
     <>
-      <PageHead title="Configurações" sub="Dados da loja, aparência do checkout e integração com a página de vendas." />
+      <PageHead title="Configurações" />
       <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor }} canWrite={canWrite} />
 
       <div className={s.settingsRow} id="script">

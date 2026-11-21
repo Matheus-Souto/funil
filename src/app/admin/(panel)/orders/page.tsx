@@ -51,7 +51,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     const link = first && base ? `${base}/c/${first.slug}` : null;
     return (
       <>
-        <PageHead title="Pedidos" sub="Nenhum pedido ainda" />
+        <PageHead title="Pedidos" />
         <section className={`${s.card} ${s.empty}`}>
           <Art name="pedidos" />
           <h2>Os pedidos aparecem aqui</h2>
@@ -90,7 +90,6 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     <>
       <PageHead
         title="Pedidos"
-        sub="Cada pessoa que preencheu o checkout, pagando ou não."
         actions={
           canExport ? (
             <a className={s.btn} href={`/admin/orders.csv${qs({ pagina: undefined })}`} download>
