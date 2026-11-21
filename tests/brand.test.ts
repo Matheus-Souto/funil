@@ -10,7 +10,9 @@ describe("cor da loja no checkout (contraste AA garantido)", () => {
     expect(brandVars(null)).toEqual(DEFAULT_BRAND);
     expect(brandVars("verde")).toEqual(DEFAULT_BRAND);
     expect(brandVars("#12345")).toEqual(DEFAULT_BRAND);
-    expect(DEFAULT_BRAND["--color-brand"]).toBe("#0B6E4F");
+    expect(DEFAULT_BRAND["--color-brand"]).toBe("#9BE86A");
+    // o padrão é exatamente o que brandVars calcula para a cor da plataforma (contraste AA garantido)
+    expect(brandVars("#9BE86A")).toEqual(DEFAULT_BRAND);
   });
 
   test("azul da Maná Kids: texto branco, strong igual à própria cor", () => {

@@ -29,7 +29,9 @@ import {
 } from "@/lib/catalog/offer-editing";
 import { brl, centsToInput, parseBrl } from "@/lib/format";
 import { cardToggle } from "@/lib/payments/card-messages";
-import { Badge } from "../../../blocks";
+import { Art, Badge } from "../../../blocks";
+import { PIX_BRAND } from "../../../brand-icons";
+import { CreditCard, Info } from "lucide-react";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
 import type { ActionResult } from "../../../result";
@@ -74,6 +76,29 @@ const slugify = (t: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
 
+/** Formulário a partir da oferta salva (ou vazio, para uma oferta nova). */
+function initialForm(offer: OfferData | null, products: ProductOption[]) {
+  return {
+    name: offer?.name ?? "",
+    slug: offer?.slug ?? "",
+    main: (offer?.productIds ?? [products.find((p) => !p.deleted)?.id ?? ""]).map(newLine),
+    price: offer ? centsToInput(offer.priceCents) : "",
+    pix: offer ? offer.methods.includes("pix") : true,
+    card: offer ? offer.methods.includes("card") : false,
+    pixMode: offer?.pixMode ?? ("manual" as "manual" | "asaas"),
+    maxInstallments: offer?.maxInstallments ?? 1,
+    bumpOn: offer?.bump != null,
+    bumpLines: (offer?.bump?.productIds ?? [""]).map(newLine),
+    bumpPrice: offer?.bump ? centsToInput(offer.bump.priceCents) : "",
+    bumpLabel: offer?.bump?.label ?? "",
+    thankYouText: offer?.thankYouText ?? "",
+    active: offer?.active ?? true,
+  };
+}
+
+/** O que importa para saber se mudou (sem as chaves locais das linhas de produto). */
+const comparable = (f: ReturnType<typeof initialForm>) => ({ ...f, main: ids(f.main), bumpLines: f.bumpOn ? ids(f.bumpLines) : [] });
+
 export function OfferEditor(props: {
   offer: OfferData | null;
   products: ProductOption[];
@@ -89,22 +114,10 @@ export function OfferEditor(props: {
 }) {
   const { offer, products, canWrite } = props;
   const router = useRouter();
-  const [f, setF] = useState(() => ({
-    name: offer?.name ?? "",
-    slug: offer?.slug ?? "",
-    main: (offer?.productIds ?? [products.find((p) => !p.deleted)?.id ?? ""]).map(newLine),
-    price: offer ? centsToInput(offer.priceCents) : "",
-    pix: offer ? offer.methods.includes("pix") : true,
-    card: offer ? offer.methods.includes("card") : false,
-    pixMode: offer?.pixMode ?? ("manual" as "manual" | "asaas"),
-    maxInstallments: offer?.maxInstallments ?? 1,
-    bumpOn: offer?.bump != null,
-    bumpLines: (offer?.bump?.productIds ?? [""]).map(newLine),
-    bumpPrice: offer?.bump ? centsToInput(offer.bump.priceCents) : "",
-    bumpLabel: offer?.bump?.label ?? "",
-    thankYouText: offer?.thankYouText ?? "",
-    active: offer?.active ?? true,
-  }));
+  const [f, setF] = useState(() => initialForm(offer, products));
+  /** Há diferença entre o formulário e a oferta salva (a barra de baixo avisa e permite descartar). */
+  const dirty = !offer || JSON.stringify(comparable(f)) !== JSON.stringify(comparable(initialForm(offer, products)));
+  const discard = () => offer && setF(initialForm(offer, products));
   const [slugTouched, setSlugTouched] = useState(Boolean(offer));
   const [pixelOn, setPixelOn] = useState(Boolean(offer?.pixelId));
   const [pixel, setPixel] = useState(offer?.pixelId ?? "");
@@ -356,11 +369,6 @@ export function OfferEditor(props: {
               Ver checkout
             </a>
           ) : null}
-          {canWrite ? (
-            <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={submit} disabled={save.pending}>
-              {save.pending ? "Salvando…" : offer ? "Salvar" : "Criar oferta"}
-            </button>
-          ) : null}
         </div>
       </div>
       <Live msg={save.msg ?? (props.created ? { tone: "ok", text: "Oferta criada." } : null)} />
@@ -377,12 +385,10 @@ export function OfferEditor(props: {
           }}
         >
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
+            <legend className={s.sectionLegend}>
+              <Art name="ticket" size={24} className={s.cardArt} />
               Oferta
             </legend>
-            <p className={s.cardSub} style={{ clear: "both", margin: "0 0 16px" }}>
-              O que o comprador vê no topo do checkout.
-            </p>
             <div className={s.stack}>
               <div className={s.formGrid}>
                 <label className={s.field}>
@@ -438,25 +444,38 @@ export function OfferEditor(props: {
           </fieldset>
 
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
+            <legend className={s.sectionLegend}>
+              <Art name="pagos" size={24} className={s.cardArt} />
               Pagamento
             </legend>
-            <p className={s.cardSub} style={{ clear: "both", margin: "0 0 16px" }}>
-              Quais métodos aparecem neste checkout.
-            </p>
             <div className={s.stack}>
               <div className={s.grid2}>
-                <label className={s.check}>
+                <label className={s.payTile}>
+                  <span className={s.payIcon} aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="20" height="20">
+                      <path fill={PIX_BRAND.hex} d={PIX_BRAND.path} />
+                    </svg>
+                  </span>
+                  <span className={s.payText}>
+                    Pix
+                    <small>{f.pixMode === "asaas" ? "Liberado sozinho pelo Asaas" : "Você confere e libera"}</small>
+                  </span>
                   <input type="checkbox" checked={f.pix} onChange={(e) => set("pix", e.target.checked)} />
-                  Pix
                 </label>
-                <label className={s.check}>
+                <label className={s.payTile} data-disabled={cardBox.disabled ? "true" : undefined}>
+                  <span className={s.payIcon} aria-hidden="true">
+                    <CreditCard size={20} strokeWidth={1.8} />
+                  </span>
+                  <span className={s.payText}>
+                    Cartão de crédito
+                    <small>Visa, Mastercard, Elo · até 12x</small>
+                  </span>
                   <input type="checkbox" checked={f.card} onChange={(e) => set("card", e.target.checked)} disabled={cardBox.disabled} aria-describedby={cardBox.notice ? "cartao-indisponivel" : undefined} />
-                  Cartão de crédito
                 </label>
               </div>
               {cardBox.notice ? (
-                <p id="cartao-indisponivel" className={s.hint} role="note">
+                <p id="cartao-indisponivel" className={s.payNote} role="note">
+                  <Info size={14} strokeWidth={2} aria-hidden="true" />
                   {cardBox.notice}
                 </p>
               ) : null}
@@ -498,7 +517,10 @@ export function OfferEditor(props: {
 
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
             <div className={s.cardHead} style={{ marginBottom: 4 }}>
-              <legend className={s.sectionTitle}>Order bump</legend>
+              <legend className={s.sectionLegend}>
+                <Art name="receita" size={24} className={s.cardArt} />
+                Order bump
+              </legend>
               <label className={s.switch}>
                 <span className={s.srOnly}>Oferecer order bump</span>
                 <input
@@ -550,15 +572,31 @@ export function OfferEditor(props: {
           </fieldset>
 
           <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
+            <legend className={s.sectionLegend}>
+              <Art name="funil" size={24} className={s.cardArt} />
               Página de obrigado
             </legend>
-            <label className={s.field} style={{ clear: "both" }}>
+            <label className={s.field}>
               <span className={s.label}>Mensagem exibida depois do pagamento confirmado</span>
               <textarea className={s.textarea} value={f.thankYouText} maxLength={2000} onChange={(e) => set("thankYouText", e.target.value)} />
             </label>
           </fieldset>
           <button type="submit" hidden />
+          {canWrite ? (
+            <div className={s.saveBar} data-dirty={dirty ? "true" : undefined}>
+              <span className={s.saveState}>{offer ? (dirty ? "Alterações não salvas" : "Tudo salvo") : "Oferta nova"}</span>
+              <div className={s.headActions}>
+                {offer && dirty ? (
+                  <button type="button" className={s.btn} onClick={discard} disabled={save.pending}>
+                    Descartar
+                  </button>
+                ) : null}
+                <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={submit} disabled={save.pending}>
+                  {save.pending ? "Salvando…" : offer ? "Salvar" : "Criar oferta"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </form>
 
         <div className={s.stack}>
@@ -586,7 +624,10 @@ export function OfferEditor(props: {
           {offer ? (
             <section className={s.card} aria-labelledby="pixel-titulo">
               <div className={s.cardHead}>
-                <h2 id="pixel-titulo">Pixel próprio desta oferta</h2>
+                <h2 id="pixel-titulo">
+                  <Art name="origem" size={24} className={s.cardArt} />
+                  Pixel próprio
+                </h2>
                 {props.canPixel ? (
                   <label className={s.switch}>
                     <span className={s.srOnly}>Usar pixel próprio</span>
