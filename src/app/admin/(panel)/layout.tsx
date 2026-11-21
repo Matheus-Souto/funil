@@ -13,7 +13,7 @@ import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { logoutAction } from "./actions";
 import { TabBar, type NavEntry } from "./nav";
-import { PanelShell } from "./sidebar";
+import { BrandLogo, PanelShell } from "./sidebar";
 
 export const dynamic = "force-dynamic";
 
@@ -64,8 +64,8 @@ export default async function PanelLayout({ children }: { children: ReactNode })
         Pular para o conteúdo
       </a>
       <header className={s.mobileTop}>
-        <Link href="/admin" className={s.brand}>
-          funil
+        <Link href="/admin" className={s.brand} aria-label="PingaPay, dashboard">
+          <BrandLogo />
         </Link>
         <span className={s.storeName}>· {id.storeName}</span>
         <button type="button" className={s.iconBtn} disabled aria-label="Pergunte à IA (em breve)" title="Pergunte à IA chega na próxima fase">

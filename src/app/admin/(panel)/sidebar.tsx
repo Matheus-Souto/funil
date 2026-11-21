@@ -2,6 +2,7 @@
 
 // Moldura do painel no desktop: sidebar que expande e recolhe (lembrada no cookie `funil-sidebar`), ícones Lucide,
 // dicas com o nome do item quando recolhida e a troca de tema (claro/escuro, lembrada no cookie `funil-theme`).
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -158,11 +159,8 @@ export function PanelShell({
     <div className={s.shell} data-collapsed={collapsed ? "true" : undefined}>
       <aside className={s.sidebar} aria-label="Menu do painel">
         <div className={s.sideTop}>
-          <Link href="/admin" className={s.brand} aria-label="funil, dashboard">
-            <span className={s.brandMark} aria-hidden="true">
-              f
-            </span>
-            <span className={s.brandText}>funil</span>
+          <Link href="/admin" className={s.brand} aria-label="PingaPay, dashboard">
+            <BrandLogo />
           </Link>
           <Tip show={collapsed} label="Expandir menu (Ctrl B)">
             <button
@@ -253,5 +251,20 @@ export function PanelShell({
         <div className={s.mainInner}>{children}</div>
       </main>
     </div>
+  );
+}
+
+/**
+ * Logo da PingaPay: a versão de cada tema (o CSS mostra uma só, conforme data-theme ou o tema do sistema) e o ícone
+ * no lugar do logo quando a sidebar está recolhida.
+ */
+export function BrandLogo() {
+  return (
+    <>
+      <Image className={`${s.brandLogo} ${s.onlyLight}`} src="/brand/pingapay-logo-light.webp" alt="" width={132} height={24} priority />
+      <Image className={`${s.brandLogo} ${s.onlyDark}`} src="/brand/pingapay-logo-dark.webp" alt="" width={132} height={24} priority />
+      <Image className={`${s.brandIcon} ${s.onlyLight}`} src="/brand/pingapay-icon-light.webp" alt="" width={28} height={28} />
+      <Image className={`${s.brandIcon} ${s.onlyDark}`} src="/brand/pingapay-icon-dark.webp" alt="" width={28} height={28} />
+    </>
   );
 }

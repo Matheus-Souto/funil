@@ -214,7 +214,29 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           </section>
         </div>
 
-        <div className={s.grid3}>
+        {/* Mesma grade da linha de cima: à esquerda (largura da conversão) origem e indicação lado a lado; à direita (largura
+            de "Por método") a receita por dia. */}
+        <div className={`${s.splitWide} ${s.splitStretch}`}>
+          <div className={`${s.grid2} ${s.rankPair}`}>
+              <section className={s.card}>
+                <div className={s.cardHead}>
+                  <h2>
+                    <Art name="origem" size={28} className={s.cardArt} />
+                    Por origem
+                  </h2>
+                </div>
+                {m.bySource.length ? <RankChart kind="source" rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
+              </section>
+              <section className={s.card}>
+                <div className={s.cardHead}>
+                  <h2>
+                    <Art name="indicacao" size={28} className={s.cardArt} />
+                    Por indicação
+                  </h2>
+                </div>
+                {m.byRef.length ? <RankChart kind="ref" rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
+              </section>
+          </div>
           <section className={s.card}>
             <div className={s.cardHead}>
               <h2>
@@ -235,24 +257,6 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 days={b.byDay.map((d, i) => ({ key: d.day, axisLabel: label(d.day, i), label: FULL_DAY.format(new Date(`${d.day}T12:00:00Z`)), cents: d.revenueCents }))}
               />
             )}
-          </section>
-          <section className={s.card}>
-            <div className={s.cardHead}>
-              <h2>
-                <Art name="origem" size={28} className={s.cardArt} />
-                Por origem
-              </h2>
-            </div>
-            {m.bySource.length ? <RankChart kind="source" rows={m.bySource.slice(0, 6).map((r) => ({ label: r.source, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda paga no período.</p>}
-          </section>
-          <section className={s.card}>
-            <div className={s.cardHead}>
-              <h2>
-                <Art name="indicacao" size={28} className={s.cardArt} />
-                Por indicação
-              </h2>
-            </div>
-            {m.byRef.length ? <RankChart kind="ref" rows={m.byRef.slice(0, 6).map((r) => ({ label: r.ref, cents: r.revenueCents, paid: r.paid }))} /> : <p className={s.muted}>Nenhuma venda com ?ref= no período.</p>}
           </section>
         </div>
       </div>

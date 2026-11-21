@@ -136,19 +136,6 @@
   color: var(--color-text);
   text-decoration: none;
 }
-.brandMark {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-  font-size: 15px;
-  font-weight: 700;
-}
-.brandText,
 .navLabel {
   white-space: nowrap;
   transition: opacity 180ms var(--ease-standard);
@@ -420,7 +407,6 @@
 
 /* Recolhida: só ícones, centralizados; os textos somem e voltam com a largura. */
 .shell[data-collapsed="true"] .navLabel,
-.shell[data-collapsed="true"] .brandText,
 .shell[data-collapsed="true"] .storeText,
 .shell[data-collapsed="true"] .userText,
 .shell[data-collapsed="true"] .navBadge {
@@ -3430,5 +3416,58 @@
 @media (prefers-reduced-motion: reduce) {
   .rankBar i {
     animation: none;
+  }
+}
+
+/* ---------- Marca (PingaPay) ---------- */
+.brandLogo {
+  display: block;
+  width: auto;
+  height: 24px;
+}
+.brandIcon {
+  display: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+.shell[data-collapsed="true"] .brandLogo {
+  display: none;
+}
+.shell[data-collapsed="true"] .brandIcon {
+  display: block;
+}
+/* Uma versão por tema: escolha salva (data-theme) ou, sem escolha, o tema do sistema. As regras de exibição acima
+   valem dentro de cada tema; aqui só se esconde a versão do outro tema. */
+:global(:root[data-theme="dark"]) .onlyLight,
+:global(:root[data-theme="light"]) .onlyDark {
+  display: none !important;
+}
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme])) .onlyLight {
+    display: none !important;
+  }
+}
+@media not (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme])) .onlyDark {
+    display: none !important;
+  }
+}
+.mobileTop .brandLogo {
+  height: 22px;
+}
+
+/* Origem e indicação lado a lado (cartões estreitos): nome e valor em cima, a barra embaixo, na largura toda. */
+.rankPair .rank li {
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 6px;
+}
+.rankPair .rankBar {
+  grid-column: 1 / -1;
+  order: 3;
+}
+@media (max-width: 700px) {
+  .rankPair {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
