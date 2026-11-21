@@ -14,6 +14,7 @@ import {
   approvalRequest,
   auditLog,
   cardAttempt,
+  checkoutLead,
   customer,
   integration,
   job,
@@ -185,6 +186,30 @@ describe("papel card: atributos e o que fica de fora", () => {
     ).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(storeId, (tx) => tx`update upload_link set used_at = now()`)).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(storeId, (tx) => tx`delete from upload_link`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("checkout_lead (contato de quem não finalizou a compra): select, insert, update e delete dão permission denied", async () => {
+    const { shop } = await pendingOrder();
+    const email = `contato-${randomUUID()}@example.com`;
+    await t.ownerDb.insert(checkoutLead).values({
+      storeId: shop.storeId,
+      offerId: shop.offerId,
+      keyHash: randomBytes(32).toString("hex"),
+      email,
+      emailHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await expect(asCardIn(shop.storeId, (tx) => tx`select email from checkout_lead`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(
+        shop.storeId,
+        (tx) =>
+          tx`insert into checkout_lead (store_id, offer_id, key_hash, email, email_hash, expires_at)
+             values (${shop.storeId}, ${shop.offerId}, 'h', 'a@example.com', 'h', now() + interval '1 day')`,
+      ),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`update checkout_lead set status = 'contacted'`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from checkout_lead`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {

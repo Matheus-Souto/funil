@@ -132,6 +132,15 @@ describe("classificação", () => {
     }
   });
 
+  test("leads.* em TOKEN_DENIED; nenhum papel (inclusive owner) enxerga ferramenta leads_*", () => {
+    expect(TOKEN_DENIED).toEqual(expect.arrayContaining(["leads.read", "leads.write"]));
+    for (const role of ROLES) {
+      const names = mcpTools(role).map((x) => x.name);
+      expect([role, names.filter((n) => n.startsWith("leads_"))]).toEqual([role, []]);
+      expect([role, mcpTools(role).filter((x) => x.permission === "leads.read" || x.permission === "leads.write").length]).toEqual([role, 0]);
+    }
+  });
+
   test("nenhuma ação excluída, pública, de sistema ou negada a token aparece em nenhum papel", () => {
     const byName = new Map(listActions().map((a) => [a.name, a]));
     for (const role of ROLES) {

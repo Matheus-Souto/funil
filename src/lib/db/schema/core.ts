@@ -14,9 +14,16 @@ export const store = pgTable(
     brandColor: text("brand_color"),
     /** Provedor ativo do e-mail da loja: 'smtp' (padrão) ou 'resend'. Só se ativa um provedor já conectado. */
     emailProvider: text("email_provider").notNull().default("smtp"),
+    /** Guarda o contato de quem não finaliza a compra (checkout_lead). Desligado por padrão; só liga com `privacyEmail`. */
+    leadCapture: boolean("lead_capture").notNull().default(false),
+    /** E-mail público para pedidos de privacidade do titular (LGPD), mostrado no aviso do checkout. */
+    privacyEmail: text("privacy_email"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [check("store_email_provider_check", sql`${t.emailProvider} in ('smtp','resend')`)],
+  (t) => [
+    check("store_email_provider_check", sql`${t.emailProvider} in ('smtp','resend')`),
+    check("store_lead_capture_check", sql`not ${t.leadCapture} or ${t.privacyEmail} is not null`),
+  ],
 );
 
 export const users = pgTable("users", {

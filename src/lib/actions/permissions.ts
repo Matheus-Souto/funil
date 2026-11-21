@@ -23,7 +23,10 @@ export type Permission =
   /** Fila de aprovação do MCP: criar um pedido e ler os próprios. Todos os papéis (o token pede com o papel dele). */
   | "approvals.request"
   /** Aprovar ou recusar pedidos da fila (sempre com a permissão da ação-alvo também). Nunca um token (TOKEN_DENIED). */
-  | "approvals.decide";
+  | "approvals.decide"
+  /** Contatos de quem não finalizou a compra (checkout_lead): dono, admin e suporte. Nunca um token (TOKEN_DENIED). */
+  | "leads.read"
+  | "leads.write";
 
 const ALL: Permission[] = [
   "products.read",
@@ -44,12 +47,14 @@ const ALL: Permission[] = [
   "account.self",
   "approvals.request",
   "approvals.decide",
+  "leads.read",
+  "leads.write",
 ];
 
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   owner: ALL,
   admin: ALL.filter((p) => p !== "team.manage" && p !== "connections.write"),
-  support: ["orders.read", "orders.report", "orders.resend", "products.read", "offers.read", "account.self", "approvals.request", "approvals.decide"],
+  support: ["orders.read", "orders.report", "orders.resend", "products.read", "offers.read", "account.self", "approvals.request", "approvals.decide", "leads.read", "leads.write"],
   // tracking.write: pixel próprio das ofertas (validado contra o token salvo pelo dono) e teste da conexão Meta.
   // Token/Pixel da loja (connections.saveMeta) exige connections.write: só o dono.
   traffic: [

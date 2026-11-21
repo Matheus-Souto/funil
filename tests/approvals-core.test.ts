@@ -103,7 +103,7 @@ describe("permissões da fila", () => {
     for (const role of ["owner", "admin", "support", "traffic", "reader"] as const) expect(hasPermission(role, "approvals.request"), role).toBe(true);
     for (const role of ["owner", "admin", "support", "traffic"] as const) expect(hasPermission(role, "approvals.decide"), role).toBe(true);
     expect(hasPermission("reader", "approvals.decide")).toBe(false);
-    expect(TOKEN_DENIED).toEqual(["team.manage", "account.self", "approvals.decide"]);
+    expect(TOKEN_DENIED).toEqual(["team.manage", "account.self", "approvals.decide", "leads.read", "leads.write"]);
 
     const { storeId, approver, tokenId } = await setup();
     let calls = 0;
