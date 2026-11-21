@@ -102,6 +102,12 @@ export function EChart({ option, height, label }: { option: (t: ChartTheme) => E
   return <div ref={ref} className={s.echart} style={{ height }} role="img" aria-label={label} />;
 }
 
+/**
+ * Escapa texto para os tooltips do ECharts, que entram no DOM como HTML (innerHTML). Obrigatório em tudo que pode vir de
+ * fora: utm_source e ?ref= chegam pela URL do checkout público.
+ */
+const esc = (v: string) => v.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+
 /** Eixo e centro da rosca: R$ inteiros ou "R$ 1,2 mil" (só exibição; os valores seguem em centavos). */
 const brlShort = (cents: number) => {
   const reais = Math.trunc(cents / 100);
@@ -138,7 +144,7 @@ export function RevenueChart({ days }: { days: Array<{ label: string; full: stri
           axisPointer: { type: "none" },
           formatter: (p: Array<{ dataIndex: number }>) => {
             const d = days[p[0]?.dataIndex ?? 0];
-            return d ? `<div style="font-size:12px;color:${t.muted}">${d.full}</div><b style="font-size:14px">${brl(d.cents)}</b>` : "";
+            return d ? `<div style="font-size:12px;color:${t.muted}">${esc(d.full)}</div><b style="font-size:14px">${brl(d.cents)}</b>` : "";
           },
         },
         xAxis: {
@@ -189,7 +195,7 @@ export function FunnelChart({ views, orders, paid }: { views: number; orders: nu
           trigger: "item",
           formatter: (p: { dataIndex: number }) => {
             const st = steps[p.dataIndex];
-            return st ? `${st.name}<br/><b>${st.value.toLocaleString("pt-BR")}</b>${st.rate ? ` · ${st.rate}` : ""}` : "";
+            return st ? `${esc(st.name)}<br/><b>${st.value.toLocaleString("pt-BR")}</b>${st.rate ? ` · ${st.rate}` : ""}` : "";
           },
         },
         series: [
@@ -248,7 +254,9 @@ export function DonutChart({ rows }: { rows: Array<{ label: string; cents: numbe
         tooltip: {
           ...tooltip(t),
           trigger: "item",
-          formatter: (p: { name: string; value: number; percent: number }) => `${p.name}<br/><b>${brl(p.value)}</b> · ${Math.round(p.percent)}%`,
+          // Sem vendas, a rosca mostra um anel cinza de valor 1: o tooltip não pode exibir isso como R$ 0,01.
+          formatter: (p: { name: string; value: number; percent: number }) =>
+            total > 0 ? `${esc(p.name)}<br/><b>${brl(p.value)}</b> · ${Math.round(p.percent)}%` : "Sem vendas no período",
         },
         graphic: [
           { type: "text", left: "center", top: "40%", style: { text: brl(total), fill: t.text, font: `600 16px ${t.font}`, align: "center" } },
@@ -343,7 +351,7 @@ export function RankChart({ rows, kind }: { rows: Array<{ label: string; cents: 
             trigger: "item",
             formatter: (p: { dataIndex: number }) => {
               const r = ordered[p.dataIndex];
-              return r ? `${r.label}<br/><b>${brl(r.cents)}</b> · ${r.paid} ${r.paid === 1 ? "pago" : "pagos"}` : "";
+              return r ? `${esc(r.label)}<br/><b>${brl(r.cents)}</b> · ${r.paid} ${r.paid === 1 ? "pago" : "pagos"}` : "";
             },
           },
           xAxis: { type: "value", show: false, max },
@@ -438,7 +446,7 @@ export function Sparkline({ values, days, label }: { values: number[]; days: str
           formatter: (p: Array<{ dataIndex: number }>) => {
             const i = p[0]?.dataIndex ?? 0;
             const n = values[i] ?? 0;
-            return `<div style="font-size:12px;color:${t.muted}">${days[i] ?? ""}</div><b style="font-size:14px">${n} ${n === 1 ? "venda" : "vendas"}</b>`;
+            return `<div style="font-size:12px;color:${t.muted}">${esc(days[i] ?? "")}</div><b style="font-size:14px">${n} ${n === 1 ? "venda" : "vendas"}</b>`;
           },
         },
         series: [
