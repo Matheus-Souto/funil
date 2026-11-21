@@ -7,7 +7,6 @@
 // - Endereço não simples (`simpleAddress`): `skipped endereco_invalido`. O limite por endereço (24 h e 30 dias) conta
 //   pela caixa (`mailbox_hash`: sem `+sufixo` e, no Gmail, sem pontos) e o descadastro casa o hash exato ou o da caixa;
 //   "já comprou" segue pelo e-mail exato.
-//
 // - Uma transação por loja, com lock consultivo por loja: duas varreduras ao mesmo tempo não escolhem o mesmo candidato
 //   (e os únicos de `recovery_email` seguram o resto). Todo id gravado (contato, pedido, oferta) vem de consulta feita
 //   dentro de `withStore(storeId)`: as FKs de `recovery_email` são simples (sem a loja).
@@ -15,13 +14,14 @@
 //   da loja ou do caso cartão): nada é gravado e o candidato volta na próxima varredura, se ainda estiver na janela.
 // - O token de descadastro em claro vai SÓ no payload do `recovery_send`; a linha guarda o sha256 dele. Log só com
 //   `recoveryId`, `storeId`, `kind` e motivo: nunca e-mail, hash do e-mail nem token.
+// - Falha numa loja: log (loja e erro saneado) e segue para as outras; o job não falha (a próxima passada vem em 5 min).
 import { and, asc, count, eq, gt, gte, inArray, isNotNull, lte, notExists, sql } from "drizzle-orm";
 import { UNKNOWN_IP } from "@/lib/client-ip";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { cardAttempt, checkoutLead, customer, offer, orders, recoveryEmail, store } from "@/lib/db/schema";
 import { enqueue, type JobHandler } from "@/lib/jobs";
-import { log } from "@/lib/log";
+import { errorFields, log } from "@/lib/log";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { countRecentEvents, hadRecentEvent, ipRateKey } from "@/lib/payments/ratelimit";
 import { alreadyBought, hasNewerOrder, optedOut } from "./checks";
@@ -156,6 +156,9 @@ async function candidates(tx: Tx, f: StoreFlags, t: Date): Promise<Candidate[]> 
         and(
           eq(orders.status, "pending"),
           eq(orders.method, "card_asaas"),
+          // Pedido recusado fica `pending` para sempre: sem este limite a consulta cresce sem fim (o de 6 h está só no
+          // HAVING da 1ª recusa). O ticket do cartão vale 30 min e a 1ª recusa vem logo depois da criação: 24 h de folga.
+          gte(orders.createdAt, minus(since, DAY_MS)),
           notExists(
             tx
               .select({ id: recoveryEmail.id })
@@ -306,8 +309,10 @@ async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
 }
 
 /**
- * Handler do `recovery_scan`. Relógio injetável (testes). Falha numa loja não impede as demais; ao final, se alguma
- * falhou, o job falha para tentar de novo (padrão do `expire_orders`). `beforeStore` existe só para testes.
+ * Handler do `recovery_scan`. Relógio injetável (testes). Falha numa loja não impede as demais e NÃO faz o job falhar:
+ * relançar devolveria o job ao backoff da fila (60 s a 12 h) e, enquanto ele espera, o agendamento não cria outro,
+ * travando a varredura de todas as lojas. A falha vai ao log (só a loja e a identificação saneada do erro) e a próxima
+ * passada vem em 5 min. `beforeStore` existe só para testes.
  */
 export function createRecoveryScanHandler(now: () => Date = () => new Date(), beforeStore?: (storeId: string) => Promise<void>): JobHandler {
   return async (_j, signal) => {
@@ -318,18 +323,15 @@ export function createRecoveryScanHandler(now: () => Date = () => new Date(), be
       .from(store)
       .where(eq(store.recoveryOn, true))
       .orderBy(asc(store.id));
-    let failed = 0;
     for (const f of stores) {
       if (signal.aborted) break;
       try {
         await beforeStore?.(f.id);
         await withStore(f.id, (tx) => scanStore(tx, f, t));
       } catch (e) {
-        failed++;
-        log.error("falha na varredura da recuperação da loja", { storeId: f.id, error: e });
+        log.error("falha na varredura da recuperação da loja", { storeId: f.id, ...errorFields(e) });
       }
     }
-    if (failed > 0) throw new Error(`recovery_scan falhou em ${failed} loja(s)`);
   };
 }
 

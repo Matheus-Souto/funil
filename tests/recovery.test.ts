@@ -403,6 +403,18 @@ describe("recovery_scan", () => {
     expect(jobs.map((j) => (j.payload as { recoveryId: string }).recoveryId)).toEqual([ok.id]);
   });
 
+  test("pedido de cartão criado há 3 dias com a 1ª recusa há 31 min (dado forjado) → não é candidato; criado há 29 h → é", async () => {
+    // O ticket do cartão vale 30 min: a 1ª recusa vem logo depois da criação. A consulta só olha pedidos criados até
+    // 24 h antes da janela de 6 h (pedido recusado fica pending para sempre).
+    const s = await shop();
+    const old = await cardOrder(s, ago(31 * MIN));
+    await t.ownerDb.update(orders).set({ createdAt: ago(3 * DAY_MS) }).where(eq(orders.id, old.id));
+    const edge = await cardOrder(s, ago(31 * MIN));
+    await t.ownerDb.update(orders).set({ createdAt: ago(29 * HOUR) }).where(eq(orders.id, edge.id));
+    await scan();
+    expect(await rowsOf(s.storeId)).toMatchObject([{ orderId: edge.id, kind: "card", status: "queued" }]);
+  });
+
   test("disjuntor da loja disparado há 1 h → skipped cartao_suspeito", async () => {
     const s = await shop();
     await recordEvent(cardBreakerKey(s.storeId), ago(HOUR));
@@ -695,20 +707,33 @@ describe("recovery_scan", () => {
     expect(await sendJobsOf(s.storeId)).toHaveLength(3);
   });
 
-  test("falha numa loja não para as outras; o job falha no fim", async () => {
+  test("falha numa loja não para as outras e o job termina sem erro (a próxima passada vem em 5 min)", async () => {
     const bad = await shop();
     const good = await shop();
     const o = await pixOrder(good, ago(31 * MIN));
-    await pixOrder(bad, ago(31 * MIN));
+    const p = await pixOrder(bad, ago(31 * MIN));
     const h = createRecoveryScanHandler(
       () => NOW,
       async (storeId) => {
-        if (storeId === bad.storeId) throw new Error("falha simulada");
+        if (storeId === bad.storeId) throw new Error(`falha simulada ${p.email}`);
       },
     );
-    await expect(h({} as never, new AbortController().signal)).rejects.toThrow("recovery_scan falhou em 1 loja(s)");
+    let out = "";
+    const stdout = spyOn(process.stdout, "write").mockImplementation(((v: string) => ((out += String(v)), true)) as never);
+    try {
+      // Relançar devolveria o job ao backoff e travaria a varredura de todas as lojas.
+      await expect(h({} as never, new AbortController().signal)).resolves.toBeUndefined();
+    } finally {
+      stdout.mockRestore();
+    }
     expect(await rowsOf(good.storeId)).toMatchObject([{ orderId: o.id, status: "queued" }]);
     expect(await rowsOf(bad.storeId)).toHaveLength(0);
+    // O erro da loja vai ao log só com a loja e a identificação saneada (sem o texto livre do erro).
+    const line = out.split("\n").find((l) => l.includes("falha na varredura da recuperação da loja"));
+    expect(line).toBeDefined();
+    expect(line).toContain(bad.storeId);
+    expect(out).not.toContain("falha simulada");
+    expect(out).not.toContain(p.email);
   });
 
   describe("log", () => {
