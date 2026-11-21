@@ -328,7 +328,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
       await page.getByRole("button", { name: "Criar produto" }).click();
       await expect(page.getByText(`Produto “${name}” criado.`)).toBeVisible();
     }
-    await expect(page.getByRole("cell", { name: "Maná bíblico · versão completa" })).toBeVisible();
+    // A célula do nome (a de ações também cita o nome, no rótulo "Ver o PDF de …").
+    await expect(page.getByRole("cell", { name: /^Maná bíblico · versão completa/ })).toBeVisible();
     await shot(page, "p13-produtos-1280");
 
     async function newOffer(o: { slug: string; manual: boolean; bump: boolean; maxInstallments?: number }) {
