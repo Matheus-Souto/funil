@@ -418,3 +418,46 @@ export function KpiNumber({ value, money }: { value: number; money?: boolean }) 
     </span>
   );
 }
+
+/** Mini gráfico de linha (tendência dos últimos dias), sem eixos; o último ponto em destaque. */
+export function Sparkline({ values, label }: { values: number[]; label: string }) {
+  return (
+    <EChart
+      height={34}
+      label={label}
+      option={(t) => ({
+        animationDuration: 600,
+        grid: { left: 2, right: 4, top: 4, bottom: 4 },
+        xAxis: { type: "category", show: false, boundaryGap: false, data: values.map((_, i) => i) },
+        yAxis: { type: "value", show: false, min: 0, max: (v: { max: number }) => Math.max(1, v.max) },
+        tooltip: { show: false },
+        series: [
+          {
+            type: "line",
+            data: values,
+            smooth: 0.3,
+            smoothMonotone: "x",
+            symbol: "circle",
+            symbolSize: (_: number, p: { dataIndex: number }) => (p.dataIndex === values.length - 1 ? 6 : 0),
+            lineStyle: { width: 2, color: t.accentInk },
+            itemStyle: { color: t.accentInk },
+            areaStyle: {
+              color: {
+                type: "linear",
+                x: 0,
+                y: 0,
+                x2: 0,
+                y2: 1,
+                colorStops: [
+                  { offset: 0, color: `${t.accent}66` },
+                  { offset: 1, color: `${t.accent}00` },
+                ],
+              },
+            },
+            silent: true,
+          },
+        ],
+      })}
+    />
+  );
+}

@@ -6,6 +6,8 @@ import { listOffers } from "@/lib/catalog/offers";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { brl } from "@/lib/format";
 import { metricsBreakdown, periodRange } from "@/lib/metrics";
+import { CreditCard, Gift, QrCode } from "lucide-react";
+import { Sparkline } from "../../charts";
 import { Art, Badge, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
@@ -14,6 +16,7 @@ import { CopyButton } from "../../ui";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Ofertas" };
 
+const DAY_MS = 86_400_000;
 const pct = (a: number, b: number) => (b === 0 ? "—" : `${Math.round((a * 1000) / b) / 10}%`.replace(".", ","));
 
 export default async function OffersPage() {
@@ -22,7 +25,21 @@ export default async function OffersPage() {
   const role = panel.actor.role;
   const offers = await runAction(listOffers, call, {});
   const names = (ps: { name: string }[]) => ps.map((p) => p.name).join(" · ");
-  const stats = hasPermission(role, "metrics.read") ? (await runAction(metricsBreakdown, call, periodRange("7d"))).byOffer : null;
+  const canMetrics = hasPermission(role, "metrics.read");
+  const week = periodRange("7d");
+  const stats = canMetrics ? (await runAction(metricsBreakdown, call, week)).byOffer : null;
+  // Vendas de cada oferta por dia (7 dias) para o mini gráfico: a mesma ação, dia a dia. Ver docs/painel-pendencias.md
+  // (o ideal é o servidor devolver isso numa consulta só).
+  const daily = canMetrics
+    ? await Promise.all(
+        Array.from({ length: 7 }, (_, k) => {
+          const from = new Date(week.from.getTime() + k * DAY_MS);
+          const to = new Date(Math.min(from.getTime() + DAY_MS, week.to.getTime()));
+          return runAction(metricsBreakdown, call, { from, to }).then((r) => r.byOffer);
+        }),
+      )
+    : null;
+  const trend = (offerId: string) => daily?.map((day) => day.find((x) => x.offerId === offerId)?.paid ?? 0) ?? [];
   const base = storeBaseUrl((await getPanelIdentity(panel)).store);
 
   return (
@@ -46,67 +63,76 @@ export default async function OffersPage() {
             <p>A oferta define o preço, os métodos de pagamento e o produto entregue. Envie o PDF em Produtos e crie a primeira.</p>
           </section>
         ) : null}
-        {offers.map((o) => {
-          const st = stats?.find((x) => x.offerId === o.id);
-          const link = `${base}/c/${o.slug}`;
-          return (
-            <section key={o.id} className={`${s.card} ${s.offerCard}`} aria-labelledby={`oferta-${o.id}`}>
-              <div className={s.stack} style={{ gap: 10 }}>
-                <div className={s.titleRow}>
-                  <h2 id={`oferta-${o.id}`} className={s.h2} style={{ fontSize: 17 }}>
-                    {o.name}
-                  </h2>
-                  <Badge tone={o.active ? "success" : "neutral"}>{o.active ? "Ativa" : "Inativa"}</Badge>
-                </div>
-                <p className={s.muted} style={{ margin: 0 }}>
-                  {names(o.products)} · <b style={{ color: "var(--color-text)" }}>{brl(o.priceCents)}</b>
-                </p>
-                <div className={s.chips}>
-                  {o.methods.includes("pix") ? <span className={s.chip}>Pix · {o.pixMode === "manual" ? "Manual" : "Asaas"}</span> : null}
-                  {o.methods.includes("card") ? (
-                    <span className={s.chip}>
-                      <PIcon name="credit-card" size={14} />
-                      Cartão · {o.maxInstallments > 1 ? `até ${o.maxInstallments}x` : "1x"}
-                    </span>
-                  ) : null}
-                  {o.bump ? (
-                    <span className={s.chip} data-tone="primary">
-                      <PIcon name="gift" size={14} />
-                      Bump: {o.bump.products.length > 1 ? (o.bump.label ?? names(o.bump.products)) : names(o.bump.products)} + {brl(o.bump.priceCents)}
-                    </span>
-                  ) : (
-                    <span className={s.chip}>Sem bump</span>
-                  )}
-                </div>
-                <div className={s.copyBox} style={{ maxWidth: 480 }}>
-                  <code>{link.replace(/^https?:\/\//, "")}</code>
-                  <CopyButton text={link} label="Copiar link" small />
-                </div>
-              </div>
-              <div className={s.stack} style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-                <Link className={s.btn} href={`/admin/offers/${o.id}`} aria-label={`${hasPermission(role, "offers.write") ? "Editar" : "Ver"} ${o.name}`}>
-                  {hasPermission(role, "offers.write") ? "Editar" : "Ver"}
-                </Link>
-                {st || stats ? (
-                  <div className={s.offerStats}>
-                    <div>
-                      <span>Vendas · 7 dias</span>
-                      <b>{st?.paid ?? 0}</b>
+        {offers.length > 0 ? (
+          <section className={`${s.card} ${s.offerList}`} aria-label="Ofertas">
+            {offers.map((o) => {
+              const st = stats?.find((x) => x.offerId === o.id);
+              const link = `${base}/c/${o.slug}`;
+              return (
+                <article key={o.id} className={s.offerRow} aria-labelledby={`oferta-${o.id}`}>
+                  <Art name="ticket" size={40} className={s.offerArt} />
+                  <div className={s.offerMain}>
+                    <div className={s.titleRow} style={{ gap: 8 }}>
+                      <h2 id={`oferta-${o.id}`} className={s.offerName}>
+                        {o.name}
+                      </h2>
+                      <Badge tone={o.active ? "success" : "neutral"}>{o.active ? "Ativa" : "Inativa"}</Badge>
                     </div>
-                    <div>
-                      <span>Conversão</span>
-                      <b>{pct(st?.paid ?? 0, st?.views ?? 0)}</b>
+                    <div className={s.offerMeta}>
+                      <span>
+                        {names(o.products)} · <b>{brl(o.priceCents)}</b>
+                      </span>
+                      {o.methods.includes("pix") ? (
+                        <span className={s.chip}>
+                          <QrCode size={13} strokeWidth={1.9} aria-hidden="true" />
+                          Pix · {o.pixMode === "manual" ? "Manual" : "Asaas"}
+                        </span>
+                      ) : null}
+                      {o.methods.includes("card") ? (
+                        <span className={s.chip}>
+                          <CreditCard size={13} strokeWidth={1.9} aria-hidden="true" />
+                          Cartão · {o.maxInstallments > 1 ? `até ${o.maxInstallments}x` : "1x"}
+                        </span>
+                      ) : null}
+                      {o.bump ? (
+                        <span className={s.chip} data-tone="primary">
+                          <Gift size={13} strokeWidth={1.9} aria-hidden="true" />
+                          Bump: {o.bump.products.length > 1 ? (o.bump.label ?? names(o.bump.products)) : names(o.bump.products)} + {brl(o.bump.priceCents)}
+                        </span>
+                      ) : null}
                     </div>
-                    <div>
-                      <span>Bump aceito</span>
-                      <b>{o.bump ? pct(st?.bumpPaid ?? 0, st?.paid ?? 0) : "—"}</b>
+                    <div className={s.offerLink}>
+                      <code>{link.replace(/^https?:\/\//, "")}</code>
+                      <CopyButton text={link} label="Copiar link" small />
                     </div>
                   </div>
-                ) : null}
-              </div>
-            </section>
-          );
-        })}
+                  {stats ? (
+                    <>
+                      <div className={s.offerSpark}>
+                        <Sparkline values={trend(o.id)} label={`Vendas de ${o.name} nos últimos 7 dias`} />
+                      </div>
+                      <div className={s.offerMetric}>
+                        <span>Vendas 7d</span>
+                        <b>{st?.paid ?? 0}</b>
+                      </div>
+                      <div className={s.offerMetric}>
+                        <span>Conversão</span>
+                        <b>{pct(st?.paid ?? 0, st?.views ?? 0)}</b>
+                      </div>
+                      <div className={s.offerMetric}>
+                        <span>Bump</span>
+                        <b>{o.bump ? pct(st?.bumpPaid ?? 0, st?.paid ?? 0) : "—"}</b>
+                      </div>
+                    </>
+                  ) : null}
+                  <Link className={`${s.btn} ${s.btnSm}`} href={`/admin/offers/${o.id}`} aria-label={`${hasPermission(role, "offers.write") ? "Editar" : "Ver"} ${o.name}`}>
+                    {hasPermission(role, "offers.write") ? "Editar" : "Ver"}
+                  </Link>
+                </article>
+              );
+            })}
+          </section>
+        ) : null}
         <div className={s.banner} data-tone="neutral">
           <PIcon name="link-2" />
           <div>
