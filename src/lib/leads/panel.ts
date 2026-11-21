@@ -2,15 +2,17 @@
 // - `leads.list` (leitura, sem auditoria como `orders.list`): 50 por página, mais novos primeiro. `q` é o código do contato
 //   (6 hex, qualquer caixa) ou o e-mail exato (normalizado, comparado pelo `email_hash`: nunca busca parcial em e-mail).
 //   O contato convertido mostra o código do pedido como o painel já o mostra e não tem e-mail nem celular.
+//   `remindedAt`: quando saiu o lembrete de recuperação por e-mail do contato (`recovery_email` `sent`; um por contato).
 // - `leads.markContacted`, `leads.delete` e `leads.forgetEmail`: a auditoria grava só `{ leadId }` ou `{ emailHash }`.
 // - `sweepLeadsJob`: a retenção de 30 dias (`expires_at`), loja a loja, de hora em hora. Entre uma varredura e outra, o
-//   contato vencido já não aparece na lista nem pode ser marcado como contatado.
+//   contato vencido já não aparece na lista nem pode ser marcado como contatado. Na mesma passada, apaga os lembretes de
+//   recuperação vencidos (`recovery_email`, 90 dias); `email_optout` nunca vence.
 import { createHash } from "node:crypto";
 import { and, count, desc, eq, gt, lt, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { db, withStore } from "@/lib/db/client";
-import { checkoutLead, offer, orders, store } from "@/lib/db/schema";
+import { checkoutLead, offer, orders, recoveryEmail, store } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import type { JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
@@ -60,10 +62,13 @@ export const listLeads = defineAction({
         phone: checkoutLead.phone,
         orderId: orders.id,
         orderPublicId: orders.publicId,
+        remindedAt: recoveryEmail.sentAt,
       })
       .from(checkoutLead)
       .innerJoin(offer, eq(offer.id, checkoutLead.offerId))
       .leftJoin(orders, eq(orders.id, checkoutLead.orderId))
+      // No máximo um lembrete por contato (`recovery_email_lead_uniq`): a junção não duplica linhas.
+      .leftJoin(recoveryEmail, and(eq(recoveryEmail.leadId, checkoutLead.id), eq(recoveryEmail.status, "sent")))
       .where(where(input))
       .orderBy(desc(checkoutLead.createdAt), desc(checkoutLead.id))
       .limit(PAGE_SIZE)
@@ -123,8 +128,9 @@ export const forgetLeadEmail = defineAction({
 });
 
 /**
- * Retenção: apaga os contatos vencidos (`expires_at < now()`, abertos ou convertidos), loja a loja (a tabela `store` não
- * tem RLS). Falha numa loja não impede as demais; ao final, se alguma falhou, o job falha para tentar de novo.
+ * Retenção: apaga os contatos vencidos (`expires_at < now()`, abertos ou convertidos) e os lembretes de recuperação
+ * vencidos (`recovery_email`, 90 dias), loja a loja (a tabela `store` não tem RLS). `email_optout` não vence. Falha numa
+ * loja não impede as demais; ao final, se alguma falhou, o job falha para tentar de novo.
  * `beforeDelete` existe só para testes. Log só com `storeId` e contagem.
  */
 export function createSweepLeadsHandler(beforeDelete?: (storeId: string) => Promise<void>): JobHandler {
@@ -134,10 +140,12 @@ export function createSweepLeadsHandler(beforeDelete?: (storeId: string) => Prom
     for (const { id: storeId } of stores) {
       try {
         await beforeDelete?.(storeId);
-        const gone = await withStore(storeId, (tx) =>
-          tx.delete(checkoutLead).where(lt(checkoutLead.expiresAt, sql`now()`)).returning({ id: checkoutLead.id }),
-        );
+        const [gone, reminders] = await withStore(storeId, async (tx) => [
+          await tx.delete(checkoutLead).where(lt(checkoutLead.expiresAt, sql`now()`)).returning({ id: checkoutLead.id }),
+          await tx.delete(recoveryEmail).where(lt(recoveryEmail.expiresAt, sql`now()`)).returning({ id: recoveryEmail.id }),
+        ]);
         if (gone.length > 0) log.info("contatos vencidos apagados", { storeId, count: gone.length });
+        if (reminders.length > 0) log.info("lembretes de recuperação vencidos apagados", { storeId, count: reminders.length });
       } catch (e) {
         failed++;
         log.error("falha ao apagar contatos vencidos da loja", { storeId, error: e });

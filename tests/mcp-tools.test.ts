@@ -11,7 +11,7 @@ import { ActionError, defineAction, runAction, TOKEN_DENIED, type Action } from 
 import { hasPermission, ROLE_PERMISSIONS, type Permission, type Role } from "@/lib/actions/permissions";
 import { listActions, registry } from "@/lib/actions/registry";
 import { ownerDb } from "@/lib/db/client";
-import { approvalRequest, auditLog, checkoutLead, mcpToken, orders } from "@/lib/db/schema";
+import { approvalRequest, auditLog, checkoutLead, mcpToken, orders, recoveryEmail } from "@/lib/db/schema";
 import { APPROVAL_PREFIX, callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
@@ -226,9 +226,16 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: { ...zero, extra: "x" }, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      recovery: {
+        sent: 3,
+        recovered: 1,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 0, extra: "x" }, pix: { sent: 1, recovered: 1 }, card: { sent: 1, recovered: 0 } },
+        emailHash: "zuleica@exemplo.com",
+      },
       campoNovo: "zuleica@exemplo.com",
     });
-    expect(JSON.stringify(out)).not.toMatch(/campoNovo|zuleica|extra/);
+    expect(JSON.stringify(out)).not.toMatch(/campoNovo|zuleica|extra|emailHash/);
     expect(out).toEqual({
       views: 1,
       orders: 2,
@@ -239,6 +246,12 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: zero, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      recovery: {
+        sent: 3,
+        recovered: 1,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 0 }, pix: { sent: 1, recovered: 1 }, card: { sent: 1, recovered: 0 } },
+      },
     });
   });
 
@@ -409,7 +422,7 @@ describe("callMcpTool", () => {
       { ref: "amigo", paid: 1, revenueCents: 990 },
     ]);
     // Projeção explícita: só as chaves conhecidas.
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
   });
 
   test("metrics_summary pelo MCP traz leads e leadsConverted como números e nada mais de contato", async () => {
@@ -436,7 +449,48 @@ describe("callMcpTool", () => {
     expect(typeof out.leadsConverted).toBe("number");
     const text = JSON.stringify(out);
     for (const secret of [email, phone, sha(email), "contato.sigiloso"]) expect(text).not.toContain(secret);
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+  });
+
+  test("metrics_summary pelo MCP traz recovery só com números (nenhuma string com @)", async () => {
+    const m = await seedPanelStore("Recuperação MCP");
+    const email = "recupera.sigiloso@exemplo.com";
+    const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+    const now = Date.now();
+    const order = await seedOrder(m, { status: "paid", email, totalCents: 990, paidAt: new Date(now - 60_000) });
+    const row = (over: Partial<typeof recoveryEmail.$inferInsert>): typeof recoveryEmail.$inferInsert => ({
+      storeId: m.storeId,
+      kind: "lead",
+      offerId: m.offerId,
+      emailHash: sha(email),
+      status: "sent",
+      unsubHash: sha(randomUUID()),
+      dueAt: new Date(now - 3_600_000),
+      sentAt: new Date(now - 3_600_000),
+      expiresAt: new Date(now + 90 * 86_400_000),
+      ...over,
+    });
+    await ownerDb.insert(recoveryEmail).values([row({}), row({ kind: "pix", orderId: order.id })]);
+    const range = { from: new Date(now - 86_400_000).toISOString(), to: new Date(now + 60_000).toISOString() };
+    for (const role of ["reader", "owner"] as const) {
+      const out = (await callMcpTool(tool(role, "metrics_summary"), call(m.storeId, role), range)) as Record<string, unknown>;
+      expect(out.recovery).toEqual({
+        sent: 2,
+        recovered: 2,
+        recoveredRevenueCents: 990,
+        byCase: { lead: { sent: 1, recovered: 1 }, pix: { sent: 1, recovered: 1 }, card: { sent: 0, recovered: 0 } },
+      });
+      const strings: string[] = [];
+      const walk = (v: unknown): void => {
+        if (typeof v === "string") strings.push(v);
+        else if (v && typeof v === "object") for (const x of Object.values(v)) walk(x);
+      };
+      walk(out.recovery);
+      expect(strings).toEqual([]);
+      const text = JSON.stringify(out);
+      expect(text).not.toContain("@");
+      for (const secret of [email, sha(email), "recupera.sigiloso"]) expect(text).not.toContain(secret);
+    }
   });
 
   test("token owner chamando leads_list pelo callMcpTool → forbidden (ferramenta montada à mão); o contato não sai", async () => {

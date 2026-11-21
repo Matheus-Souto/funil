@@ -1,14 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
-import { integration, job, orderItem, orders } from "@/lib/db/schema";
+import { emailLog, integration, job, orderItem, orders } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { createOrder } from "@/lib/orders/create";
+import { getOrderDetail } from "@/lib/orders/panel";
 import { ALLOWED, transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -227,5 +230,29 @@ describe("integrations", () => {
     expect(await withStore(a.storeId, (tx) => getIntegration(tx, a.storeId, "smtp"))).toEqual({ config: { host: "h2" }, secret: "s1" });
     expect(await withStore(b.storeId, (tx) => getIntegration(tx, b.storeId, "smtp"))).toBeNull();
     expect(await withStore(a.storeId, (tx) => getIntegration(tx, a.storeId, "meta"))).toBeNull();
+  });
+});
+
+describe("linha do tempo do pedido", () => {
+  test("linha do tempo mostra o lembrete enviado", async () => {
+    const p = await seedPanelStore();
+    const email = "lembrete.timeline@exemplo.com";
+    const order = await seedOrder(p, { status: "pending", email });
+    const toHash = createHash("sha256").update(email).digest("hex");
+    const sentAt = new Date(Date.now() - 2 * 3_600_000);
+    const failedAt = new Date(Date.now() - 3_600_000);
+    await t.ownerDb.insert(emailLog).values([
+      { storeId: p.storeId, orderId: order.id, toHash, kind: "recovery", status: "sent", provider: "smtp", at: sentAt },
+      { storeId: p.storeId, orderId: order.id, toHash, kind: "recovery", status: "failed", error: `recusado para ${email}`, at: failedAt },
+    ]);
+    const d = await runAction(getOrderDetail, panelCall(p.storeId), { id: order.id });
+    const reminders = d.timeline.filter((e) => e.label.startsWith("Lembrete"));
+    expect(reminders.map((e) => [e.at, e.kind, e.label])).toEqual([
+      [failedAt, "email.failed", "Lembrete por e-mail não enviado"],
+      [sentAt, "email.sent", "Lembrete de pagamento por e-mail"],
+    ]);
+    // nunca o destinatário (nem o erro cru do provedor, que pode ecoá-lo)
+    expect(JSON.stringify(d.timeline)).not.toContain(email);
+    expect(JSON.stringify(d.timeline)).not.toContain(toHash);
   });
 });

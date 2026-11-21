@@ -153,6 +153,7 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
                     </td>
                     <td>
                       <Badge tone={badge.tone}>{badge.label}</Badge>
+                      {l.remindedAt ? <small style={{ marginTop: 4 }}>Lembrete enviado em {shortWhen(l.remindedAt)}</small> : null}
                     </td>
                     {canWrite ? <td>{l.status === "converted" ? null : <LeadRowActions id={l.id} code={l.code} status={l.status} />}</td> : null}
                   </tr>
