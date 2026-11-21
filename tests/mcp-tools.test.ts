@@ -2,7 +2,7 @@
 // negada a token ou excluída com motivo), lista por papel, nomes, esquemas de entrada e projeções por lista branca
 // (nenhum dado pessoal do comprador sai pelo MCP).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { eq } from "drizzle-orm";
@@ -11,8 +11,8 @@ import { ActionError, defineAction, runAction, TOKEN_DENIED, type Action } from 
 import { hasPermission, ROLE_PERMISSIONS, type Permission, type Role } from "@/lib/actions/permissions";
 import { listActions, registry } from "@/lib/actions/registry";
 import { ownerDb } from "@/lib/db/client";
-import { auditLog, orders } from "@/lib/db/schema";
-import { callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
+import { approvalRequest, auditLog, mcpToken, orders } from "@/lib/db/schema";
+import { APPROVAL_PREFIX, callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
@@ -53,7 +53,6 @@ describe("classificação", () => {
     const missing = listActions()
       .filter(
         (a) =>
-          !a.sensitive &&
           a.permission !== "public" &&
           a.permission !== "system" &&
           !TOKEN_DENIED.includes(a.permission) &&
@@ -70,37 +69,74 @@ describe("classificação", () => {
       expect(names.has(name)).toBe(true);
       expect(reason.length).toBeGreaterThan(5);
     }
-    expect(Object.keys(MCP_EXCLUDED)).toEqual(
-      expect.arrayContaining([
-        "orders.export",
-        "products.create",
-        "connections.testSmtp",
-        "connections.testResend",
-        "connections.testTelegram",
-        "alerts.ack",
-        "offers.create",
-        "offers.update",
-        "orders.resend",
-        "products.update",
-        "connections.testMeta",
-      ]),
-    );
+    expect(Object.keys(MCP_EXCLUDED).sort()).toEqual(["approvals.request", "orders.export", "products.completeUpload", "products.create"]);
   });
 
-  test("MCP só de leitura: nenhuma ferramenta de nenhum papel tem permissão de escrita", () => {
-    const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read"];
+  // Escritas diretas (não sensíveis) que o MCP expõe; qualquer outra escrita nova precisa ser decidida aqui.
+  const DIRECT_WRITES = [
+    "connections_testMeta",
+    "connections_testResend",
+    "connections_testSmtp",
+    "connections_testTelegram",
+    "orders_resend",
+    "products_createUploadLink",
+    "products_update",
+  ];
+  const READ: Permission[] = ["products.read", "offers.read", "orders.read", "orders.report", "metrics.read", "connections.read", "approvals.request"];
+
+  test("toda ferramenta de escrita não sensível está na lista esperada da matriz", () => {
+    const byName = new Map(listActions().map((a) => [a.name, a]));
     for (const role of ROLES) {
-      const writes = mcpTools(role).filter((x) => !READ.includes(x.permission));
-      expect([role, writes.map((x) => x.name)]).toEqual([role, []]);
+      const writes = mcpTools(role)
+        .filter((x) => !READ.includes(x.permission) && !byName.get(x.action)!.sensitive)
+        .map((x) => x.name);
+      expect([role, writes.filter((n) => !DIRECT_WRITES.includes(n))]).toEqual([role, []]);
+    }
+    expect(mcpTools("owner").map((x) => x.name)).toEqual(expect.arrayContaining(DIRECT_WRITES));
+  });
+
+  test("toda ferramenta sensível aparece marcada e com approval: true; as demais não", () => {
+    const byName = new Map(listActions().map((a) => [a.name, a]));
+    for (const role of ROLES) {
+      for (const x of mcpTools(role)) {
+        const sensitive = byName.get(x.action)!.sensitive === true;
+        expect([x.name, x.approval]).toEqual([x.name, sensitive]);
+        expect([x.name, x.description.startsWith(APPROVAL_PREFIX)]).toEqual([x.name, sensitive]);
+      }
+    }
+    const owner = mcpTools("owner").map((x) => x.name);
+    expect(owner).toEqual(expect.arrayContaining(["orders_refund", "connections_saveResend", "offers_create", "offers_update", "alerts_ack", "products_delete"]));
+  });
+
+  test("owner vê orders_refund marcada [Exige aprovação]", () => {
+    const refund = tool("owner", "orders_refund");
+    expect(refund.approval).toBe(true);
+    expect(refund.description.startsWith("[Exige aprovação no painel] ")).toBe(true);
+    expect(refund.inputSchema).toMatchObject({ type: "object", required: ["orderId"] });
+  });
+
+  test("reader não vê nenhuma ferramenta sensível", () => {
+    const byName = new Map(listActions().map((a) => [a.name, a]));
+    const sensitive = mcpTools("reader").filter((x) => x.approval || byName.get(x.action)!.sensitive);
+    expect(sensitive.map((x) => x.name)).toEqual([]);
+  });
+
+  test("nenhuma ferramenta de TOKEN_DENIED aparece, em nenhum papel", () => {
+    for (const role of ROLES) {
+      const denied = mcpTools(role).filter((x) => TOKEN_DENIED.includes(x.permission));
+      expect([role, denied.map((x) => x.name)]).toEqual([role, []]);
+    }
+    const owner = mcpTools("owner").map((x) => x.name);
+    for (const name of ["mcpTokens_create", "mcpTokens_revoke", "mcpTokens_list", "team_list", "team_revokeSessions", "account_changePassword", "approvals_approve", "approvals_list", "approvals_reject", "approvals_pendingCount"]) {
+      expect(owner).not.toContain(name);
     }
   });
 
-  test("nenhuma ação sensível, excluída, pública, de sistema ou negada a token aparece em nenhum papel", () => {
+  test("nenhuma ação excluída, pública, de sistema ou negada a token aparece em nenhum papel", () => {
     const byName = new Map(listActions().map((a) => [a.name, a]));
     for (const role of ROLES) {
       for (const x of mcpTools(role)) {
         const a = byName.get(x.action)!;
-        expect(a.sensitive).toBe(false);
         expect(x.action in MCP_EXCLUDED).toBe(false);
         expect(a.permission === "public" || a.permission === "system").toBe(false);
         expect(TOKEN_DENIED.includes(a.permission as Permission)).toBe(false);
@@ -109,20 +145,7 @@ describe("classificação", () => {
       }
     }
     const owner = mcpTools("owner").map((x) => x.action);
-    for (const name of [
-      "orders.export",
-      "products.create",
-      "connections.testSmtp",
-      "connections.removeTelegram",
-      "orders.refund",
-      "team.list",
-      "alerts.ack",
-      "offers.create",
-      "offers.update",
-      "orders.resend",
-      "products.update",
-      "connections.testMeta",
-    ]) {
+    for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "email.applyResendEvent"]) {
       expect(owner).not.toContain(name);
     }
   });
@@ -132,7 +155,7 @@ describe("classificação", () => {
       mcpTools("reader")
         .map((x) => x.name)
         .sort(),
-    ).toEqual(["metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    ).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
   });
 
   test("traffic não lista pedidos nem ações de connections.write", () => {
@@ -386,5 +409,22 @@ describe("callMcpTool", () => {
     await ownerDb.update(orders).set({ lastTouch: { utm_source: "ig", utm_campaign: "https://x.com" } }).where(eq(orders.id, o.id));
     const out = (await callMcpTool(tool("owner", "orders_get"), call(s.storeId), { id: o.id })) as { attribution: unknown };
     expect(out.attribution).toEqual({ firstTouch: null, lastTouch: { utm_source: "ig", utm_campaign: "(oculto)" }, ref: "(oculto)" });
+  });
+
+  test("callMcpTool de orders_refund cria pedido e não reembolsa; a resposta não ecoa os argumentos", async () => {
+    const [tok] = await t.ownerDb
+      .insert(mcpToken)
+      .values({ storeId: s.storeId, name: "agente", role: "owner", tokenHash: randomBytes(32).toString("hex"), last4: "abcd" })
+      .returning({ id: mcpToken.id });
+    const paid = await seedOrder(s, { status: "paid" });
+    const out = (await callMcpTool(tool("owner", "orders_refund"), { storeId: s.storeId, tokenId: tok!.id, role: "owner" }, { orderId: paid.id })) as Record<string, unknown>;
+    expect(Object.keys(out).sort()).toEqual(["expiresAt", "message", "requestId", "status"]);
+    expect(out.status).toBe("pending");
+    expect(out.message).toBe("Pedido enviado para aprovação no painel da loja. Consulte com approvals_status.");
+    expect(JSON.stringify(out)).not.toContain(paid.id);
+    const [req] = await t.ownerDb.select().from(approvalRequest).where(eq(approvalRequest.id, out.requestId as string));
+    expect(req).toMatchObject({ action: "orders.refund", status: "pending", tokenId: tok!.id });
+    const [after] = await t.ownerDb.select({ status: orders.status }).from(orders).where(eq(orders.id, paid.id));
+    expect(after!.status).toBe("paid");
   });
 });

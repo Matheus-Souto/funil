@@ -18,8 +18,9 @@ import { store } from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
+import { limitConnectionTest } from "@/lib/mcp/limits";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
-import { EMAIL, loadResend, sendViaResend } from "./resend";
+import { EMAIL, loadResend, sendViaResend, testRecipient } from "./resend";
 import { oneLine } from "./templates";
 
 export interface SmtpSettings {
@@ -318,11 +319,14 @@ export const saveSmtp = defineAction({
 
 export const testSmtp = defineAction({
   name: "connections.testSmtp",
-  description: "Envia um e-mail de teste pela conexão SMTP da loja para o endereço informado.",
-  input: z.object({ to: EMAIL }),
+  description:
+    "Envia um e-mail de teste pela conexão SMTP da loja. Pelo painel vai para o endereço informado (to); pelo agente (MCP) vai sempre para o e-mail de avisos da loja, e o to é ignorado.",
+  input: z.object({ to: EMAIL.optional() }),
   permission: "connections.write",
-  // O envio (rede) acontece aqui, fora da transação; a ação só registra o resultado.
-  async prepare(call, { to }) {
+  // O envio (rede) acontece aqui, fora da transação; o destino segue para `run`, que só registra o resultado.
+  async prepare(call, input) {
+    await limitConnectionTest(call.actor, "testSmtp", call.storeId);
+    const to = await testRecipient(call, input.to);
     const { smtp, storeName } = await withStore(call.storeId, async (tx) => {
       const [s] = await tx.select({ name: store.name }).from(store).where(eq(store.id, call.storeId));
       return { smtp: await loadSmtp(tx, call.storeId), storeName: s?.name ?? "" };
@@ -339,8 +343,9 @@ export const testSmtp = defineAction({
     } catch (e) {
       throw new ActionError("provider_error", smtpProblem(e, smtp));
     }
+    return { to };
   },
-  async run(ctx, { to }) {
+  async run(ctx, _input, { to }) {
     await logEmail(ctx.tx, { storeId: ctx.storeId, to, kind: "test", status: "sent", provider: "smtp" });
     return { sent: true };
   },

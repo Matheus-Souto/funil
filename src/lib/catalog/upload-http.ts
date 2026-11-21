@@ -3,21 +3,11 @@
 //
 // Contrato: corpo = bytes do PDF (Content-Type: application/pdf); metadados na query (`name`, `fileName`).
 // O Content-Type application/pdf também barra POST cross-site por formulário (que não consegue enviá-lo).
-import { runAction, ActionError, type ActionErrorCode } from "@/lib/actions/core";
+import { runAction, ActionError } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor, type PanelActor } from "@/lib/auth/session";
-import { readBytesCapped } from "@/lib/http";
+import { readBytesCapped, UPLOAD_ERROR_STATUS } from "@/lib/http";
 import { createProduct, MAX_PDF_BYTES } from "./products";
-
-const STATUS: Record<ActionErrorCode, number> = {
-  invalid_input: 400,
-  forbidden: 403,
-  not_found: 404,
-  conflict: 409,
-  approval_required: 403,
-  provider_error: 502,
-  rate_limited: 429,
-};
 
 const json = (status: number, body: unknown) => Response.json(body, { status });
 
@@ -39,7 +29,7 @@ export async function handleProductUpload(req: Request, opts: { actor?: () => Pr
     const out = await runAction(createProduct, { storeId, actor, origin: "panel" }, { name, fileName, file });
     return json(200, out);
   } catch (e) {
-    if (e instanceof ActionError) return json(STATUS[e.code], { error: e.message });
+    if (e instanceof ActionError) return json(UPLOAD_ERROR_STATUS[e.code], { error: e.message });
     throw e;
   }
 }

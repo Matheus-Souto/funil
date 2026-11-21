@@ -340,7 +340,7 @@ describe("offers", () => {
     const q = await mkProduct(storeId, "Completo");
     const o = await call(createOffer, storeId, owner, offerInput(p.id));
     expect(listActions().find((a) => a.name === "offers.updatePrice")?.sensitive).toBe(true);
-    expect(listActions().find((a) => a.name === "offers.update")?.sensitive).toBe(false);
+    expect(listActions().find((a) => a.name === "offers.update")?.sensitive).toBe(true); // D2: a oferta inteira passa pela fila
     for (const origin of ["mcp", "ai"] as const) {
       expect(await code(call(updateOfferPrice, storeId, owner, { id: o.id, priceCents: 1 }, origin))).toBe("approval_required");
     }
@@ -560,7 +560,7 @@ describe("rodada de correção 1 (concorrência, slug sensível, editor com N pr
     expect(await code(call(setOfferSlug, storeId, support, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
     expect(await code(call(setOfferSlug, storeId, traffic, { id: a.id, slug: "oferta-velha" }))).toBe("forbidden");
     // O contorno do revisor (S1): criar outra oferta e trocar os slugs só com ações não sensíveis.
-    const b = await call(createOffer, storeId, owner, offerInput(x.id, { slug: "oferta-tmp", priceCents: 5 }), "mcp");
+    const b = await call(createOffer, storeId, owner, offerInput(x.id, { slug: "oferta-tmp", priceCents: 5 }));
     expect(await code(call(updateOffer, storeId, owner, { id: a.id, slug: "oferta-velha" }, "mcp"))).toBe("invalid_input");
     expect(await code(call(updateOffer, storeId, owner, { id: b.id, slug: "oferta-a" }, "mcp"))).toBe("invalid_input");
     const pubA = await call(getPublicOffer, storeId, pub, { slug: "oferta-a" }, "public");

@@ -8,7 +8,7 @@ import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { mcpToken, users } from "@/lib/db/schema";
+import { approvalRequest, mcpToken, users } from "@/lib/db/schema";
 
 /** Papéis que um token pode ter (o `reader` só existe para tokens). */
 export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader"] as const satisfies readonly Role[];
@@ -22,7 +22,7 @@ export function mintMcpToken(storeId: string): { token: string; hash: string; la
 }
 
 /** 32 hex → UUID com hífens (8-4-4-4-12). */
-const toUuid = (h: string) => `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+export const toUuid = (h: string) => `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 
 /**
  * Loja, token e papel do token, ou `null` (formato inválido, loja inexistente, hash desconhecido ou revogado: o
@@ -102,7 +102,7 @@ export const listMcpTokens = defineAction({
 
 export const revokeMcpToken = defineAction({
   name: "mcpTokens.revoke",
-  description: "Revoga um token MCP da loja (deixa de autenticar na hora).",
+  description: "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados).",
   input: z.object({ id: z.uuid() }),
   permission: "team.manage",
   sensitive: true,
@@ -112,7 +112,15 @@ export const revokeMcpToken = defineAction({
       .set({ revokedAt: sql`now()` })
       .where(and(eq(mcpToken.id, id), isNull(mcpToken.revokedAt)))
       .returning({ id: mcpToken.id });
-    if (revoked.length > 0) return { revoked: true };
+    if (revoked.length > 0) {
+      // Pedido pendente do token não pode mais ser aprovado: cancela e apaga a entrada selada. A reivindicação de uma
+      // aprovação em andamento trava a linha do token (for share): esta revogação espera o commit dela.
+      await ctx.tx
+        .update(approvalRequest)
+        .set({ status: "canceled", inputSealed: null, decidedAt: sql`now()` })
+        .where(and(eq(approvalRequest.tokenId, id), eq(approvalRequest.status, "pending")));
+      return { revoked: true };
+    }
     const [found] = await ctx.tx.select({ id: mcpToken.id }).from(mcpToken).where(eq(mcpToken.id, id));
     if (!found) throw new ActionError("not_found", "Token não encontrado");
     return { revoked: false };

@@ -9,6 +9,7 @@ import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
+import { approveRequest, rejectRequest } from "@/lib/mcp/approvals";
 import { createMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { removeTelegram, saveTelegram, testTelegram } from "@/lib/notify/telegram-connection";
 import { saveResend, setEmailProvider, testResend } from "@/lib/delivery/resend";
@@ -218,4 +219,16 @@ export async function createMcpTokenAction(input: unknown) {
 export async function revokeMcpTokenAction(id: string) {
   const panel = await requirePanelActor();
   return call(panel, revokeMcpToken, { id }, () => "Token revogado.");
+}
+
+// ---- aprovações (fila do MCP) ----------------------------------------------------------------------------------
+
+export async function approveRequestAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, approveRequest, { id }, () => "Pedido aprovado e executado.");
+}
+
+export async function rejectRequestAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, rejectRequest, { id }, () => "Pedido recusado.");
 }

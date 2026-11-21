@@ -10,7 +10,21 @@ import postgres from "postgres";
 import type { ActionError } from "@/lib/actions/core";
 import { setDbForTests, withStore } from "@/lib/db/client";
 import { migrate } from "@/lib/db/migrate";
-import { auditLog, cardAttempt, customer, integration, job, mcpToken, orders, payment, rateLimit, storeAlert, telegramNotice } from "@/lib/db/schema";
+import {
+  approvalRequest,
+  auditLog,
+  cardAttempt,
+  customer,
+  integration,
+  job,
+  mcpToken,
+  orders,
+  payment,
+  rateLimit,
+  storeAlert,
+  telegramNotice,
+  uploadLink,
+} from "@/lib/db/schema";
 import { env } from "@/lib/env";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { payWithCard, type CardDeps, type CardPaymentInput } from "@/lib/payments/asaas/card";
@@ -123,6 +137,54 @@ describe("papel card: atributos e o que fica de fora", () => {
     ).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(storeId, (tx) => tx`update mcp_token set revoked_at = null`)).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(storeId, (tx) => tx`delete from mcp_token`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("approval_request e upload_link (fila e upload do MCP): select, insert, update e delete dão permission denied", async () => {
+    const { storeId } = await seedStore("Fila MCP");
+    const [tok] = await t.ownerDb
+      .insert(mcpToken)
+      .values({ storeId, name: "agente", role: "owner", tokenHash: randomBytes(32).toString("hex"), last4: "abcd" })
+      .returning({ id: mcpToken.id });
+    const tokenId = tok!.id;
+    await t.ownerDb.insert(approvalRequest).values({
+      storeId,
+      tokenId,
+      action: "orders.refund",
+      inputSealed: "v1.selado",
+      inputSha256: randomBytes(32).toString("hex"),
+      summary: {},
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await t.ownerDb.insert(uploadLink).values({
+      storeId,
+      tokenId,
+      name: "Produto",
+      fileName: "produto.pdf",
+      keyHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await expect(asCardIn(storeId, (tx) => tx`select input_sealed from approval_request`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(
+        storeId,
+        (tx) =>
+          tx`insert into approval_request (store_id, token_id, action, input_sha256, summary, expires_at)
+             values (${storeId}, ${tokenId}, 'orders.refund', 'h', '{}', now() + interval '1 day')`,
+      ),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`update approval_request set status = 'approved'`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`delete from approval_request`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`select key_hash from upload_link`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(
+        storeId,
+        (tx) =>
+          tx`insert into upload_link (store_id, token_id, name, file_name, key_hash, expires_at)
+             values (${storeId}, ${tokenId}, 'x', 'x.pdf', 'h', now() + interval '1 day')`,
+      ),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`update upload_link set used_at = now()`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(storeId, (tx) => tx`delete from upload_link`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {

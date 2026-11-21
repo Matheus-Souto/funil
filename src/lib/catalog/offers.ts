@@ -68,6 +68,8 @@ export const createOffer = defineAction({
     "Cria uma oferta (preço em centavos) com os produtos entregues (productIds, 1 a 20, em ordem) e order bump opcional (bump: productIds, priceCents e label, obrigatório com mais de 1 produto).",
   input: createInput,
   permission: "offers.write",
+  // Oferta nova vai ao ar com preço e produtos entregues: MCP/IA pedem aprovação.
+  sensitive: true,
   async run(ctx, input) {
     const bumpIds = input.bump?.productIds ?? [];
     // Antes do insert: valida os produtos (loja, apagados, repetidos) com erro legível.
@@ -193,6 +195,8 @@ export const updateOffer = defineAction({
     active: z.boolean().optional(),
   }),
   permission: "offers.write",
+  // Nome, métodos, modo Pix, parcelas, texto de obrigado e `active` aparecem no checkout: MCP/IA pedem aprovação.
+  sensitive: true,
   async run(ctx, input) {
     const { id: offerId, ...changes } = input;
     const [current] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, offerId));

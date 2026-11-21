@@ -1,0 +1,2 @@
+CREATE INDEX "upload_link_store_open_idx" ON "upload_link" USING btree ("store_id","expires_at") WHERE "upload_link"."used_at" is null;--> statement-breakpoint
+CREATE INDEX "upload_link_token_idx" ON "upload_link" USING btree ("token_id","created_at" DESC NULLS LAST);

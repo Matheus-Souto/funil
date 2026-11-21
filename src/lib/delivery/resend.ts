@@ -4,12 +4,13 @@
 // Também guarda a conexão, a escolha do provedor ativo e o teste (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
 import { and, eq, notExists } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, defineAction } from "@/lib/actions/core";
+import { ActionError, defineAction, type Actor } from "@/lib/actions/core";
 import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
 import { IntegrationSecretUnreadable, getIntegration, readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
 import { log } from "@/lib/log";
+import { limitConnectionTest } from "@/lib/mcp/limits";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
 import type { MailMessage } from "./mailer";
 import { oneLine } from "./templates";
@@ -163,7 +164,8 @@ export function smtpConfigUsable(c: IntegrationConfig | undefined): boolean {
 
 export const saveResend = defineAction({
   name: "connections.saveResend",
-  description: "Conecta o Resend da loja (remetente, chave de API e segredo do webhook): campo omitido mantém o valor guardado.",
+  description:
+    "Conecta o Resend da loja (remetente, chave de API e segredo do webhook): campo omitido mantém o valor guardado. Se a loja não tem SMTP e ainda está no padrão, também ativa o Resend como provedor dos e-mails da loja (resultado em `activated`).",
   input: z.object({
     fromEmail: EMAIL,
     fromName: z.string().trim().max(100).optional(),
@@ -215,6 +217,8 @@ export const saveResend = defineAction({
       .returning({ id: store.id });
     return { ...config, activated: activated.length > 0 };
   },
+  // A ativação automática fica visível na auditoria (`result.activated`).
+  auditResult: (o) => ({ activated: o.activated }),
 });
 
 export const setEmailProvider = defineAction({
@@ -237,23 +241,44 @@ export const setEmailProvider = defineAction({
   },
 });
 
+/**
+ * Destino de um e-mail de teste. Ator token: sempre o e-mail de avisos da loja (o `to` recebido é ignorado; sem e-mail de
+ * avisos, `conflict`). Ator usuário: o `to` informado (obrigatório). Usado por `testSmtp` e `testResend`.
+ */
+export async function testRecipient(call: { storeId: string; actor: Actor }, to: string | undefined): Promise<string> {
+  if (call.actor.kind !== "token") {
+    if (!to) throw new ActionError("invalid_input", "Informe o e-mail de destino.", [{ path: ["to"], message: "Informe o e-mail de destino." }]);
+    return to;
+  }
+  const notify = await withStore(call.storeId, async (tx) => {
+    const [s] = await tx.select({ notifyEmail: store.notifyEmail }).from(store).where(eq(store.id, call.storeId));
+    return s?.notifyEmail ?? null;
+  });
+  if (!notify) throw new ActionError("conflict", "Defina o e-mail de avisos da loja para testar pelo agente");
+  return notify;
+}
+
 export const testResend = defineAction({
   name: "connections.testResend",
-  description: "Envia um e-mail de teste pelo Resend da loja para o endereço informado.",
-  input: z.object({ to: EMAIL }),
+  description:
+    "Envia um e-mail de teste pelo Resend da loja. Pelo painel vai para o endereço informado (to); pelo agente (MCP) vai sempre para o e-mail de avisos da loja, e o to é ignorado.",
+  input: z.object({ to: EMAIL.optional() }),
   permission: "connections.write",
-  // O envio (rede) acontece aqui, fora da transação; o id da mensagem segue para `run`, que só registra o resultado.
-  async prepare(call, { to }) {
+  // O envio (rede) acontece aqui, fora da transação; o id da mensagem e o destino seguem para `run`, que só registra o resultado.
+  async prepare(call, input) {
+    await limitConnectionTest(call.actor, "testResend", call.storeId);
+    const to = await testRecipient(call, input.to);
     const { resend, storeName } = await withStore(call.storeId, async (tx) => {
       const [s] = await tx.select({ name: store.name }).from(store).where(eq(store.id, call.storeId));
       return { resend: await loadResend(tx, call.storeId), storeName: s?.name ?? "" };
     });
     if (!resend) throw new ActionError("provider_error", NOT_CONFIGURED);
     const text = "Este é um e-mail de teste. Se chegou, as entregas da sua loja vão sair pelo Resend.";
-    return sendViaResend(resend, storeName, { to, subject: `E-mail de teste da ${storeName || "sua loja"}`, text, html: `<p>${text}</p>` });
+    const sent = await sendViaResend(resend, storeName, { to, subject: `E-mail de teste da ${storeName || "sua loja"}`, text, html: `<p>${text}</p>` });
+    return { ...sent, to };
   },
-  async run(ctx, { to }, sent) {
-    await logEmail(ctx.tx, { storeId: ctx.storeId, to, kind: "test", status: "sent", provider: "resend", messageId: sent.id });
+  async run(ctx, _input, sent) {
+    await logEmail(ctx.tx, { storeId: ctx.storeId, to: sent.to, kind: "test", status: "sent", provider: "resend", messageId: sent.id });
     return { sent: true };
   },
 });

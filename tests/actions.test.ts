@@ -210,7 +210,7 @@ test("matriz de papéis", () => {
   // orders.report (relatório de vendas pagas, sem dados do comprador): quem tem metrics.read ou orders.read.
   for (const role of ["owner", "admin", "support", "traffic", "reader"] as const) expect(hasPermission(role, "orders.report")).toBe(true);
   // reader (só para tokens MCP): leitura de catálogo, métricas e o relatório; nada de pedidos, conexões nem escrita.
-  expect([...ROLE_PERMISSIONS.reader].sort()).toEqual(["metrics.read", "offers.read", "orders.report", "products.read"]);
+  expect([...ROLE_PERMISSIONS.reader].sort()).toEqual(["approvals.request", "metrics.read", "offers.read", "orders.report", "products.read"]);
   const byName = new Map(listActions().map((a) => [a.name, a]));
   expect(byName.get("connections.saveMeta")).toMatchObject({ permission: "connections.write", sensitive: true });
   expect(byName.get("offers.setPixel")).toMatchObject({ permission: "tracking.write", sensitive: true });

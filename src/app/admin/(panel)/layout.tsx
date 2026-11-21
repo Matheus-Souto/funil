@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
+import { pendingApprovalsCount } from "@/lib/mcp/approvals";
 import { ROLE_LABEL } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
@@ -25,6 +26,14 @@ export default async function PanelLayout({ children }: { children: ReactNode })
   const id = await getPanelIdentity(panel);
   const pending = can("orders.read") ? (await runAction(orderCounts, { ...panel, origin: "panel" }, {})).pendingManual : 0;
 
+  // Selo do menu: se a contagem falhar, o menu aparece sem selo (não derruba o layout).
+  const approvals = can("approvals.decide")
+    ? await runAction(pendingApprovalsCount, { ...panel, origin: "panel" }, {}).then(
+        (r) => r.count,
+        () => 0,
+      )
+    : 0;
+
   const items: NavEntry[] = [
     ...(can("metrics.read") ? [{ href: "/admin", label: "Visão geral", icon: "layout-dashboard" as const }] : []),
     ...(can("orders.read") ? [{ href: "/admin/orders", label: "Pedidos", icon: "receipt" as const, badge: pending }] : []),
@@ -35,6 +44,9 @@ export default async function PanelLayout({ children }: { children: ReactNode })
           { href: "/admin/connections", label: "Conexões", icon: "plug" as const, section: "loja" as const },
           { href: "/admin/settings", label: "Configurações", icon: "settings" as const, section: "loja" as const },
         ]
+      : []),
+    ...(can("approvals.decide")
+      ? [{ href: "/admin/aprovacoes", label: "Aprovações", icon: "circle-check" as const, section: "loja" as const, ...(approvals > 0 ? { badge: approvals } : {}) }]
       : []),
     ...(can("team.manage") ? [{ href: "/admin/tokens", label: "Agentes (MCP)", icon: "code" as const, section: "loja" as const }] : []),
   ];
