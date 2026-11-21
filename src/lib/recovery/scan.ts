@@ -1,6 +1,6 @@
 // Varredura `recovery_scan` (job global, a cada 5 min, agendada junto do `expire_orders`): loja a loja, com a recuperação
 // ligada, escolhe os candidatos dos três casos (contato do checkout, Pix não pago, cartão recusado) que venceram o prazo
-// e nasceram há no máximo 6 h, aplica supressão, dedupe por endereço, "já comprou", tetos e a proteção do cartão, grava
+// e nasceram há no máximo 6 h (contato e cartão só com a oferta ativa: o link leva ao checkout), aplica supressão, dedupe por endereço, "já comprou", tetos e a proteção do cartão, grava
 // `recovery_email` e enfileira `recovery_send` na mesma transação.
 //
 // - Uma transação por loja, com lock consultivo por loja: duas varreduras ao mesmo tempo não escolhem o mesmo candidato
@@ -10,23 +10,22 @@
 //   da loja ou do caso cartão): nada é gravado e o candidato volta na próxima varredura, se ainda estiver na janela.
 // - O token de descadastro em claro vai SÓ no payload do `recovery_send`; a linha guarda o sha256 dele. Log só com
 //   `recoveryId`, `storeId`, `kind` e motivo: nunca e-mail, hash do e-mail nem token.
-import { and, asc, count, eq, gt, gte, inArray, isNotNull, lte, ne, notExists, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, gte, inArray, isNotNull, lte, notExists, sql } from "drizzle-orm";
 import { UNKNOWN_IP } from "@/lib/client-ip";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { db, withStore, type Tx } from "@/lib/db/client";
-import { cardAttempt, checkoutLead, customer, emailOptout, orders, recoveryEmail, store } from "@/lib/db/schema";
+import { cardAttempt, checkoutLead, customer, offer, orders, recoveryEmail, store } from "@/lib/db/schema";
 import { enqueue, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { countRecentEvents, hadRecentEvent, ipRateKey } from "@/lib/payments/ratelimit";
+import { alreadyBought, hasNewerOrder, optedOut } from "./checks";
 import { RECOVERY, recoveryEmailHash } from "./rules";
 
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-/** Pedido que já foi pago em algum momento (pago, contestado ou reembolsado). */
-const WAS_PAID = ["paid", "disputed", "refunded"];
 /** Lembrete que conta para dedupe e tetos (o pulado e o que falhou não contam). */
 const LIVE = ["queued", "sending", "sent"];
 
@@ -66,6 +65,8 @@ async function candidates(tx: Tx, f: StoreFlags, t: Date): Promise<Candidate[]> 
     const leads = await tx
       .select({ id: checkoutLead.id, offerId: checkoutLead.offerId, email: checkoutLead.email, createdAt: checkoutLead.createdAt })
       .from(checkoutLead)
+      // O link do lembrete leva ao checkout da oferta: oferta desativada não vende.
+      .innerJoin(offer, and(eq(offer.id, checkoutLead.offerId), eq(offer.active, true)))
       .where(
         and(
           eq(checkoutLead.status, "open"),
@@ -145,6 +146,7 @@ async function candidates(tx: Tx, f: StoreFlags, t: Date): Promise<Candidate[]> 
       .from(orders)
       .innerJoin(customer, eq(customer.id, orders.customerId))
       .innerJoin(cardAttempt, and(eq(cardAttempt.orderId, orders.id), eq(cardAttempt.status, "declined")))
+      .innerJoin(offer, and(eq(offer.id, orders.offerId), eq(offer.active, true)))
       .where(
         and(
           eq(orders.status, "pending"),
@@ -210,43 +212,10 @@ async function cardSuspicious(storeId: string, o: NonNullable<Candidate["order"]
 
 /** Motivo para pular com linha (o candidato não volta), ou `null` se o lembrete pode sair. */
 async function skipReason(tx: Tx, storeId: string, c: Candidate, hash: string, t: Date): Promise<RecoverySkipReason | null> {
-  const [opted] = await tx
-    .select({ h: emailOptout.emailHash })
-    .from(emailOptout)
-    .where(and(eq(emailOptout.storeId, storeId), eq(emailOptout.emailHash, hash)));
-  if (opted) return "optout";
-
-  // Já comprou a mesma oferta com o mesmo e-mail (o `customer.email` é gravado minúsculo; único por loja e e-mail).
-  const [bought] = await tx
-    .select({ id: orders.id })
-    .from(orders)
-    .innerJoin(customer, eq(customer.id, orders.customerId))
-    .where(
-      and(
-        eq(orders.offerId, c.offerId),
-        eq(customer.email, c.email.trim().toLowerCase()),
-        inArray(orders.status, WAS_PAID),
-        sql`coalesce(${orders.paidAt}, ${orders.createdAt}) > ${iso(minus(t, RECOVERY.boughtLookbackDays * DAY_MS))}::timestamptz`,
-      ),
-    )
-    .limit(1);
-  if (bought) return "ja_comprou";
-
-  if (c.order) {
-    // O lembrete vai para o pedido mais novo do mesmo cliente na mesma oferta.
-    const [newer] = await tx
-      .select({ id: orders.id })
-      .from(orders)
-      .where(
-        and(
-          eq(orders.customerId, c.order.customerId),
-          eq(orders.offerId, c.offerId),
-          ne(orders.id, c.orderId!),
-          gt(orders.createdAt, c.order.createdAt),
-        ),
-      )
-      .limit(1);
-    if (newer) return "pedido_mais_novo";
+  if (await optedOut(tx, storeId, hash)) return "optout";
+  if (await alreadyBought(tx, c.offerId, c.email, t)) return "ja_comprou";
+  if (c.order && (await hasNewerOrder(tx, { id: c.orderId!, customerId: c.order.customerId, offerId: c.offerId, createdAt: c.order.createdAt }))) {
+    return "pedido_mais_novo";
   }
 
   if (c.kind === "card" && (await cardSuspicious(storeId, c.order!, t))) return "cartao_suspeito";

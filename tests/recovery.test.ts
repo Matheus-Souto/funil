@@ -10,6 +10,7 @@ import { withStore } from "@/lib/db/client";
 import { auditLog, cardAttempt, checkoutLead, emailLog, emailOptout, job, offer, orders, recoveryEmail, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
+import { saveResend, setEmailProvider, setResendFetchForTests } from "@/lib/delivery/resend";
 import { dateTimeSP } from "@/lib/format";
 import type { Job } from "@/lib/jobs";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
@@ -17,7 +18,7 @@ import { recordEvent } from "@/lib/payments/ratelimit";
 import { createRecoveryScanHandler } from "@/lib/recovery/scan";
 import { createRecoverySendHandler } from "@/lib/recovery/send";
 import { createTestDb, seedStore, type TestDb } from "./db";
-import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
+import { panelCall, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -571,6 +572,16 @@ describe("recovery_scan", () => {
     expect(await rowsOf(s.storeId)).toHaveLength(0);
   });
 
+  test("oferta desativada → contato e cartão não viram candidatos; o Pix segue", async () => {
+    const s = await shop();
+    await lead(s, ago(61 * MIN));
+    await cardOrder(s, ago(31 * MIN));
+    const pix = await pixOrder(s, ago(31 * MIN));
+    await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.offerId));
+    await scan();
+    expect((await rowsOf(s.storeId)).map((r) => [r.kind, r.orderId, r.status])).toEqual([["pix", pix.id, "queued"]]);
+  });
+
   test("captura de contato desligada → caso lead não roda", async () => {
     const s = await shop({ capture: false });
     await lead(s, ago(61 * MIN));
@@ -800,6 +811,60 @@ describe("recovery_send", () => {
     expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "pix_vencido" });
   });
 
+  test("pago em outro pedido entre a varredura e o envio → skipped, nenhum e-mail", async () => {
+    // Cartão recusado; a pessoa abre outro pedido e paga com Pix: o pedido do cartão segue pending, sem tentativa approved.
+    const s = await mailShop();
+    const card = await cardOrder(s, ago(31 * MIN));
+    const a = await queued(s.storeId);
+    await seedOrder(s, { status: "paid", method: "pix_asaas", email: card.email });
+    await send(a.job);
+    expect(await rowOf(a.row.id)).toMatchObject({ status: "skipped", skipReason: "ja_comprou" });
+
+    // Contato: comprou por outra sessão de checkout e o contato antigo ficou open.
+    const s2 = await mailShop();
+    const l = await lead(s2, ago(61 * MIN));
+    const b = await queued(s2.storeId);
+    await seedOrder(s2, { status: "paid", method: "pix_asaas", email: l.email });
+    await send(b.job);
+    expect(await rowOf(b.row.id)).toMatchObject({ status: "skipped", skipReason: "ja_comprou" });
+    expect(outbox).toHaveLength(0);
+    expect(await logsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("pedido mais novo da mesma oferta entre a varredura e o envio → skipped pedido_mais_novo", async () => {
+    for (const make of [(s: PanelStore) => cardOrder(s, ago(31 * MIN)), (s: PanelStore) => pixOrder(s, ago(31 * MIN))]) {
+      const s = await mailShop();
+      const o = await make(s);
+      const { row, job: j } = await queued(s.storeId);
+      await seedOrder(s, { status: "pending", method: "pix_asaas", email: o.email });
+      await send(j);
+      expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "pedido_mais_novo" });
+    }
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("oferta desativada depois da varredura → contato e cartão skipped oferta_inativa, nenhum e-mail", async () => {
+    for (const make of [(s: PanelStore) => lead(s, ago(61 * MIN)), (s: PanelStore) => cardOrder(s, ago(31 * MIN))]) {
+      const s = await mailShop();
+      await make(s);
+      const { row, job: j } = await queued(s.storeId);
+      await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.offerId));
+      await send(j);
+      expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "oferta_inativa" });
+    }
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("Pix com a oferta desativada depois da varredura → sai (o /o/ funciona sem a oferta ativa)", async () => {
+    const s = await mailShop();
+    await pixOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.offerId));
+    await send(j);
+    expect(outbox).toHaveLength(1);
+    expect((await rowOf(row.id)).status).toBe("sent");
+  });
+
   test("descadastrou com o job na fila → skipped optout", async () => {
     const s = await mailShop();
     const l = await lead(s, ago(61 * MIN));
@@ -929,6 +994,71 @@ describe("recovery_send", () => {
     await send(j); // não lança
     expect(await rowOf(row.id)).toMatchObject({ status: "failed", sentAt: null });
     expect((await logsOf(s.storeId)).map((x) => [x.kind, x.status])).toEqual([["recovery", "failed"]]);
+  });
+
+  describe("pelo Resend", () => {
+    // Montada em tempo de execução: nenhum literal com formato de chave no código.
+    const apiKey = ["re", "teste", "recuperacao"].join("_");
+    let status = 200;
+    let calls = 0;
+    beforeEach(() => {
+      status = 200;
+      calls = 0;
+      setResendFetchForTests((async () => {
+        calls++;
+        return status === 200
+          ? new Response(JSON.stringify({ id: `msg_${calls}` }), { status: 200 })
+          : new Response(JSON.stringify({ message: "erro" }), { status });
+      }) as unknown as typeof fetch);
+    });
+    afterEach(() => setResendFetchForTests());
+
+    async function resendShop() {
+      const s = await mailShop({ smtp: false });
+      await runAction(saveResend, panelCall(s.storeId), { fromEmail: "vendas@loja.com", apiKey });
+      await runAction(setEmailProvider, panelCall(s.storeId), { provider: "resend" });
+      await lead(s, ago(61 * MIN));
+      return { s, ...(await queued(s.storeId)) };
+    }
+
+    test("503 → relança e linha queued; a nova tentativa sai com o message id", async () => {
+      const { s, row, job: j } = await resendShop();
+      status = 503;
+      await expect(send(j)).rejects.toThrow();
+      expect(await rowOf(row.id)).toMatchObject({ status: "queued", sentAt: null });
+      status = 200;
+      await send(j);
+      expect(await rowOf(row.id)).toMatchObject({ status: "sent" });
+      const logs = await logsOf(s.storeId);
+      expect(logs.map((x) => [x.status, x.provider]).sort()).toEqual([
+        ["failed", "resend"],
+        ["sent", "resend"],
+      ]);
+      expect(logs.find((x) => x.status === "sent")!.providerMessageId).toBe("msg_2");
+    });
+
+    test("429 e falha de rede (status 0) também são temporários; depois de 2 h → failed", async () => {
+      const { row, job: j } = await resendShop();
+      status = 429;
+      await expect(send(j)).rejects.toThrow();
+      expect((await rowOf(row.id)).status).toBe("queued");
+      setResendFetchForTests((async () => {
+        throw new Error("fetch failed");
+      }) as unknown as typeof fetch);
+      await expect(send(j)).rejects.toThrow();
+      expect((await rowOf(row.id)).status).toBe("queued");
+      await t.ownerDb.update(recoveryEmail).set({ dueAt: ago(121 * MIN) }).where(eq(recoveryEmail.id, row.id));
+      await send(j); // não lança
+      expect((await rowOf(row.id)).status).toBe("failed");
+    });
+
+    test("422 → failed sem relançar", async () => {
+      const { s, row, job: j } = await resendShop();
+      status = 422;
+      await send(j); // não lança
+      expect(await rowOf(row.id)).toMatchObject({ status: "failed", sentAt: null });
+      expect((await logsOf(s.storeId)).map((x) => [x.status, x.provider])).toEqual([["failed", "resend"]]);
+    });
   });
 
   describe("log", () => {

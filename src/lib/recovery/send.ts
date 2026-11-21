@@ -2,11 +2,13 @@
 //
 // 1. Transação curta: reivindica a linha (`queued` -> `sending` com o id do job; o mesmo job pode reivindicar de novo
 //    depois de cair no meio) e confere de novo o caso, porque a fila pode ter rodado bem depois da varredura: token de
-//    descadastro, chave geral e caso ligados, descadastro, contato ainda aberto ou pedido ainda pendente, e o mesmo
-//    endereço da varredura. Não vale mais: `skipped` com o motivo. Lê destinatário, loja, produto e valor.
+//    descadastro, chave geral e caso ligados, descadastro, oferta ativa (contato e cartão), contato ainda aberto ou
+//    pedido ainda pendente, o mesmo endereço da varredura, "já comprou" e pedido mais novo (as mesmas consultas da
+//    varredura, em `checks.ts`). Não vale mais: `skipped` com o motivo. Lê destinatário, loja, produto e valor.
 // 2. Fora de transação: `sendMail` (chave de idempotência = id do lembrete).
-// 3. Resultado: `sent`; `provider_error` (provedor não configurado, recusou) = `failed` sem relançar; outro erro volta a
-//    `queued` e relança enquanto `now < due_at + 120 min` (a fila tenta de novo), depois vira `failed`.
+// 3. Resultado: `sent`; `provider_error` definitivo (provedor não configurado, chave ou mensagem recusada) = `failed`
+//    sem relançar; erro temporário (rede, tempo-limite, ou `provider_error` com status 0, 429 ou 5xx) volta a `queued`
+//    e relança enquanto `now < due_at + 120 min` (a fila tenta de novo), depois vira `failed`.
 //
 // Log só com `recoveryId`, `storeId`, `kind` e motivo: nunca e-mail, token nem URL. O erro relançado também não leva
 // texto livre do provedor (pode ecoar o destinatário). `email_log` só pelo `logEmail` (sha256 do destinatário).
@@ -15,20 +17,20 @@ import { ActionError } from "@/lib/actions/core";
 import { loadOfferProducts } from "@/lib/catalog/offer-products";
 import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
-import { cardAttempt, checkoutLead, customer, emailOptout, offer, orderItem, orders, product, recoveryEmail, store } from "@/lib/db/schema";
+import { cardAttempt, checkoutLead, customer, offer, orderItem, orders, product, recoveryEmail, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { logEmail, sendMail, type EmailProvider } from "@/lib/delivery/mailer";
 import { recoveryEmail as recoveryTemplate, type RecoveryEmailData } from "@/lib/delivery/templates";
 import type { JobHandler } from "@/lib/jobs";
 import { errorFields, log } from "@/lib/log";
 import { itemOrder } from "@/lib/orders/items";
+import { WAS_PAID, alreadyBought, hasNewerOrder, optedOut } from "./checks";
 import { RECOVERY, recoveryEmailHash } from "./rules";
 import type { RecoveryKind } from "./scan";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Token de descadastro: `randomToken(32)` em base64url (43 caracteres); a folga só aceita o mesmo alfabeto. */
 const TOKEN = /^[A-Za-z0-9_-]{16,128}$/;
-const WAS_PAID = ["paid", "disputed", "refunded"];
 const UTM = "utm_source=recuperacao&utm_medium=email&utm_campaign=";
 
 export type RecoverySendSkipReason =
@@ -41,15 +43,23 @@ export type RecoverySendSkipReason =
   | "pedido_apagado"
   | "pedido_encerrado"
   | "pago"
-  | "pix_vencido";
+  | "pix_vencido"
+  | "oferta_inativa"
+  | "ja_comprou"
+  | "pedido_mais_novo";
 
 type Row = typeof recoveryEmail.$inferSelect;
 type Mail = { to: string; kind: RecoveryKind; orderId: string | null; data: RecoveryEmailData };
 type Prepared = { skip: RecoverySendSkipReason } | { invalidToken: true } | Mail | null;
 /** O que o caso põe no e-mail: destinatário, produto, valor e, nos casos com pedido, o pedido. */
-type Content = { to: string; productName: string; totalCents: number; publicId: string | null; expiresAt: Date | null };
+type Content = {
+  to: string;
+  productName: string;
+  totalCents: number;
+  order: { id: string; customerId: string; createdAt: Date; publicId: string; expiresAt: Date | null } | null;
+};
 type Checked = { skip: RecoverySendSkipReason } | Content;
-type Offer = { name: string; slug: string; priceCents: number };
+type Offer = { name: string; slug: string; priceCents: number; active: boolean };
 
 /** Destinatário e conteúdo do caso contato (valor = preço atual da oferta), ou o motivo para pular. */
 async function leadMail(tx: Tx, r: Row, of: Offer, t: Date): Promise<Checked> {
@@ -64,7 +74,7 @@ async function leadMail(tx: Tx, r: Row, of: Offer, t: Date): Promise<Checked> {
   // Mesmo critério do aviso de pedido: 1 principal -> o produto; mais de 1 -> a oferta.
   const mains = (await loadOfferProducts(tx, [r.offerId])).get(r.offerId)?.main.filter((p) => p.deletedAt === null) ?? [];
   const productName = mains.length > 1 ? of.name : (mains[0]?.name ?? of.name);
-  return { to: l.email, productName, totalCents: of.priceCents, publicId: null, expiresAt: null };
+  return { to: l.email, productName, totalCents: of.priceCents, order: null };
 }
 
 /** Destinatário e conteúdo dos casos Pix e cartão (valor = total do pedido), ou o motivo para pular. */
@@ -72,6 +82,8 @@ async function orderMail(tx: Tx, r: Row, of: Offer, t: Date): Promise<Checked> {
   const [o] = await tx
     .select({
       status: orders.status,
+      customerId: orders.customerId,
+      createdAt: orders.createdAt,
       publicId: orders.publicId,
       totalCents: orders.totalCents,
       expiresAt: orders.expiresAt,
@@ -99,7 +111,8 @@ async function orderMail(tx: Tx, r: Row, of: Offer, t: Date): Promise<Checked> {
     .orderBy(...itemOrder);
   const mains = items.filter((i) => i.kind === "main");
   const productName = mains.length > 1 ? of.name : (mains[0]?.name ?? items[0]?.name ?? of.name);
-  return { to: o.email, productName, totalCents: o.totalCents, publicId: o.publicId, expiresAt: o.expiresAt };
+  const order = { id: r.orderId!, customerId: o.customerId, createdAt: o.createdAt, publicId: o.publicId, expiresAt: o.expiresAt };
+  return { to: o.email, productName, totalCents: o.totalCents, order };
 }
 
 /** Reivindica a linha e decide, com o estado atual, se o lembrete sai (transação curta, sem rede). */
@@ -134,25 +147,29 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
     .where(eq(store.id, storeId));
   if (!s?.on || !s[kind] || (kind === "lead" && !s.capture)) return { skip: "desligado" };
 
-  const [opted] = await tx
-    .select({ h: emailOptout.emailHash })
-    .from(emailOptout)
-    .where(and(eq(emailOptout.storeId, storeId), eq(emailOptout.emailHash, r.emailHash)));
-  if (opted) return { skip: "optout" };
+  if (await optedOut(tx, storeId, r.emailHash)) return { skip: "optout" };
 
-  // A oferta existe: a FK de `recovery_email` apaga a linha junto com ela.
-  const [of] = await tx.select({ name: offer.name, slug: offer.slug, priceCents: offer.priceCents }).from(offer).where(eq(offer.id, r.offerId));
-  const c = kind === "lead" ? await leadMail(tx, r, of!, t) : await orderMail(tx, r, of!, t);
+  const [of] = await tx
+    .select({ name: offer.name, slug: offer.slug, priceCents: offer.priceCents, active: offer.active })
+    .from(offer)
+    .where(eq(offer.id, r.offerId));
+  // Contato e cartão levam ao checkout da oferta, que não vende desativada. O Pix (`/o/`) funciona sem ela ativa.
+  // Oferta apagada: a FK de `recovery_email` já apagou a linha (a reivindicação não a acha).
+  if (!of || (kind !== "pix" && !of.active)) return { skip: "oferta_inativa" };
+  const c = kind === "lead" ? await leadMail(tx, r, of, t) : await orderMail(tx, r, of, t);
   if ("skip" in c) return c;
   // O endereço mudou desde a varredura (ex.: o contato trocou de e-mail na mesma chave): não manda para o novo.
   if (recoveryEmailHash(c.to) !== r.emailHash) return { skip: "email_mudou" };
+  // Comprou por outro pedido ou outra sessão de checkout, ou abriu um pedido mais novo, depois da varredura.
+  if (await alreadyBought(tx, r.offerId, c.to, t)) return { skip: "ja_comprou" };
+  if (c.order && (await hasNewerOrder(tx, { ...c.order, offerId: r.offerId }))) return { skip: "pedido_mais_novo" };
 
   const base = storeBaseUrl({ domain: s.domain, slug: s.slug });
   // D10: nunca e-mail nem nome na URL.
   const actionUrl =
     kind === "pix"
-      ? `${base}/o/${encodeURIComponent(c.publicId!)}`
-      : `${base}/c/${encodeURIComponent(of!.slug)}?${UTM}${kind === "lead" ? "contato" : "cartao"}`;
+      ? `${base}/o/${encodeURIComponent(c.order!.publicId)}`
+      : `${base}/c/${encodeURIComponent(of.slug)}?${UTM}${kind === "lead" ? "contato" : "cartao"}`;
   return {
     to: c.to,
     kind,
@@ -164,7 +181,7 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
       totalCents: c.totalCents,
       actionUrl,
       unsubscribeUrl: `${base}/sair/${token}`,
-      ...(kind === "pix" && c.expiresAt ? { pixExpiresAt: c.expiresAt } : {}),
+      ...(kind === "pix" && c.order?.expiresAt ? { pixExpiresAt: c.order.expiresAt } : {}),
     },
   };
 }
@@ -175,6 +192,16 @@ function settle(tx: Tx, recoveryId: string, jobId: string, set: Partial<typeof r
     .update(recoveryEmail)
     .set(set)
     .where(and(eq(recoveryEmail.id, recoveryId), eq(recoveryEmail.status, "sending"), eq(recoveryEmail.jobId, jobId)));
+}
+
+/**
+ * `provider_error` que não adianta tentar de novo: sem status (provedor não configurado, SMTP recusado na rede) ou com
+ * status 4xx que não é 429 (chave ou mensagem recusada). Status 0 (rede), 429 e 5xx do Resend são temporários.
+ */
+function definitiveProviderError(e: unknown): boolean {
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return false;
+  const status = (e.details as { status?: unknown } | undefined)?.status;
+  return typeof status !== "number" || (status !== 0 && status !== 429 && status < 500);
 }
 
 /** Identificação do erro sem texto livre do provedor (nome e códigos). */
@@ -221,9 +248,9 @@ export function createRecoverySendHandler(now: () => Date = () => new Date()): J
     try {
       sent = await sendMail(storeId, { to, ...recoveryTemplate(kind, prep.data) }, { signal, idempotencyKey: recoveryId, onProvider: (v) => (provider = v) });
     } catch (e) {
-      const definitive = e instanceof ActionError && e.code === "provider_error";
+      const definitive = definitiveProviderError(e);
       // `provider_error` traz só mensagem nossa; o resto pode ecoar o destinatário (ex.: recusa do SMTP).
-      const error = definitive ? e : safeError(e);
+      const error = e instanceof ActionError && e.code === "provider_error" ? e : safeError(e);
       const t = now();
       const retry = await withStore(storeId, async (tx) => {
         await logEmail(tx, { ...logRow, status: "failed", error, provider });
