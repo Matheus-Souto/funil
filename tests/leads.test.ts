@@ -310,6 +310,27 @@ describe("limites da captura", () => {
     for (let i = 0; i < LEAD_LIMITS.newPerIpPerHour; i++) expect(await code(save(s, { clientIp: ip, email: mail() }))).toBe("ok");
   });
 
+  test("captura desligada ou oferta inexistente: nenhuma linha em rate_limit (a chave só conta depois de conferir as duas)", async () => {
+    const off = await seedCapture(false);
+    const on = await seedCapture();
+    const keysOf = async (storeId: string) =>
+      (await t.ownerDb.select({ key: rateLimit.key }).from(rateLimit).where(sql`${rateLimit.key} like ${"leads:%" + storeId + "%"}`)).map((r) => r.key);
+    for (let i = 0; i < 3; i++) expect(await code(save(off, { email: mail() }))).toBe("conflict");
+    expect(await code(save(off, { phone: PHONE }))).toBe("conflict");
+    expect(await code(save({ ...on, slug: "nao-existe" }, { email: mail() }))).toBe("not_found");
+    expect(await keysOf(off.storeId)).toEqual([]);
+    expect(await keysOf(on.storeId)).toEqual([]);
+  });
+
+  test("rajada simultânea do mesmo IP: só 10 contatos novos passam", async () => {
+    const s = await seedCapture();
+    const ip = nextIp();
+    const codes = await Promise.all(Array.from({ length: 15 }, () => code(save(s, { clientIp: ip, email: mail() }))));
+    expect(codes.filter((c) => c === "ok")).toHaveLength(LEAD_LIMITS.newPerIpPerHour);
+    expect(codes.filter((c) => c === "rate_limited")).toHaveLength(15 - LEAD_LIMITS.newPerIpPerHour);
+    expect(await rowsOf(s.storeId)).toHaveLength(LEAD_LIMITS.newPerIpPerHour);
+  });
+
   test("21ª gravação da mesma chave na hora: rate_limited", async () => {
     const s = await seedCapture();
     const leadKey = randomUUID();

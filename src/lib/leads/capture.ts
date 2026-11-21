@@ -9,8 +9,9 @@
 // - `checkout.forgetLead` (público, sem auditoria): "Não salvar meus dados" apaga a linha da chave (nunca a convertida);
 //   chave sem linha também é ok (não revela nada).
 // - `convertLeads`: na criação do pedido (mesma transação) o contato vira `converted` e perde e-mail e celular.
-// - Limites contra abuso (contatos novos por IP e por loja contam só a linha criada; gravações por chave contam toda
-//   tentativa). As chaves usam o `key_hash`, nunca e-mail, celular nem a `leadKey` em claro.
+// - Limites contra abuso, contados na transação da ação (atômicos contra rajada; rollback desfaz a contagem): contatos
+//   novos por IP e por loja contam só a linha criada; gravações por chave contam toda tentativa depois de conferir
+//   captura e oferta. As chaves usam o `key_hash`, nunca e-mail, celular nem a `leadKey` em claro.
 // - Nunca grava e-mail, celular nem `leadKey` em log ou auditoria (as duas ações são `audit: false`).
 import { createHash } from "node:crypto";
 import { and, eq, gt, inArray, or, type SQL } from "drizzle-orm";
@@ -20,7 +21,7 @@ import { UNKNOWN_IP } from "@/lib/client-ip";
 import { checkoutLead, customer, offer, orders, store } from "@/lib/db/schema";
 import { enqueue } from "@/lib/jobs";
 import { telegramSettings } from "@/lib/notify/telegram-connection";
-import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
+import { checkRateLimit, ipRateKey } from "@/lib/payments/ratelimit";
 import { normalizeBrMobile, validEmail } from "@/lib/validation/br";
 
 /** Retenção do contato: a linha vence 30 dias depois de criada (varredura diária). */
@@ -122,54 +123,37 @@ export const checkoutSaveLead = defineAction({
   permission: "public",
   // Anônima e repetida a cada campo preenchido; e-mail e celular nunca vão para a auditoria.
   audit: false,
-  /**
-   * `checkRateLimit` conta toda tentativa da chave. Os limites de contato NOVO (IP e loja) só são lidos aqui (`peek`):
-   * quem decide se vale é `run` (só linha nova) e quem soma é `afterCommit` (só linha criada).
-   */
-  async prepare(call, input) {
-    const keyHash = sha256(input.leadKey);
-    if (!(await checkRateLimit(writeKey(call.storeId, keyHash), LEAD_LIMITS.writesPerKeyPerHour, HOUR))) {
-      throw new ActionError("rate_limited", "Muitas gravações");
-    }
-    const knownIp = input.clientIp !== UNKNOWN_IP;
-    const [ipOk, storeOk] = await Promise.all([
-      knownIp ? peekRateLimit(newIpKey(call.storeId, input.clientIp), LEAD_LIMITS.newPerIpPerHour, HOUR) : true,
-      peekRateLimit(newStoreKey(call.storeId), LEAD_LIMITS.newPerStorePerHour, HOUR),
-    ]);
-    return { keyHash, newOk: ipOk && storeOk };
-  },
-  /** Soma o contato novo (melhor esforço; falha só vai para o log). */
-  async afterCommit(call, input, out: SaveOutput) {
-    if (!out.created) return;
-    if (input.clientIp !== UNKNOWN_IP) await hitRateLimit(newIpKey(call.storeId, input.clientIp), HOUR);
-    await hitRateLimit(newStoreKey(call.storeId), HOUR);
-  },
-  async run(ctx, input, prepared): Promise<SaveOutput> {
+  async run(ctx, input): Promise<SaveOutput> {
     const [s] = await ctx.tx.select({ on: store.leadCapture, privacyEmail: store.privacyEmail }).from(store).where(eq(store.id, ctx.storeId));
     if (!s?.on || !s.privacyEmail) throw new ActionError("conflict", "Captura de contato desligada");
     const [o] = await ctx.tx.select({ id: offer.id }).from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
 
+    // Limites na transação (contagem atômica; rollback desfaz linha, job e contagem). A chave conta toda gravação, mas
+    // só depois de conferir captura e oferta: chave inventada em loja sem captura não enche `rate_limit`.
+    const keyHash = sha256(input.leadKey);
+    if (!(await checkRateLimit(writeKey(ctx.storeId, keyHash), LEAD_LIMITS.writesPerKeyPerHour, HOUR, new Date(), ctx.tx))) {
+      throw new ActionError("rate_limited", "Muitas gravações");
+    }
     const [existing] = await ctx.tx
       .select({ id: checkoutLead.id, status: checkoutLead.status })
       .from(checkoutLead)
-      .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.keyHash, prepared.keyHash)));
+      .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.keyHash, keyHash)));
     if (existing) {
-      if (existing.status !== "converted") await touchLead(ctx, prepared.keyHash, input);
+      if (existing.status !== "converted") await touchLead(ctx, keyHash, input);
       return { created: false, leadId: existing.id };
     }
-    // Celular sozinho nunca cria linha; contato novo respeita os limites de IP e de loja.
+    // Celular sozinho nunca cria linha.
     if (input.email === undefined) return { created: false, leadId: null };
     // Já tem pedido desta oferta (visita nova depois de gerar o Pix): não é abandono antes de comprar.
     if (await orderedRecently(ctx, o.id, input.email)) return { created: false, leadId: null };
-    if (!prepared.newOk) throw new ActionError("rate_limited", "Muitos contatos novos");
 
     const [row] = await ctx.tx
       .insert(checkoutLead)
       .values({
         storeId: ctx.storeId,
         offerId: o.id,
-        keyHash: prepared.keyHash,
+        keyHash,
         email: input.email,
         emailHash: sha256(input.email),
         phone: input.phone ?? null,
@@ -177,12 +161,15 @@ export const checkoutSaveLead = defineAction({
       })
       .onConflictDoNothing({ target: [checkoutLead.storeId, checkoutLead.keyHash] })
       .returning({ id: checkoutLead.id, createdAt: checkoutLead.createdAt });
-    if (row) {
-      await enqueueLeadNotice(ctx, row);
-      return { created: true, leadId: row.id };
-    }
     // Outra requisição da mesma chave criou a linha entre a leitura e a gravação: atualiza essa.
-    return { created: false, leadId: await touchLead(ctx, prepared.keyHash, input) };
+    if (!row) return { created: false, leadId: await touchLead(ctx, keyHash, input) };
+    // Contato novo conta por IP (se conhecido) e por loja, logo depois de criado: estourou, a transação desfaz tudo.
+    const ipOk = input.clientIp === UNKNOWN_IP || (await checkRateLimit(newIpKey(ctx.storeId, input.clientIp), LEAD_LIMITS.newPerIpPerHour, HOUR, new Date(), ctx.tx));
+    if (!ipOk || !(await checkRateLimit(newStoreKey(ctx.storeId), LEAD_LIMITS.newPerStorePerHour, HOUR, new Date(), ctx.tx))) {
+      throw new ActionError("rate_limited", "Muitos contatos novos");
+    }
+    await enqueueLeadNotice(ctx, row);
+    return { created: true, leadId: row.id };
   },
 });
 
