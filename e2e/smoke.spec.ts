@@ -953,7 +953,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
   test("painel: telas no desktop (1280) e no celular (390, tema escuro)", async ({ browser }) => {
     await owner.goto("/admin");
-    await expect(owner.getByRole("heading", { name: "Visão geral" })).toBeVisible();
+    await expect(owner.getByRole("heading", { name: "Dashboard" })).toBeVisible();
     await expect(owner.getByText("Por origem")).toBeVisible();
     await shot(owner, "p03-visao-geral-1280");
     await owner.goto("/admin?periodo=30d");
@@ -967,7 +967,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     const dark = await browser.newContext({ viewport: MOBILE, colorScheme: "dark", storageState: state });
     const m = await dark.newPage();
     await m.goto("/admin");
-    await expect(m.getByRole("heading", { name: "Visão geral" })).toBeVisible();
+    await expect(m.getByRole("heading", { name: "Dashboard" })).toBeVisible();
     await shot(m, "p09-visao-geral-390-escuro");
     await m.goto("/admin/orders");
     await shot(m, "p05c-pedidos-390-escuro");
