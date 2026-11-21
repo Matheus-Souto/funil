@@ -13,30 +13,39 @@ export const MAX_PDF_PAGES = 500;
 
 /**
  * Única regra de validação do PDF (a rota de upload e a ação chamam o mesmo caminho).
- * Devolve a mensagem de erro para o usuário, ou `null` se o arquivo serve. A abertura do PDF roda isolada num Worker
+ * Devolve a mensagem de erro para o usuário, ou o número de páginas se o arquivo serve. A abertura do PDF roda isolada num Worker
  * (teto de memória e tempo, src/lib/pdf/sandbox.ts); fila cheia lança `PdfBusyError`.
  */
-export async function checkPdfBytes(bytes: Uint8Array): Promise<string | null> {
+async function inspectProductPdf(bytes: Uint8Array): Promise<{ problem: string } | { pages: number }> {
   if (bytes.length === 0 || Buffer.from(bytes.subarray(0, 5)).toString("latin1") !== "%PDF-") {
-    return "Envie um arquivo PDF válido.";
+    return { problem: "Envie um arquivo PDF válido." };
   }
-  if (bytes.length > MAX_PDF_BYTES) return "O PDF passa de 50 MB.";
+  if (bytes.length > MAX_PDF_BYTES) return { problem: "O PDF passa de 50 MB." };
   let r: PdfInspection;
   try {
     r = await inspectInSandbox(bytes);
   } catch (e) {
     if (e instanceof PdfBusyError) throw e;
     // Tempo-limite, falta de memória no Worker etc.
-    return "Não conseguimos processar este PDF (grande ou complexo demais). Gere o arquivo de novo, de preferência otimizado, e envie outra vez.";
+    return { problem: "Não conseguimos processar este PDF (grande ou complexo demais). Gere o arquivo de novo, de preferência otimizado, e envie outra vez." };
   }
   if ("error" in r) {
-    return r.error === "encrypted"
-      ? "O PDF está protegido por senha ou criptografado. Envie uma versão sem proteção."
-      : "O PDF está corrompido ou tem estrutura inválida. Gere o arquivo de novo e envie outra vez.";
+    return {
+      problem:
+        r.error === "encrypted"
+          ? "O PDF está protegido por senha ou criptografado. Envie uma versão sem proteção."
+          : "O PDF está corrompido ou tem estrutura inválida. Gere o arquivo de novo e envie outra vez.",
+    };
   }
-  if (r.pages < 1) return "O PDF não tem páginas.";
-  if (r.pages > MAX_PDF_PAGES) return `O PDF tem ${r.pages} páginas; o máximo é ${MAX_PDF_PAGES}.`;
-  return null;
+  if (r.pages < 1) return { problem: "O PDF não tem páginas." };
+  if (r.pages > MAX_PDF_PAGES) return { problem: `O PDF tem ${r.pages} páginas; o máximo é ${MAX_PDF_PAGES}.` };
+  return { pages: r.pages };
+}
+
+/** A mesma validação, só com a mensagem de erro (`null` se o arquivo serve). */
+export async function checkPdfBytes(bytes: Uint8Array): Promise<string | null> {
+  const r = await inspectProductPdf(bytes);
+  return "problem" in r ? r.problem : null;
 }
 
 export const pdfBytes = z.instanceof(Uint8Array);
@@ -54,26 +63,29 @@ const view = {
   name: product.name,
   fileName: product.fileName,
   fileSize: product.fileSize,
+  pageCount: product.pageCount,
   createdAt: product.createdAt,
 };
 
 /**
  * Validação do PDF de um produto novo, no `prepare` da ação (CPU, antes de abrir a transação): problema no arquivo vira
- * `invalid_input` com a mensagem de `checkPdfBytes`; fila do Worker cheia vira `rate_limited`.
+ * `invalid_input` com a mensagem de `checkPdfBytes`; fila do Worker cheia vira `rate_limited`. Devolve o número de páginas,
+ * que fica gravado no produto.
  */
-export async function assertProductPdf(bytes: Uint8Array): Promise<void> {
-  let problem: string | null;
+export async function assertProductPdf(bytes: Uint8Array): Promise<{ pages: number }> {
+  let r: Awaited<ReturnType<typeof inspectProductPdf>>;
   try {
-    problem = await checkPdfBytes(bytes);
+    r = await inspectProductPdf(bytes);
   } catch (e) {
     if (e instanceof PdfBusyError) throw new ActionError("rate_limited", "Outro PDF está sendo processado agora. Tente de novo em instantes.");
     throw e;
   }
-  if (problem) throw new ActionError("invalid_input", problem);
+  if ("problem" in r) throw new ActionError("invalid_input", r.problem);
+  return r;
 }
 
 /** Linha do produto novo (na transação da ação). O arquivo vai depois, com `putProductFile`, como último passo. */
-export async function insertProductRow(ctx: Ctx, p: { name: string; fileName: string; bytes: Uint8Array }) {
+export async function insertProductRow(ctx: Ctx, p: { name: string; fileName: string; bytes: Uint8Array; pages: number }) {
   const productId = randomUUID();
   const [row] = await ctx.tx
     .insert(product)
@@ -85,6 +97,7 @@ export async function insertProductRow(ctx: Ctx, p: { name: string; fileName: st
       fileName: p.fileName,
       fileSize: p.bytes.length,
       fileSha256: sha256Bytes(p.bytes),
+      pageCount: p.pages,
     })
     .returning(view);
   return row!;
@@ -105,8 +118,8 @@ export const createProduct = defineAction({
   auditInput: (i) => ({ name: i.name, fileName: i.fileName, fileSize: i.file.length }),
   // Validação do PDF (CPU) antes de abrir a transação.
   prepare: (_call, input) => assertProductPdf(input.file),
-  async run(ctx, input) {
-    const row = await insertProductRow(ctx, { name: input.name, fileName: input.fileName, bytes: input.file });
+  async run(ctx, input, pdf) {
+    const row = await insertProductRow(ctx, { name: input.name, fileName: input.fileName, bytes: input.file, pages: pdf.pages });
     await putProductFile(ctx.storeId, row.id, input.file);
     return row;
   },

@@ -199,6 +199,16 @@ describe("products", () => {
   });
 });
 
+describe("products.pageCount", () => {
+  test("o envio grava o número de páginas contado na validação e a lista devolve", async () => {
+    const { storeId } = await seedStore();
+    const p = await call(createProduct, storeId, owner, { name: "Apostila", fileName: "apostila.pdf", file: await makePdf(3) });
+    expect(p.pageCount).toBe(3);
+    const list = await call(listProducts, storeId, owner, {});
+    expect(list.find((x) => x.id === p.id)?.pageCount).toBe(3);
+  });
+});
+
 describe("products.file (PDF para o painel)", () => {
   test("devolve os bytes e o nome do arquivo; support lê, sem permissão não; outra loja e excluído viram not_found", async () => {
     const { storeId } = await seedStore();

@@ -218,6 +218,13 @@
       "when": 1795217664183,
       "tag": "0030_mcp_upload_link_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1795287225342,
+      "tag": "0031_product_page_count",
+      "breakpoints": true
     }
   ]
 }
