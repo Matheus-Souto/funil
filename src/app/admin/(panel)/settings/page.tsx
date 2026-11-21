@@ -5,16 +5,20 @@ import { requirePanelActor } from "@/lib/auth/session";
 import { getStoreSettings } from "@/lib/store-settings";
 import { PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
+import { firstParam, type Param } from "@/lib/panel-params";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
-import { SettingsForm } from "./form";
+import { SettingsPanel } from "./form";
+import { SETTINGS_TABS, type SettingsTab } from "./tabs";
 import { TeamList } from "./team";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Configurações" };
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ aba?: Param }> }) {
   const panel = await requirePanelActor();
+  const aba = firstParam((await searchParams).aba);
+  const initialTab: SettingsTab = SETTINGS_TABS.find(([k]) => k === aba)?.[0] ?? "loja";
   const st = await runAction(getStoreSettings, { ...panel, origin: "panel" }, {});
   const canWrite = hasPermission(panel.actor.role, "connections.write");
   const team = hasPermission(panel.actor.role, "team.manage") ? await runAction(listTeam, { ...panel, origin: "panel" }, {}) : null;
@@ -22,17 +26,17 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHead title="Configurações" />
-      <SettingsForm initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "", recovery: st.recovery }} canWrite={canWrite} />
-
-      <div className={s.settingsRow} id="script">
-        <div>
-          <h2 className={s.sectionTitle}>Script da página de vendas</h2>
-          <p>
-            Cole antes do <code className={s.mono}>&lt;/body&gt;</code> da sua página. Ele leva UTMs, fbclid e <code className={s.mono}>?ref=</code> para os
-            links do checkout, assim as vendas aparecem por origem e indicação.
-          </p>
-        </div>
-        <section className={s.card}>
+      <SettingsPanel
+        initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "", recovery: st.recovery }}
+        canWrite={canWrite}
+        initialTab={initialTab}
+        script={
+          <div className={s.stack} id="script">
+            <p className={s.muted} style={{ margin: 0 }}>
+              Cole antes do <code className={s.mono}>&lt;/body&gt;</code> da sua página. Ele leva UTMs, fbclid e <code className={s.mono}>?ref=</code> para os
+              links do checkout, assim as vendas aparecem por origem e indicação.
+            </p>
+            <section className={s.card}>
           <pre className={s.codeBlock} aria-label="Script do t.js">
             {st.trackingSnippet}
           </pre>
@@ -60,28 +64,26 @@ export default async function SettingsPage() {
               </li>
             </ol>
           </details>
-        </section>
-      </div>
-
-      {team ? (
-        <div className={s.settingsRow} id="equipe">
-          <div>
-            <h2 className={s.sectionTitle}>Equipe</h2>
-            <p>
-              Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
-              <a href="/admin/senha">Trocar senha</a>.
-            </p>
+            </section>
           </div>
-          <TeamList members={team} />
-        </div>
-      ) : null}
-
-      <div className={s.settingsRow}>
-        <div>
-          <h2 className={s.sectionTitle}>Entrega</h2>
-          <p>Regras do link pessoal de download.</p>
-        </div>
-        <section className={s.card}>
+        }
+        team={
+          team ? (
+            <div className={s.stack} id="equipe">
+              <p className={s.muted} style={{ margin: 0 }}>
+                Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
+                <a href="/admin/senha">Trocar senha</a>.
+              </p>
+              <TeamList members={team} />
+            </div>
+          ) : null
+        }
+        delivery={
+          <div className={s.stack}>
+            <p className={s.muted} style={{ margin: 0 }}>
+              Regras do link pessoal de download.
+            </p>
+            <section className={s.card}>
           <div className={s.rows}>
             <div className={s.row}>
               <span>Validade do link</span>
@@ -96,8 +98,10 @@ export default async function SettingsPage() {
             <PIcon name="info" size={14} />
             Reembolso ou contestação desativa o link na hora. Em Pedidos, “Reenviar acesso” pode gerar links novos.
           </p>
-        </section>
-      </div>
+            </section>
+          </div>
+        }
+      />
     </>
   );
 }

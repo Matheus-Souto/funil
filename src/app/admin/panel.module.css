@@ -3527,3 +3527,80 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---------- Configurações em abas ---------- */
+.settingsTabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--color-border);
+  scrollbar-width: none;
+}
+.settingsTabs button {
+  flex: none;
+  margin-bottom: -1px;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms var(--ease-standard), border-color 120ms var(--ease-standard);
+}
+.settingsTabs button:hover {
+  color: var(--color-text);
+}
+.settingsTabs button[aria-selected="true"] {
+  border-bottom-color: var(--color-primary-ink);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.settingsTabs button:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+.settingsFieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.settingsCard {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.settingsSub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-left: 14px;
+  border-left: 2px solid var(--color-border);
+}
+.colorWell {
+  flex: none;
+  width: 44px;
+  height: 42px;
+  padding: 2px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+.saveBarSimple {
+  margin-top: 16px;
+}
+.saveBarSimple > span:first-child {
+  margin-right: auto;
+  color: var(--color-warning);
+  font-size: 13px;
+  font-weight: 600;
+}
+.settingsCard[hidden] {
+  display: none;
+}
