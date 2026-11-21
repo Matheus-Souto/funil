@@ -47,17 +47,37 @@ export default async function ConnectionsPage() {
           </div>
         </div>
       ) : null}
-      <div className={s.grid2} style={{ alignItems: "start" }}>
-        <div className={s.stack}>
-          <PixManualCard data={st.pixManual} canWrite={canWrite} />
-          <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} active={st.emailProvider === "smtp"} usable={st.emailUsable} />
-          <ResendCard data={st.resend} canWrite={canWrite} defaultTo={userEmail} storeName={storeName} active={st.emailProvider === "resend"} usable={st.emailUsable} />
-          <TelegramCard data={st.telegram} canWrite={canWrite} />
-        </div>
-        <div className={s.stack}>
-          <AsaasCard data={st.asaas} canWrite={canWrite} />
-          <MetaCard data={st.meta} canWrite={canWrite} canTest={canTestMeta} />
-        </div>
+      <div className={s.connGroups}>
+        <section className={s.connGroup} aria-labelledby="conn-receber">
+          <div className={s.connGroupHead}>
+            <h2 id="conn-receber">Como receber</h2>
+            <p>Para onde vai o dinheiro de cada venda.</p>
+          </div>
+          <div className={s.connGroupGrid}>
+            <PixManualCard data={st.pixManual} canWrite={canWrite} />
+            <AsaasCard data={st.asaas} canWrite={canWrite} />
+          </div>
+        </section>
+        <section className={s.connGroup} aria-labelledby="conn-email">
+          <div className={s.connGroupHead}>
+            <h2 id="conn-email">E-mail para o comprador</h2>
+            <p>Leva o link de download e os avisos de venda. Basta um dos dois.</p>
+          </div>
+          <div className={s.connGroupGrid}>
+            <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} active={st.emailProvider === "smtp"} usable={st.emailUsable} />
+            <ResendCard data={st.resend} canWrite={canWrite} defaultTo={userEmail} storeName={storeName} active={st.emailProvider === "resend"} usable={st.emailUsable} />
+          </div>
+        </section>
+        <section className={s.connGroup} aria-labelledby="conn-avisos">
+          <div className={s.connGroupHead}>
+            <h2 id="conn-avisos">Rastreamento e avisos</h2>
+            <p>Eventos para os anúncios do Meta e avisos da loja no Telegram.</p>
+          </div>
+          <div className={s.connGroupGrid}>
+            <MetaCard data={st.meta} canWrite={canWrite} canTest={canTestMeta} />
+            <TelegramCard data={st.telegram} canWrite={canWrite} />
+          </div>
+        </section>
       </div>
     </>
   );

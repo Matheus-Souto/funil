@@ -2124,10 +2124,8 @@
   line-height: 1.2;
 }
 .eyebrow {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--color-text-muted);
 }
 .wizard {
@@ -2275,4 +2273,65 @@
   font: inherit;
   letter-spacing: inherit;
   color: inherit;
+}
+
+/* ---------- Conexões em grupos ---------- */
+.connGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.connGroupHead {
+  margin-bottom: 12px;
+}
+.connGroupHead h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.connGroupHead p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.connGroupGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .connGroupGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Fatos do Pix manual: rótulo em cima, valor embaixo (chave e identificador longos não quebram no meio) */
+.factRows .row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 0;
+}
+.factRows .row > span:first-child {
+  font-size: 12px;
+}
+.factRows .row > span:last-child {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+/* Linha com um bloco só (ex.: equipe): texto à esquerda, peso normal */
+.row > span.rowMain {
+  text-align: left;
+  font-weight: 400;
+  color: var(--color-text);
+}
+
+/* Links em texto corrido do painel na cor de destaque legível */
+.settingsRow p a,
+.hint a {
+  color: var(--color-primary-ink);
+  font-weight: 600;
+  text-underline-offset: 2px;
 }

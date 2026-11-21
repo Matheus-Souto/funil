@@ -115,7 +115,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                     Valor único deste pedido ({brl(d.totalCents)} + {brl(amount - d.totalCents)} de identificação)
                   </span>
                 </div>
-                <div className={s.rows}>
+                <div className={`${s.rows} ${s.factRows}`}>
                   <div className={s.row}>
                     <span>Recebido a partir de</span>
                     <span>{shortWhenSP(d.createdAt)}</span>
@@ -255,7 +255,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
               {phoneDigits.length >= 10 ? (
                 <>
                   {" · "}
-                  <a href={`https://wa.me/55${phoneDigits.slice(-11)}`} target="_blank" rel="noreferrer" style={{ color: "var(--color-primary)" }}>
+                  <a href={`https://wa.me/55${phoneDigits.slice(-11)}`} target="_blank" rel="noreferrer" style={{ color: "var(--color-primary-ink)" }}>
                     abrir WhatsApp
                   </a>
                 </>

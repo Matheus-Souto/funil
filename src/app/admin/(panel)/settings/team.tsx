@@ -26,7 +26,7 @@ export function TeamList({ members }: { members: TeamMember[] }) {
       <div className={s.rows}>
         {members.map((m) => (
           <div className={s.row} key={m.userId}>
-            <span>
+            <span className={s.rowMain}>
               <b>{m.name}</b> <span className={s.muted}>{m.email}</span>
               <br />
               <small className={s.muted}>
