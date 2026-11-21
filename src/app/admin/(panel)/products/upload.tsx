@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, Plus, X } from "lucide-react";
 import { Art } from "../../blocks";
-import { isPasswordError, openPdf, renderPage } from "../../pdf";
+import { isPasswordError, openPdf, renderPage, type PdfDoc } from "../../pdf";
 import s from "../../panel.module.css";
 import { Dialog, Live } from "../../ui";
 
@@ -66,10 +66,12 @@ function NewProductDialog({ open, onClose, onCreated }: { open: boolean; onClose
   useEffect(() => {
     if (!file) return;
     let alive = true;
+    let opened: PdfDoc | null = null;
     void file
       .arrayBuffer()
       .then(openPdf)
       .then(async (doc) => {
+        opened = doc;
         if (!alive) return;
         setPreview({ status: "ok", pages: doc.numPages });
         if (canvas.current) await renderPage(doc, 1, canvas.current, 132);
@@ -79,6 +81,7 @@ function NewProductDialog({ open, onClose, onCreated }: { open: boolean; onClose
       });
     return () => {
       alive = false;
+      void opened?.loadingTask.destroy();
     };
   }, [file]);
 

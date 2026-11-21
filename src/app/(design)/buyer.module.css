@@ -310,7 +310,7 @@ select.input {
   cursor: pointer;
 }
 .method:has(input:focus-visible) {
-  outline: 3px solid color-mix(in srgb, var(--color-brand) 40%, transparent);
+  outline: 3px solid color-mix(in srgb, var(--color-brand-strong) 70%, transparent);
   outline-offset: 2px;
 }
 .radio {
@@ -466,7 +466,7 @@ select.input {
   cursor: pointer;
 }
 .bump:has(input:focus-visible) {
-  outline: 3px solid color-mix(in srgb, var(--color-brand) 40%, transparent);
+  outline: 3px solid color-mix(in srgb, var(--color-brand-strong) 70%, transparent);
   outline-offset: 2px;
 }
 .bumpTop {
@@ -580,7 +580,7 @@ select.input {
   background: var(--color-brand-hover);
 }
 .btn:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--color-brand) 40%, transparent);
+  outline: 3px solid color-mix(in srgb, var(--color-brand-strong) 70%, transparent);
   outline-offset: 2px;
 }
 .btn:disabled {

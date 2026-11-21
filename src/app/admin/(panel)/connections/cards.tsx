@@ -80,7 +80,9 @@ function ConnItem({
   canWrite: boolean;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
+  // Link direto (ex.: /admin/connections#meta, dos Primeiros passos) já abre o modal dessa conexão. O portal do modal
+  // só monta no cliente, então abrir no primeiro render não muda o HTML do servidor.
+  const [open, setOpen] = useState(() => typeof window !== "undefined" && window.location.hash === `#${id}`);
   const action = canWrite ? (on ? "Configurar" : "Conectar") : "Ver";
   return (
     <div className={s.connRow}>

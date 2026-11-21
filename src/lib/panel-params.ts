@@ -6,7 +6,6 @@ export type Param = string | string[] | undefined;
 
 export const firstParam = (v: Param): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-/** Filtros da lista de pedidos: status/método fora da lista são ignorados; página inválida vira 1. */
 /** Filtros do painel com vários valores: ?status=paid&status=pending (ou "paid,pending"); inválidos são ignorados. */
 export function parseOrderMultiFilters(sp: { status?: Param; method?: Param; q?: Param; pagina?: Param }): {
   statuses: OrderStatus[];
@@ -24,6 +23,7 @@ export function parseOrderMultiFilters(sp: { status?: Param; method?: Param; q?:
   };
 }
 
+/** Filtros da lista de pedidos: status/método fora da lista são ignorados; página inválida vira 1. */
 export function parseOrderFilters(sp: { status?: Param; method?: Param; q?: Param; pagina?: Param }): {
   status: OrderStatus | undefined;
   method: OrderMethod | undefined;

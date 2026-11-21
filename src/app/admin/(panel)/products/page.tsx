@@ -10,7 +10,7 @@ import Link from "next/link";
 import { NewProductButton } from "./upload";
 import { PdfViewerButton, ProductCell } from "./pdf-view";
 import { TablePager } from "../../table-pager";
-import { parsePage, parsePerPage } from "../../per-page";
+import { PER_PAGE_OPTIONS, parsePage, parsePerPage } from "../../per-page";
 import { firstParam, type Param } from "@/lib/panel-params";
 import { ColumnFilter, TableShell } from "../../table-controls";
 
@@ -51,7 +51,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
         {all.length > 0 ? (
           <TableShell
             q={q}
-            keep={{ status: statuses }}
+            keep={{ status: statuses, por: perPage === PER_PAGE_OPTIONS[0] ? [] : [String(perPage)] }}
             placeholder="Buscar produto"
             searchLabel="Buscar produtos"
             count={`${products.length} ${products.length === 1 ? "produto" : "produtos"}${filtered ? " com estes filtros" : ""}`}

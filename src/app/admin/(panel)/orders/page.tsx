@@ -15,7 +15,7 @@ import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { ColumnFilter, TableShell } from "../../table-controls";
 import { TablePager } from "../../table-pager";
-import { parsePerPage } from "../../per-page";
+import { PER_PAGE_OPTIONS, parsePerPage } from "../../per-page";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
@@ -26,9 +26,16 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
   const sp = await searchParams;
-  const { statuses, methods, q, page } = parseOrderMultiFilters(sp);
+  const { statuses, methods, q, page: requested } = parseOrderMultiFilters(sp);
   const perPage = parsePerPage(sp.por);
-  const data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
+  let page = requested;
+  let data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
+  // ?pagina= além do fim (link antigo, pedidos que sumiram do filtro): mostra a última página em vez de "nenhum pedido".
+  const last = Math.max(1, Math.ceil(data.total / perPage));
+  if (data.items.length === 0 && page > last) {
+    page = last;
+    data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
+  }
   const canExport = hasPermission(panel.actor.role, "orders.export");
 
   const failed = await runAction(listDeliveryFailures, call, {});
@@ -106,7 +113,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       ) : null}
       <TableShell
         q={q}
-        keep={{ status: statuses, method: methods }}
+        keep={{ status: statuses, method: methods, por: perPage === PER_PAGE_OPTIONS[0] ? [] : [String(perPage)] }}
         placeholder="Buscar por nome ou e-mail"
         searchLabel="Buscar pedidos"
         count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}

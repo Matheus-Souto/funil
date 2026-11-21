@@ -106,8 +106,19 @@ function initialForm(offer: OfferData | null, products: ProductOption[]) {
   };
 }
 
-/** O que importa para saber se mudou (sem as chaves locais das linhas de produto). */
-const comparable = (f: ReturnType<typeof initialForm>) => ({ ...f, main: ids(f.main), bumpLines: f.bumpOn ? ids(f.bumpLines) : [] });
+/**
+ * O que importa para saber se mudou: sem as chaves locais das linhas de produto, com os textos aparados como o salvar
+ * grava, e sem os campos do bump quando ele está desligado (não são salvos).
+ */
+const comparable = (f: ReturnType<typeof initialForm>) => ({
+  ...f,
+  name: f.name.trim(),
+  thankYouText: f.thankYouText.trim(),
+  main: ids(f.main),
+  bumpLines: f.bumpOn ? ids(f.bumpLines) : [],
+  bumpPrice: f.bumpOn ? f.bumpPrice : "",
+  bumpLabel: f.bumpOn ? f.bumpLabel.trim() : "",
+});
 
 export function OfferEditor(props: {
   offer: OfferData | null;

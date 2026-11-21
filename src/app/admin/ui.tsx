@@ -32,7 +32,19 @@ export function Dialog({
 }) {
   return (
     <ArcDialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent title={title} className={`${s.themeVars} ${s.arcDialog}`} aria-describedby={undefined}>
+      <DialogContent
+        title={title}
+        className={`${s.themeVars} ${s.arcDialog}`}
+        aria-describedby={undefined}
+        // Foco inicial no elemento marcado com data-autofocus (ex.: "Cancelar" nos diálogos de risco), não no X.
+        onOpenAutoFocus={(e) => {
+          const el = (e.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>("[data-autofocus]");
+          if (el) {
+            e.preventDefault();
+            el.focus();
+          }
+        }}
+      >
         <div className={s.dialogBody} data-tone={tone} data-icon={icon}>
           {children}
         </div>
