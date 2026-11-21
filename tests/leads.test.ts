@@ -387,7 +387,7 @@ describe("leads.list", () => {
     const out = await runAction(listLeads, panelCall(s.storeId, "support"), {});
     expect(out).toMatchObject({ total: 1, page: 1, pageSize: PAGE_SIZE });
     expect(out.items).toEqual([
-      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "open", offerName: "Oferta", email: row.email, phone: PHONE_DIGITS, orderCode: null },
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "open", offerName: "Oferta", email: row.email, phone: PHONE_DIGITS, orderId: null, orderCode: null },
     ]);
     expect(await code(runAction(listLeads, panelCall(s.storeId, "traffic"), {}))).toBe("forbidden");
     expect(await code(runAction(markLeadContacted, panelCall(s.storeId, "traffic"), { id: row.id }))).toBe("forbidden");
@@ -419,7 +419,7 @@ describe("leads.list", () => {
     const row = await insertLead(p, { email: null, phone: null, status: "converted", orderId: order.id });
     const out = await runAction(listLeads, panelCall(p.storeId), { status: "converted" });
     expect(out.items).toEqual([
-      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "converted", offerName: "Maná bíblico", email: null, phone: null, orderCode: orderCode(order.publicId) },
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "converted", offerName: "Maná bíblico", email: null, phone: null, orderId: order.id, orderCode: orderCode(order.publicId) },
     ]);
   });
 

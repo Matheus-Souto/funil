@@ -144,6 +144,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           <Kpi label="Ticket médio" value={brl(ticket)} delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
         </section>
 
+        {lifetime.leads > 0 ? (
+          <section className={s.grid2} aria-label="Contatos do período">
+            <Kpi label="Contatos capturados" value={String(m.leads)} delta={deltaOf(m.leads, prev.leads)} compare={COMPARE[period]} />
+            <Kpi label="Viraram pedido" value={String(m.leadsConverted)} delta={deltaOf(m.leadsConverted, prev.leadsConverted)} compare={COMPARE[period]} />
+          </section>
+        ) : null}
+
         <div className={s.splitWide}>
           <section className={s.card}>
             <div className={s.cardHead}>

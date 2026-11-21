@@ -54,6 +54,7 @@ export const listLeads = defineAction({
         offerName: offer.name,
         email: checkoutLead.email,
         phone: checkoutLead.phone,
+        orderId: orders.id,
         orderPublicId: orders.publicId,
       })
       .from(checkoutLead)

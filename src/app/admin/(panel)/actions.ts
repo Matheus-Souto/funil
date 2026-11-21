@@ -9,6 +9,7 @@ import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
+import { deleteLead, forgetLeadEmail, markLeadContacted } from "@/lib/leads/panel";
 import { approveRequest, rejectRequest } from "@/lib/mcp/approvals";
 import { createMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { removeTelegram, saveTelegram, testTelegram } from "@/lib/notify/telegram-connection";
@@ -231,4 +232,22 @@ export async function approveRequestAction(id: string) {
 export async function rejectRequestAction(id: string) {
   const panel = await requirePanelActor();
   return call(panel, rejectRequest, { id }, () => "Pedido recusado.");
+}
+
+// ---- contatos de quem não finalizou a compra (a auditoria grava só o id ou o hash do e-mail) -----------------------
+
+export async function markLeadContactedAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, markLeadContacted, { id }, () => "Marcado como contatado.");
+}
+
+export async function deleteLeadAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, deleteLead, { id }, () => "Contato excluído.");
+}
+
+/** Pedido de exclusão do titular. O e-mail vai no corpo do POST da server action, nunca na URL. */
+export async function forgetLeadEmailAction(email: string) {
+  const panel = await requirePanelActor();
+  return call(panel, forgetLeadEmail, { email }, (o) => `${o.deleted} contato(s) excluído(s).`);
 }
