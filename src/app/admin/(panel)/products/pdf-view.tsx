@@ -1,10 +1,12 @@
 "use client";
 
-// Miniatura da 1ª página de cada PDF na tabela de produtos (carrega quando a linha aparece na tela) e o visualizador
+// Nome do produto com o ícone 3D e o número de páginas (o PDF é lido quando a linha aparece na tela) e o visualizador
 // "Ver PDF" (páginas ao lado, página grande no meio, baixar). O arquivo vem da rota do painel /admin/api/products/<id>/file.
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Download, Eye } from "lucide-react";
 import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
+import { Tooltip } from "@/components/arc/tooltip/tooltip";
+import { Art } from "../../blocks";
 import { openPdf, productPdfUrl, renderPage, type PdfDoc } from "../../pdf";
 import s from "../../panel.module.css";
 
@@ -38,7 +40,7 @@ function PageCanvas({ doc, n, width, className }: { doc: PdfDoc; n: number; widt
   return <canvas ref={ref} className={className} data-ready={ready ? "true" : undefined} aria-hidden="true" />;
 }
 
-/** Nome do produto com a miniatura da capa e o número de páginas. */
+/** Nome do produto com o ícone 3D de PDF e o número de páginas. */
 export function ProductCell({ id, name }: { id: string; name: string }) {
   const box = useRef<HTMLSpanElement>(null);
   const [doc, setDoc] = useState<PdfDoc | null>(null);
@@ -59,10 +61,8 @@ export function ProductCell({ id, name }: { id: string; name: string }) {
   }, [id]);
   return (
     <span className={s.productCell}>
-      <span ref={box} className={s.pdfThumb} data-loading={!doc && !failed ? "true" : undefined}>
-        {doc ? <PageCanvas doc={doc} n={1} width={36} /> : null}
-      </span>
-      <span className={s.productCellText}>
+      <Art name="pdf" size={36} className={s.productArt} />
+      <span ref={box} className={s.productCellText}>
         <b>{name}</b>
         <small>{doc ? `${doc.numPages} ${doc.numPages === 1 ? "página" : "páginas"}` : failed ? "Sem prévia" : " "}</small>
       </span>
@@ -90,10 +90,11 @@ export function PdfViewerButton({ id, name }: { id: string; name: string }) {
   const pages = doc?.numPages ?? 0;
   return (
     <>
-      <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => setOpen(true)} aria-label={`Ver o PDF de ${name}`}>
-        <Eye size={14} strokeWidth={2} aria-hidden="true" />
-        Ver PDF
-      </button>
+      <Tooltip content="Ver PDF">
+        <button type="button" className={s.iconBtn} onClick={() => setOpen(true)} aria-label={`Ver o PDF de ${name}`}>
+          <Eye size={16} strokeWidth={1.75} aria-hidden="true" />
+        </button>
+      </Tooltip>
       <ArcDialog open={open} onOpenChange={setOpen}>
         <DialogContent title={pages ? `${name} · ${pages} ${pages === 1 ? "página" : "páginas"}` : name} className={`${s.themeVars} ${s.pdfDialog}`} aria-describedby={undefined}>
           {failed ? (

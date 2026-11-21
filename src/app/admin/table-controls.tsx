@@ -1,12 +1,13 @@
 "use client";
 
-// Controles da tabela de pedidos: busca dentro do cartão, filtros no cabeçalho das colunas (como no Excel, com o
-// menu do Arc, marcando várias opções) e o botão de maximizar a tabela. Os filtros ficam na URL
+// Controles das tabelas do painel (pedidos, produtos): busca dentro do cartão, filtros no cabeçalho das colunas (como
+// no Excel, com o menu do Arc, marcando várias opções) e o botão de maximizar a tabela. Os filtros ficam na URL
 // (?status=paid&status=pending&method=..., ?q=), aplicados a cada clique.
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition, type ReactNode } from "react";
 import {
   CircleCheck,
+  CircleMinus,
   Clock,
   CreditCard,
   ListFilter,
@@ -22,10 +23,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { DropdownMenu } from "@/components/arc/dropdown-menu/dropdown-menu";
-import s from "../../panel.module.css";
+import s from "./panel.module.css";
 
-/** Ícone de cada opção de filtro (status e método). */
+/** Ícone de cada opção de filtro (status e método dos pedidos, uso dos produtos). */
 const OPTION_ICONS: Record<string, LucideIcon> = {
+  "em-uso": CircleCheck,
+  "sem-oferta": CircleMinus,
   pending: Clock,
   paid: CircleCheck,
   expired: TimerOff,
@@ -47,6 +50,7 @@ export interface FilterOption {
 /** Cabeçalho de coluna com filtro de várias opções. Marca e desmarca com o menu aberto; aplica ao fechar. */
 export function ColumnFilter({ title, param, values, options }: { title: string; param: string; values: string[]; options: FilterOption[] }) {
   const router = useRouter();
+  const pathname = usePathname();
   const params = useSearchParams();
   const [picked, setPicked] = useState<string[]>(values);
   const [seen, setSeen] = useState(values.join(","));
@@ -67,7 +71,7 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
     p.delete(param);
     for (const v of options.map((o) => o.value).filter((v) => next.includes(v))) p.append(param, v);
     const str = p.toString();
-    start(() => router.replace(`/admin/orders${str ? `?${str}` : ""}`, { scroll: false }));
+    start(() => router.replace(`${pathname}${str ? `?${str}` : ""}`, { scroll: false }));
   };
   const active = values.length > 0;
   return (
@@ -114,17 +118,19 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
 /** Cartão da tabela com a barra de cima (busca, total e maximizar). Maximizada, ocupa a tela; Esc volta. */
 export function TableShell({
   q,
-  statuses,
-  methods,
-  total,
-  filtered,
+  keep,
+  placeholder,
+  searchLabel,
+  count,
   children,
 }: {
   q?: string;
-  statuses: string[];
-  methods: string[];
-  total: number;
-  filtered?: boolean;
+  /** Filtros das colunas que a busca mantém, ex.: { status: ["paid"], method: [] }. */
+  keep: Record<string, string[]>;
+  placeholder: string;
+  searchLabel: string;
+  /** Texto do total ao lado da busca, ex.: "12 pedidos com estes filtros". */
+  count: string;
   children: ReactNode;
 }) {
   const [max, setMax] = useState(false);
@@ -143,19 +149,11 @@ export function TableShell({
     <section className={`${s.card} ${s.cardFlush} ${s.tableShell}`} data-max={max ? "true" : undefined}>
       <div className={s.tableBar}>
         <form method="get" role="search" className={s.tableSearch}>
-          {statuses.map((v) => (
-            <input key={`s-${v}`} type="hidden" name="status" value={v} />
-          ))}
-          {methods.map((v) => (
-            <input key={`m-${v}`} type="hidden" name="method" value={v} />
-          ))}
+          {Object.entries(keep).flatMap(([name, values]) => values.map((v) => <input key={`${name}-${v}`} type="hidden" name={name} value={v} />))}
           <Search size={15} strokeWidth={2} aria-hidden="true" />
-          <input name="q" defaultValue={q} placeholder="Buscar por nome ou e-mail" maxLength={100} aria-label="Buscar pedidos" />
+          <input name="q" defaultValue={q} placeholder={placeholder} maxLength={100} aria-label={searchLabel} />
         </form>
-        <span className={s.tableCount}>
-          {total} {total === 1 ? "pedido" : "pedidos"}
-          {filtered ? " com estes filtros" : ""}
-        </span>
+        <span className={s.tableCount}>{count}</span>
         <button
           type="button"
           className={s.iconBtn}

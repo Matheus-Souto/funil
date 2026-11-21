@@ -51,10 +51,11 @@ Causa provável: o `request` do Playwright reaproveita uma conexão keep-alive q
 inatividade (~5 s parado durante o diálogo de reembolso). Uma correção possível é fazer essa checagem num contexto de
 requisição novo (`playwright.request.newContext()`) ou com `Connection: close`, em vez de repetir o teste.
 
-## 6. Miniatura dos PDFs (página Produtos)
+## 6. Número de páginas dos PDFs (página Produtos)
 
-**Hoje:** a tabela de produtos baixa o PDF inteiro de cada linha visível (rota `GET /admin/api/products/<id>/file`,
-ação `products.file`) e desenha a 1ª página no navegador com pdf.js. Para PDFs grandes isso pesa.
+**Hoje:** para mostrar "N páginas" embaixo do nome, a tabela de produtos baixa o PDF inteiro de cada linha visível
+(rota `GET /admin/api/products/<id>/file`, ação `products.file`) e conta as páginas no navegador com pdf.js. Para PDFs
+grandes isso pesa.
 
-**Sugestão:** gerar uma miniatura (PNG/WebP pequeno) no upload e guardar no storage ao lado do PDF, com o número de
-páginas na tabela `product`; a tabela passa a usar só a imagem e o visualizador continua lendo o PDF.
+**Sugestão:** guardar o número de páginas na tabela `product` no upload (o servidor já abre o PDF com pdf-lib para
+validar) e devolver em `listProducts`; a tabela deixa de baixar o arquivo e só o visualizador "Ver PDF" lê o PDF.

@@ -13,7 +13,7 @@ import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
-import { ColumnFilter, TableShell } from "./table-controls";
+import { ColumnFilter, TableShell } from "../../table-controls";
 import { TablePager } from "../../table-pager";
 import { parsePerPage } from "../../per-page";
 
@@ -104,7 +104,13 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           <FailedDeliveries items={failed} />
         </div>
       ) : null}
-      <TableShell q={q} statuses={statuses} methods={methods} total={data.total} filtered={filtered}>
+      <TableShell
+        q={q}
+        keep={{ status: statuses, method: methods }}
+        placeholder="Buscar por nome ou e-mail"
+        searchLabel="Buscar pedidos"
+        count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
+      >
         {data.items.length === 0 ? (
           <div className={s.empty}>
             <Art name="pedidos" size={96} />
