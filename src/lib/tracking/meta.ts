@@ -185,13 +185,27 @@ export async function pixelIdFor(tx: Tx, storeId: string, offerPixelId: string |
   return validPixel((row?.config as MetaConfig | undefined)?.pixelId);
 }
 
-/** Pergunta ao Meta se o token enxerga o pixel (GET no pixel: não cria evento nenhum). */
+/**
+ * Subcódigos do Meta para "parâmetro inválido no evento" da API de Conversões (2804xxx; ex.: 2804019 = falta
+ * `event_time`). O Meta só valida o corpo DEPOIS de aceitar o token e a permissão de enviar ao Pixel.
+ */
+const EVENT_PARAM_SUBCODES = { min: 2_804_000, max: 2_804_999 } as const;
+
+/**
+ * Pergunta ao Meta se o token pode enviar eventos a este Pixel, sem criar evento nenhum: manda um evento de propósito
+ * incompleto (sem `event_time`). "Falta parâmetro do evento" (código 100, subcódigo 2804xxx) prova que o token e a
+ * permissão valem; token inválido (190) ou sem permissão no Pixel ("(#100) Missing Permission", sem subcódigo 2804xxx)
+ * é recusado. Não usa leitura (`GET /{pixel}`): o token padrão da API de Conversões, gerado no Gerenciador de Eventos,
+ * envia eventos mas não pode ler o Pixel (o Meta responde "Missing Permission"), e a leitura recusava todo token
+ * legítimo (visto em produção em 21/11/2026).
+ */
 async function checkToken(pixelId: string, token: string, storeId: string): Promise<void> {
   try {
-    const r = (await graph("GET", pixelId, { token, query: { fields: "id" } })) as { id?: unknown } | null;
-    if (String(r?.id ?? "") !== pixelId) throw new MetaApiError(200, null, null);
+    // Aceito (não deveria acontecer sem event_time): o token também serve.
+    await graph("POST", `${pixelId}/events`, { token, body: { data: [{ event_name: "FunilTesteDeConexao" }] } });
   } catch (e) {
     if (!(e instanceof MetaApiError)) throw e;
+    if (e.code === 100 && e.subcode !== null && e.subcode >= EVENT_PARAM_SUBCODES.min && e.subcode <= EVENT_PARAM_SUBCODES.max) return;
     log.warn("Meta recusou o teste da conexão", { storeId, status: e.status, code: e.code, subcode: e.subcode });
     if (e.status === 0) throw new ActionError("provider_error", "Não foi possível falar com o Meta agora. Tente de novo em instantes.");
     throw new ActionError(
@@ -256,7 +270,7 @@ export const saveMeta = defineAction({
 /** Botão "Testar" do Meta: valida de novo o token guardado contra o pixel da loja. */
 export const testMeta = defineAction({
   name: "connections.testMeta",
-  description: "Testa a conexão do Meta da loja (o token da API de Conversões enxerga o Pixel).",
+  description: "Testa a conexão do Meta da loja (o token da API de Conversões pode enviar eventos ao Pixel).",
   input: z.object({}),
   permission: "tracking.write",
   async prepare(call) {
