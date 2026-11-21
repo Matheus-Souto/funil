@@ -36,6 +36,7 @@ export const checkoutLead = pgTable(
     uniqueIndex("checkout_lead_store_key_uniq").on(t.storeId, t.keyHash),
     check("checkout_lead_status_check", sql`${t.status} in ('open','contacted','converted')`),
     check("checkout_lead_email_check", sql`${t.status} = 'converted' or ${t.email} is not null`),
+    check("checkout_lead_converted_check", sql`${t.status} <> 'converted' or (${t.email} is null and ${t.phone} is null)`),
     index("checkout_lead_store_created_idx").on(t.storeId, t.createdAt.desc()),
     index("checkout_lead_store_email_idx").on(t.storeId, t.emailHash),
     index("checkout_lead_expires_idx").on(t.expiresAt),

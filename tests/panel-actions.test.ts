@@ -403,6 +403,30 @@ describe("store.updateSettings / store.getSettings", () => {
     expect(got.checkoutBaseUrl).toBe("http://localhost:3000");
   });
 
+  test("captura de contato: ligar sem privacyEmail -> invalid_input no campo; com e-mail liga; getSettings devolve os dois", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    const e = await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true }).then(
+      () => null,
+      (err: unknown) => err as ActionError,
+    );
+    expect(e?.code).toBe("invalid_input");
+    expect((e?.details as { path: string[] }[]).map((d) => d.path)).toEqual([["privacyEmail"]]);
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: null }))).toBe("invalid_input");
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: "não é e-mail" }))).toBe("invalid_input");
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: false, privacyEmail: null });
+
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: true, privacyEmail: " Privacidade@Loja.com.br " });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId, "admin"), {})).toMatchObject({ leadCapture: true, privacyEmail: "privacidade@loja.com.br" });
+
+    // omitidos: mantém; apagar o e-mail com a captura ligada é recusado; desligar e apagar na mesma chamada passa
+    await runAction(updateStoreSettings, panelCall(s.storeId), base);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: true, privacyEmail: "privacidade@loja.com.br" });
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, privacyEmail: null }))).toBe("invalid_input");
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, leadCapture: false, privacyEmail: null });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ leadCapture: false, privacyEmail: null });
+  });
+
   test("a auditoria registra a mudança", async () => {
     const s = await seedPanelStore();
     await runAction(updateStoreSettings, panelCall(s.storeId), { name: "Loja Nova", notifyEmail: null });

@@ -8,7 +8,8 @@ import { listActions } from "@/lib/actions/registry";
 import { checkoutOffer } from "@/lib/catalog/checkout-offer";
 import { createOffer, getPublicOffer, setOfferProducts } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
-import { auditLog, checkoutView, customer, orderItem, orders, product } from "@/lib/db/schema";
+import { auditLog, checkoutLead, checkoutView, customer, orderItem, orders, product, store } from "@/lib/db/schema";
+import { checkoutSaveLead } from "@/lib/leads/capture";
 import {
   ASAAS_LIMITS,
   CARD_UNAVAILABLE_MESSAGE,
@@ -1057,4 +1058,80 @@ describe("setProducts e checkout concorrentes na mesma oferta", () => {
       expect([JSON.stringify(oldItems), JSON.stringify(newItems)]).toContain(JSON.stringify(items));
     }
   }, HEAVY_TEST_MS);
+});
+
+describe("checkout.start: converte o contato guardado antes da compra", () => {
+  const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+  const leadsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(checkoutLead).where(eq(checkoutLead.storeId, storeId)));
+
+  /** Loja com captura ligada e uma segunda oferta (outra página da mesma loja). */
+  async function seedCapture() {
+    const s = await seed();
+    await t.ownerDb.update(store).set({ leadCapture: true, privacyEmail: "privacidade@example.com" }).where(eq(store.id, s.storeId));
+    const prod = await seedProduct(s.storeId, "Outro produto");
+    const other = await runAction(createOffer, { storeId: s.storeId, actor: owner, origin: "panel" as const }, {
+      slug: `o-${Math.random().toString(36).slice(2, 10)}`,
+      name: "Outra oferta",
+      productIds: [prod.id],
+      priceCents: 1500,
+      methods: ["pix"],
+      pixMode: "manual",
+    });
+    return { ...s, otherSlug: other.slug };
+  }
+  const saveLead = (storeId: string, slug: string, input: { leadKey: string; email?: string; phone?: string }) =>
+    runAction(checkoutSaveLead, pub(storeId), { slug, clientIp: nextIp(), ...input });
+
+  test("pedido criado com o mesmo e-mail (outra oferta) converte o contato e zera e-mail e celular", async () => {
+    const s = await seedCapture();
+    const mail = email();
+    const leadKey = randomUUID();
+    await saveLead(s.storeId, s.slug, { leadKey, email: mail });
+    await saveLead(s.storeId, s.slug, { leadKey, phone: "(11) 98765-4321" });
+    const [before] = await leadsOf(s.storeId);
+    expect(before).toMatchObject({ status: "open", email: mail, phone: "11987654321" });
+
+    const out = await runAction(checkoutStart, pub(s.storeId), startInput(s.otherSlug, { customer: { email: mail.toUpperCase() } }));
+    const rows = await leadsOf(s.storeId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: before!.id, status: "converted", orderId: out.orderId, email: null, phone: null, emailHash: sha(mail) });
+  });
+
+  test("pedido com a mesma leadKey e outro e-mail também converte", async () => {
+    const s = await seedCapture();
+    const leadKey = randomUUID();
+    await saveLead(s.storeId, s.slug, { leadKey, email: email() });
+    const out = await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { leadKey }));
+    expect((await leadsOf(s.storeId))[0]).toMatchObject({ status: "converted", orderId: out.orderId, email: null, phone: null });
+  });
+
+  test("contato de outra loja com o mesmo e-mail não muda; contato de outra pessoa na mesma loja também não", async () => {
+    const a = await seedCapture();
+    const b = await seedCapture();
+    const mail = email();
+    const keyB = randomUUID();
+    await saveLead(b.storeId, b.slug, { leadKey: keyB, email: mail, phone: "(11) 98765-4321" });
+    // mesma chave na loja de A (outra linha) e outro e-mail na mesma loja
+    await saveLead(a.storeId, a.slug, { leadKey: randomUUID(), email: email() });
+
+    await runAction(checkoutStart, pub(a.storeId), startInput(a.slug, { customer: { email: mail }, leadKey: keyB }));
+    expect((await leadsOf(b.storeId))[0]).toMatchObject({ status: "open", email: mail, phone: "11987654321", orderId: null });
+    expect((await leadsOf(a.storeId))[0]).toMatchObject({ status: "open", orderId: null });
+    expect((await leadsOf(a.storeId))[0]!.email).not.toBeNull();
+  });
+
+  test("pedido recusado (acréscimo indisponível) não converte o contato", async () => {
+    const s = await seedCapture();
+    const mail = email();
+    await saveLead(s.storeId, s.slug, { leadKey: randomUUID(), email: mail });
+    const e = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.otherSlug, { withBump: true, customer: { email: mail } })));
+    expect(e.code).toBe("conflict");
+    expect((await leadsOf(s.storeId))[0]).toMatchObject({ status: "open", email: mail });
+  });
+
+  test("leadKey inválida na entrada: invalid_input", async () => {
+    const s = await seedCapture();
+    const e = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { leadKey: "nao-e-uuid" })));
+    expect(e.code).toBe("invalid_input");
+  });
 });

@@ -2,7 +2,7 @@ import { and, desc, eq, getTableColumns } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
-import { offer } from "@/lib/db/schema";
+import { offer, store } from "@/lib/db/schema";
 import { checkOfferProducts, loadOfferProducts, productsFields, refineProducts, writeOfferProducts, type ProductRef } from "./offer-products";
 import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
@@ -256,6 +256,8 @@ export const getPublicOffer = defineAction({
     // Nunca vende combo incompleto: principal apagado esconde a oferta; produto do bump apagado esconde o bump.
     if (main.length === 0 || main.some((p) => p.deletedAt)) throw new ActionError("not_found", "Oferta não encontrada");
     const hasBump = bump.length > 0 && o.bumpPriceCents !== null && !bump.some((p) => p.deletedAt);
+    // Aviso de captura de contato: só com a captura ligada. O e-mail de privacidade é público (aparece no aviso).
+    const [st] = await ctx.tx.select({ on: store.leadCapture, privacyEmail: store.privacyEmail }).from(store).where(eq(store.id, ctx.storeId));
     const names = (ps: ProductRef[]) => ps.map((p) => ({ name: p.name }));
     return {
       id: o.id,
@@ -269,6 +271,7 @@ export const getPublicOffer = defineAction({
       bump: hasBump ? { products: names(bump), priceCents: o.bumpPriceCents!, label: o.bumpLabel } : null,
       thankYouText: o.thankYouText,
       pixelId: await pixelIdFor(ctx.tx, ctx.storeId, o.pixelId),
+      leadCapture: st?.on && st.privacyEmail ? { privacyEmail: st.privacyEmail } : null,
     };
   },
 });

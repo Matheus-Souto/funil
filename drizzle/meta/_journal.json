@@ -225,6 +225,13 @@
       "when": 1795230665227,
       "tag": "0031_checkout_lead",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1795232213768,
+      "tag": "0032_checkout_lead_converted",
+      "breakpoints": true
     }
   ]
 }
