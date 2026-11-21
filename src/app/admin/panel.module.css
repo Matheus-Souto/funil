@@ -2905,3 +2905,22 @@
     bottom: 84px;
   }
 }
+
+/* Campos do Arc (Select, MoneyInput) dentro das grades de formulário do painel */
+.arcField {
+  min-width: 0;
+  width: 100%;
+}
+.productLine > .arcField {
+  flex: 1;
+}
+/* Prévia do celular acompanha a rolagem do editor */
+.previewCol {
+  position: sticky;
+  top: 24px;
+}
+@media (max-width: 1100px) {
+  .previewCol {
+    position: static;
+  }
+}
