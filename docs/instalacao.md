@@ -744,7 +744,7 @@ Guarde esse registro junto com os documentos de privacidade da loja.
 **Prazo.** Todo contato é apagado 30 dias depois da captura, esteja ele aberto, contatado ou convertido (a rotina roda
 de hora em hora; vencido, ele já some do painel e não gera aviso antes disso). Se a pessoa **compra** (cria o pedido), o
 contato vira "Comprou", perde e-mail e celular na hora e passa a apontar para o pedido; o registro some com os 30 dias.
-Até vencer, o contato convertido guarda só um **hash** do e-mail (resumo irreversível, não o e-mail), usado apenas para
+Até vencer, o contato convertido guarda só um **hash** do e-mail (um resumo do e-mail, não o e-mail em si; quem já conhece o e-mail consegue confirmar que ele está ali), usado apenas para
 não avisar como abandono quem comprou e para atender o pedido de exclusão (**Excluir todos deste e-mail**).
 
 **Onde ver e agir.** No painel, **Contatos** (dono, admin e suporte): filtro por status (Abertos, Contatados, Compraram),

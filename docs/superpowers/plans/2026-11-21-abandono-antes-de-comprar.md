@@ -19,7 +19,7 @@ essa pessoa. O Telegram avisa a equipe sem nenhum dado do comprador, e o MCP nã
   abandono que já existe; no envio confere que o contato continua aberto. Mensagem só com oferta, valor e um código do
   contato.
 - Painel: página "Contatos" (`/admin/contatos`) para dono, admin e suporte, com copiar e-mail, WhatsApp, marcar como
-  contatado e excluir (um ou todos de um e-mail). Varredura diária apaga tudo com mais de 30 dias.
+  contatado e excluir (um ou todos de um e-mail). Varredura de hora em hora apaga tudo com mais de 30 dias.
 - Permissões novas `leads.read` e `leads.write` entram em `TOKEN_DENIED`: nenhuma ação de contato sai pelo MCP, em
   nenhum papel, nem pela fila de aprovação.
 
@@ -44,7 +44,7 @@ Cada linha traz a minha recomendação (**R**) e a alternativa. O que não estiv
 | D4 | Liga/desliga | **R:** desligado por padrão; a loja liga em Configurações ("Guardar o contato de quem não finaliza a compra"), e só consegue ligar com um e-mail público de privacidade preenchido (D5) | Ligado para toda loja que tem o Telegram ligado | Um passo de configuração a mais |
 | D5 | Canal para o titular | **R:** campo novo em Configurações, "E-mail para pedidos de privacidade" (público), obrigatório para ligar a captura e mostrado no "Saiba mais" do aviso | Sem campo novo; o texto manda responder a qualquer contato da loja | Um campo a mais; mas a LGPD pede um canal claro (art. 9º e 41) |
 | D6 | Texto do aviso | **R:** o da seção "Texto do aviso" abaixo (curto embaixo do e-mail + "Saiba mais" expansível, sem página nova) | Página de política de privacidade da loja (URL configurável) | O detalhe fica dentro do checkout, não numa política completa da loja |
-| D7 | Retenção | **R:** 30 dias a partir da captura (varredura diária `sweep_leads` apaga a linha, aberta ou convertida) | 7 dias (só o tempo da recuperação) ou 90 dias | 30 dias de contatos de quem não comprou guardados |
+| D7 | Retenção | **R:** 30 dias a partir da captura (varredura de hora em hora `sweep_leads` apaga a linha, aberta ou convertida) | 7 dias (só o tempo da recuperação) ou 90 dias | 30 dias de contatos de quem não comprou guardados |
 | D8 | Quando a pessoa compra depois | **R:** na **criação** do pedido (qualquer oferta da loja, mesmo e-mail, ou a mesma chave da página), o contato vira `converted`, ligado ao pedido, e perde e-mail e celular na hora; o painel mostra "Comprou — pedido #XXXX" | Converter só no **pagamento** (contato continua "aberto" enquanto o Pix não é pago) | Pix gerado e não pago sai da lista de contatos; a recuperação desse caso continua pelo aviso "Carrinho abandonado" do pedido, que já existe |
 | D9 | Aviso no Telegram | **R:** evento novo "Abandono antes do pagamento", caixa própria e desligada por padrão, mesmo prazo do "Carrinho abandonado" (padrão 30 min). Texto: `Abandono antes do pagamento (30 min): Almanaque Bíblico Kids — R$ 9,90 — contato #3FA91C`. Sem dado do comprador e sem link | Reaproveitar a caixa "Carrinho abandonado" para os dois casos | Uma caixa a mais no cartão do Telegram |
 | D10 | Spam de aviso | **R:** um aviso por contato; pula se outro contato com o mesmo e-mail já foi avisado nas últimas 24 h (a pessoa recarregou a página); teto de 30 avisos desse evento por loja por hora (o resto só aparece no painel) | Sem teto | Num pico real, avisos acima de 30/h ficam só no painel |
