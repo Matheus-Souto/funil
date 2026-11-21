@@ -294,6 +294,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   test("painel: produtos com upload do PDF (validação e progresso) e oferta com bump pelo editor", async () => {
     const page = owner;
     await page.goto("/admin/products");
+    const newProduct = () => page.getByRole("button", { name: "Novo produto", exact: true }).click();
+    await newProduct();
     // Arquivo que não é PDF: recusado antes de enviar.
     await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "nota.txt", mimeType: "text/plain", buffer: Buffer.from("oi") });
     await expect(page.getByText("Envie um arquivo PDF.")).toBeVisible();
@@ -302,11 +304,13 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "quebrado.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\nnada") });
     await page.getByRole("button", { name: "Criar produto" }).click();
     await expect(page.getByText("O PDF está corrompido ou tem estrutura inválida.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Cancelar", exact: true }).click();
 
     const doc = await PDFDocument.create();
     doc.addPage([200, 200]);
     const pdf = Buffer.from(await doc.save());
     for (const name of ["Maná bíblico · versão básica", "Maná bíblico · versão completa"]) {
+      await newProduct();
       await page.getByLabel("Nome do produto").fill(name);
       await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "mana.pdf", mimeType: "application/pdf", buffer: pdf });
       await page.getByRole("button", { name: "Criar produto" }).click();
@@ -1076,6 +1080,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     for (const p of KIDS) {
       const doc = await PDFDocument.create();
       doc.addPage([p.width, 300]);
+      await page.getByRole("button", { name: "Novo produto", exact: true }).click();
       await page.getByLabel("Nome do produto").fill(p.name);
       await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: p.file, mimeType: "application/pdf", buffer: Buffer.from(await doc.save()) });
       await page.getByRole("button", { name: "Criar produto" }).click();
