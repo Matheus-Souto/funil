@@ -9,7 +9,12 @@ import { PdfBusyError, inspectInSandbox } from "@/lib/pdf/sandbox";
 import { storage } from "@/lib/storage";
 
 export const MAX_PDF_BYTES = 52_428_800;
-export const MAX_PDF_PAGES = 500;
+/**
+ * Teto de páginas do PDF de produto. O carimbo (nome e e-mail do comprador) passa por todas as páginas: medido em
+ * 21/11/2026 com o Almanaque Bíblico Kids real (551 páginas, 5,3 MB), a inspeção levou ~0,8 s e o carimbo ~2 s no Worker
+ * (teto de 192 MB e 60 s, src/lib/pdf/sandbox.ts). PDFs pesados continuam barrados pelos 50 MB e pelo tempo-limite.
+ */
+export const MAX_PDF_PAGES = 1000;
 
 /**
  * Única regra de validação do PDF (a rota de upload e a ação chamam o mesmo caminho).
