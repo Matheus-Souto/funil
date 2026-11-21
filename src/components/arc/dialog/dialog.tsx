@@ -47,10 +47,11 @@ export function DialogContent({ title, description, children, className, onPoint
   const open = useContext(OpenContext);
   const nesting = useContext(CloseContext);
   // While this dialog animates out it is still the top layer, so Radix hands it the next Escape. That press is meant for
-  // the dialog underneath (a confirm closing on top of a form): pass it down instead of swallowing it.
+  // the dialog underneath (a confirm closing on top of a form): pass it down instead of swallowing it. The leaving copy is
+  // frozen with the props of its last open render, so the current state is read through the ref below, not the closure.
   const escape: DialogContentProps["onEscapeKeyDown"] = event => {
     onEscapeKeyDown?.(event);
-    if (open === false) { event.preventDefault(); nesting?.parentClose?.(); }
+    if (change.current.open === false) { event.preventDefault(); nesting?.parentClose?.(); }
   };
   const reduced = useReducedMotion();
   // When the open state last changed. Radix waits for the click before treating a press as outside, and a press on the trigger
