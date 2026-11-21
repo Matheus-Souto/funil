@@ -164,7 +164,10 @@ describe("tools/list e tools/call", () => {
     expect(result.serverInfo.name).toBe("funil");
     expect(result.capabilities).toHaveProperty("tools");
     expect(result.instructions).toMatch(/mascarad/);
-    expect(result.instructions).toMatch(/sensíve/);
+    // O que muda para o agente com a fila (texto real das instruções, não uma palavra que aparece por acaso).
+    expect(result.instructions).toContain(
+      "Ferramentas marcadas com [Exige aprovação no painel] não executam na hora: viram um pedido pendente por até 7 dias",
+    );
     expect(result.instructions).not.toMatch(/só de leitura/);
     expect(result.instructions).toContain("[Exige aprovação no painel]");
     expect(result.instructions).toContain("approvals_status");

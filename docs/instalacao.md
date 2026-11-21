@@ -629,8 +629,11 @@ mostra estado, datas, ferramenta, o id do recurso criado (quando houver) e o err
 nem quem decidiu. As ferramentas sem a marca (consultas, `products_update`, reenvio de acesso e "Enviar teste" das
 conexões) executam na hora, com os limites abaixo.
 
-**Aprovar no painel.** Em **Loja → Aprovações** (o item mostra um selo com o número de pedidos pendentes). Cada
-pedido mostra o agente (nome do token e papel), a ação, o que será feito, avisos e quando expira. **Aprovar e
+**Aprovar no painel.** Em **Loja → Aprovações** (o item mostra um selo com o número de pedidos pendentes que você pode
+decidir). Cada pedido mostra o agente (nome do token e papel), a ação, o que será feito, avisos e quando expira. Produto
+aparece com nome, arquivo, tamanho, data de envio e o começo do id (e o selo "enviado pelo agente" quando veio de um
+link de upload); oferta, com nome, endereço `/c/...` e o começo do id. Se o nome de um produto ou oferta mudou depois do
+pedido, a fila mostra o nome atual e um aviso. Quem não pode decidir um pedido vê só a ação, o agente e as datas. **Aprovar e
 executar** roda a ação agora, em nome de quem aprovou, e **Recusar** descarta o pedido. Quem decide: qualquer membro
 com a permissão da ação pedida (dono, administrador, atendimento ou tráfego, conforme a ação), inclusive quem criou o
 token. Chaves e senhas aparecem só pelos 4 últimos caracteres (a chave Pix aparece inteira, para conferir o destino
@@ -641,14 +644,18 @@ foi revogado) também ficam no histórico (os 50 últimos).
 **Enviar PDF de produto.** O agente chama `products_createUploadLink` (nome do produto e do arquivo) e recebe uma URL
 de uso único, válida por **15 minutos**. Em seguida faz um `PUT` do arquivo nessa URL com
 `Content-Type: application/pdf` (até **50 MB**). O produto é criado quando o PDF chega. A URL é a única credencial do
-envio: trate-a como segredo. PDF inválido devolve o erro e o link segue valendo, até 5 tentativas. Cada loja pode ter
-10 links abertos e cada token pode criar 20 por hora.
+envio: trate-a como segredo. A chave vai no caminho da URL (`/api/mcp/upload/<chave>`): **não habilite log de URL** em
+proxy ou CDN para `/api/mcp/upload/`. Ela vale 15 minutos e é de uso único. PDF inválido devolve o erro e o link segue
+valendo, até 5 tentativas (cada envio gasta uma, menos quando o servidor está ocupado processando outro PDF). Um envio
+por link de cada vez e até 2 envios ao mesmo tempo no servidor; acima disso, a resposta é 429 com `Retry-After`. Cada
+loja pode ter 10 links abertos e cada token pode criar 20 por hora.
 
 **Limites para o agente (só valem para token; o painel não tem limite).** Pedidos de aprovação: 30 por token por hora,
 50 pendentes por loja, entrada de até 16 KB; pedir de novo o mesmo pedido pendente devolve o existente. Reenvio de
 acesso (`orders_resend`): 1 por pedido por hora, 3 por pedido em 24 horas e 20 por loja por hora; o e-mail sempre vai
 ao endereço do pedido. "Enviar teste" das conexões: 5 por hora por loja; o teste de e-mail vai sempre para o e-mail
-de avisos da loja (sem ele, o teste é recusado).
+de avisos da loja (sem ele, o teste é recusado). `products_update` (renomear produto ou arquivo) não tem limite
+próprio: fica na auditoria e no limite geral de 120 requisições por minuto do token.
 
 **O que nunca sai pelo MCP, em nenhum papel:**
 
