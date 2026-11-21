@@ -13,6 +13,7 @@ import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
+import { ColumnFilter, TableShell } from "./table-controls";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
@@ -84,7 +85,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     <>
       <PageHead
         title="Pedidos"
-        sub={`${data.counts.all} ${data.counts.all === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
+        sub="Cada pessoa que preencheu o checkout, pagando ou não."
         actions={
           canExport ? (
             <a className={s.btn} href={`/admin/orders.csv${qs({ pagina: undefined })}`} download>
@@ -99,44 +100,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           <FailedDeliveries items={failed} />
         </div>
       ) : null}
-      <form className={s.filters} method="get" role="search">
-        {status ? <input type="hidden" name="status" value={status} /> : null}
-        <label className={s.search}>
-          <PIcon name="search" size={16} />
-          <span className={s.srOnly}>Buscar pedidos</span>
-          <input name="q" defaultValue={q} placeholder="Buscar por nome ou e-mail" maxLength={100} />
-        </label>
-        <label className={s.selectBox}>
-          Método:
-          <select name="method" defaultValue={method ?? ""}>
-            <option value="">Todos</option>
-            {ORDER_METHODS.map((m) => (
-              <option key={m} value={m}>
-                {METHOD_LABEL[m]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" className={s.btn}>
-          Filtrar
-        </button>
-      </form>
-      <nav className={s.pills} aria-label="Filtrar por status">
-        <Link className={s.pill} href={`/admin/orders${qs({ status: undefined, pagina: undefined })}`} aria-current={!status ? "page" : undefined}>
-          Todos <b>{data.counts.all}</b>
-        </Link>
-        {(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
-          .filter((k) => k !== "disputed" || data.counts.disputed > 0)
-          .map((k) => (
-            <Link key={k} className={s.pill} href={`/admin/orders${qs({ status: k, pagina: undefined })}`} aria-current={status === k ? "page" : undefined}>
-              {STATUS_FILTER_LABEL[k]} <b>{data.counts[k]}</b>
-            </Link>
-          ))}
-      </nav>
-
-      <section className={`${s.card} ${s.cardFlush}`}>
+      <TableShell q={q} status={status} method={method} total={data.total} filtered={filtered}>
         {data.items.length === 0 ? (
-          <p className={s.empty}>Nenhum pedido com estes filtros.</p>
+          <p className={s.empty}>
+            Nenhum pedido com estes filtros. <Link href="/admin/orders">Limpar filtros</Link>
+          </p>
         ) : (
           <>
             <table className={`${s.table} ${s.orderTable}`}>
@@ -145,11 +113,22 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <th scope="col">Pedido</th>
                   <th scope="col">Cliente</th>
                   <th scope="col">Oferta</th>
-                  <th scope="col">Método</th>
+                  <th scope="col">
+                    <ColumnFilter title="Método" param="method" value={method} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m] }))} />
+                  </th>
                   <th scope="col" className={s.num}>
                     Valor
                   </th>
-                  <th scope="col">Status</th>
+                  <th scope="col">
+                    <ColumnFilter
+                      title="Status"
+                      param="status"
+                      value={status}
+                      options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
+                        .filter((k) => k !== "disputed" || data.counts.disputed > 0)
+                        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k] }))}
+                    />
+                  </th>
                   <th scope="col">Data</th>
                 </tr>
               </thead>
@@ -220,7 +199,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             )}
           </div>
         </div>
-      </section>
+      </TableShell>
     </>
   );
 }

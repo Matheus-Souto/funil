@@ -626,13 +626,15 @@
   transition:
     background-color 150ms var(--ease-standard),
     border-color 150ms var(--ease-standard),
-    transform 120ms var(--ease-standard);
+    transform 440ms var(--ease-spring);
 }
 .btn:hover {
   background: var(--color-surface-2);
 }
+/* aperta rápido e volta com mola */
 .btn:active:not(:disabled, [aria-disabled="true"]) {
-  transform: scale(0.97);
+  transform: scale(0.96);
+  transition-duration: 150ms, 150ms, 100ms;
 }
 @media (prefers-reduced-motion: reduce) {
   .btn:active:not(:disabled, [aria-disabled="true"]) {
@@ -2334,4 +2336,112 @@
   color: var(--color-primary-ink);
   font-weight: 600;
   text-underline-offset: 2px;
+}
+
+/* ---------- Tabela com barra (busca dentro do cartão, filtros nas colunas, maximizar) ---------- */
+.tableShell[data-max="true"] {
+  position: fixed;
+  inset: 12px;
+  z-index: 40;
+  overflow: auto;
+  box-shadow: var(--shadow-floating);
+}
+.tableBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+.tableSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(360px, 100%);
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+.tableSearch:focus-within {
+  border-color: var(--color-primary-ink);
+}
+.tableSearch input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 14px;
+}
+.tableCount {
+  flex: 1;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.thFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.thFilter:hover,
+.thFilter[data-state="open"] {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+.thFilter svg {
+  opacity: 0.6;
+}
+.thFilter svg[data-on] {
+  opacity: 1;
+  color: var(--color-primary-ink);
+}
+
+/* Seletor de período com pílula que desliza (period-tabs.tsx) */
+.segmentItem {
+  position: relative;
+  display: inline-flex;
+  border-radius: 999px;
+}
+.segmentPill {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: 999px;
+  background: var(--color-primary);
+}
+.segment .segmentItem a {
+  position: relative;
+  z-index: 1;
+  background: none;
+  transition: color 150ms var(--ease-standard);
+}
+.segment .segmentItem a[aria-current="page"] {
+  background: none;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+.segment .segmentItem:has(.segmentPill) a {
+  color: var(--color-on-primary);
+  font-weight: 600;
+}
+.tableShell[data-max="true"] {
+  box-shadow:
+    0 0 0 100vmax rgb(0 0 0 / 0.35),
+    var(--shadow-floating);
 }

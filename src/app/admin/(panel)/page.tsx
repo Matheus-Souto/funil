@@ -17,6 +17,7 @@ import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { Art, Kpi, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
+import { PeriodTabs } from "./period-tabs";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { AckButton, CopyField } from "../ui";
@@ -90,13 +91,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         title="Visão geral"
         sub={`${id.storeName} · ${period === "hoje" ? "hoje" : rangeLabel(cur.from, now)}`}
         actions={
-          <nav className={s.segment} aria-label="Período">
-            {PERIODS.map(([p, l]) => (
-              <Link key={p} href={p === "7d" ? "/admin" : `/admin?periodo=${p}`} aria-current={p === period ? "page" : undefined}>
-                {l}
-              </Link>
-            ))}
-          </nav>
+          <PeriodTabs current={period} items={PERIODS.map(([p, l]) => ({ key: p, label: l, href: p === "7d" ? "/admin" : `/admin?periodo=${p}` }))} />
         }
       />
 
