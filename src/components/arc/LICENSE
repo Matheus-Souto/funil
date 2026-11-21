@@ -29,13 +29,17 @@ adaptados ao painel (textos em português, tokens do tema, partes não usadas
 removidas).
 
 - animated-counter  https://uiarc.dev/components/animated-counter
+- bar-chart         https://uiarc.dev/components/bar-chart
 - button            https://uiarc.dev/components/button
+- date-range-picker https://uiarc.dev/components/date-range-picker (e lib/use-today.ts)
 - dialog            https://uiarc.dev/components/dialog
+- donut-chart       https://uiarc.dev/components/donut-chart
 - dropdown-menu     https://uiarc.dev/components/dropdown-menu
 - money-input       https://uiarc.dev/components/money-input
 - pagination        https://uiarc.dev/components/pagination
 - select            https://uiarc.dev/components/select
 - skeleton          https://uiarc.dev/components/skeleton
+- sparkline         https://uiarc.dev/components/sparkline
 - theme-switch      https://uiarc.dev/components/theme-switch
 - tooltip           https://uiarc.dev/components/tooltip
 - foundation.css e lib/motion-tokens.ts: base de tokens que esses componentes usam

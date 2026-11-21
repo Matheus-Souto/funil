@@ -9,7 +9,7 @@ import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { brl } from "@/lib/format";
-import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange, PERIOD_DAYS, type Period } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsSummary } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
@@ -17,7 +17,8 @@ import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { Art, Kpi, Notice, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
-import { PeriodTabs } from "./period-tabs";
+import { parseDashboardRange } from "../date-range";
+import { RangePicker } from "./range-picker";
 import { CreditCard, QrCode, Zap } from "lucide-react";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
@@ -28,37 +29,31 @@ import { ackAlertAction } from "./actions";
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard" };
 
-const PERIODS: Array<[Period, string]> = [
-  ["hoje", "Hoje"],
-  ["7d", "7 dias"],
-  ["30d", "30 dias"],
-];
-const COMPARE: Record<Period, string> = { hoje: "ontem no mesmo horário", "7d": "7 dias anteriores", "30d": "30 dias anteriores" };
 const WEEKDAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "short" });
 const FULL_DAY = new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long" });
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 const pct = (a: number, b: number) => (b === 0 ? "—" : `${Math.round((a * 1000) / b) / 10}%`.replace(".", ","));
 
-export default async function Overview({ searchParams }: { searchParams: Promise<{ periodo?: string | string[] }> }) {
+export default async function Overview({ searchParams }: { searchParams: Promise<{ periodo?: string | string[]; de?: string | string[]; ate?: string | string[] }> }) {
   const panel = await requirePanelActor();
   const role = panel.actor.role;
   if (!hasPermission(role, "metrics.read")) redirect(hasPermission(role, "orders.read") ? "/admin/orders" : "/admin/offers");
   const call = { ...panel, origin: "panel" as const };
-  const q = firstParam((await searchParams).periodo);
-  const period: Period = q === "hoje" || q === "30d" ? q : "7d";
+  const sp = await searchParams;
   const now = new Date();
-  const cur = periodRange(period, now);
+  const range = parseDashboardRange({ de: firstParam(sp.de), ate: firstParam(sp.ate), periodo: firstParam(sp.periodo) }, now);
+  const cur = { from: range.from, to: range.to };
   const lifetime = await runAction(metricsSummary, call, { from: new Date(0), to: now });
   const id = await getPanelIdentity(panel);
 
   if (lifetime.orders === 0 && lifetime.views === 0) return <EmptyOverview call={call} storeName={id.storeName} />;
 
   const m = await runAction(metricsSummary, call, cur);
-  const prevRange = periodRange(period, now, { previous: true });
+  const prevRange = range.prev;
   const prev = await runAction(metricsSummary, call, prevRange);
   // Contatos somem com 30 dias: janela anterior que começa antes disso não tem com o que comparar.
-  const leadsCompare = leadWindowCovered(prevRange.from, now) ? COMPARE[period] : undefined;
+  const leadsCompare = leadWindowCovered(prevRange.from, now) ? range.compare : undefined;
   const b = await runAction(metricsBreakdown, call, cur);
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
@@ -70,11 +65,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const ticket = m.paid > 0 ? Math.round(m.revenueCents / m.paid) : 0;
   const prevTicket = prev.paid > 0 ? Math.round(prev.revenueCents / prev.paid) : 0;
   const unpaid = m.orders - m.byMethod.pix_manual.paid - m.byMethod.pix_asaas.paid - m.byMethod.card_asaas.paid;
-  const days = PERIOD_DAYS[period];
+  const days = range.days;
+  // Rótulo curto sob cada barra: dia da semana até 7 dias; depois, o dia do mês a cada poucas barras.
+  const step = days <= 7 ? 1 : days <= 31 ? 5 : Math.ceil(days / 8);
   const label = (day: string, i: number) => {
-    if (i === b.byDay.length - 1) return "hoje";
+    if (i === b.byDay.length - 1 && range.endsToday) return "hoje";
     if (days <= 7) return WEEKDAY.format(new Date(`${day}T12:00:00Z`)).replace(".", "");
-    return i % 5 === 0 ? day.slice(8, 10) : "";
+    return i % step === 0 ? `${day.slice(8, 10)}/${day.slice(5, 7)}` : "";
   };
   const methods = (Object.keys(m.byMethod) as OrderMethod[])
     .map((k) => ({ k, ...m.byMethod[k] }))
@@ -85,7 +82,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
       <PageHead
         title="Dashboard"
         actions={
-          <PeriodTabs current={period} items={PERIODS.map(([p, l]) => ({ key: p, label: l, href: p === "7d" ? "/admin" : `/admin?periodo=${p}` }))} />
+          <RangePicker de={range.de} ate={range.ate} />
         }
       />
 
@@ -122,10 +119,10 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 
       <div className={s.stack}>
         <section className={`${s.card} ${s.kpiStrip}`} aria-label="Números do período">
-          <Kpi layout="cell" art="receita" label="Receita" value={brl(m.revenueCents)} amount={m.revenueCents} money delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={COMPARE[period]} />
-          <Kpi layout="cell" art="pedidos" label="Pedidos" value={String(m.orders)} amount={m.orders} delta={deltaOf(m.orders, prev.orders)} compare={COMPARE[period]} />
-          <Kpi layout="cell" art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={COMPARE[period]} />
-          <Kpi layout="cell" art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={COMPARE[period]} />
+          <Kpi layout="cell" art="receita" label="Receita" value={brl(m.revenueCents)} amount={m.revenueCents} money delta={deltaOf(m.revenueCents, prev.revenueCents)} compare={range.compare} />
+          <Kpi layout="cell" art="pedidos" label="Pedidos" value={String(m.orders)} amount={m.orders} delta={deltaOf(m.orders, prev.orders)} compare={range.compare} />
+          <Kpi layout="cell" art="pagos" label="Pagos" value={String(m.paid)} amount={m.paid} delta={deltaOf(m.paid, prev.paid)} compare={range.compare} />
+          <Kpi layout="cell" art="ticket" label="Ticket médio" value={brl(ticket)} amount={ticket} money delta={deltaOf(ticket, prevTicket)} compare={range.compare} />
         </section>
 
         {lifetime.leads > 0 ? (
@@ -142,18 +139,18 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 
         {lifetime.recovery.sent > 0 ? (
           <section className={s.grid3} aria-label="Recuperação de vendas por e-mail no período">
-            <Kpi label="Lembretes enviados" value={String(m.recovery.sent)} delta={deltaOf(m.recovery.sent, prev.recovery.sent)} compare={COMPARE[period]} />
+            <Kpi label="Lembretes enviados" value={String(m.recovery.sent)} delta={deltaOf(m.recovery.sent, prev.recovery.sent)} compare={range.compare} />
             <Kpi
               label="Lembretes que viraram venda"
               value={String(m.recovery.recovered)}
               delta={deltaOf(m.recovery.recovered, prev.recovery.recovered)}
-              compare={COMPARE[period]}
+              compare={range.compare}
             />
             <Kpi
               label="Receita recuperada"
               value={brl(m.recovery.recoveredRevenueCents)}
               delta={deltaOf(m.recovery.recoveredRevenueCents, prev.recovery.recoveredRevenueCents)}
-              compare={COMPARE[period]}
+              compare={range.compare}
             />
           </section>
         ) : null}
@@ -196,7 +193,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 Por método
               </h2>
             </div>
-            <DonutChart rows={methods.map((r) => ({ label: METHOD_LABEL[r.k], cents: r.revenueCents, paid: r.paid }))} />
+            <DonutChart rows={methods.map((r) => ({ key: r.k, label: METHOD_LABEL[r.k], cents: r.revenueCents }))} />
             <ul className={s.legend}>
               {methods.map((r) => (
                 <li key={r.k}>
@@ -225,15 +222,18 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 Receita por dia
               </h2>
             </div>
-            {period === "hoje" ? (
+            {days === 1 ? (
               <p className={s.chartEmpty}>
                 <span>
-                  Hoje entrou <b>{brl(m.revenueCents)}</b>. Para comparar os dias, escolha <Link href="/admin">7 dias</Link> ou{" "}
-                  <Link href="/admin?periodo=30d">30 dias</Link>.
+                  {range.endsToday ? "Hoje" : "Neste dia"} entrou <b>{brl(m.revenueCents)}</b>. Para comparar os dias, escolha um período maior no
+                  calendário.
                 </span>
               </p>
             ) : (
-              <RevenueChart days={b.byDay.map((d, i) => ({ label: label(d.day, i), full: FULL_DAY.format(new Date(`${d.day}T12:00:00Z`)), cents: d.revenueCents }))} />
+              <RevenueChart
+                period={range.label}
+                days={b.byDay.map((d, i) => ({ key: d.day, axisLabel: label(d.day, i), label: FULL_DAY.format(new Date(`${d.day}T12:00:00Z`)), cents: d.revenueCents }))}
+              />
             )}
           </section>
           <section className={s.card}>

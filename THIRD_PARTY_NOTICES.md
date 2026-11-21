@@ -20,7 +20,6 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | geist (fonte) | 1.9.2 | SIL Open Font License 1.1 |
 | @fontsource-variable/inter (fonte) | 5.3.0 | OFL-1.1 |
-| echarts (gráficos do painel) | 6.1.0 | Apache-2.0 |
 | motion (animações do painel) | 14.14.0 | MIT |
 | lucide-react (ícones do painel) | 1.73.0 | ISC |
 | pdfjs-dist (miniatura e visualizador de PDF do painel) | 6.5.438 | Apache-2.0 |
