@@ -3,17 +3,18 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
-import { brl, dateTimeShortSP } from "@/lib/format";
+import { dateTimeShortSP } from "@/lib/format";
 import { METHOD_LABEL, ORDER_METHODS, STATUS_FILTER_LABEL, type OrderMethod, type OrderStatus } from "@/lib/orders/labels";
 import { listDeliveryFailures } from "@/lib/alerts";
 import { listOrders } from "@/lib/orders/panel";
 import { parseOrderMultiFilters, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
+import { Art, FailedDeliveries, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { ColumnFilter, TableShell } from "../../table-controls";
+import { OrdersTable } from "./orders-table";
 import { TablePager } from "../../table-pager";
 import { ORDERS_PER_PAGE, parsePerPage } from "../../per-page";
 
@@ -50,17 +51,13 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     return str ? `?${str}` : "";
   };
   const filtered = Boolean(statuses.length || methods.length || q);
-  const methodFilter = <ColumnFilter title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />;
-  const statusFilter = (
-    <ColumnFilter
-      title="Status"
-      param="status"
-      values={statuses}
-      options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
-        .filter((k) => k !== "disputed" || data.counts.disputed > 0)
-        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k], icon: k }))}
-    />
-  );
+  const statusOptions = (["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
+    .filter((k) => k !== "disputed" || data.counts.disputed > 0)
+    .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], hint: data.counts[k] }));
+  const columnFilters = {
+    status: <ColumnFilter compact title="Status" param="status" values={statuses} options={statusOptions.map((o) => ({ value: o.value, label: o.label, count: o.hint, icon: o.value }))} />,
+    method: <ColumnFilter compact title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />,
+  };
 
   if (data.counts.all === 0 && !methods.length && !q) {
     const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
@@ -128,17 +125,6 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         placeholder="Buscar por nome ou e-mail"
         searchLabel="Buscar pedidos"
         count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
-        filters={
-          <>
-            {statusFilter}
-            {methodFilter}
-            {statuses.length || methods.length ? (
-              <Link className={s.linkBtn} href={`/admin/orders${q ? `?q=${encodeURIComponent(q)}` : ""}`}>
-                Limpar filtros
-              </Link>
-            ) : null}
-          </>
-        }
       >
         {data.items.length === 0 ? (
           <div className={s.empty}>
@@ -150,62 +136,25 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             </Link>
           </div>
         ) : (
-          <>
-            <table className={`${s.table} ${s.orderTable}`}>
-              <thead>
-                <tr>
-                  <th scope="col">Pedido</th>
-                  <th scope="col">Cliente</th>
-                  <th scope="col">Oferta</th>
-                  <th scope="col">{methodFilter}</th>
-                  <th scope="col" className={s.num}>
-                    Valor
-                  </th>
-                  <th scope="col">{statusFilter}</th>
-                  <th scope="col">Data</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((o) => (
-                  <tr key={o.id} data-tone={o.status === "pending" && o.method === "pix_manual" ? "warning" : undefined}>
-                    <td>
-                      <Link className={`${s.rowLink} ${s.mono}`} href={`/admin/orders/${o.id}`}>
-                        #{o.code}
-                      </Link>
-                    </td>
-                    <td>
-                      {o.buyerName}
-                      <small>{o.email}</small>
-                    </td>
-                    <td>
-                      {o.offerName}
-                      {o.hasBump ? <small>+ bump</small> : null}
-                    </td>
-                    <td className={`${s.muted} ${s.nowrap}`}>{METHOD_LABEL[o.method as OrderMethod] ?? o.method}</td>
-                    <td className={s.num}>{brl(o.manualAmountCents ?? o.totalCents)}</td>
-                    <td>
-                      <StatusBadge status={o.status} method={o.method} label={o.refundRequestedAt && o.status === "paid" ? "Estorno solicitado" : undefined} />
-                    </td>
-                    <td className={`${s.muted} ${s.nowrap}`}>{dateTimeShortSP(o.createdAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <ul className={s.orderCards}>
-              {data.items.map((o) => (
-                <li key={o.id}>
-                  <Link className={s.orderCard} href={`/admin/orders/${o.id}`}>
-                    <b>{o.buyerName}</b>
-                    <b className={s.money}>{brl(o.manualAmountCents ?? o.totalCents)}</b>
-                    <small>
-                      #{o.code} · {METHOD_LABEL[o.method as OrderMethod] ?? o.method} · {dateTimeShortSP(o.createdAt)}
-                    </small>
-                    <StatusBadge status={o.status} method={o.method} />
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </>
+          <OrdersTable
+            filters={columnFilters}
+            rows={data.items.map((o) => ({
+              id: o.id,
+              code: o.code,
+              buyerName: o.buyerName,
+              email: o.email,
+              offerName: o.offerName,
+              hasBump: o.hasBump,
+              method: o.method,
+              methodLabel: METHOD_LABEL[o.method as OrderMethod] ?? o.method,
+              cents: o.manualAmountCents ?? o.totalCents,
+              status: o.status,
+              statusLabel: STATUS_FILTER_LABEL[o.status as OrderStatus] ?? o.status,
+              refundRequested: o.refundRequestedAt !== null,
+              createdText: dateTimeShortSP(o.createdAt),
+              createdTs: o.createdAt.getTime(),
+            }))}
+          />
         )}
         <TablePager page={page} perPage={perPage} total={data.total} defaultPerPage={ORDERS_PER_PAGE} />
       </TableShell>

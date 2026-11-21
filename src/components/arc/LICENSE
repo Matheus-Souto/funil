@@ -39,6 +39,7 @@ removidas).
 - pagination        https://uiarc.dev/components/pagination
 - select            https://uiarc.dev/components/select
 - skeleton          https://uiarc.dev/components/skeleton
+- sortable-data-table https://uiarc.dev/components/sortable-data-table (com um espaço para o filtro da coluna no cabeçalho)
 - sparkline         https://uiarc.dev/components/sparkline
 - theme-switch      https://uiarc.dev/components/theme-switch
 - tooltip           https://uiarc.dev/components/tooltip

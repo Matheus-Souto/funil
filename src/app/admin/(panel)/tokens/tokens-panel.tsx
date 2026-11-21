@@ -5,6 +5,7 @@
 // localStorage nem log): some ao fechar o modal. Sem regra de negócio: tudo passa pelas actions.
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
+import { SortableDataTable } from "@/components/arc/sortable-data-table/sortable-data-table";
 import { Art, Badge } from "../../blocks";
 import s from "../../panel.module.css";
 import { CopyField, Dialog, Live, useActionRunner } from "../../ui";
@@ -164,44 +165,49 @@ export function TokensTable({ tokens }: { tokens: TokenRow[] }) {
           <p>Crie um token para conectar um agente de IA à loja.</p>
         </div>
       ) : (
-        <table className={`${s.table} ${s.tokenTable}`}>
-          <thead>
-            <tr>
-              <th scope="col">Token</th>
-              <th scope="col">Papel</th>
-              <th scope="col">Último uso</th>
-              <th scope="col">Criado</th>
-              <th scope="col">
-                <span className={s.srOnly}>Ações</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {tokens.map((t) => (
-              <tr key={t.id} data-revoked={t.revokedAt ? "true" : undefined}>
-                <td>
+        <div className={s.arcTable}>
+          <SortableDataTable<TokenRow & Record<string, unknown>>
+            rows={tokens as Array<TokenRow & Record<string, unknown>>}
+            rowKey="id"
+            caption="Tokens da loja"
+            itemName={{ one: "token", other: "tokens" }}
+            columns={[
+              {
+                key: "name",
+                label: "Token",
+                render: (_, t) => (
                   <span className={s.leadCell}>
                     <b>{t.name}</b>
                     <small className={s.mono}>fnl_…{t.last4}</small>
                   </span>
-                </td>
-                <td>{t.revokedAt ? <Badge tone="neutral">Revogado</Badge> : <Badge tone="info">{ROLE_NAME[t.role] ?? t.role}</Badge>}</td>
-                <td className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</td>
-                <td className={s.muted}>
-                  <span className={s.nowrap}>{t.createdAt}</span>
-                  {t.createdBy ? <small className={s.leadNote}>por {t.createdBy}</small> : null}
-                </td>
-                <td className={s.num}>
-                  {t.revokedAt ? null : (
+                ),
+              },
+              { key: "role", label: "Papel", render: (_, t) => (t.revokedAt ? <Badge tone="neutral">Revogado</Badge> : <Badge tone="info">{ROLE_NAME[t.role] ?? t.role}</Badge>) },
+              { key: "lastUsedAt", label: "Último uso", render: (_, t) => <span className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</span> },
+              {
+                key: "createdAt",
+                label: "Criado",
+                render: (_, t) => (
+                  <span className={s.leadCell}>
+                    <span className={`${s.muted} ${s.nowrap}`}>{t.createdAt}</span>
+                    {t.createdBy ? <small>por {t.createdBy}</small> : null}
+                  </span>
+                ),
+              },
+              {
+                key: "id",
+                label: "Ações",
+                sortable: false,
+                render: (_, t) =>
+                  t.revokedAt ? null : (
                     <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => openRevoke(t)} aria-label={`Revogar o token ${t.name}`}>
                       Revogar
                     </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  ),
+              },
+            ]}
+          />
+        </div>
       )}
       <Live msg={target ? null : revoke.msg} />
       <Dialog

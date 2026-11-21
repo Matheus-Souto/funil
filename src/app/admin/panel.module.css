@@ -3206,26 +3206,19 @@
   }
 }
 
-/* Filtros das colunas na barra da tabela: só quando o cabeçalho some (tabela de pedidos vira lista abaixo de 900 px). */
-.barFilters {
-  display: none;
+/* A tabela do Arc dentro do cartão: sem a própria borda (o cartão já tem). */
+.arcTable > div {
+  border: 0;
+  border-radius: 0;
 }
-@media (max-width: 900px) {
-  .barFilters {
-    display: flex;
-    order: 3;
-    flex-basis: 100%;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-  }
-  .barFilters .thFilter {
-    margin: 0;
-    padding: 5px 10px;
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    font-size: 13px;
-  }
+/* E-mail e textos secundários das células: uma linha, cortada com "…" (sem quebrar no meio da palavra). */
+.arcTable td small {
+  display: block;
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 /* ---------- Contatos ---------- */
@@ -3603,4 +3596,18 @@
 }
 .settingsCard[hidden] {
   display: none;
+}
+
+/* Filtro da coluna só com o ícone (ao lado do título na tabela do Arc). */
+.thFilterCompact {
+  gap: 4px;
+  margin: 0;
+  padding: 4px;
+  color: var(--color-text-muted);
+}
+
+/* Uma linha só (valores, códigos, datas), em qualquer tabela. */
+.nowrap {
+  white-space: nowrap;
+  overflow-wrap: normal;
 }

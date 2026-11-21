@@ -52,7 +52,7 @@ export interface FilterOption {
 }
 
 /** Cabeçalho de coluna com filtro de várias opções. Marca e desmarca com o menu aberto; aplica ao fechar. */
-export function ColumnFilter({ title, param, values, options }: { title: string; param: string; values: string[]; options: FilterOption[] }) {
+export function ColumnFilter({ title, param, values, options, compact = false }: { title: string; param: string; values: string[]; options: FilterOption[]; /** Só o ícone (e a contagem): o título já está no cabeçalho da tabela do Arc. */ compact?: boolean }) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
@@ -82,11 +82,11 @@ export function ColumnFilter({ title, param, values, options }: { title: string;
     <DropdownMenu
       label={title}
       align="start"
-      triggerClassName={s.thFilter}
+      triggerClassName={compact ? `${s.thFilter} ${s.thFilterCompact}` : s.thFilter}
       triggerLabel={active ? `${title}: ${values.length} ${values.length === 1 ? "filtro" : "filtros"}. Mudar` : `Filtrar por ${title.toLowerCase()}`}
       trigger={
         <>
-          {title}
+          {compact ? null : title}
           {picked.length > 0 ? <span className={s.thCount}>{picked.length}</span> : null}
           {pending ? <span className={s.thPending} aria-hidden="true" /> : null}
           <ListFilter size={14} strokeWidth={2} aria-hidden="true" data-on={active ? true : undefined} />
@@ -126,7 +126,6 @@ export function TableShell({
   placeholder,
   searchLabel,
   count,
-  filters,
   children,
 }: {
   q?: string;
@@ -136,11 +135,6 @@ export function TableShell({
   searchLabel: string;
   /** Texto do total ao lado da busca, ex.: "12 pedidos com estes filtros". */
   count: string;
-  /**
-   * Os mesmos filtros do cabeçalho, mostrados na barra só em telas estreitas (onde a tabela vira lista e o cabeçalho
-   * some): quem chega com ?status= aplicado vê o filtro e consegue tirar.
-   */
-  filters?: ReactNode;
   children: ReactNode;
 }) {
   const [max, setMax] = useState(false);
@@ -164,7 +158,6 @@ export function TableShell({
           <input name="q" defaultValue={q} placeholder={placeholder} maxLength={100} aria-label={searchLabel} />
         </form>
         <span className={s.tableCount}>{count}</span>
-        {filters ? <div className={s.barFilters}>{filters}</div> : null}
         <button
           type="button"
           className={s.iconBtn}

@@ -7,12 +7,13 @@ import { shortWhenSP as shortWhen } from "@/lib/format";
 import { listLeads } from "@/lib/leads/panel";
 import { firstParam, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { Art, Badge, Notice, PageHead } from "../../blocks";
+import { Art, Notice, PageHead } from "../../blocks";
 import s from "../../panel.module.css";
 import { parsePage, parsePerPage, type PerPage } from "../../per-page";
 import { ColumnFilter, TableShell } from "../../table-controls";
+import { LeadsTable } from "./leads-table";
 import { TablePager } from "../../table-pager";
-import { ForgetEmailButton, LeadRowActions } from "./lead-actions";
+import { ForgetEmailButton } from "./lead-actions";
 import { remindedLabel } from "./reminded";
 import { whatsappUrl } from "./whatsapp";
 
@@ -92,68 +93,35 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
             ) : null}
           </div>
         ) : (
-          <table className={`${s.table} ${s.leadTable}`}>
-            <thead>
-              <tr>
-                <th scope="col">Contato</th>
-                <th scope="col">Oferta</th>
-                <th scope="col">
-                  <ColumnFilter
-                    title="Status"
-                    param="status"
-                    values={statuses}
-                    options={(Object.keys(STATUS_BADGE) as Status[]).map((k) => ({ value: k, label: STATUS_FILTER[k], icon: `lead-${k}` }))}
-                  />
-                </th>
-                <th scope="col">Capturado</th>
-                <th scope="col">
-                  <span className={s.srOnly}>Ações</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((l) => {
-                const badge = STATUS_BADGE[l.status];
-                return (
-                  <tr key={l.id}>
-                    <td>
-                      <span className={s.leadCell}>
-                        <b className={s.mono}>#{l.code}</b>
-                        {l.status === "converted" ? (
-                          <small>
-                            Comprou:{" "}
-                            {l.orderId && canOpenOrders ? (
-                              <Link className={`${s.rowLink} ${s.mono}`} href={`/admin/orders/${l.orderId}`}>
-                                pedido #{l.orderCode}
-                              </Link>
-                            ) : (
-                              <span className={s.mono}>pedido #{l.orderCode}</span>
-                            )}
-                          </small>
-                        ) : (
-                          <>
-                            {l.email ? <small className={s.leadEmail}>{l.email}</small> : null}
-                            {l.phone ? <small>{l.phone}</small> : null}
-                          </>
-                        )}
-                      </span>
-                    </td>
-                    <td>{l.offerName}</td>
-                    <td>
-                      <Badge tone={badge.tone}>{badge.label}</Badge>
-                      {l.remindedAt ? <small className={s.leadNote}>{remindedLabel(l.remindedAt)}</small> : null}
-                    </td>
-                    <td className={`${s.muted} ${s.nowrap}`}>{shortWhen(l.createdAt)}</td>
-                    <td className={s.num}>
-                      {l.status === "converted" ? null : (
-                        <LeadRowActions id={l.id} code={l.code} status={l.status} email={l.email} whatsapp={whatsappUrl(l.phone)} canWrite={canWrite} />
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <LeadsTable
+            statusFilter={
+              <ColumnFilter
+                compact
+                title="Status"
+                param="status"
+                values={statuses}
+                options={(Object.keys(STATUS_BADGE) as Status[]).map((k) => ({ value: k, label: STATUS_FILTER[k], icon: `lead-${k}` }))}
+              />
+            }
+            canWrite={canWrite}
+            canOpenOrders={canOpenOrders}
+            rows={data.items.map((l) => ({
+              id: l.id,
+              code: l.code,
+              email: l.email,
+              phone: l.phone,
+              whatsapp: whatsappUrl(l.phone),
+              offerName: l.offerName,
+              status: l.status,
+              statusLabel: STATUS_BADGE[l.status].label,
+              tone: STATUS_BADGE[l.status].tone,
+              remindedText: l.remindedAt ? remindedLabel(l.remindedAt) : null,
+              orderId: l.orderId,
+              orderCode: l.orderCode,
+              createdText: shortWhen(l.createdAt),
+              createdTs: l.createdAt.getTime(),
+            }))}
+          />
         )}
         <TablePager page={page} perPage={perPage} total={data.total} defaultPerPage={LEADS_PER_PAGE} />
       </TableShell>
