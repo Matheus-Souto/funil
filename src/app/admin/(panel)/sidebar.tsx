@@ -227,18 +227,18 @@ export function PanelShell({
             />
             <Tip show label="Configurações" side={collapsed ? "right" : "top"}>
               <Link href="/admin/settings" className={s.footBtn} aria-label="Configurações">
-                <Settings size={16} strokeWidth={1.75} />
+                <Settings size={15} strokeWidth={1.75} />
               </Link>
             </Tip>
             <Tip show label="Trocar senha" side={collapsed ? "right" : "top"}>
               <Link href="/admin/senha" className={s.footBtn} aria-label="Trocar senha">
-                <KeyRound size={16} strokeWidth={1.75} />
+                <KeyRound size={15} strokeWidth={1.75} />
               </Link>
             </Tip>
             <form action={logout}>
               <Tip show label="Sair" side={collapsed ? "right" : "top"}>
                 <button type="submit" className={s.footBtn} aria-label="Sair">
-                  <LogOut size={16} strokeWidth={1.75} />
+                  <LogOut size={15} strokeWidth={1.75} />
                 </button>
               </Tip>
             </form>

@@ -366,8 +366,8 @@
 .footBtn {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -415,11 +415,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Ícones pequenos espalhados por igual na largura da sidebar. */
 .userActions {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 2px;
+  justify-content: space-between;
+  padding: 0 4px;
 }
 .iconBtn {
   display: grid;
@@ -2551,9 +2552,9 @@
 .sidebar .iconBtn,
 /* O botão de tema (Arc) com a mesma cara dos outros ícones da fileira: sem borda nem fundo. */
 .userActions :global(button) {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
   border: 0;
   border-radius: 8px;

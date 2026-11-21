@@ -48,7 +48,7 @@ function ThemeIcon({ theme, reduced, settled }: { theme: Theme; reduced: boolean
         transition={reduced ? { duration: motionTokens.duration.instant } : iconSpring}
         aria-hidden="true"
       >
-        <Icon size={16} strokeWidth={1.75} />
+        <Icon size={15} strokeWidth={1.75} />
       </motion.span>
     </AnimatePresence>
   );
