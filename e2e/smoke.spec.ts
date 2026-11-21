@@ -219,7 +219,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   }
 
   test.beforeAll(async ({ browser }) => {
-    owner = await browser.newPage({ viewport: DESKTOP });
+    // Movimento reduzido: os menus, diálogos e gráficos do painel (Arc + motion) quase não animam, e cada clique não
+    // espera a animação acabar (o teste do Kids escolhe ~15 itens nos menus do editor).
+    owner = await browser.newPage({ viewport: DESKTOP, reducedMotion: "reduce" });
     await owner.goto("/admin/login");
     await owner.getByLabel("E-mail").fill(OWNER.email);
     await owner.getByLabel("Senha").fill(OWNER.password);
