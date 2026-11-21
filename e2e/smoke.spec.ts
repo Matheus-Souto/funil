@@ -176,13 +176,21 @@ const stamp = Date.now();
 const buyerEmail = (tag: string) => `comprador.${tag}.${stamp}@exemplo.com`;
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 390, height: 844 };
-/** Código curto do pedido no painel (#XXXXXXXX): 8 primeiros caracteres alfanuméricos do id público, em maiúsculas. */
 /** Escolhe uma opção num menu do painel (Select do Arc: botão "combobox" que abre a lista de opções). */
 async function pickOption(page: Page, name: string, option: string) {
   await page.getByRole("combobox", { name, exact: true }).click();
   await page.getByRole("option", { name: option, exact: true }).click();
 }
 
+/**
+ * Confere, de forma exata, a opção escolhida num Select do Arc. O botão repete o texto (o valor real, só para leitor de
+ * tela, e a cópia visível animada), então a conferência é no 1º filho: o valor do Radix.
+ */
+async function expectPicked(page: Page, name: string, option: string) {
+  await expect(page.getByRole("combobox", { name, exact: true }).locator(":scope > span").first()).toHaveText(option);
+}
+
+/** Código curto do pedido no painel (#XXXXXXXX): 8 primeiros caracteres alfanuméricos do id público, em maiúsculas. */
 const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
 
 test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
@@ -254,8 +262,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(pix.getByText("Chave Pix salva.")).toBeVisible();
     await expect(pix.getByText("MANA KIDS")).toBeVisible();
 
-    // Fecha pelo X (o Esc logo depois de salvar ainda cai no diálogo de confirmação, que está saindo).
-    await pix.getByRole("button", { name: "Fechar" }).click();
+    // Esc logo depois de salvar fecha o modal da conexão (o diálogo de confirmação que está saindo repassa o Esc).
+    await page.keyboard.press("Escape");
     await expect(pix).toBeHidden();
     await page.getByRole("button", { name: "Conectar Asaas" }).click();
     const asaas = page.locator("#asaas");
@@ -289,7 +297,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     // Meta: Pixel + API de Conversões falsa do verify (${asaasBase}/meta). O token é testado antes de salvar.
     const { token: metaToken } = (await (await request.get(`${asaasBase}/__control/meta`)).json()) as { token: string };
-    await smtp.getByRole("button", { name: "Fechar" }).click();
+    await page.keyboard.press("Escape");
     await expect(smtp).toBeHidden();
     await page.getByRole("button", { name: "Conectar Meta" }).click();
     const meta = page.locator("#meta");
@@ -333,6 +341,21 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     // A célula do nome (a de ações também cita o nome, no rótulo "Ver o PDF de …").
     await expect(page.getByRole("cell", { name: /^Maná bíblico · versão completa/ })).toBeVisible();
     await shot(page, "p13-produtos-1280");
+
+    // "Ver PDF" (só dono e admin): o PDF original sai como anexo e com a CSP `sandbox` de verdade na resposta HTTP
+    // (vem do next.config.ts; o cabeçalho que a rota devolve não substitui o de /admin).
+    await page.getByRole("button", { name: "Ver o PDF de Maná bíblico · versão completa" }).click();
+    const viewer = page.getByRole("dialog", { name: "Maná bíblico · versão completa" });
+    const pdfUrl = (await viewer.getByRole("link", { name: "Baixar" }).getAttribute("href"))!;
+    expect(pdfUrl).toMatch(/^\/admin\/api\/products\/[0-9a-f-]{36}\/file$/);
+    const pdfRes = await page.request.get(pdfUrl);
+    expect(pdfRes.status()).toBe(200);
+    expect(pdfRes.headers()["content-type"]).toBe("application/pdf");
+    expect(pdfRes.headers()["content-disposition"]).toMatch(/^attachment;/);
+    expect(pdfRes.headers()["x-content-type-options"]).toBe("nosniff");
+    expect(pdfRes.headers()["content-security-policy"]).toBe("frame-ancestors 'none'; sandbox");
+    await page.keyboard.press("Escape");
+    await expect(viewer).toBeHidden();
 
     async function newOffer(o: { slug: string; manual: boolean; bump: boolean; maxInstallments?: number }) {
       await page.goto("/admin/offers/nova");
@@ -1128,9 +1151,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
     // Gravada na ordem: o editor recarregado mostra as 6 linhas como foram escolhidas.
-    await expect(page.getByRole("combobox", { name: "Produto entregue", exact: true })).toContainText(KIDS[0]!.name);
+    await expectPicked(page, "Produto entregue", KIDS[0]!.name);
     for (let n = 2; n <= KIDS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n}`, exact: true })).toContainText(KIDS[n - 1]!.name);
+      await expectPicked(page, `Produto ${n}`, KIDS[n - 1]!.name);
     }
     await shot(page, "p12d-oferta-completo-6-produtos-1280");
 
@@ -1156,9 +1179,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.getByRole("button", { name: "Criar oferta" }).click();
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Produto do bump", exact: true })).toContainText(KITS[0]!.name);
+    await expectPicked(page, "Produto do bump", KITS[0]!.name);
     for (let n = 2; n <= KITS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n} do bump`, exact: true })).toContainText(KITS[n - 1]!.name);
+      await expectPicked(page, `Produto ${n} do bump`, KITS[n - 1]!.name);
     }
     await shot(page, "p12e-oferta-almanaque-bump-5-kits-1280");
   });
