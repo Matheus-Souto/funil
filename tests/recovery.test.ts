@@ -1,16 +1,23 @@
 // Tabelas da recuperação de vendas por e-mail (`recovery_email` e `email_optout`): isolamento por loja (RLS) e
 // restrições do banco (kind x order_id, um lembrete por pedido e tipo). Varredura `recovery_scan`: candidatos dos três
-// casos, dedupe, tetos e proteção do cartão (relógio injetado, datas mudadas no banco).
+// casos, dedupe, tetos e proteção do cartão (relógio injetado, datas mudadas no banco). Envio `recovery_send`: e-mail
+// pelo provedor da loja (SMTP falso), conferência de novo do caso na hora do envio, falhas e o que nunca vai a log.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import { runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { cardAttempt, checkoutLead, emailOptout, job, orders, recoveryEmail, store } from "@/lib/db/schema";
+import { auditLog, cardAttempt, checkoutLead, emailLog, emailOptout, job, offer, orders, recoveryEmail, store } from "@/lib/db/schema";
+import { storeBaseUrl } from "@/lib/delivery/links";
+import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
+import { dateTimeSP } from "@/lib/format";
+import type { Job } from "@/lib/jobs";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { recordEvent } from "@/lib/payments/ratelimit";
 import { createRecoveryScanHandler } from "@/lib/recovery/scan";
+import { createRecoverySendHandler } from "@/lib/recovery/send";
 import { createTestDb, seedStore, type TestDb } from "./db";
-import { seedOrder, seedPanelStore } from "./panel-helpers";
+import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -632,6 +639,346 @@ describe("recovery_scan", () => {
       }
       for (const j of jobs) expect(out).not.toContain((j.payload as { unsubToken: string }).unsubToken);
       for (const r of rows) expect(out).not.toContain(r.unsubHash);
+    });
+  });
+});
+
+// ---- Envio (`recovery_send`) -----------------------------------------------------------------------------------------
+
+describe("recovery_send", () => {
+  let outbox: SentMail[] = [];
+  let sendError: Error | null = null;
+  const fakeSmtp = () =>
+    setMailTransportForTests(() => ({
+      async verify() {
+        return true;
+      },
+      async sendMail(m) {
+        if (sendError) throw sendError;
+        outbox.push(m);
+        return {};
+      },
+      close() {},
+    }));
+  beforeAll(fakeSmtp);
+  afterEach(() => {
+    outbox = [];
+    sendError = null;
+    fakeSmtp();
+  });
+  afterAll(() => setMailTransportForTests());
+
+  const SMTP = { host: "smtp.exemplo.com", port: 587, secure: false, user: "loja@exemplo.com", password: "senha-smtp-de-teste", from: "contato@loja.com" };
+  const send = (j: Job, at: Date = NOW) => createRecoverySendHandler(() => at)(j, new AbortController().signal);
+
+  /** Loja com a recuperação ligada e, salvo `smtp: false`, o SMTP (falso) configurado. */
+  async function mailShop(f: Flags & { smtp?: boolean } = {}) {
+    const s = await shop(f);
+    if (f.smtp !== false) await runAction(saveSmtp, panelCall(s.storeId), SMTP);
+    return s;
+  }
+
+  /** Roda a varredura e devolve a linha `queued`, o job `recovery_send` e o token em claro (a loja tem 1 candidato). */
+  async function queued(storeId: string) {
+    await scan();
+    const rows = await rowsOf(storeId);
+    const jobs = await sendJobsOf(storeId);
+    expect(rows).toHaveLength(1);
+    expect(jobs).toHaveLength(1);
+    const j = jobs[0]!;
+    return { row: rows[0]!, job: j, token: (j.payload as { unsubToken: string }).unsubToken };
+  }
+
+  const rowOf = async (id: string) => (await t.ownerDb.select().from(recoveryEmail).where(eq(recoveryEmail.id, id)))[0]!;
+  const logsOf = (storeId: string) => t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId));
+  const baseOf = async (storeId: string) => {
+    const [s] = await t.ownerDb.select({ domain: store.domain, slug: store.slug }).from(store).where(eq(store.id, storeId));
+    return storeBaseUrl(s!);
+  };
+  const slugOf = async (offerId: string) => {
+    const [o] = await t.ownerDb.select({ slug: offer.slug }).from(offer).where(eq(offer.id, offerId));
+    return o!.slug;
+  };
+
+  test("lead → e-mail para o contato com link /c/<slug>?utm_source=recuperacao&utm_medium=email&utm_campaign=contato, List-Unsubscribe e email_log recovery com to_hash", async () => {
+    const s = await mailShop();
+    const l = await lead(s, ago(61 * MIN));
+    const { row, job: j, token } = await queued(s.storeId);
+    await send(j);
+
+    expect(outbox).toHaveLength(1);
+    const m = outbox[0]!;
+    const base = await baseOf(s.storeId);
+    const link = `${base}/c/${await slugOf(s.offerId)}?utm_source=recuperacao&utm_medium=email&utm_campaign=contato`;
+    const unsub = `${base}/sair/${token}`;
+    expect(m.to).toBe(l.email);
+    expect(m.subject).toBe("Sua compra de Maná básica ficou pela metade");
+    expect(m.text).toContain(`Concluir minha compra: ${link}`);
+    expect(m.text).toContain("R$ 9,90");
+    expect(m.text).toContain(unsub);
+    expect(m.html).toContain(link.replaceAll("&", "&amp;"));
+    expect(m.headers).toEqual({ "List-Unsubscribe": `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" });
+    // Nunca o e-mail (nem o hash dele) no link.
+    expect(link).not.toContain(l.email);
+    expect(m.text).not.toContain(encodeURIComponent(l.email));
+
+    const after = await rowOf(row.id);
+    expect(after).toMatchObject({ status: "sent", jobId: j.id, skipReason: null });
+    expect(after.sentAt?.getTime()).toBe(NOW.getTime());
+    const logs = await logsOf(s.storeId);
+    expect(logs.map((x) => [x.kind, x.status, x.toHash, x.orderId, x.jobId, x.provider])).toEqual([
+      ["recovery", "sent", emailHash(l.email), null, j.id, "smtp"],
+    ]);
+  });
+
+  test("pix → link /o/<publicId>", async () => {
+    const s = await mailShop();
+    const o = await pixOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await send(j);
+
+    expect(outbox).toHaveLength(1);
+    const m = outbox[0]!;
+    const link = `${await baseOf(s.storeId)}/o/${o.publicId}`;
+    expect(m.to).toBe(o.email);
+    expect(m.subject).toBe("Seu Pix de R$ 9,90 ainda não foi pago");
+    expect(m.text).toContain(`Ver o Pix: ${link}`);
+    // A validade do Pix é o `expires_at` do pedido.
+    expect(m.text).toContain(dateTimeSP(o.expiresAt!));
+    expect((await rowOf(row.id)).status).toBe("sent");
+    const logs = await logsOf(s.storeId);
+    expect(logs.map((x) => [x.kind, x.status, x.toHash, x.orderId, x.jobId])).toEqual([["recovery", "sent", emailHash(o.email), o.id, j.id]]);
+  });
+
+  test("cartão → utm_campaign=cartao", async () => {
+    const s = await mailShop();
+    const o = await cardOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await send(j);
+
+    expect(outbox).toHaveLength(1);
+    const m = outbox[0]!;
+    const link = `${await baseOf(s.storeId)}/c/${await slugOf(s.offerId)}?utm_source=recuperacao&utm_medium=email&utm_campaign=cartao`;
+    expect(m.to).toBe(o.email);
+    expect(m.subject).toBe("Sua compra de Maná básica não foi concluída");
+    expect(m.text).toContain(`Tentar de novo: ${link}`);
+    expect((await rowOf(row.id)).status).toBe("sent");
+    const logs = await logsOf(s.storeId);
+    expect(logs.map((x) => [x.kind, x.status, x.orderId])).toEqual([["recovery", "sent", o.id]]);
+  });
+
+  test("pago entre a varredura e o envio → skipped, nenhum e-mail", async () => {
+    const s = await mailShop();
+    const o = await pixOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(orders).set({ status: "paid", paidAt: NOW }).where(eq(orders.id, o.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "pago", sentAt: null });
+    expect(await logsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("cartão aprovado (tentativa approved) entre a varredura e o envio → skipped pago", async () => {
+    const s = await mailShop();
+    const o = await cardOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb
+      .insert(cardAttempt)
+      .values({ storeId: s.storeId, orderId: o.id, idempotencyKey: randomUUID(), status: "approved", resolvedAt: NOW });
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "pago" });
+  });
+
+  test("Pix vencido entre a varredura e o envio → skipped pix_vencido", async () => {
+    const s = await mailShop();
+    const o = await pixOrder(s, ago(31 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(orders).set({ expiresAt: ago(MIN) }).where(eq(orders.id, o.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "pix_vencido" });
+  });
+
+  test("descadastrou com o job na fila → skipped optout", async () => {
+    const s = await mailShop();
+    const l = await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.insert(emailOptout).values({ storeId: s.storeId, emailHash: emailHash(l.email), reason: "unsubscribe" });
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "optout" });
+  });
+
+  test("contato convertido ou apagado → skipped", async () => {
+    const s = await mailShop();
+    const l = await lead(s, ago(61 * MIN));
+    const a = await queued(s.storeId);
+    await t.ownerDb.update(checkoutLead).set({ status: "converted", email: null, phone: null }).where(eq(checkoutLead.id, l.id));
+    await send(a.job);
+    expect(await rowOf(a.row.id)).toMatchObject({ status: "skipped", skipReason: "contato_encerrado" });
+
+    const s2 = await mailShop();
+    const l2 = await lead(s2, ago(61 * MIN));
+    const b = await queued(s2.storeId);
+    await t.ownerDb.delete(checkoutLead).where(eq(checkoutLead.id, l2.id));
+    await send(b.job);
+    expect(await rowOf(b.row.id)).toMatchObject({ status: "skipped", skipReason: "contato_apagado", leadId: null });
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("contato trocou de e-mail na mesma chave → skipped email_mudou", async () => {
+    const s = await mailShop();
+    const l = await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    const other = newEmail();
+    await t.ownerDb.update(checkoutLead).set({ email: other, emailHash: emailHash(other) }).where(eq(checkoutLead.id, l.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "email_mudou" });
+  });
+
+  test("caso ou chave geral desligados depois da varredura → skipped desligado", async () => {
+    for (const set of [{ recoveryOn: false }, { recoveryPix: false }]) {
+      const s = await mailShop();
+      await pixOrder(s, ago(31 * MIN));
+      const { row, job: j } = await queued(s.storeId);
+      await t.ownerDb.update(store).set(set).where(eq(store.id, s.storeId));
+      await send(j);
+      expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "desligado" });
+    }
+    // Caso lead: a captura de contato desligada também desliga o lembrete.
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(store).set({ leadCapture: false }).where(eq(store.id, s.storeId));
+    await send(j);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "desligado" });
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("token do payload que não bate com o unsub_hash (ou fora do base64url) → failed sem enviar", async () => {
+    for (const bad of [randomUUID().replaceAll("-", ""), "a b<c>"]) {
+      const s = await mailShop();
+      await lead(s, ago(61 * MIN));
+      const { row, job: j } = await queued(s.storeId);
+      await send({ ...j, payload: { recoveryId: row.id, unsubToken: bad } });
+      expect(await rowOf(row.id)).toMatchObject({ status: "failed" });
+    }
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("segundo recovery_send da mesma linha → não envia de novo", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await send(j);
+    // O mesmo job de novo (at-least-once) e um segundo job com o mesmo payload.
+    await send(j);
+    await send({ ...j, id: randomUUID() });
+    expect(outbox).toHaveLength(1);
+    expect(await rowOf(row.id)).toMatchObject({ status: "sent", jobId: j.id });
+    expect(await logsOf(s.storeId)).toHaveLength(1);
+  });
+
+  test("linha em sending por outro job → não envia; o mesmo job (worker caiu no meio) reivindica de novo", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(recoveryEmail).set({ status: "sending", jobId: randomUUID() }).where(eq(recoveryEmail.id, row.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    await t.ownerDb.update(recoveryEmail).set({ jobId: j.id }).where(eq(recoveryEmail.id, row.id));
+    await send(j);
+    expect(outbox).toHaveLength(1);
+    expect((await rowOf(row.id)).status).toBe("sent");
+  });
+
+  test("provedor não configurado → failed sem relançar", async () => {
+    const s = await mailShop({ smtp: false });
+    const l = await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await send(j); // não lança
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "failed", sentAt: null });
+    const logs = await logsOf(s.storeId);
+    expect(logs.map((x) => [x.kind, x.status, x.toHash, x.jobId])).toEqual([["recovery", "failed", emailHash(l.email), j.id]]);
+  });
+
+  test("erro de rede dentro de 2 h → relança e linha queued", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    sendError = Object.assign(new Error("Connection timeout"), { code: "ETIMEDOUT" });
+    await expect(send(j)).rejects.toThrow();
+    expect(await rowOf(row.id)).toMatchObject({ status: "queued", sentAt: null });
+    expect((await logsOf(s.storeId)).map((x) => [x.kind, x.status])).toEqual([["recovery", "failed"]]);
+    // A fila tenta de novo e agora sai.
+    sendError = null;
+    await send(j);
+    expect(outbox).toHaveLength(1);
+    expect((await rowOf(row.id)).status).toBe("sent");
+  });
+
+  test("erro de rede depois de 2 h → failed", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.update(recoveryEmail).set({ dueAt: ago(121 * MIN) }).where(eq(recoveryEmail.id, row.id));
+    sendError = Object.assign(new Error("Connection timeout"), { code: "ETIMEDOUT" });
+    await send(j); // não lança
+    expect(await rowOf(row.id)).toMatchObject({ status: "failed", sentAt: null });
+    expect((await logsOf(s.storeId)).map((x) => [x.kind, x.status])).toEqual([["recovery", "failed"]]);
+  });
+
+  describe("log", () => {
+    let out = "";
+    let stdout: ReturnType<typeof spyOn>;
+    beforeEach(() => {
+      out = "";
+      stdout = spyOn(process.stdout, "write").mockImplementation(((v: string) => ((out += String(v)), true)) as never);
+    });
+    afterEach(() => stdout.mockRestore());
+
+    test("nem log nem audit_log contêm o e-mail ou o token", async () => {
+      const s = await mailShop();
+      const l = await lead(s, ago(61 * MIN));
+      const sent = await queued(s.storeId);
+      await send(sent.job);
+
+      const s2 = await mailShop();
+      const p = await pixOrder(s2, ago(31 * MIN));
+      const skipped = await queued(s2.storeId);
+      await t.ownerDb.insert(emailOptout).values({ storeId: s2.storeId, emailHash: emailHash(p.email), reason: "complaint" });
+      await send(skipped.job);
+
+      const s3 = await mailShop();
+      const l3 = await lead(s3, ago(61 * MIN));
+      const failed = await queued(s3.storeId);
+      sendError = Object.assign(new Error(`Can't send mail - all recipients were rejected: 550 <${l3.email}>`), { code: "EENVELOPE" });
+      const err = await send(failed.job).catch((e: unknown) => e);
+      stdout.mockRestore();
+      expect(err).toBeInstanceOf(Error);
+
+      expect(outbox).toHaveLength(1);
+      expect((await rowOf(skipped.row.id)).skipReason).toBe("optout");
+      // O log identifica o lembrete...
+      for (const x of [sent, skipped, failed]) expect(out).toContain(x.row.id);
+      // ...e nunca o e-mail, o token nem a URL de descadastro.
+      const audits = JSON.stringify(await t.ownerDb.select().from(auditLog).where(inArray(auditLog.storeId, [s.storeId, s2.storeId, s3.storeId])));
+      for (const email of [l.email, p.email, l3.email]) {
+        expect(out).not.toContain(email);
+        expect(audits).not.toContain(email);
+      }
+      for (const x of [sent, skipped, failed]) {
+        expect(out).not.toContain(x.token);
+        expect(audits).not.toContain(x.token);
+        expect(out).not.toContain("/sair/");
+      }
+      // O erro relançado (vai ao log da fila e ao last_error do job) também não traz o e-mail.
+      expect((err as Error).message).not.toContain(l3.email);
+      // email_log guarda só o hash.
+      expect(JSON.stringify(await logsOf(s3.storeId))).not.toContain(l3.email);
     });
   });
 });

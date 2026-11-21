@@ -11,6 +11,7 @@ import { notifyTelegramJob } from "@/lib/notify/telegram-job";
 import { sweepLeadsJob } from "@/lib/leads/panel";
 import { sweepMcpJob } from "@/lib/mcp/approvals";
 import { recoveryScanJob } from "@/lib/recovery/scan";
+import { recoverySendJob } from "@/lib/recovery/send";
 import { metaEventJob } from "@/lib/tracking/meta";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
@@ -71,6 +72,7 @@ const registry: JobHandlers = {
   sweep_mcp: sweepMcpJob,
   sweep_leads: sweepLeadsJob,
   recovery_scan: recoveryScanJob,
+  recovery_send: recoverySendJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {
