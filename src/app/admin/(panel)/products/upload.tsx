@@ -109,7 +109,7 @@ export function ProductUpload() {
           <PIcon name="file-up" size={26} />
           <b>Arraste o PDF aqui</b>
           <span className={s.hint}>
-            ou <u>escolha um arquivo</u> · até 50 MB, sem senha, até 500 páginas
+            ou <u>escolha um arquivo</u> · até 50 MB, sem senha, até 1.000 páginas
           </span>
           <input
             ref={input}
