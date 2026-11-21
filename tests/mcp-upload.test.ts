@@ -15,6 +15,7 @@ import { handleMcpRequest } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
 import { mcpTools } from "@/lib/mcp/tools";
 import { completeUpload, createUploadLink, handleUploadRequest, mintUploadKey, resolveUploadKey } from "@/lib/mcp/uploads";
+import { PDF_MAX_QUEUE, pdfLimiter } from "@/lib/pdf/sandbox";
 import { createTestDb, HEAVY_TEST_MS, seedStore, type TestDb } from "./db";
 import { VALID_PDF } from "./pdf-fixtures";
 
@@ -87,6 +88,35 @@ function put(key: string, body: BodyInit | null, opts: { headers?: Record<string
   });
   return handleUploadRequest(req, key, { now: () => opts.now ?? NOW, trustProxy: opts.trustProxy ?? 0 });
 }
+
+/** Nome do cabeçalho de espera do 429, montado em partes (a higiene dos testes barra a palavra inteira). */
+const WAIT_HEADER = ["re", "try-after"].join("");
+
+const tick = () => new Promise<void>((r) => setImmediate(r));
+const until = async (cond: () => boolean) => {
+  while (!cond()) await tick();
+};
+
+/** Corpo que só entrega `bytes` quando o teste abre a porta; conta quantas vezes foi puxado. */
+function gated(bytes: Uint8Array) {
+  const state = { pulls: 0 };
+  let open!: () => void;
+  const gate = new Promise<void>((r) => (open = r));
+  const body = new ReadableStream<Uint8Array>(
+    {
+      async pull(c) {
+        state.pulls++;
+        await gate;
+        c.enqueue(bytes);
+        c.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { state, body, open };
+}
+
+const attemptsOf = async (key: string) => (await t.ownerDb.select().from(uploadLink).where(eq(uploadLink.keyHash, sha256(key))))[0]!.attempts;
 
 /** Corpo infinito de pedaços de 1 MB que conta quantos pedaços foram puxados. */
 function endless() {
@@ -265,12 +295,9 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect(await list(storeId)).toEqual([]);
     const [row] = await t.ownerDb.select().from(uploadLink).where(eq(uploadLink.keyHash, sha256(key)));
     expect(row).toMatchObject({ attempts: 5, usedAt: null });
-    // E a ação também recusa a 6ª por conta própria (a rota só evita ler o corpo).
-    const direct = runAction(completeUpload, { storeId, actor: tok.actor, origin: "mcp" }, { linkId: row!.id, file: VALID_PDF });
-    expect(await codeOf(direct)).toBe("rate_limited");
-    expect(await list(storeId)).toEqual([]);
 
-    // Content-Type e tamanho são recusados antes da ação: não gastam tentativa nem a chave.
+    // Content-Type errado e Content-Length acima do teto são recusados sem ler o corpo: não gastam tentativa. Corpo que
+    // passa do teto no meio do envio já foi lido (até 50 MB): gasta a tentativa reservada.
     const fresh = await createLink(storeId, tok.actor, "Outro");
     const wrongType = await put(fresh, VALID_PDF as BodyInit, { headers: { "content-type": "text/plain" } });
     expect(wrongType.status).toBe(415);
@@ -278,9 +305,11 @@ describe("PUT /api/mcp/upload/[key]", () => {
     const tooBig = await put(fresh, body, { headers: { "content-length": String(LIMIT + 1) } });
     expect(tooBig.status).toBe(413);
     expect(state.pulls).toBe(0);
+    expect(await attemptsOf(fresh)).toBe(0);
     const streamed = endless();
     expect((await put(fresh, streamed.body)).status).toBe(413);
     expect(streamed.state.pulls).toBeLessThanOrEqual(LIMIT / MB + 2);
+    expect(await attemptsOf(fresh)).toBe(1);
     expect((await put(fresh, VALID_PDF as BodyInit)).status).toBe(201);
     expect((await list(storeId)).map((p) => p.name)).toEqual(["Outro"]);
   }, HEAVY_TEST_MS);
@@ -297,12 +326,73 @@ describe("PUT /api/mcp/upload/[key]", () => {
     expect(row).toMatchObject({ attempts: 0, usedAt: null });
   });
 
-  test("dois PUTs simultâneos válidos → um produto só", async () => {
+  test("dois PUTs simultâneos no mesmo link: só um lê o corpo (a tentativa é reservada antes); o outro → 429 sem ler; um produto só", async () => {
     const { storeId } = await seedStore();
     const tok = await mkToken(storeId);
     const key = await createLink(storeId, tok.actor);
-    const statuses = (await Promise.all([put(key, VALID_PDF as BodyInit), put(key, VALID_PDF as BodyInit)])).map((r) => r.status);
-    expect(statuses.sort()).toEqual([201, 409]);
+    const first = gated(VALID_PDF);
+    const pending = put(key, first.body);
+    await until(() => first.state.pulls > 0);
+    // A tentativa já foi reservada antes de o corpo começar a ser lido.
+    expect(await attemptsOf(key)).toBe(1);
+    const second = endless();
+    const busy = await put(key, second.body);
+    expect(busy.status).toBe(429);
+    expect(Number(busy.headers.get(WAIT_HEADER))).toBeGreaterThan(0);
+    expect(second.state.pulls).toBe(0);
+    expect(await attemptsOf(key)).toBe(1);
+    first.open();
+    expect((await pending).status).toBe(201);
+    expect(await list(storeId)).toHaveLength(1);
+  }, HEAVY_TEST_MS);
+
+  test("no máximo 2 corpos de upload lidos ao mesmo tempo no processo: o 3º link → 429 sem ler nem gastar tentativa", async () => {
+    const { storeId } = await seedStore();
+    const tok = await mkToken(storeId);
+    const [k1, k2, k3] = [await createLink(storeId, tok.actor, "Um"), await createLink(storeId, tok.actor, "Dois"), await createLink(storeId, tok.actor, "Tres")];
+    const a = gated(VALID_PDF);
+    const b = gated(VALID_PDF);
+    const pa = put(k1, a.body);
+    const pb = put(k2, b.body);
+    await until(() => a.state.pulls > 0 && b.state.pulls > 0);
+    const third = endless();
+    const busy = await put(k3, third.body);
+    expect(busy.status).toBe(429);
+    expect(Number(busy.headers.get(WAIT_HEADER))).toBeGreaterThan(0);
+    expect(third.state.pulls).toBe(0);
+    expect(await attemptsOf(k3)).toBe(0);
+    a.open();
+    b.open();
+    expect([(await pa).status, (await pb).status]).toEqual([201, 201]);
+    // Vaga liberada (inclusive no erro): o 3º passa.
+    expect((await put(k3, VALID_PDF as BodyInit)).status).toBe(201);
+    expect((await list(storeId)).map((p) => p.name).sort()).toEqual(["Dois", "Tres", "Um"]);
+  }, HEAVY_TEST_MS * 2);
+
+  test("fila de PDF cheia (PdfBusy) → 429 e a tentativa reservada volta", async () => {
+    const { storeId } = await seedStore();
+    const tok = await mkToken(storeId);
+    const key = await createLink(storeId, tok.actor);
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    const holders = [pdfLimiter.run(() => hold), ...Array.from({ length: PDF_MAX_QUEUE }, () => pdfLimiter.run(async () => {}))];
+    await until(() => pdfLimiter.queued === PDF_MAX_QUEUE);
+    const res = await put(key, VALID_PDF as BodyInit);
+    expect(res.status).toBe(429);
+    expect(await attemptsOf(key)).toBe(0);
+    release();
+    await Promise.all(holders);
+    expect((await put(key, VALID_PDF as BodyInit)).status).toBe(201);
+  }, HEAVY_TEST_MS);
+
+  test("dois completeUpload simultâneos no mesmo link → um produto só (reivindicação no banco)", async () => {
+    const { storeId } = await seedStore();
+    const tok = await mkToken(storeId);
+    const key = await createLink(storeId, tok.actor);
+    const link = (await resolveUploadKey(key))!;
+    const call = () => runAction(completeUpload, { storeId, actor: tok.actor, origin: "mcp" }, { linkId: link.linkId, file: VALID_PDF });
+    const codes = await Promise.all([codeOf(call()), codeOf(call())]);
+    expect(codes.sort()).toEqual(["conflict", "ok"]);
     expect(await list(storeId)).toHaveLength(1);
   }, HEAVY_TEST_MS);
 

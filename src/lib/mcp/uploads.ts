@@ -6,7 +6,11 @@
 // chave inteira é guardado; a URL aparece uma vez, na resposta da ferramenta, e nunca vai para log nem auditoria.
 // A resolução tira a loja da própria chave e consulta SÓ dentro do RLS dela. A chave só é gasta quando o produto é
 // criado: arquivo inválido devolve o erro e a chave segue valendo, até 5 tentativas na validade.
-import { and, count, eq, gt, isNull, sql } from "drizzle-orm";
+//
+// Memória: cada PUT pode guardar até 50 MB. A rota reserva a tentativa no banco ANTES de ler o corpo (sem reserva, 429
+// sem ler) e só lê corpo com vaga no semáforo do processo: 2 corpos ao mesmo tempo no total e 1 por link (acima disso,
+// 429 com retry-after). A vaga é solta no `finally`, no sucesso ou no erro.
+import { and, count, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
@@ -39,6 +43,9 @@ const IP_LIMIT = 30;
 const GLOBAL_KEY = "mcp:upload:global";
 const GLOBAL_LIMIT = 60;
 const IP_WINDOW_SEC = 60;
+/** Corpos de upload lidos ao mesmo tempo no processo (cada um até 50 MB) e por link. */
+const MAX_BODIES = 2;
+const BUSY_RETRY_SEC = 10;
 /** Loja usada na consulta quando a chave nem tem o formato: a mesma consulta roda e não acha nada. */
 const NIL_STORE = "00000000-0000-0000-0000-000000000000";
 
@@ -138,19 +145,25 @@ export const completeUpload = defineAction({
   // O arquivo nunca vai para a auditoria: o link e o tamanho; nome e nome do arquivo (que vêm do link) saem em `result`.
   auditInput: (i) => ({ linkId: i.linkId, fileSize: i.file.length }),
   auditResult: (out: ProductView) => ({ id: out.id, name: out.name, fileName: out.fileName }),
-  // Conta a tentativa (mesmo se o PDF for inválido) numa transação própria e valida o PDF antes da transação principal.
+  // A tentativa já foi reservada pela rota antes de ler o corpo (`reserveUploadAttempt`): aqui só confere o link e valida
+  // o PDF antes da transação principal. Fila do Worker de PDF cheia não é culpa do arquivo: devolve a tentativa.
   async prepare(call, input) {
     const tokenId = tokenIdOf(call.actor);
     const [link] = await withStore(call.storeId, (tx) =>
       tx
-        .update(uploadLink)
-        .set({ attempts: sql`${uploadLink.attempts} + 1` })
-        .where(usable(input.linkId, tokenId))
-        .returning({ attempts: uploadLink.attempts, name: uploadLink.name, fileName: uploadLink.fileName }),
+        .select({ attempts: uploadLink.attempts, name: uploadLink.name, fileName: uploadLink.fileName })
+        .from(uploadLink)
+        .where(usable(input.linkId, tokenId)),
     );
     if (!link) throw gone();
     if (link.attempts > MAX_ATTEMPTS) throw tooManyAttempts();
-    await assertProductPdf(input.file);
+    try {
+      await assertProductPdf(input.file);
+    } catch (e) {
+      // O único rate_limited de assertProductPdf é a fila do Worker cheia (PdfBusyError).
+      if (e instanceof ActionError && e.code === "rate_limited") await releaseUploadAttempt(call.storeId, input.linkId);
+      throw e;
+    }
     return { name: link.name, fileName: link.fileName };
   },
   async run(ctx, input, link) {
@@ -171,6 +184,49 @@ export const completeUpload = defineAction({
   compensate: (call, _input, out) => removeProductFile(call.storeId, out.id),
 });
 
+/**
+ * Reserva uma tentativa do link antes de ler o corpo: `attempts + 1` só se o link ainda vale (não usado, no prazo, token
+ * não revogado) e tem tentativa sobrando. `false` = sem reserva (a rota responde 429 sem ler).
+ */
+export async function reserveUploadAttempt(storeId: string, linkId: string, tokenId: string): Promise<boolean> {
+  const rows = await withStore(storeId, (tx) =>
+    tx
+      .update(uploadLink)
+      .set({ attempts: sql`${uploadLink.attempts} + 1` })
+      .where(and(usable(linkId, tokenId), lt(uploadLink.attempts, MAX_ATTEMPTS)))
+      .returning({ id: uploadLink.id }),
+  );
+  return rows.length > 0;
+}
+
+/** Devolve a tentativa reservada (fila de PDF cheia: o arquivo nem foi avaliado). Nunca abaixo de zero. */
+async function releaseUploadAttempt(storeId: string, linkId: string): Promise<void> {
+  await withStore(storeId, (tx) =>
+    tx
+      .update(uploadLink)
+      .set({ attempts: sql`greatest(${uploadLink.attempts} - 1, 0)` })
+      .where(and(eq(uploadLink.id, linkId), isNull(uploadLink.usedAt))),
+  );
+}
+
+// Semáforo do processo para corpos de upload: no total e por link.
+let bodiesInFlight = 0;
+const linksInFlight = new Set<string>();
+
+/** Vaga para ler o corpo de um upload deste link, ou `null` (2 no processo ou 1 neste link já lendo). */
+function acquireBodySlot(linkId: string): (() => void) | null {
+  if (bodiesInFlight >= MAX_BODIES || linksInFlight.has(linkId)) return null;
+  bodiesInFlight++;
+  linksInFlight.add(linkId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    bodiesInFlight--;
+    linksInFlight.delete(linkId);
+  };
+}
+
 export interface UploadHttpOptions {
   /** Proxies confiáveis para o IP do cliente (padrão: `TRUST_PROXY`). */
   trustProxy?: number;
@@ -183,9 +239,10 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 /**
  * PUT /api/mcp/upload/[key]. Ordem: método → limite por IP, ou global sem IP conhecido (antes de consultar a chave,
- * contra varredura) → chave (404 com o MESMO corpo em todo caso de falha) → tentativas esgotadas (429 sem ler o corpo; o
- * teto vale de fato no `prepare` da ação) → Content-Type → corpo em streaming com teto de 50 MB →
- * `products.completeUpload` como o token que pediu o link. A chave nunca vai para log.
+ * contra varredura) → chave (404 com o MESMO corpo em todo caso de falha) → tentativas esgotadas (429) → Content-Type
+ * (415) → Content-Length acima do teto (413) → vaga no semáforo do processo (429 com retry-after) → reserva da tentativa
+ * no banco (sem reserva, 429) → corpo em streaming com teto de 50 MB → `products.completeUpload` como o token que pediu o
+ * link. Nada antes da reserva lê o corpo. A chave nunca vai para log.
  */
 export async function handleUploadRequest(req: Request, key: string, opts: UploadHttpOptions = {}): Promise<Response> {
   if (req.method !== "PUT") return json(405, { error: "Método não permitido. Envie o PDF com PUT." }, { allow: "PUT" });
@@ -204,15 +261,26 @@ export async function handleUploadRequest(req: Request, key: string, opts: Uploa
   if (!(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/pdf")) {
     return json(415, { error: "Envie o PDF com Content-Type application/pdf." });
   }
-  const file = await readBytesCapped(req, MAX_PDF_BYTES);
-  if (file === null) return json(413, { error: "O PDF passa de 50 MB." });
+  const tooBig = () => json(413, { error: "O PDF passa de 50 MB." });
+  if (Number(req.headers.get("content-length") ?? 0) > MAX_PDF_BYTES) return tooBig();
 
+  const release = acquireBodySlot(link.linkId);
+  if (!release) {
+    return json(429, { error: "Outro envio está em andamento. Tente de novo em instantes." }, { "retry-after": String(BUSY_RETRY_SEC) });
+  }
   try {
+    if (!(await reserveUploadAttempt(link.storeId, link.linkId, link.tokenId))) {
+      return json(UPLOAD_ERROR_STATUS.rate_limited, { error: tooManyAttempts().message });
+    }
+    const file = await readBytesCapped(req, MAX_PDF_BYTES);
+    if (file === null) return tooBig();
     const actor = { kind: "token", tokenId: link.tokenId, role: link.role } as const;
     const out = await runAction(completeUpload, { storeId: link.storeId, actor, origin: "mcp" }, { linkId: link.linkId, file });
     return json(201, { id: out.id, name: out.name, fileName: out.fileName, fileSize: out.fileSize });
   } catch (e) {
     if (e instanceof ActionError) return json(UPLOAD_ERROR_STATUS[e.code], { error: e.message });
     throw e;
+  } finally {
+    release();
   }
 }
