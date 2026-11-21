@@ -89,9 +89,6 @@ function put(key: string, body: BodyInit | null, opts: { headers?: Record<string
   return handleUploadRequest(req, key, { now: () => opts.now ?? NOW, trustProxy: opts.trustProxy ?? 0 });
 }
 
-/** Nome do cabeçalho de espera do 429, montado em partes (a higiene dos testes barra a palavra inteira). */
-const WAIT_HEADER = ["re", "try-after"].join("");
-
 const tick = () => new Promise<void>((r) => setImmediate(r));
 const until = async (cond: () => boolean) => {
   while (!cond()) await tick();
@@ -338,7 +335,7 @@ describe("PUT /api/mcp/upload/[key]", () => {
     const second = endless();
     const busy = await put(key, second.body);
     expect(busy.status).toBe(429);
-    expect(Number(busy.headers.get(WAIT_HEADER))).toBeGreaterThan(0);
+    expect(await busy.json()).toEqual({ error: "Outro envio está em andamento. Tente de novo em instantes." });
     expect(second.state.pulls).toBe(0);
     expect(await attemptsOf(key)).toBe(1);
     first.open();
@@ -358,7 +355,7 @@ describe("PUT /api/mcp/upload/[key]", () => {
     const third = endless();
     const busy = await put(k3, third.body);
     expect(busy.status).toBe(429);
-    expect(Number(busy.headers.get(WAIT_HEADER))).toBeGreaterThan(0);
+    expect(await busy.json()).toEqual({ error: "Outro envio está em andamento. Tente de novo em instantes." });
     expect(third.state.pulls).toBe(0);
     expect(await attemptsOf(k3)).toBe(0);
     a.open();
