@@ -578,7 +578,8 @@ capabilities, 192 MB de memória e sem core dump.
 ## 13. Agentes de IA (MCP)
 
 O painel deixa um agente de IA (Claude, por exemplo) consultar a loja pelo protocolo MCP, sem nunca receber dado
-pessoal de comprador. **Nesta versão o MCP é só de leitura**: o agente consulta, mas não altera nada na loja.
+pessoal de comprador. O agente consulta a loja na hora; o que altera algo sensível (reembolso, chaves, preços, apagar
+produto) vira um **pedido de aprovação** que alguém da equipe confirma no painel antes de qualquer coisa acontecer.
 
 **Criar o token.** No painel: **Loja → Agentes (MCP)** (só quem gerencia a equipe, o dono). Dê um nome, escolha o
 papel e clique em **Criar token**. O token (`fnl_...`) aparece **uma única vez**, num quadro com o botão Copiar:
@@ -615,10 +616,39 @@ Paulo.
 | Leitor | lê produtos, ofertas, métricas e o relatório de vendas pagas |
 | Tráfego | Leitor + avisos da loja, estado das conexões (sem chaves) e configurações |
 | Suporte | consulta pedidos (comprador mascarado), produtos, ofertas e o relatório de vendas pagas |
-| Admin | consulta tudo que o MCP oferece hoje |
+| Admin | consulta tudo que o MCP oferece e pede as ações do Admin pela fila |
 | Dono | igual ao Admin por enquanto; prefira Admin |
 
-Comece pelo menor papel que resolve o que o agente precisa (Leitor, na dúvida).
+Comece pelo menor papel que resolve o que o agente precisa (Leitor, na dúvida). O papel do token também limita o que
+ele pode pedir pela fila: só as ações que o próprio papel teria no painel.
+
+**Ferramentas que exigem aprovação.** No cliente MCP, a descrição dessas ferramentas começa com
+`[Exige aprovação no painel]`. Chamá-las **não executa nada**: cria um pedido pendente e o agente recebe só o estado
+dele. Para acompanhar, o agente usa a ferramenta `approvals_status` (um pedido pelo id, ou os 20 mais recentes), que
+mostra estado, datas, ferramenta, o id do recurso criado (quando houver) e o erro, se houver; nunca o resumo do pedido
+nem quem decidiu. As ferramentas sem a marca (consultas, `products_update`, reenvio de acesso e "Enviar teste" das
+conexões) executam na hora, com os limites abaixo.
+
+**Aprovar no painel.** Em **Loja → Aprovações** (o item mostra um selo com o número de pedidos pendentes). Cada
+pedido mostra o agente (nome do token e papel), a ação, o que será feito, avisos e quando expira. **Aprovar e
+executar** roda a ação agora, em nome de quem aprovou, e **Recusar** descarta o pedido. Quem decide: qualquer membro
+com a permissão da ação pedida (dono, administrador, atendimento ou tráfego, conforme a ação), inclusive quem criou o
+token. Chaves e senhas aparecem só pelos 4 últimos caracteres (a chave Pix aparece inteira, para conferir o destino
+do dinheiro). Um pedido vale por **7 dias**; depois disso expira e o agente precisa pedir de novo. Se a ação falhar ao
+executar, o pedido fica como "Falhou" com o erro e **não é repetido**. Pedido recusado, expirado ou cancelado (o token
+foi revogado) também ficam no histórico (os 50 últimos).
+
+**Enviar PDF de produto.** O agente chama `products_createUploadLink` (nome do produto e do arquivo) e recebe uma URL
+de uso único, válida por **15 minutos**. Em seguida faz um `PUT` do arquivo nessa URL com
+`Content-Type: application/pdf` (até **50 MB**). O produto é criado quando o PDF chega. A URL é a única credencial do
+envio: trate-a como segredo. PDF inválido devolve o erro e o link segue valendo, até 5 tentativas. Cada loja pode ter
+10 links abertos e cada token pode criar 20 por hora.
+
+**Limites para o agente (só valem para token; o painel não tem limite).** Pedidos de aprovação: 30 por token por hora,
+50 pendentes por loja, entrada de até 16 KB; pedir de novo o mesmo pedido pendente devolve o existente. Reenvio de
+acesso (`orders_resend`): 1 por pedido por hora, 3 por pedido em 24 horas e 20 por loja por hora; o e-mail sempre vai
+ao endereço do pedido. "Enviar teste" das conexões: 5 por hora por loja; o teste de e-mail vai sempre para o e-mail
+de avisos da loja (sem ele, o teste é recusado).
 
 **O que nunca sai pelo MCP, em nenhum papel:**
 
@@ -628,13 +658,16 @@ Comece pelo menor papel que resolve o que o agente precisa (Leitor, na dúvida).
   ou nome, nem exportação de pedidos (CSV). IP, user agent e e-mails da equipe também não saem.
 - Origem (UTM) e indicação (`ref`) só saem se parecerem nome de campanha; com cara de e-mail, endereço, telefone ou
   frase longa, saem como `(oculto)`.
-- Ações sensíveis: reembolso, liberar pedido, chaves e conexões (inclusive desligar o Telegram), preço, produtos e
-  endereço da oferta, apagar produto, configurações da loja, senha e equipe (inclusive criar e revogar tokens).
-- Por enquanto, também ficam de fora: criar e editar oferta e produto (inclusive o envio de arquivo), reenviar acesso,
-  "Enviar teste" das conexões, testar o Pixel e confirmar avisos.
+- Ações sensíveis sem aprovação: o agente nunca as executa por conta própria; elas só rodam depois de aprovadas no
+  painel por alguém da equipe.
+- Segredos enviados em um pedido (chaves, senhas, tokens): ficam guardados só selados até a decisão, são apagados ao
+  aprovar, recusar, expirar ou cancelar, e nunca voltam em nenhuma resposta, log ou auditoria.
+- Nunca pelo MCP, nem com aprovação: senha e conta, equipe e criação ou revogação de tokens, aprovar ou recusar pedidos
+  (só gente, no painel), exportar pedidos (CSV com dados do comprador) e criar produto com os bytes do arquivo (o
+  caminho do agente é o link de upload).
 
 **Revogar.** Em **Agentes (MCP)**, clique em **Revogar** ao lado do token e confirme. O agente perde o acesso na hora.
-O token revogado continua na lista, marcado como revogado, para o histórico.
+O token revogado continua na lista, marcado como revogado, para o histórico. Os pedidos pendentes dele são cancelados.
 
 **Quem sai da equipe.** O token não pertence a quem o criou: ele continua válido mesmo que essa pessoa saia da equipe
 ou perca o acesso ao painel. Ao tirar alguém da equipe, revogue os tokens que ela criou (a lista mostra quem criou cada

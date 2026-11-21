@@ -37,7 +37,7 @@ export default async function TokensPage() {
           <PIcon name="shield-check" />
           <div>
             <p>
-              O agente nunca recebe nome, e-mail, telefone ou CPF de comprador. Ações sensíveis (reembolso, chaves, preços) não estão disponíveis pelo MCP.
+              O agente nunca recebe nome, e-mail, telefone ou CPF de comprador. Ações sensíveis pedidas pelo agente esperam aprovação em Aprovações.
             </p>
           </div>
         </div>
