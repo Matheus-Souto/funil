@@ -3,6 +3,7 @@ import { needsSetup } from "@/lib/stores";
 import { setupAction } from "../actions";
 import { PIcon } from "../icons";
 import { Art } from "../blocks";
+import { BrandLogo } from "../brand";
 import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
@@ -22,15 +23,15 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
   return (
     <div className={`${s.root} ${s.auth}`}>
       <header className={s.authTop} data-bar="true">
-        <span className={s.brand} style={{ padding: 0 }}>
-          funil
+        <span className={s.brand} aria-label="PingaPay">
+          <BrandLogo />
         </span>
         <span className={s.muted}>Dá para mudar tudo depois em Configurações</span>
       </header>
       <main className={s.setup}>
         <div>
           <span className={s.eyebrow}>Configuração inicial</span>
-          <Art name="funil" size={120} className={s.authArt} />
+          <Art name="produto" size={120} className={s.authArt} />
           <h1>Sua loja pronta para vender em 4 passos</h1>
           <ol className={s.wizard}>
             {STEPS.map((x, i) => (

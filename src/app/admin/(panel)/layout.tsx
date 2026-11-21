@@ -12,7 +12,8 @@ import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { logoutAction } from "./actions";
 import { TabBar, type NavEntry } from "./nav";
-import { BrandLogo, PanelShell } from "./sidebar";
+import { BrandLogo } from "../brand";
+import { PanelShell } from "./sidebar";
 
 export const dynamic = "force-dynamic";
 
