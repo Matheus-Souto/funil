@@ -3,11 +3,12 @@ import { hasPermission } from "@/lib/actions/permissions";
 import { listTeam } from "@/lib/auth/account";
 import { requirePanelActor } from "@/lib/auth/session";
 import { getStoreSettings } from "@/lib/store-settings";
-import { PageHead } from "../../blocks";
+import { Accordion } from "@/components/arc/accordion/accordion";
+import { CopyButton } from "@/components/arc/copy-button/copy-button";
+import { Art, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import { firstParam, type Param } from "@/lib/panel-params";
 import s from "../../panel.module.css";
-import { CopyButton } from "../../ui";
 import { SettingsPanel } from "./form";
 import { SETTINGS_TABS, type SettingsTab } from "./tabs";
 import { TeamList } from "./team";
@@ -31,46 +32,66 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         canWrite={canWrite}
         initialTab={initialTab}
         script={
-          <div className={s.stack} id="script">
-            <p className={s.muted} style={{ margin: 0 }}>
-              Cole antes do <code className={s.mono}>&lt;/body&gt;</code> da sua página. Ele leva UTMs, fbclid e <code className={s.mono}>?ref=</code> para os
-              links do checkout, assim as vendas aparecem por origem e indicação.
-            </p>
-            <section className={s.card}>
-          <pre className={s.codeBlock} aria-label="Script do t.js">
-            {st.trackingSnippet}
-          </pre>
-          <div className={s.formActions} style={{ marginTop: 12 }}>
-            <CopyButton text={st.trackingSnippet} label="Copiar script" />
-          </div>
-          <details style={{ marginTop: 12 }}>
-            <summary style={{ cursor: "pointer", fontWeight: 600 }}>Página de vendas hospedada na Cloudflare (Pages)</summary>
-            <ol className={s.checklist}>
-              <li>
-                No projeto da página (Cloudflare Pages), abra o <code className={s.mono}>index.html</code> e cole o script logo antes de{" "}
-                <code className={s.mono}>&lt;/body&gt;</code>. Publique de novo (deploy).
-              </li>
-              <li>
-                Os botões de compra precisam apontar para o checkout: <code className={s.mono}>https://{host}/c/&lt;endereço-da-oferta&gt;</code>. O script só
-                completa links desse endereço.
-              </li>
-              <li>
-                Se o Rocket Loader estiver ligado (Speed → Optimization), acrescente <code className={s.mono}>data-cfasync=&quot;false&quot;</code> à tag{" "}
-                <code className={s.mono}>&lt;script&gt;</code> para ele não adiar o script.
-              </li>
-              <li>
-                Para conferir: abra a página com <code className={s.mono}>?utm_source=teste</code> e passe o mouse no botão de compra; o link deve levar o{" "}
-                <code className={s.mono}>utm_source=teste</code>.
-              </li>
-            </ol>
-          </details>
-            </section>
-          </div>
+          <section className={s.setCard} id="script" aria-label="Script da página de vendas">
+            <div className={s.setBody}>
+              <div className={s.setText}>
+                <h3>Script da página de vendas</h3>
+                <p>
+                  Cole antes do <code className={s.mono}>&lt;/body&gt;</code> da sua página. Ele leva UTMs, fbclid e <code className={s.mono}>?ref=</code> para os
+                  links do checkout, assim as vendas aparecem por origem e indicação.
+                </p>
+              </div>
+              <pre className={s.setCode} aria-label="Script do t.js">
+                {st.trackingSnippet}
+                <span className={s.setCodeCopy}>
+                  <CopyButton value={st.trackingSnippet} label="Copiar script" iconOnly variant="plain" />
+                </span>
+              </pre>
+              <Accordion
+                defaultOpen={-1}
+                items={[
+                  {
+                    title: "Página hospedada na Cloudflare (Pages)",
+                    content: (
+                      <ol className={s.setSteps}>
+                        <li>
+                          No projeto da página, abra o <code className={s.mono}>index.html</code> e cole o script logo antes de{" "}
+                          <code className={s.mono}>&lt;/body&gt;</code>. Publique de novo (deploy).
+                        </li>
+                        <li>
+                          Os botões de compra precisam apontar para o checkout: <code className={s.mono}>https://{host}/c/&lt;endereço-da-oferta&gt;</code>. O
+                          script só completa links desse endereço.
+                        </li>
+                      </ol>
+                    ),
+                  },
+                  {
+                    title: "Rocket Loader ligado",
+                    content: (
+                      <p className={s.setSteps} style={{ paddingLeft: 0 }}>
+                        Em Speed → Optimization, com o Rocket Loader ligado, acrescente <code className={s.mono}>data-cfasync=&quot;false&quot;</code> à tag{" "}
+                        <code className={s.mono}>&lt;script&gt;</code> para ele não adiar o script.
+                      </p>
+                    ),
+                  },
+                  {
+                    title: "Como conferir",
+                    content: (
+                      <p className={s.setSteps} style={{ paddingLeft: 0 }}>
+                        Abra a página com <code className={s.mono}>?utm_source=teste</code> e passe o mouse no botão de compra: o link deve levar o{" "}
+                        <code className={s.mono}>utm_source=teste</code>.
+                      </p>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+          </section>
         }
         team={
           team ? (
-            <div className={s.stack} id="equipe">
-              <p className={s.muted} style={{ margin: 0 }}>
+            <div id="equipe">
+              <p className={s.setIntro}>
                 Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
                 <a href="/admin/senha">Trocar senha</a>.
               </p>
@@ -79,26 +100,28 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           ) : null
         }
         delivery={
-          <div className={s.stack}>
-            <p className={s.muted} style={{ margin: 0 }}>
-              Regras do link pessoal de download.
+          <div>
+            <p className={s.setIntro}>Regras do link pessoal de download.</p>
+            <div className={s.setStats}>
+              <div className={s.setStat}>
+                <Art name="pdf" size={48} />
+                <div>
+                  <small>Validade do link</small>
+                  <b>30 dias</b>
+                </div>
+              </div>
+              <div className={s.setStat}>
+                <Art name="pedidos" size={48} />
+                <div>
+                  <small>Limite de downloads</small>
+                  <b>5 por link</b>
+                </div>
+              </div>
+            </div>
+            <p className={s.setNote}>
+              <PIcon name="info" size={14} />
+              Reembolso ou contestação desativa o link na hora. Em Pedidos, “Reenviar acesso” pode gerar links novos.
             </p>
-            <section className={s.card}>
-          <div className={s.rows}>
-            <div className={s.row}>
-              <span>Validade do link</span>
-              <span>30 dias</span>
-            </div>
-            <div className={s.row}>
-              <span>Limite de downloads</span>
-              <span>5</span>
-            </div>
-          </div>
-          <p className={s.hint} style={{ display: "flex", gap: 6, alignItems: "center", margin: "10px 0 0" }}>
-            <PIcon name="info" size={14} />
-            Reembolso ou contestação desativa o link na hora. Em Pedidos, “Reenviar acesso” pode gerar links novos.
-          </p>
-            </section>
           </div>
         }
       />

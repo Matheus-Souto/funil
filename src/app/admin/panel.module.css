@@ -1507,18 +1507,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.codeBlock {
-  margin: 0;
-  padding: 16px;
-  border-radius: var(--radius-md);
-  background: #15201b;
-  color: #d9e6de;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 .live {
   margin: 0;
   min-height: 20px;
@@ -1542,26 +1530,6 @@
   margin: 0 0 4px;
   font-size: 16px;
   font-weight: 700;
-}
-
-/* configurações em 2 colunas (título à esquerda) */
-.settingsRow {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 32px;
-  padding: 24px 0;
-  border-top: 1px solid var(--color-border);
-}
-.settingsRow > div:first-child p {
-  margin: 6px 0 0;
-  color: var(--color-text-muted);
-  line-height: 1.5;
-}
-@media (max-width: 900px) {
-  .settingsRow {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
-  }
 }
 
 /* ---------- Pedido ---------- */
@@ -1783,18 +1751,6 @@
   height: 100%;
   background: var(--color-primary);
   transition: width 0.15s;
-}
-
-/* ---------- Botão de exemplo na cor da loja (Configurações) ---------- */
-.previewBtn {
-  display: block;
-  margin-top: 10px;
-  padding: 12px;
-  border-radius: var(--radius-md);
-  background: var(--color-brand);
-  color: var(--color-on-brand);
-  text-align: center;
-  font-weight: 700;
 }
 
 /* Linhas de produto do editor de oferta: select + subir/descer/remover. */
@@ -2290,7 +2246,6 @@
 }
 
 /* Links em texto corrido do painel na cor de destaque legível */
-.settingsRow p a,
 .hint a {
   color: var(--color-primary-ink);
   font-weight: 600;
@@ -3521,69 +3476,222 @@
   }
 }
 
-/* ---------- Configurações em abas ---------- */
-.settingsTabs {
-  display: flex;
-  gap: 2px;
-  margin-bottom: 16px;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--color-border);
-  scrollbar-width: none;
-}
-.settingsTabs button {
-  flex: none;
-  margin-bottom: -1px;
-  padding: 9px 12px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: none;
-  color: var(--color-text-muted);
-  font: inherit;
-  font-size: 14px;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color 120ms var(--ease-standard), border-color 120ms var(--ease-standard);
-}
-.settingsTabs button:hover {
-  color: var(--color-text);
-}
-.settingsTabs button[aria-selected="true"] {
-  border-bottom-color: var(--color-primary-ink);
-  color: var(--color-text);
-  font-weight: 600;
-}
-.settingsTabs button:focus-visible {
-  outline: 2px solid var(--color-primary-ink);
-  outline-offset: -2px;
-  border-radius: 6px;
-}
+/* ---------- Configurações em abas (abas do Arc; cada ajuste numa linha: texto à esquerda, controle à direita) ---------- */
 .settingsFieldset {
   margin: 0;
   padding: 0;
   border: 0;
   min-width: 0;
 }
-.settingsCard {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+.setCard {
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-surface);
 }
-.settingsSub {
+.setRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 18px 20px;
+}
+.setRowSwitch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 20px;
+}
+.setCard > :is(.setRow, .setRowSwitch, .setMember) + :is(.setRow, .setRowSwitch, .setMember) {
+  border-top: 1px solid var(--color-border);
+}
+/* Aviso de resultado dentro do cartão: só ocupa espaço quando tem texto. */
+.setCard > .live {
+  min-height: 0;
+}
+.setCard > .live:not(:empty) {
+  padding: 0 20px 14px;
+}
+.setText h3 {
+  margin: 0 0 3px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.setText p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+.setSub {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
-  padding-left: 14px;
+  gap: 2px;
+  margin: 0 20px;
+  padding: 4px 0 14px 16px;
   border-left: 2px solid var(--color-border);
 }
-.colorWell {
-  flex: none;
-  width: 44px;
+.setSubRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  font-size: 14px;
+  color: var(--color-text);
+}
+.setSubRow small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.setCheckout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  align-items: start;
+  gap: 20px;
+  padding: 20px;
+}
+.setColor {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+/* O checkout é sempre claro: a prévia também, nos dois temas do painel. */
+.setMock {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: #ffffff;
+  color: #15201b;
+  font-size: 13px;
+}
+.setMock > span:first-of-type {
+  color: #5f6f69;
+}
+.setMockBtn {
+  display: grid;
+  place-items: center;
   height: 42px;
-  padding: 2px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 10px;
+  border-radius: 999px;
+  background: var(--color-brand);
+  color: var(--color-on-brand);
+  font-weight: 700;
+}
+.setMockLink {
+  color: var(--color-brand-strong);
+  font-weight: 600;
+}
+.setBody {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+.setCode {
+  position: relative;
+  margin: 0;
+  padding: 16px 52px 16px 16px;
+  border-radius: 12px;
+  background: #11181a;
+  color: #e6efe9;
+  font: 13px/1.6 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.setCodeCopy {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: #e6efe9;
+}
+.setSteps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-muted);
+}
+.setSteps li + li {
+  margin-top: 6px;
+}
+.setMember {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+}
+.setMemberText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 14px;
+}
+.setMemberText b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.setMemberText small {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.setStats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.setStat {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
   background: var(--color-surface);
+}
+.setStat small {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.setStat b {
+  display: block;
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+.setNote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 2px 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.setIntro {
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  color: var(--color-text-muted);
+}
+.setIntro a {
+  color: var(--color-primary-ink);
+  font-weight: 600;
+}
+@media (max-width: 760px) {
+  .setRow,
+  .setCheckout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .setStats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .setMember {
+    flex-wrap: wrap;
+  }
 }
 .saveBarSimple {
   margin-top: 16px;
@@ -3594,8 +3702,16 @@
   font-size: 13px;
   font-weight: 600;
 }
-.settingsCard[hidden] {
-  display: none;
+@media (max-width: 520px) {
+  .saveBarSimple {
+    flex-wrap: wrap;
+  }
+  .saveBarSimple > span:first-child {
+    flex-basis: 100%;
+  }
+  .saveBarSimple > button {
+    flex: 1;
+  }
 }
 
 /* Filtro da coluna só com o ícone (ao lado do título na tabela do Arc). */
