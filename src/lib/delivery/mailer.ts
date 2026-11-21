@@ -21,7 +21,7 @@ import { log } from "@/lib/log";
 import { limitConnectionTest } from "@/lib/mcp/limits";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
 import { EMAIL, loadResend, sendViaResend, testRecipient } from "./resend";
-import { oneLine } from "./templates";
+import { cleanHeaders, oneLine, type MailHeaders } from "./templates";
 
 export interface SmtpSettings {
   host: string;
@@ -40,6 +40,7 @@ export interface SentMail {
   subject: string;
   html: string;
   text: string;
+  headers?: MailHeaders;
 }
 
 export interface MailTransport {
@@ -180,6 +181,8 @@ export interface MailMessage {
   subject: string;
   html: string;
   text: string;
+  /** Vazio ou ausente: o envio sai como sempre. */
+  headers?: MailHeaders;
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -196,6 +199,7 @@ async function deliver(s: SmtpSettings, storeName: string, msg: MailMessage, sig
     subject: header(msg.subject, 250),
     html: msg.html,
     text: msg.text,
+    ...(msg.headers ? { headers: cleanHeaders(msg.headers) } : {}),
   };
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<never>((_, reject) => {

@@ -77,6 +77,15 @@ describe("cliente do Resend", () => {
     });
   });
 
+  test("headers de descadastro vão no corpo da requisição; sem headers o corpo não muda", async () => {
+    const calls = fakeFetch(() => json(200, { id: "msg_h" }));
+    const headers = { "List-Unsubscribe": "<https://loja.exemplo.com/sair/t>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } as const;
+    await sendViaResend(settings, "Loja", { ...msg, headers });
+    await sendViaResend(settings, "Loja", msg);
+    expect(JSON.parse(String(calls[0]!.init.body)).headers).toEqual(headers);
+    expect("headers" in JSON.parse(String(calls[1]!.init.body))).toBe(false);
+  });
+
   test("sem fromName usa o nome da loja", async () => {
     const calls = fakeFetch(() => json(200, { id: "msg_1" }));
     await sendViaResend(settings, "Minha Loja", msg);
