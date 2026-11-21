@@ -163,7 +163,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           <section className={s.grid3} aria-label="Recuperação de vendas por e-mail no período">
             <Kpi label="Lembretes enviados" value={String(m.recovery.sent)} delta={deltaOf(m.recovery.sent, prev.recovery.sent)} compare={COMPARE[period]} />
             <Kpi
-              label="Vendas recuperadas"
+              label="Lembretes que viraram venda"
               value={String(m.recovery.recovered)}
               delta={deltaOf(m.recovery.recovered, prev.recovery.recovered)}
               compare={COMPARE[period]}

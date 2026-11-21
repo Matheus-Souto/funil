@@ -96,7 +96,7 @@ async function recoverySummary(ctx: Ctx, from: Date, to: Date): Promise<Recovery
     where exists (select 1 from recovery_email r where ${sentIn} and ${RECOVERS})`)) as unknown as Array<{ cents: string | number }>;
 
   const byCase = Object.fromEntries(RECOVERY_CASES.map((k) => [k, { sent: 0, recovered: 0 }])) as RecoverySummary["byCase"];
-  for (const r of rows) if (r.kind in byCase) byCase[r.kind as RecoveryCase] = { sent: Number(r.sent), recovered: Number(r.recovered) };
+  for (const r of rows) if (Object.hasOwn(byCase, r.kind)) byCase[r.kind as RecoveryCase] = { sent: Number(r.sent), recovered: Number(r.recovered) };
   return {
     sent: RECOVERY_CASES.reduce((a, k) => a + byCase[k].sent, 0),
     recovered: RECOVERY_CASES.reduce((a, k) => a + byCase[k].recovered, 0),

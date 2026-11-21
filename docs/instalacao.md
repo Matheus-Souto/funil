@@ -793,8 +793,11 @@ sai para abandonos antigos: só entram casos das últimas 6 horas.
 | Pix gerado e não pago | 30 min depois de gerado, só se faltar pelo menos 1 hora para o Pix vencer | `/o/<pedido>` (o Pix do pedido) |
 | Cartão recusado (pedido ainda pendente com pelo menos uma recusa) | 30 min depois da 1ª recusa | `/c/<oferta>?utm_source=recuperacao&utm_medium=email&utm_campaign=cartao` |
 
-Um lembrete por contato ou pedido. Por endereço, na loja: no máximo **1 lembrete a cada 24 horas e 3 em 30 dias**,
-somando os três casos. Não sai para quem já comprou a mesma oferta (pago, contestado ou reembolsado) nos últimos 30
+Um lembrete por contato ou pedido. Só **endereços simples** recebem lembrete (letras, números e `. _ % + -` antes do
+`@`, domínio com ponto): endereço com comentário entre parênteses, vírgula, ponto e vírgula, aspas, colchetes, `<>` ou
+espaço é pulado. Por endereço, na loja: no máximo **1 lembrete a cada 24 horas e 3 em 30 dias**, somando os três casos.
+O limite vale para a **caixa de entrada**: variantes com `+` (`ana+promo@exemplo.com`) e, no Gmail, com pontos
+(`a.na@gmail.com`, também `@googlemail.com`) contam como o mesmo endereço. Não sai para quem já comprou a mesma oferta (pago, contestado ou reembolsado) nos últimos 30
 dias, nem para um pedido mais antigo quando o mesmo cliente tem um mais novo na mesma oferta (o lembrete vai para o mais
 novo). Quem digitou o e-mail e gerou o Pix recebe só o do Pix (o pedido converte o contato na hora). Teto da loja: 60
 lembretes por hora, dentro deles no máximo 10 do caso cartão; o excedente fica para a próxima varredura, ainda dentro
@@ -807,8 +810,9 @@ a oferta desativada, porque a página do Pix (`/o/<pedido>`) continua funcionand
 **Falha no envio.** Sem provedor de e-mail configurado ou com recusa definitiva do provedor (chave ou mensagem
 recusada), o lembrete fica como não enviado e não há nova tentativa (no pedido, a linha do tempo mostra **Lembrete por
 e-mail não enviado**). Com erro temporário (rede, tempo esgotado, limite do provedor, resposta 429 ou 5xx), a fila tenta
-de novo, mas só até 2 horas depois do horário previsto do lembrete; depois disso desiste e o lembrete fica como não
-enviado. Um lembrete muito atrasado não sai.
+de novo, mas só até 2 horas depois do horário previsto do lembrete (ou de quando ele entrou na fila, o que for mais
+tarde); depois disso desiste e o lembrete fica como não enviado. **Lembrete parado mais de 2 horas na fila não sai**
+(ex.: worker fora do ar): fica registrado como pulado, mesmo numa nova tentativa.
 
 **Os textos.** Fixos (a loja não edita), com o nome da loja, o produto (o produto principal; se a oferta tem mais de um,
 o nome da oferta) e o valor (contato: preço atual da oferta; Pix e cartão: total do pedido). Nunca o nome do comprador.
@@ -829,10 +833,12 @@ Rodapé de todos:
 **Descadastro.** O link do rodapé abre `/sair/<token>`, uma página com o botão de confirmar; só o botão (POST)
 descadastra, porque leitores de link e antivírus abrem links com GET. O e-mail também leva os cabeçalhos
 `List-Unsubscribe` e `List-Unsubscribe-Post` (descadastro de um clique pelo próprio Gmail ou Outlook). Descadastrar vale
-para a loja inteira (os três casos), sem prazo, e apaga os contatos abertos ou contatados desse e-mail. Com o Resend,
+para a loja inteira (os três casos), sem prazo, e para a **caixa de entrada** (como no limite por endereço: quem
+descadastra `ana+promo@gmail.com` também não recebe em `ana@gmail.com` nem em `a.na@gmail.com`), e apaga os contatos
+abertos ou contatados do e-mail do link. Com o Resend,
 devolução (`email.bounced`) ou marcação como spam (`email.complained`) de **qualquer** e-mail da loja (inclusive o de
-acesso) também tira o endereço da recuperação. A loja guarda só o **hash** do e-mail descadastrado (sem ele não
-conseguiria respeitar o pedido). Link inventado, de outra loja ou vencido mostra "Este link não vale mais.".
+acesso) também tira o endereço da recuperação. A loja guarda só o **hash** do e-mail descadastrado e o da caixa (sem
+eles não conseguiria respeitar o pedido). Link inventado, de outra loja ou vencido mostra "Este link não vale mais.".
 
 - **Proxy e CDN: não registre a URL de `/sair/`.** O token de descadastro vai no caminho da URL (`/sair/<token>`), como
   a chave de envio em `/api/mcp/upload/`: desligue o log de URL para `/sair/` no proxy ou CDN.
@@ -849,7 +855,7 @@ foi você, ignore este e-mail".
 
 **Onde ver.** Sem item novo no menu. Em **Contatos**, a linha mostra "Lembrete enviado em {data}". No pedido, a linha do
 tempo mostra **Lembrete de pagamento por e-mail** (ou **Lembrete por e-mail não enviado**, se o provedor recusou),
-sem o destinatário. A visão geral ganha o cartão com **Lembretes enviados**, **Vendas recuperadas** e **Receita
+sem o destinatário. A visão geral ganha o cartão com **Lembretes enviados**, **Lembretes que viraram venda** e **Receita
 recuperada** do período (aparece depois do primeiro lembrete enviado). **Recuperada** = pedido pago (ou depois
 contestado ou reembolsado) da mesma oferta, do mesmo e-mail, até 7 dias depois do envio; a receita soma cada pedido uma
 vez, mesmo que ele tenha recebido dois lembretes. Os números contam os lembretes enviados no período.

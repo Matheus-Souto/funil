@@ -40,7 +40,7 @@ describe("recoveryEmail", () => {
   for (const c of cases) {
     test(`${c.kind}: assunto, título, botão, links e rodapé`, () => {
       const m = recoveryEmail(c.kind, { ...base, pixExpiresAt });
-      expect(m.subject.replace(/ /g, " ")).toBe(c.subject.replace(/ /g, " "));
+      expect(m.subject.replace(/\u00a0/g, " ")).toBe(c.subject.replace(/\u00a0/g, " "));
       expect(m.html).toContain(c.title);
       expect(m.html).toContain(`>${c.button}</a>`);
       expect(m.html).toContain('href="https://loja.exemplo.com/checkout/abc?x=1&amp;y=2"');
