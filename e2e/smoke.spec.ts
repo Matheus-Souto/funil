@@ -236,6 +236,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     await page.goto("/admin/connections");
     await shot(page, "p14a-conexoes-vazias-1280");
+    // Cada conexão é uma linha; o formulário abre num modal (o id fica no modal).
+    await page.getByRole("button", { name: "Conectar Pix manual" }).click();
     const pix = page.locator("#pix-manual-card");
     await pix.getByLabel("Chave Pix").fill("contato@manakids.com.br");
     await pix.getByLabel("Nome do recebedor").fill("Mana Kids");
@@ -250,6 +252,10 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(pix.getByText("Chave Pix salva.")).toBeVisible();
     await expect(pix.getByText("MANA KIDS")).toBeVisible();
 
+    // Fecha pelo X (o Esc logo depois de salvar ainda cai no diálogo de confirmação, que está saindo).
+    await pix.getByRole("button", { name: "Fechar" }).click();
+    await expect(pix).toBeHidden();
+    await page.getByRole("button", { name: "Conectar Asaas" }).click();
     const asaas = page.locator("#asaas");
     const { apiKey } = (await (await request.get(`${asaasBase}/__control/key`)).json()) as { apiKey: string };
     await asaas.getByLabel("Chave de API").fill(apiKey);
@@ -268,6 +274,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(asaas.getByText("reative a fila")).toBeVisible();
 
     // SMTP da loja: Mailpit do compose (a ação testa a conexão antes de salvar).
+    await asaas.getByRole("button", { name: "Fechar" }).click();
+    await expect(asaas).toBeHidden();
+    await page.getByRole("button", { name: "Conectar SMTP" }).click();
     const smtp = page.locator("#smtp");
     await smtp.getByLabel("Servidor").fill("127.0.0.1");
     await smtp.getByLabel("Porta", { exact: true }).fill("1025");
@@ -278,6 +287,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     // Meta: Pixel + API de Conversões falsa do verify (${asaasBase}/meta). O token é testado antes de salvar.
     const { token: metaToken } = (await (await request.get(`${asaasBase}/__control/meta`)).json()) as { token: string };
+    await smtp.getByRole("button", { name: "Fechar" }).click();
+    await expect(smtp).toBeHidden();
+    await page.getByRole("button", { name: "Conectar Meta" }).click();
     const meta = page.locator("#meta");
     await meta.getByLabel("Pixel ID").fill(PIXEL_ID);
     await meta.getByLabel("Token da API de Conversões").fill(metaToken);
