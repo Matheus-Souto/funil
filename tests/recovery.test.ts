@@ -2,6 +2,7 @@
 // restrições do banco (kind x order_id, um lembrete por pedido e tipo).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { withStore } from "@/lib/db/client";
 import { checkoutLead, emailOptout, recoveryEmail } from "@/lib/db/schema";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -109,14 +110,20 @@ describe("recovery_email e email_optout", () => {
   test("lead apagado (lead_id nulo) continua válido e um lead só tem um lembrete", async () => {
     const s = await seedPanelStore();
     const leadId = await seedLead(s.storeId, s.offerId);
-    await t.ownerDb.insert(recoveryEmail).values(row(s.storeId, s.offerId, "lead", { leadId }));
+    const [kept] = await t.ownerDb
+      .insert(recoveryEmail)
+      .values(row(s.storeId, s.offerId, "lead", { leadId }))
+      .returning({ id: recoveryEmail.id });
     expect(await pgError(() => t.ownerDb.insert(recoveryEmail).values(row(s.storeId, s.offerId, "lead", { leadId })))).toEqual({
       code: UNIQUE,
       constraint: "recovery_email_lead_uniq",
     });
-    await t.ownerDb.delete(checkoutLead);
-    const rows = await t.ownerDb.select({ leadId: recoveryEmail.leadId, orderId: recoveryEmail.orderId }).from(recoveryEmail);
-    expect(rows.filter((r) => r.leadId === null && r.orderId === null).length).toBeGreaterThanOrEqual(1);
+    // apagado o contato, a linha daquele lembrete fica com lead_id nulo (ON DELETE SET NULL) e continua válida
+    await t.ownerDb.delete(checkoutLead).where(eq(checkoutLead.id, leadId));
+    const [after] = await t.ownerDb.select().from(recoveryEmail).where(eq(recoveryEmail.id, kept!.id));
+    expect(after).toBeDefined();
+    expect(after!.leadId).toBeNull();
+    expect(after!.orderId).toBeNull();
     // dois leads sem lead_id (contato apagado) convivem: o único é parcial
     await t.ownerDb.insert(recoveryEmail).values(row(s.storeId, s.offerId, "lead"));
   });
