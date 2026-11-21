@@ -138,6 +138,25 @@ export const listProducts = defineAction({
   run: (ctx) => ctx.tx.select(view).from(product).where(isNull(product.deletedAt)).orderBy(desc(product.createdAt)),
 });
 
+/** PDF de um produto da loja, para o painel mostrar a miniatura e o visualizador ("Ver PDF"). Fora do MCP. */
+export const readProductFile = defineAction({
+  name: "products.file",
+  description: "Arquivo PDF de um produto (só o painel: miniatura e visualizador).",
+  input: z.object({ id }),
+  permission: "products.read",
+  audit: false,
+  async run(ctx, input) {
+    const [row] = await ctx.tx
+      .select({ id: product.id, fileName: product.fileName })
+      .from(product)
+      .where(and(eq(product.id, input.id), isNull(product.deletedAt)));
+    if (!row) throw new ActionError("not_found", "Produto não encontrado");
+    const bytes = await storage.get(fileKeyFor(ctx.storeId, row.id));
+    if (!bytes) throw new ActionError("not_found", "Arquivo do produto não encontrado");
+    return { fileName: row.fileName, bytes };
+  },
+});
+
 export const deleteProduct = defineAction({
   name: "products.delete",
   description: "Exclui um produto (soft delete; o arquivo é mantido para pedidos antigos).",

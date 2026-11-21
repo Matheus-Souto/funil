@@ -8,7 +8,7 @@ import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
 import { auditLog, offer, offerProduct, product } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
-import { checkPdfBytes, createProduct, deleteProduct, listProducts, updateProduct } from "@/lib/catalog/products";
+import { checkPdfBytes, createProduct, deleteProduct, listProducts, readProductFile, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import {
   changeDialog,
@@ -196,6 +196,22 @@ describe("products", () => {
     const p = await mkProduct(a.storeId);
     expect(await code(call(updateProduct, b.storeId, owner, { id: p.id, name: "x" }))).toBe("not_found");
     expect(await code(call(createOffer, b.storeId, owner, offerInput(p.id)))).toBe("invalid_input");
+  });
+});
+
+describe("products.file (PDF para o painel)", () => {
+  test("devolve os bytes e o nome do arquivo; support lê, sem permissão não; outra loja e excluído viram not_found", async () => {
+    const { storeId } = await seedStore();
+    const raw = await makePdf(2);
+    const p = await call(createProduct, storeId, owner, { name: "Guia", fileName: "guia.pdf", file: raw });
+    const out = await call(readProductFile, storeId, support, { id: p.id });
+    expect(out.fileName).toBe("guia.pdf");
+    expect(Buffer.from(out.bytes).equals(Buffer.from(raw))).toBe(true);
+    expect(await code(call(readProductFile, storeId, pub, { id: p.id }))).toBe("forbidden");
+    const other = await seedStore();
+    expect(await code(call(readProductFile, other.storeId, owner, { id: p.id }))).toBe("not_found");
+    await call(deleteProduct, storeId, owner, { id: p.id });
+    expect(await code(call(readProductFile, storeId, owner, { id: p.id }))).toBe("not_found");
   });
 });
 
