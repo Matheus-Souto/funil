@@ -159,6 +159,24 @@ export default async function Overview({ searchParams }: { searchParams: Promise
           </section>
         ) : null}
 
+        {lifetime.recovery.sent > 0 ? (
+          <section className={s.grid3} aria-label="Recuperação de vendas por e-mail no período">
+            <Kpi label="Lembretes enviados" value={String(m.recovery.sent)} delta={deltaOf(m.recovery.sent, prev.recovery.sent)} compare={COMPARE[period]} />
+            <Kpi
+              label="Lembretes que viraram venda"
+              value={String(m.recovery.recovered)}
+              delta={deltaOf(m.recovery.recovered, prev.recovery.recovered)}
+              compare={COMPARE[period]}
+            />
+            <Kpi
+              label="Receita recuperada"
+              value={brl(m.recovery.recoveredRevenueCents)}
+              delta={deltaOf(m.recovery.recoveredRevenueCents, prev.recovery.recoveredRevenueCents)}
+              compare={COMPARE[period]}
+            />
+          </section>
+        ) : null}
+
         <div className={s.splitWide}>
           <section className={s.card}>
             <div className={s.cardHead}>

@@ -18,6 +18,11 @@ export const store = pgTable(
     leadCapture: boolean("lead_capture").notNull().default(false),
     /** E-mail público para pedidos de privacidade do titular (LGPD), mostrado no aviso do checkout. */
     privacyEmail: text("privacy_email"),
+    /** Recuperação de vendas por e-mail (recovery_email). Desligada por padrão; os três tipos abaixo valem só com ela ligada. */
+    recoveryOn: boolean("recovery_on").notNull().default(false),
+    recoveryLead: boolean("recovery_lead").notNull().default(true),
+    recoveryPix: boolean("recovery_pix").notNull().default(true),
+    recoveryCard: boolean("recovery_card").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

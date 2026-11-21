@@ -24,5 +24,6 @@ import "@/lib/payments/asaas/pix";
 import "@/lib/payments/asaas/webhook";
 import "@/lib/payments/manual";
 import "@/lib/payments/refund";
+import "@/lib/recovery/unsubscribe";
 import "@/lib/store-settings";
 import "@/lib/tracking/meta";

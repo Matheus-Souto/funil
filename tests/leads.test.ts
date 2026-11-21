@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { auditLog, checkoutLead, offer, rateLimit, store } from "@/lib/db/schema";
+import { auditLog, checkoutLead, emailOptout, offer, rateLimit, recoveryEmail, store } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { LEAD_LIMITS, LEAD_TTL_DAYS, checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
 import { PAGE_SIZE, createSweepLeadsHandler, deleteLead, forgetLeadEmail, listLeads, markLeadContacted, sweepLeadsJob } from "@/lib/leads/panel";
@@ -452,6 +452,23 @@ const insertLead = async (s: { storeId: string; offerId: string }, over: Partial
   return r!;
 };
 const auditOf = (storeId: string) => t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId));
+/** Lembrete de recuperação do caso contato (sem pedido), enviado há pouco e vencendo em 90 dias, salvo `over`. */
+function reminder(s: { storeId: string; offerId: string }, over: Partial<typeof recoveryEmail.$inferInsert> = {}): typeof recoveryEmail.$inferInsert {
+  const h = over.emailHash ?? sha(randomUUID());
+  return {
+    storeId: s.storeId,
+    kind: "lead",
+    offerId: s.offerId,
+    emailHash: h,
+    mailboxHash: h,
+    status: "sent",
+    unsubHash: sha(randomUUID()),
+    dueAt: new Date(Date.now() - 3_600_000),
+    sentAt: new Date(Date.now() - 3_600_000),
+    expiresAt: new Date(Date.now() + 90 * DAY_MS),
+    ...over,
+  };
+}
 const leftIds = async (storeId: string) => new Set((await t.ownerDb.select({ id: checkoutLead.id }).from(checkoutLead).where(eq(checkoutLead.storeId, storeId))).map((r) => r.id));
 
 describe("leads.list", () => {
@@ -461,7 +478,7 @@ describe("leads.list", () => {
     const out = await runAction(listLeads, panelCall(s.storeId, "support"), {});
     expect(out).toMatchObject({ total: 1, page: 1, pageSize: PAGE_SIZE });
     expect(out.items).toEqual([
-      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "open", offerName: "Oferta", email: row.email, phone: PHONE_DIGITS, orderId: null, orderCode: null },
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "open", offerName: "Oferta", email: row.email, phone: PHONE_DIGITS, orderId: null, orderCode: null, remindedAt: null },
     ]);
     expect(await code(runAction(listLeads, panelCall(s.storeId, "traffic"), {}))).toBe("forbidden");
     expect(await code(runAction(markLeadContacted, panelCall(s.storeId, "traffic"), { id: row.id }))).toBe("forbidden");
@@ -493,7 +510,7 @@ describe("leads.list", () => {
     const row = await insertLead(p, { email: null, phone: null, status: "converted", orderId: order.id });
     const out = await runAction(listLeads, panelCall(p.storeId), { status: "converted" });
     expect(out.items).toEqual([
-      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "converted", offerName: "Maná bíblico", email: null, phone: null, orderId: order.id, orderCode: orderCode(order.publicId) },
+      { id: row.id, code: leadCode(row.id), createdAt: row.createdAt, status: "converted", offerName: "Maná bíblico", email: null, phone: null, orderId: order.id, orderCode: orderCode(order.publicId), remindedAt: null },
     ]);
   });
 
@@ -522,6 +539,26 @@ describe("leads.list", () => {
     expect([out.total, out.items.map((i) => i.id)]).toEqual([1, [live.id]]);
     expect((await runAction(listLeads, panelCall(s.storeId), { q: expired.email! })).total).toBe(0);
     expect((await runAction(listLeads, panelCall(s.storeId), { q: leadCode(expired.id) })).total).toBe(0);
+  });
+
+  test("leads.list traz remindedAt do lembrete enviado", async () => {
+    const s = await seedCapture();
+    const sent = await insertLead(s);
+    const queued = await insertLead(s);
+    const failed = await insertLead(s);
+    const none = await insertLead(s);
+    const sentAt = new Date(Date.now() - 2 * 3_600_000);
+    await t.ownerDb.insert(recoveryEmail).values([
+      reminder(s, { leadId: sent.id, emailHash: sent.emailHash!, status: "sent", sentAt }),
+      reminder(s, { leadId: queued.id, emailHash: queued.emailHash!, status: "queued" }),
+      reminder(s, { leadId: failed.id, emailHash: failed.emailHash!, status: "failed" }),
+    ]);
+    const out = await runAction(listLeads, panelCall(s.storeId), {});
+    const by = new Map(out.items.map((i) => [i.id, i.remindedAt]));
+    expect(by.get(sent.id)).toEqual(sentAt);
+    expect([by.get(queued.id), by.get(failed.id), by.get(none.id)]).toEqual([null, null, null]);
+    // o lembrete não duplica a linha nem muda o total
+    expect([out.total, out.items.length]).toEqual([4, 4]);
   });
 
   test("busca por e-mail respeita o filtro de status", async () => {
@@ -631,6 +668,37 @@ describe("sweep_leads", () => {
     // idempotente
     await sweepLeadsJob({} as never, new AbortController().signal);
     expect(await leftIds(a.storeId)).toEqual(new Set([a2.id]));
+  });
+
+  test("sweep apaga recovery_email vencida e mantém email_optout", async () => {
+    const a = await seedCapture();
+    const b = await seedCapture();
+    const past = new Date(Date.now() - 60_000);
+    const future = new Date(Date.now() + 3_600_000);
+    const optHash = sha(randomUUID());
+    const rows = await t.ownerDb
+      .insert(recoveryEmail)
+      .values([
+        reminder(a, { expiresAt: past }),
+        reminder(a, { expiresAt: future }),
+        reminder(b, { expiresAt: past, status: "failed", sentAt: null }),
+        reminder(b, { expiresAt: future }),
+      ])
+      .returning({ id: recoveryEmail.id });
+    await t.ownerDb.insert(emailOptout).values([
+      { storeId: a.storeId, emailHash: optHash, reason: "unsubscribe" },
+      { storeId: b.storeId, emailHash: optHash, reason: "bounce" },
+    ]);
+    // optout antigo também fica: não vence
+    await t.ownerDb.update(emailOptout).set({ createdAt: new Date(Date.now() - 400 * DAY_MS) }).where(eq(emailOptout.storeId, a.storeId));
+
+    await sweepLeadsJob({} as never, new AbortController().signal);
+    const left = async (storeId: string) =>
+      new Set((await t.ownerDb.select({ id: recoveryEmail.id }).from(recoveryEmail).where(eq(recoveryEmail.storeId, storeId))).map((r) => r.id));
+    expect(await left(a.storeId)).toEqual(new Set([rows[1]!.id]));
+    expect(await left(b.storeId)).toEqual(new Set([rows[3]!.id]));
+    const opt = await t.ownerDb.select().from(emailOptout).where(eq(emailOptout.emailHash, optHash));
+    expect(opt.map((o) => o.storeId).sort()).toEqual([a.storeId, b.storeId].sort());
   });
 
   test("falha numa loja não impede as outras e o job falha no fim", async () => {

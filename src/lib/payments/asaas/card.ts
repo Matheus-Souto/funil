@@ -28,6 +28,7 @@ import { IntegrationSecretUnreadable } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
+import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
 import { checkoutHostnames, verifyTurnstile, type TurnstileDeps } from "@/lib/payments/turnstile";
@@ -208,7 +209,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   // IPv6 agrupado por /64: trocar de endereço dentro da mesma rede não escapa do limite.
   const ipKey = ipRateKey(ip);
   const emailHash = sha256(pre.cust.email.toLowerCase());
-  const breakerKey = `card:breaker:store:${storeId}`;
+  const breakerKey = cardBreakerKey(storeId);
   // IP desconhecido (sem proxy confiável): uma chave única para todos seria um limite global; vale só e-mail e cartão.
   if (knownIp && !(await checkRateLimit(`card:ip:${ipKey}`, LIMITS.ip, HOUR, t))) throw limited();
   if (!(await checkRateLimit(`card:email:${emailHash}`, LIMITS.email, HOUR, t))) throw limited();
@@ -221,7 +222,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     if (!(await checkRateLimit(`card:store:${storeId}:${source}`, BREAKER.capPerSourceWithoutTurnstile, HOUR, t))) throw limited();
   }
   const recentDecline =
-    (knownIp && (await hadRecentEvent(`card:decline:ip:${ipKey}`, HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
+    (knownIp && (await hadRecentEvent(cardDeclineIpKey(ipKey), HOUR, t))) || (await hadRecentEvent(`card:decline:email:${emailHash}`, HOUR, t));
   if (recentDecline || (breakerOn && turnstileOn)) {
     const verify =
       deps.verifyTurnstile ??
@@ -319,7 +320,7 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
     const asaas = { status: d?.status ?? 0, errorCodes: d?.errorCodes ?? [] };
     if (asaas.status === 400 && asaas.errorCodes.some((c) => DECLINE_CODES.has(c))) {
       await closeAttempt(storeId, attempt.id, { status: "declined" }, now(), (tx) => enqueueDeclineNotice(tx, storeId, order.id, attempt.id));
-      if (knownIp) await recordEvent(`card:decline:ip:${ipKey}`, t);
+      if (knownIp) await recordEvent(cardDeclineIpKey(ipKey), t);
       await recordEvent(`card:decline:email:${emailHash}`, t);
       await countStoreDecline(storeId, t);
       log.warn("cartão recusado pelo Asaas", { orderId: order.id, attemptId: attempt.id, asaas });
@@ -417,7 +418,7 @@ async function reconcileWithAsaas(storeId: string, orderId: string): Promise<"pa
 /** Conta uma recusa na loja; na 10ª em 15 min liga o disjuntor por 1 h e avisa o vendedor (log e e-mail via notify_seller). */
 async function countStoreDecline(storeId: string, t: Date): Promise<void> {
   const key = `card:decline:store:${storeId}`;
-  const breakerKey = `card:breaker:store:${storeId}`;
+  const breakerKey = cardBreakerKey(storeId);
   await recordEvent(key, t);
   const n = await countRecentEvents(key, BREAKER.windowSec, t);
   if (n < BREAKER.declines || (await hadRecentEvent(breakerKey, BREAKER.holdSec, t))) return;

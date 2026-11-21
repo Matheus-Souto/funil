@@ -16,6 +16,18 @@ export function oneLine(v: string): string {
   return v.replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ");
 }
 
+/** Cabeçalhos de descadastro em um clique (RFC 8058). */
+// `type` (não `interface`): precisa ser atribuível ao índice de strings dos cabeçalhos do nodemailer.
+export type MailHeaders = {
+  "List-Unsubscribe": string;
+  "List-Unsubscribe-Post": "List-Unsubscribe=One-Click";
+};
+
+/** Nem SMTP nem Resend aceitam quebra de linha em cabeçalho: os valores passam por `oneLine` antes de sair. */
+export function cleanHeaders(h: MailHeaders): MailHeaders {
+  return { "List-Unsubscribe": oneLine(h["List-Unsubscribe"]).trim(), "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" };
+}
+
 const C = { bg: "#EEF0EC", surface: "#FFFFFF", soft: "#F5F6F3", border: "#DDE1DB", text: "#15201B", muted: "#56615B" };
 const FONT = "Helvetica,Arial,sans-serif";
 
@@ -147,5 +159,83 @@ ${d.paragraphs.map((p) => `<p style="margin:12px 0 0;font-size:15px;color:${C.mu
     subject: d.subject,
     html: layout({ title: d.subject, storeName: d.storeName, brand, body, footer }),
     text: [oneLine(d.heading), "", ...d.paragraphs.flatMap((p) => [oneLine(p), ""]), `Aviso automático da sua loja ${oneLine(d.storeName)}.`].join("\n"),
+  };
+}
+
+export interface RecoveryEmailData {
+  storeName: string;
+  brandColor: string | null;
+  productName: string;
+  totalCents: number;
+  actionUrl: string;
+  unsubscribeUrl: string;
+  /** Validade do código Pix (só no caso "pix"). */
+  pixExpiresAt?: Date;
+}
+
+/** Lembrete de recuperação de venda (D3): sem nome do comprador, com link de descadastro no rodapé e nos cabeçalhos. */
+export function recoveryEmail(
+  kind: "lead" | "pix" | "card",
+  d: RecoveryEmailData,
+): { subject: string; html: string; text: string; headers: MailHeaders } {
+  const valor = brl(d.totalCents);
+  const until = d.pixExpiresAt ? dateTimeSP(d.pixExpiresAt) : "";
+  const reason = kind === "lead" ? "digitou este e-mail no checkout" : "iniciou uma compra";
+  const copy = {
+    lead: {
+      subject: (p: string) => `Sua compra de ${p} ficou pela metade`,
+      title: (p: string) => `Ainda dá tempo de garantir ${p}`,
+      body: (p: string, s: string) => `Você começou a comprar ${p} (${valor}) na ${s} e não terminou. Se quiser concluir, é só voltar:`,
+      button: "Concluir minha compra",
+    },
+    pix: {
+      subject: () => `Seu Pix de ${valor} ainda não foi pago`,
+      title: () => "Seu Pix está pronto para pagar",
+      body: (p: string, s: string) =>
+        `Você gerou um Pix de ${valor} para ${p} na ${s}, mas o pagamento ainda não chegou. O código vale até ${until}. Já pagou? Pode ignorar: o acesso chega assim que o banco confirmar.`,
+      button: "Ver o Pix",
+    },
+    card: {
+      subject: (p: string) => `Sua compra de ${p} não foi concluída`,
+      title: () => "O pagamento não foi concluído",
+      body: (p: string, s: string) =>
+        `Sua compra de ${p} (${valor}) na ${s} não foi concluída e nada foi cobrado. Você pode tentar de novo com Pix ou outro cartão:`,
+      button: "Tentar de novo",
+    },
+  }[kind];
+
+  const brandV = brandVars(d.brandColor);
+  const brand = brandV["--color-brand-strong"];
+  const product = oneLine(d.productName);
+  const store = oneLine(d.storeName);
+  const subject = copy.subject(product);
+  const title = copy.title(product);
+  const bodyText = copy.body(product, store);
+  const bodyHtml = copy.body(esc(d.productName), esc(d.storeName));
+  const optOut = `Não quero receber lembretes da ${store}`;
+
+  const body = `<tr><td style="padding:32px 32px 30px">
+<h1 style="margin:0;font-size:24px;line-height:1.3;letter-spacing:-0.01em">${esc(title)}</h1>
+<p style="margin:12px 0 20px;font-size:16px;color:${C.muted}">${bodyHtml}</p>
+${button(d.actionUrl, copy.button, brandV["--color-brand"], brandV["--color-on-brand"])}
+</td></tr>`;
+  const footer = `<p style="margin:0">Você recebeu este lembrete porque ${reason} na ${esc(d.storeName)}. Se não foi você, ignore este e-mail.</p>
+<p style="margin:6px 0 0"><a href="${esc(d.unsubscribeUrl)}" style="color:${C.muted}">Não quero receber lembretes da ${esc(d.storeName)}</a></p>`;
+
+  const text = [
+    title,
+    "",
+    bodyText,
+    `${copy.button}: ${oneLine(d.actionUrl)}`,
+    "",
+    `Você recebeu este lembrete porque ${reason} na ${store}. Se não foi você, ignore este e-mail.`,
+    `${optOut}: ${oneLine(d.unsubscribeUrl)}`,
+  ].join("\n");
+
+  return {
+    subject,
+    html: layout({ title: subject, storeName: d.storeName, brand, body, footer }),
+    text,
+    headers: cleanHeaders({ "List-Unsubscribe": `<${d.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" }),
   };
 }

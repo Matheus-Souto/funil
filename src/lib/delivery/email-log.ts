@@ -7,7 +7,7 @@ import { safeErrorMessage } from "@/lib/log";
 
 export const NOT_CONFIGURED = "E-mail não configurado";
 
-export type EmailKind = "delivery" | "seller_notice" | "test";
+export type EmailKind = "delivery" | "seller_notice" | "test" | "recovery";
 
 /** Registra um envio (destinatário só como sha256). Erro com no máximo 500 caracteres e sem dados de cartão. */
 export async function logEmail(

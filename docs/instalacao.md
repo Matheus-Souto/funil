@@ -692,8 +692,9 @@ em 5 segundos); uma consulta que passe de 5 segundos no banco é cortada e volta
 ## Abandono antes de comprar
 
 Muita gente digita o e-mail no checkout e sai sem criar o pedido. Com esta opção, a loja guarda o **e-mail e o celular**
-dessa pessoa por até 30 dias, para chamá-la à mão (copiar o e-mail, abrir o WhatsApp) e lembrá-la da compra. Não há
-e-mail automático de recuperação: a loja decide quem contatar.
+dessa pessoa por até 30 dias, para chamá-la à mão (copiar o e-mail, abrir o WhatsApp) e lembrá-la da compra. O lembrete
+automático por e-mail é opcional e tem seção própria (**Recuperação de vendas por e-mail**, abaixo); sem ele, a loja
+decide quem contatar.
 
 Isto **não é parecer jurídico**: é o desenho técnico e um roteiro. A loja é a **controladora** dos dados (quem decide
 para que e por quanto tempo guardar) e responde por eles; confirme com seu advogado ou encarregado de dados.
@@ -733,7 +734,7 @@ copiar e adaptar:
 
 | Pergunta | Resposta (adapte à sua loja) |
 |---|---|
-| **Finalidade** | Lembrar, uma vez e à mão, quem começou o checkout de um produto da loja e não concluiu a compra. |
+| **Finalidade** | Lembrar, uma vez (à mão ou pelo lembrete automático por e-mail, se ligado), quem começou o checkout de um produto da loja e não concluiu a compra. |
 | **Necessidade** | Só e-mail e celular, que a própria pessoa digitou no checkout. Nada além disso é coletado, e nada é comprado de terceiros. |
 | **Expectativa do titular** | Quem preenche o checkout espera ser lembrado da compra. O aviso aparece antes da coleta e diz quem guarda, para quê e por quanto tempo. |
 | **Salvaguardas** | Aviso prévio e visível; coleta mínima; apagado em 30 dias; botão **Não salvar meus dados** (para a coleta neste navegador e apaga o que foi guardado nesta visita e o que estiver aberto com o e-mail digitado); exclusão por pedido no painel; contato apaga-se na hora quando a pessoa compra; acesso restrito (dono, admin e suporte). |
@@ -766,8 +767,116 @@ papel. A única coisa que ele recebe são dois **números** em `metrics.summary`
 `leadsConverted` (quantos viraram pedido), que cobrem só os últimos 30 dias (a retenção dos contatos).
 
 **Proteção contra abuso.** A captura tem limites por IP e por loja (e o **Não salvar meus dados**, por IP e por
-visita); passou do limite, o pedido é ignorado em silêncio (o comprador nunca vê erro). Não há e-mail automático, então um contato falso só causa efeito se a loja o contatar à mão:
-confira antes de escrever para alguém.
+visita); passou do limite, o pedido é ignorado em silêncio (o comprador nunca vê erro). Sem a recuperação por e-mail
+ligada, um contato falso só causa efeito se a loja o contatar à mão: confira antes de escrever para alguém. Com ela
+ligada, valem os limites por endereço da seção seguinte.
+
+## Recuperação de vendas por e-mail
+
+A loja pode mandar **um** lembrete automático por e-mail, pelo próprio provedor de e-mail (SMTP ou Resend, seção 7), a
+quem começou a comprar e não pagou. Todo lembrete tem um link para a pessoa não receber mais. Isto **não é parecer
+jurídico** (veja **Base legal**, abaixo).
+
+**Como ligar.** Vem **desligado**. Em **Configurações**, marque **Mandar um lembrete por e-mail para quem não concluiu a
+compra**. Só liga com o e-mail da loja conectado (o provedor ativo em **Conexões** tem conexão salva); sem ele o painel
+avisa "Conecte o e-mail da loja em Conexões antes de ligar.". Embaixo, uma caixa por caso, que já vêm marcadas:
+**Digitou o e-mail e saiu antes do pedido** (precisa da captura de contato ligada, seção anterior), **Pix gerado e não
+pago** e **Cartão recusado**. Pelo MCP, mudar as configurações continua passando pela fila de aprovação. Ao ligar, nada
+sai para abandonos antigos: só entram casos das últimas 6 horas.
+
+**Os três casos e os prazos.** Uma varredura roda a cada 5 minutos e olha só o que foi criado (ou recusado) nas últimas
+6 horas. Worker parado por mais de 6 horas perde esses lembretes; nunca sai e-mail em massa depois de uma queda.
+
+| Caso | Quando sai | Para onde o botão leva |
+|---|---|---|
+| Contato (digitou o e-mail e saiu antes do pedido) | 60 min depois da captura, se o contato ainda estiver aberto | `/c/<oferta>?utm_source=recuperacao&utm_medium=email&utm_campaign=contato` |
+| Pix gerado e não pago | 30 min depois de gerado, só se faltar pelo menos 1 hora para o Pix vencer | `/o/<pedido>` (o Pix do pedido) |
+| Cartão recusado (pedido ainda pendente com pelo menos uma recusa) | 30 min depois da 1ª recusa | `/c/<oferta>?utm_source=recuperacao&utm_medium=email&utm_campaign=cartao` |
+
+Um lembrete por contato ou pedido. Só **endereços simples** recebem lembrete (letras, números e `. _ % + -` antes do
+`@`, domínio com ponto): endereço com comentário entre parênteses, vírgula, ponto e vírgula, aspas, colchetes, `<>` ou
+espaço é pulado. Por endereço, na loja: no máximo **1 lembrete a cada 24 horas e 3 em 30 dias**, somando os três casos.
+O limite vale para a **caixa de entrada**: variantes com `+` (`ana+promo@exemplo.com`) e, no Gmail, com pontos
+(`a.na@gmail.com`, também `@googlemail.com`) contam como o mesmo endereço. Não sai para quem já comprou a mesma oferta (pago, contestado ou reembolsado) nos últimos 30
+dias, nem para um pedido mais antigo quando o mesmo cliente tem um mais novo na mesma oferta (o lembrete vai para o mais
+novo). Quem digitou o e-mail e gerou o Pix recebe só o do Pix (o pedido converte o contato na hora). Teto da loja: 60
+lembretes por hora, dentro deles no máximo 10 do caso cartão; o excedente fica para a próxima varredura, ainda dentro
+das 6 horas. Antes de enviar, o app confere tudo de novo: se a pessoa pagou, descadastrou ou o contato foi apagado
+nesse meio-tempo, o lembrete não sai. **Oferta desativada:** contato e cartão só recebem lembrete com a oferta ativa,
+porque o botão leva ao checkout dela (a varredura nem os seleciona, e o envio confere de novo); o do Pix sai mesmo com
+a oferta desativada, porque a página do Pix (`/o/<pedido>`) continua funcionando. Os links nunca levam e-mail nem nome
+(o checkout não vem preenchido); com a UTM, a venda recuperada aparece como origem `recuperacao`.
+
+**Falha no envio.** Sem provedor de e-mail configurado ou com recusa definitiva do provedor (chave ou mensagem
+recusada), o lembrete fica como não enviado e não há nova tentativa (no pedido, a linha do tempo mostra **Lembrete por
+e-mail não enviado**). Com erro temporário (rede, tempo esgotado, limite do provedor, resposta 429 ou 5xx), a fila tenta
+de novo, mas só até 2 horas depois do horário previsto do lembrete (ou de quando ele entrou na fila, o que for mais
+tarde); depois disso desiste e o lembrete fica como não enviado. **Lembrete parado mais de 2 horas na fila não sai**
+(ex.: worker fora do ar): fica registrado como pulado, mesmo numa nova tentativa.
+
+**Os textos.** Fixos (a loja não edita), com o nome da loja, o produto (o produto principal; se a oferta tem mais de um,
+o nome da oferta) e o valor (contato: preço atual da oferta; Pix e cartão: total do pedido). Nunca o nome do comprador.
+
+| Caso | Assunto | Título | Corpo | Botão |
+|---|---|---|---|---|
+| Contato | Sua compra de {produto} ficou pela metade | Ainda dá tempo de garantir {produto} | Você começou a comprar {produto} ({valor}) na {loja} e não terminou. Se quiser concluir, é só voltar: | Concluir minha compra |
+| Pix | Seu Pix de {valor} ainda não foi pago | Seu Pix está pronto para pagar | Você gerou um Pix de {valor} para {produto} na {loja}, mas o pagamento ainda não chegou. O código vale até {data e hora de São Paulo}. Já pagou? Pode ignorar: o acesso chega assim que o banco confirmar. | Ver o Pix |
+| Cartão | Sua compra de {produto} não foi concluída | O pagamento não foi concluído | Sua compra de {produto} ({valor}) na {loja} não foi concluída e nada foi cobrado. Você pode tentar de novo com Pix ou outro cartão: | Tentar de novo |
+
+Rodapé de todos:
+
+> Você recebeu este lembrete porque {motivo} na {loja}. Se não foi você, ignore este e-mail.
+> **Não quero receber lembretes da {loja}**
+
+`{motivo}`: no caso contato, "digitou este e-mail no checkout"; nos casos Pix e cartão, "iniciou uma compra".
+
+**Descadastro.** O link do rodapé abre `/sair/<token>`, uma página com o botão de confirmar; só o botão (POST)
+descadastra, porque leitores de link e antivírus abrem links com GET. O e-mail também leva os cabeçalhos
+`List-Unsubscribe` e `List-Unsubscribe-Post` (descadastro de um clique pelo próprio Gmail ou Outlook). Descadastrar vale
+para a loja inteira (os três casos), sem prazo, e para a **caixa de entrada** (como no limite por endereço: quem
+descadastra `ana+promo@gmail.com` também não recebe em `ana@gmail.com` nem em `a.na@gmail.com`), e apaga os contatos
+abertos ou contatados do e-mail do link. Com o Resend,
+devolução (`email.bounced`) ou marcação como spam (`email.complained`) de **qualquer** e-mail da loja (inclusive o de
+acesso) também tira o endereço da recuperação. A loja guarda só o **hash** do e-mail descadastrado e o da caixa (sem
+eles não conseguiria respeitar o pedido). Link inventado, de outra loja ou vencido mostra "Este link não vale mais.".
+
+- **Proxy e CDN: não registre a URL de `/sair/`.** O token de descadastro vai no caminho da URL (`/sair/<token>`), como
+  a chave de envio em `/api/mcp/upload/`: desligue o log de URL para `/sair/` no proxy ou CDN.
+- **Confira o `TRUST_PROXY`** (seção 2). A página aceita até 30 confirmações por IP por hora na loja; com
+  `TRUST_PROXY` errado todo mundo parece ter o mesmo IP e o limite trava descadastros legítimos; com `TRUST_PROXY=0` o
+  IP é desconhecido e o limite por IP não vale.
+
+**Proteção do caso cartão.** Um robô que testa cartões roubados usa e-mails de outras pessoas; o lembrete não pode virar
+spam contra elas. O lembrete do cartão é pulado (e fica registrado como pulado) se o pedido teve mais de 3 recusas, se o
+disjuntor de cartão da loja disparou nas últimas 2 horas, se o IP do pedido teve mais de 3 recusas nas últimas 2 horas
+ou se o IP é desconhecido (por isso, de novo, o `TRUST_PROXY` correto). Valem também os limites por endereço e o teto de
+10 por hora. O texto não fala em "cartão recusado": diz que a compra não foi concluída, que nada foi cobrado e "se não
+foi você, ignore este e-mail".
+
+**Onde ver.** Sem item novo no menu. Em **Contatos**, a linha mostra "Lembrete enviado em {data}". No pedido, a linha do
+tempo mostra **Lembrete de pagamento por e-mail** (ou **Lembrete por e-mail não enviado**, se o provedor recusou),
+sem o destinatário. A visão geral ganha o cartão com **Lembretes enviados**, **Lembretes que viraram venda** e **Receita
+recuperada** do período (aparece depois do primeiro lembrete enviado). **Recuperada** = pedido pago (ou depois
+contestado ou reembolsado) da mesma oferta, do mesmo e-mail, até 7 dias depois do envio; a receita soma cada pedido uma
+vez, mesmo que ele tenha recebido dois lembretes. Os números contam os lembretes enviados no período.
+
+**Agentes de IA (MCP) e Telegram.** O MCP recebe só **números**, em `metrics.summary`, em qualquer papel:
+`recovery.sent` (lembretes enviados no período), `recovery.recovered`, `recovery.recoveredRevenueCents` (centavos) e
+`recovery.byCase` (`lead`, `pix`, `card`, cada um com `sent` e `recovered`). Nunca quem recebeu. O **Telegram não
+recebe nada** da recuperação (os avisos de abandono que já existem seguem iguais).
+
+**Retenção.** Cada lembrete fica guardado 90 dias, só com ids, hashes e datas (nunca e-mail, token nem link), e é
+apagado pela mesma rotina de hora em hora que apaga os contatos. O link de descadastro vale enquanto o lembrete existir;
+depois, mostra "Este link não vale mais." (a pessoa ainda pode responder a um e-mail da loja). Por isso os números da
+recuperação cobrem só os últimos 90 dias. A lista de descadastros (`email_optout`) não vence. O envio grava no
+histórico de e-mails (`email_log`) só o hash do destinatário. Os logs do app levam só ids, loja, caso e motivo.
+
+**Base legal.** Isto não é parecer jurídico; leve isto ao jurídico junto com o aviso do checkout (seção anterior). Caso contato: o
+aviso que a pessoa viu ("para falar com você se a compra não for concluída" e "só para lembrar você desta compra") cobre
+um lembrete; base **legítimo interesse** (LGPD, art. 7º, IX), como na captura de contato; registre o teste de
+balanceamento (o modelo da seção anterior serve). Casos Pix e cartão: a pessoa iniciou o pedido; o lembrete do próprio
+pedido cabe em **procedimentos preliminares do contrato a pedido do titular** (art. 7º, V) ou em legítimo interesse.
+Em todos: link de saída de um clique e nenhum uso além do lembrete.
 
 ## 14. Problemas comuns
 

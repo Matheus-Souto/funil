@@ -874,6 +874,16 @@ describe("SMTP: rede restrita no modo multi (SSRF) e senha", () => {
     expect(transports.at(-1)).toMatchObject({ host: "203.0.114.7", servername: "smtp.exemplo.com" });
   });
 
+  test("headers de descadastro chegam ao SMTP; mensagem sem headers sai como antes", async () => {
+    const { storeId } = await seedStore();
+    await runAction(saveSmtp, panel(storeId), SMTP);
+    const headers = { "List-Unsubscribe": "<https://loja.exemplo.com/sair/t>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } as const;
+    await sendMail(storeId, { to: "a@b.co", subject: "x", html: "x", text: "x", headers });
+    await sendMail(storeId, { to: "c@d.co", subject: "x", html: "x", text: "x" });
+    expect(outbox.find((m) => m.to === "a@b.co")!.headers).toEqual(headers);
+    expect("headers" in outbox.find((m) => m.to === "c@d.co")!).toBe(false);
+  });
+
   test("modo restrito: erro de autenticação também vira a mensagem genérica", async () => {
     const { storeId } = await seedStore();
     strict({ "smtp.exemplo.com": ["198.51.200.10"] });

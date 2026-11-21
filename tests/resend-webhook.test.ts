@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { runAction } from "@/lib/actions/core";
 import { listAlerts } from "@/lib/alerts";
 import { withStore } from "@/lib/db/client";
-import { emailLog } from "@/lib/db/schema";
+import { emailLog, emailOptout } from "@/lib/db/schema";
 import { saveResend } from "@/lib/delivery/resend";
 import { POST } from "@/app/api/webhooks/resend/[storeId]/route";
 import { applyResendEvent, handleResendWebhook } from "@/lib/delivery/resend-webhook";
@@ -67,9 +67,15 @@ const send = (storeId: string, secret: string, type: string, emailId = ID) => {
   return handleResendWebhook(storeId, headers, body);
 };
 const rowsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(emailLog));
-async function seedMail(storeId: string, orderId: string | null, messageId = ID, at?: Date) {
-  await t.ownerDb.insert(emailLog).values({ storeId, orderId, toHash: "x", kind: "delivery", status: "sent", provider: "resend", providerMessageId: messageId, ...(at ? { at } : {}) });
+async function seedMail(storeId: string, orderId: string | null, messageId = ID, at?: Date, over: { toHash?: string; kind?: string } = {}) {
+  await t.ownerDb
+    .insert(emailLog)
+    .values({ storeId, orderId, toHash: over.toHash ?? "x", kind: over.kind ?? "delivery", status: "sent", provider: "resend", providerMessageId: messageId, ...(at ? { at } : {}) });
 }
+const optoutsOf = async (storeId: string) =>
+  (await withStore(storeId, (tx) => tx.select({ emailHash: emailOptout.emailHash, reason: emailOptout.reason }).from(emailOptout))).sort((a, b) =>
+    a.emailHash.localeCompare(b.emailHash),
+  );
 
 describe("status de entrega do Resend", () => {
   test("entregue grava delivered e a data", async () => {
@@ -134,6 +140,42 @@ describe("status de entrega do Resend", () => {
     await seedMail(b.storeId, null, "msg_da_loja_b");
     expect(await send(a.storeId, a.secret, "email.bounced", "msg_da_loja_b")).toEqual({ status: 200 });
     expect((await rowsOf(b.storeId))[0]!.deliveryStatus).toBeNull();
+  });
+});
+
+describe("supressão por devolução ou spam (email_optout)", () => {
+  const hashOf = (n: string) => n.repeat(64).slice(0, 64);
+
+  test("bounced e complained gravam email_optout com o to_hash", async () => {
+    const { storeId, secret } = await seedResendStore();
+    await seedMail(storeId, null, "msg_devolvido", undefined, { toHash: hashOf("a"), kind: "recovery" });
+    await seedMail(storeId, null, "msg_spam", undefined, { toHash: hashOf("b"), kind: "delivery" });
+    await seedMail(storeId, null, "msg_entregue", undefined, { toHash: hashOf("c") });
+    expect(await send(storeId, secret, "email.bounced", "msg_devolvido")).toEqual({ status: 200 });
+    expect(await send(storeId, secret, "email.complained", "msg_spam")).toEqual({ status: 200 });
+    expect(await send(storeId, secret, "email.delivered", "msg_entregue")).toEqual({ status: 200 });
+    expect(await optoutsOf(storeId)).toEqual([
+      { emailHash: hashOf("a"), reason: "bounce" },
+      { emailHash: hashOf("b"), reason: "complaint" },
+    ]);
+    // Repetido ou outro motivo para o mesmo e-mail: on conflict do nothing (fica o primeiro motivo), sem erro.
+    expect(await send(storeId, secret, "email.complained", "msg_devolvido")).toEqual({ status: 200 });
+    expect(await send(storeId, secret, "email.bounced", "msg_devolvido")).toEqual({ status: 200 });
+    expect(await optoutsOf(storeId)).toEqual([
+      { emailHash: hashOf("a"), reason: "bounce" },
+      { emailHash: hashOf("b"), reason: "complaint" },
+    ]);
+    expect((await rowsOf(storeId)).find((r) => r.providerMessageId === "msg_devolvido")!.deliveryStatus).toBe("bounced");
+  });
+
+  test("evento de e-mail desconhecido ou de outra loja não grava email_optout", async () => {
+    const a = await seedResendStore();
+    const b = await seedResendStore();
+    await seedMail(b.storeId, null, "msg_da_loja_b", undefined, { toHash: hashOf("d") });
+    await send(a.storeId, a.secret, "email.bounced", "msg_da_loja_b");
+    await send(a.storeId, a.secret, "email.complained", "msg_que_nao_existe");
+    expect(await optoutsOf(a.storeId)).toEqual([]);
+    expect(await optoutsOf(b.storeId)).toEqual([]);
   });
 });
 

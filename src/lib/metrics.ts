@@ -1,10 +1,15 @@
 // Métricas da visão geral do painel. Dinheiro em centavos inteiros (somas em bigint no banco, convertidas uma vez).
 // Receita = soma de `total_cents` dos pedidos `paid` com `paid_at` no período: reembolsados e contestados ficam fora.
+// Recuperação por e-mail (`recovery`): só números, contando os lembretes `sent` com `sent_at` no período. Recuperado =
+// existe pedido pago, contestado ou reembolsado da mesma oferta, de cliente com o mesmo sha256 do e-mail, com `paid_at`
+// entre `sent_at` e `sent_at + 7 dias`. Receita recuperada = soma de `total_cents` desses pedidos, cada pedido uma vez.
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { checkoutLead, checkoutView, orders } from "@/lib/db/schema";
 import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
+import { WAS_PAID } from "@/lib/recovery/checks";
+import { RECOVERY } from "@/lib/recovery/rules";
 
 export type Method = "pix_manual" | "pix_asaas" | "card_asaas";
 export const METHODS: readonly Method[] = ["pix_manual", "pix_asaas", "card_asaas"];
@@ -53,10 +58,56 @@ const money = (col: unknown) => sql<number>`coalesce(sum(${col}), 0)::bigint`.ma
 const n = () => count().mapWith(Number);
 
 type MethodRow = { orders: number; paid: number; revenueCents: number };
+export type RecoveryCase = "lead" | "pix" | "card";
+export const RECOVERY_CASES: readonly RecoveryCase[] = ["lead", "pix", "card"];
+export interface RecoverySummary {
+  sent: number;
+  recovered: number;
+  recoveredRevenueCents: number;
+  byCase: Record<RecoveryCase, { sent: number; recovered: number }>;
+}
+
+/**
+ * O pedido `o` (cliente `c`) recupera o lembrete `r`: mesma loja e oferta, pago, contestado ou reembolsado, pago entre o
+ * envio e 7 dias depois, e cliente com o mesmo sha256 do e-mail (`customer.email` já é gravado minúsculo e sem espaços).
+ * SQL escrito à mão com aliases: as três tabelas têm `store_id`/`status` e o drizzle não qualifica colunas de uma
+ * consulta de tabela única. Só constantes do código entram com `sql.raw`.
+ */
+const RECOVERS = sql.raw(`o.store_id = r.store_id
+  and o.offer_id = r.offer_id
+  and o.status in (${WAS_PAID.map((x) => `'${x}'`).join(", ")})
+  and o.paid_at >= r.sent_at
+  and o.paid_at <= r.sent_at + interval '${RECOVERY.attributionDays} days'
+  and encode(sha256(convert_to(c.email, 'UTF8')), 'hex') = r.email_hash`);
+
+async function recoverySummary(ctx: Ctx, from: Date, to: Date): Promise<RecoverySummary> {
+  const sentIn = sql`r.status = 'sent' and r.sent_at >= ${from.toISOString()}::timestamptz and r.sent_at < ${to.toISOString()}::timestamptz`;
+  const rows = (await ctx.tx.execute(sql`
+    select r.kind,
+      count(*)::int as sent,
+      (count(*) filter (where exists (select 1 from orders o join customer c on c.id = o.customer_id where ${RECOVERS})))::int as recovered
+    from recovery_email r
+    where ${sentIn}
+    group by r.kind`)) as unknown as Array<{ kind: string; sent: number; recovered: number }>;
+  // Cada pedido uma vez, mesmo com vários lembretes que ele recupera.
+  const [rev] = (await ctx.tx.execute(sql`
+    select coalesce(sum(o.total_cents), 0)::bigint as cents
+    from orders o join customer c on c.id = o.customer_id
+    where exists (select 1 from recovery_email r where ${sentIn} and ${RECOVERS})`)) as unknown as Array<{ cents: string | number }>;
+
+  const byCase = Object.fromEntries(RECOVERY_CASES.map((k) => [k, { sent: 0, recovered: 0 }])) as RecoverySummary["byCase"];
+  for (const r of rows) if (Object.hasOwn(byCase, r.kind)) byCase[r.kind as RecoveryCase] = { sent: Number(r.sent), recovered: Number(r.recovered) };
+  return {
+    sent: RECOVERY_CASES.reduce((a, k) => a + byCase[k].sent, 0),
+    recovered: RECOVERY_CASES.reduce((a, k) => a + byCase[k].recovered, 0),
+    recoveredRevenueCents: Number(rev?.cents ?? 0),
+    byCase,
+  };
+}
 
 export const metricsSummary = defineAction({
   name: "metrics.summary",
-  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve.",
+  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve. recovery: lembretes de recuperação por e-mail enviados no período (sent), quantos viraram venda da mesma oferta e do mesmo e-mail em até 7 dias (recovered), a receita desses pedidos (recoveredRevenueCents) e os mesmos números por caso (lead, pix, card); cobre só os últimos 90 dias (retenção dos lembretes).",
   input: range,
   permission: "metrics.read",
   audit: false,
@@ -112,6 +163,7 @@ export const metricsSummary = defineAction({
         .map((r) => ({ ref: r.ref!, paid: r.paid, revenueCents: r.revenueCents }))
         .sort(byRevenue((x) => x.ref))
         .slice(0, 50),
+      recovery: await recoverySummary(ctx, from, to),
     };
   },
 });
