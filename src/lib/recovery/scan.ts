@@ -1,7 +1,12 @@
 // Varredura `recovery_scan` (job global, a cada 5 min, agendada junto do `expire_orders`): loja a loja, com a recuperação
 // ligada, escolhe os candidatos dos três casos (contato do checkout, Pix não pago, cartão recusado) que venceram o prazo
-// e nasceram há no máximo 6 h (contato e cartão só com a oferta ativa: o link leva ao checkout), aplica supressão, dedupe por endereço, "já comprou", tetos e a proteção do cartão, grava
-// `recovery_email` e enfileira `recovery_send` na mesma transação.
+// e nasceram há no máximo 6 h (contato e cartão só com a oferta ativa: o link leva ao checkout), aplica endereço simples,
+// supressão, dedupe por caixa, "já comprou", tetos e a proteção do cartão, grava `recovery_email` e enfileira
+// `recovery_send` na mesma transação.
+//
+// - Endereço não simples (`simpleAddress`): `skipped endereco_invalido`. O limite por endereço (24 h e 30 dias) conta
+//   pela caixa (`mailbox_hash`: sem `+sufixo` e, no Gmail, sem pontos) e o descadastro casa o hash exato ou o da caixa;
+//   "já comprou" segue pelo e-mail exato.
 //
 // - Uma transação por loja, com lock consultivo por loja: duas varreduras ao mesmo tempo não escolhem o mesmo candidato
 //   (e os únicos de `recovery_email` seguram o resto). Todo id gravado (contato, pedido, oferta) vem de consulta feita
@@ -20,7 +25,7 @@ import { log } from "@/lib/log";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { countRecentEvents, hadRecentEvent, ipRateKey } from "@/lib/payments/ratelimit";
 import { alreadyBought, hasNewerOrder, optedOut } from "./checks";
-import { RECOVERY, recoveryEmailHash } from "./rules";
+import { RECOVERY, mailboxHash, recoveryEmailHash, simpleAddress } from "./rules";
 
 const MIN_MS = 60_000;
 const HOUR_MS = 60 * MIN_MS;
@@ -30,7 +35,7 @@ const DAY_MS = 24 * HOUR_MS;
 const LIVE = ["queued", "sending", "sent"];
 
 export type RecoveryKind = "lead" | "pix" | "card";
-export type RecoverySkipReason = "optout" | "endereco_24h" | "endereco_30d" | "ja_comprou" | "pedido_mais_novo" | "cartao_suspeito";
+export type RecoverySkipReason = "endereco_invalido" | "optout" | "endereco_24h" | "endereco_30d" | "ja_comprou" | "pedido_mais_novo" | "cartao_suspeito";
 
 interface Candidate {
   kind: RecoveryKind;
@@ -211,8 +216,9 @@ async function cardSuspicious(storeId: string, o: NonNullable<Candidate["order"]
 }
 
 /** Motivo para pular com linha (o candidato não volta), ou `null` se o lembrete pode sair. */
-async function skipReason(tx: Tx, storeId: string, c: Candidate, hash: string, t: Date): Promise<RecoverySkipReason | null> {
-  if (await optedOut(tx, storeId, hash)) return "optout";
+async function skipReason(tx: Tx, storeId: string, c: Candidate, hash: string, mailbox: string, t: Date): Promise<RecoverySkipReason | null> {
+  if (simpleAddress(c.email) === null) return "endereco_invalido";
+  if (await optedOut(tx, storeId, hash, mailbox)) return "optout";
   if (await alreadyBought(tx, c.offerId, c.email, t)) return "ja_comprou";
   if (c.order && (await hasNewerOrder(tx, { id: c.orderId!, customerId: c.order.customerId, offerId: c.offerId, createdAt: c.order.createdAt }))) {
     return "pedido_mais_novo";
@@ -223,7 +229,7 @@ async function skipReason(tx: Tx, storeId: string, c: Candidate, hash: string, t
   const sameAddress = (since: Date) =>
     and(
       eq(recoveryEmail.storeId, storeId),
-      eq(recoveryEmail.emailHash, hash),
+      eq(recoveryEmail.mailboxHash, mailbox),
       inArray(recoveryEmail.status, LIVE),
       gt(recoveryEmail.createdAt, since),
     );
@@ -257,7 +263,8 @@ async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
     // Primeiro os motivos de pulo (com linha, definitivo, avaliado com a evidência fresca); a linha `skipped` não gasta
     // teto. Só depois os tetos: um candidato suspeito nunca fica adiado esperando a evidência sair da janela.
     const hash = recoveryEmailHash(c.email);
-    const reason = await skipReason(tx, storeId, c, hash, t);
+    const mailbox = mailboxHash(c.email);
+    const reason = await skipReason(tx, storeId, c, hash, mailbox, t);
     // Pula sem linha: teto da hora da loja ou do caso cartão (volta na próxima varredura).
     if (reason === null && (storeCount >= RECOVERY.storePerHour || (c.kind === "card" && cardCount >= RECOVERY.cardPerHour))) {
       deferred++;
@@ -273,6 +280,7 @@ async function scanStore(tx: Tx, f: StoreFlags, t: Date): Promise<void> {
         orderId: c.orderId,
         offerId: c.offerId,
         emailHash: hash,
+        mailboxHash: mailbox,
         status: reason === null ? "queued" : "skipped",
         skipReason: reason,
         // Pulado: um hash qualquer (a coluna é obrigatória e única); nenhum link de descadastro sai para ele.

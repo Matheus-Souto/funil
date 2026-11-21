@@ -222,6 +222,7 @@ describe("papel card: atributos e o que fica de fora", () => {
       offerId: shop.offerId,
       kind: "lead",
       emailHash: hash,
+      mailboxHash: hash,
       unsubHash: randomBytes(32).toString("hex"),
       dueAt: new Date(),
       expiresAt: new Date(Date.now() + 60_000),

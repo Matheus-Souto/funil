@@ -454,11 +454,13 @@ const insertLead = async (s: { storeId: string; offerId: string }, over: Partial
 const auditOf = (storeId: string) => t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId));
 /** Lembrete de recuperação do caso contato (sem pedido), enviado há pouco e vencendo em 90 dias, salvo `over`. */
 function reminder(s: { storeId: string; offerId: string }, over: Partial<typeof recoveryEmail.$inferInsert> = {}): typeof recoveryEmail.$inferInsert {
+  const h = over.emailHash ?? sha(randomUUID());
   return {
     storeId: s.storeId,
     kind: "lead",
     offerId: s.offerId,
-    emailHash: sha(randomUUID()),
+    emailHash: h,
+    mailboxHash: h,
     status: "sent",
     unsubHash: sha(randomUUID()),
     dueAt: new Date(Date.now() - 3_600_000),

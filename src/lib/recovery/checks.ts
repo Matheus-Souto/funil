@@ -10,12 +10,16 @@ const DAY_MS = 86_400_000;
 /** Pedido que já foi pago em algum momento (pago, contestado ou reembolsado). */
 export const WAS_PAID = ["paid", "disputed", "refunded"];
 
-/** O e-mail (pelo sha256) está em `email_optout` da loja. */
-export async function optedOut(tx: Tx, storeId: string, emailHash: string): Promise<boolean> {
+/**
+ * O e-mail está em `email_optout` da loja: casa o hash exato (`email_hash`) ou o da caixa (`mailbox_hash`). O descadastro
+ * grava os dois; a devolução e a reclamação do Resend gravam o hash exato do destinatário.
+ */
+export async function optedOut(tx: Tx, storeId: string, emailHash: string, mailboxHash: string): Promise<boolean> {
   const [row] = await tx
     .select({ h: emailOptout.emailHash })
     .from(emailOptout)
-    .where(and(eq(emailOptout.storeId, storeId), eq(emailOptout.emailHash, emailHash)));
+    .where(and(eq(emailOptout.storeId, storeId), inArray(emailOptout.emailHash, [emailHash, mailboxHash])))
+    .limit(1);
   return row !== undefined;
 }
 

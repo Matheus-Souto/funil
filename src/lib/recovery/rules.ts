@@ -1,4 +1,5 @@
-// Prazos, janelas e tetos da recuperação de vendas por e-mail (fixos no código) e o hash do e-mail.
+// Prazos, janelas e tetos da recuperação de vendas por e-mail (fixos no código), o hash do e-mail, o endereço simples e
+// a chave da caixa de entrada.
 import { sha256 } from "@/lib/crypto";
 
 export const RECOVERY = {
@@ -28,7 +29,10 @@ export const RECOVERY = {
   cardIpDeclinesMax: 3,
   /** Janela do disjuntor da loja e das recusas por IP. */
   cardSuspicionWindowHours: 2,
-  /** Envio: erro temporário tenta de novo só até 2 h depois do horário previsto. */
+  /**
+   * Envio: o lembrete só sai até 2 h depois de enfileirado (`created_at`); depois, `skipped atrasado`. Erro temporário
+   * tenta de novo só até 2 h depois de `max(due_at, created_at)`.
+   */
   sendGraceMin: 120,
   /** Retenção de `recovery_email`. */
   retentionDays: 90,
@@ -38,3 +42,39 @@ export const RECOVERY = {
 
 /** sha256 em hex do e-mail normalizado: o mesmo de `email_log.to_hash` e `checkout_lead.email_hash`. */
 export const recoveryEmailHash = (email: string): string => sha256(email.trim().toLowerCase());
+
+/**
+ * Endereço simples: letras, dígitos e `._%+-` na parte local, domínio com ponto. Sem comentário `(...)`, vírgula, ponto
+ * e vírgula, aspas, colchetes, `<>` nem espaço: o nodemailer entrega `"(c1)a@x.com"` ou `"x,a@x.com"` na caixa
+ * `a@x.com`, e cada variante passaria como endereço novo no limite por endereço e no descadastro.
+ */
+const SIMPLE = /^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+
+/** O endereço normalizado (trim + minúsculas) se for simples; `null` se não for (a recuperação não manda para ele). */
+export function simpleAddress(email: string): string | null {
+  const v = email.trim().toLowerCase();
+  return SIMPLE.test(v) ? v : null;
+}
+
+const GMAIL = new Set(["gmail.com", "googlemail.com"]);
+
+/**
+ * Chave canônica da caixa de entrada: parte local sem o `+sufixo`; no Gmail (`gmail.com` e `googlemail.com`), também
+ * sem pontos e com o domínio `gmail.com`. `a+1@gmail.com`, `a.b@googlemail.com` e `ab@gmail.com` caem na mesma caixa.
+ * Endereço não simples (pulado na varredura e no envio) fica só normalizado.
+ */
+export function mailboxKey(email: string): string {
+  const v = simpleAddress(email);
+  if (v === null) return email.trim().toLowerCase();
+  const at = v.lastIndexOf("@");
+  let local = v.slice(0, at).split("+")[0]!;
+  let domain = v.slice(at + 1);
+  if (GMAIL.has(domain)) {
+    local = local.replaceAll(".", "");
+    domain = "gmail.com";
+  }
+  return `${local}@${domain}`;
+}
+
+/** sha256 em hex da chave da caixa (`recovery_email.mailbox_hash`): limite por endereço e descadastro valem para a caixa. */
+export const mailboxHash = (email: string): string => sha256(mailboxKey(email));

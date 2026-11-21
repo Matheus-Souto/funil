@@ -34,14 +34,15 @@ async function seedShop(name = "Maná Kids"): Promise<Shop> {
   return { storeId: p.storeId, offerId: p.offerId, name: s!.name, resolve: async () => ({ id: p.storeId, slug: s!.slug, name: s!.name }) };
 }
 
-/** Lembrete enviado para `email`, com o token de descadastro em claro (só existe no link do e-mail). */
-async function seedReminder(shop: Shop, email: string): Promise<string> {
+/** Lembrete enviado para `email` (caixa `mailbox`), com o token de descadastro em claro (só existe no link do e-mail). */
+async function seedReminder(shop: Shop, email: string, mailbox = email): Promise<string> {
   const token = randomToken(32);
   await t.ownerDb.insert(recoveryEmail).values({
     storeId: shop.storeId,
     offerId: shop.offerId,
     kind: "lead",
     emailHash: sha(email),
+    mailboxHash: sha(mailbox),
     unsubHash: sha(token),
     status: "sent",
     dueAt: new Date(),
@@ -149,6 +150,29 @@ describe("descadastro /sair/<token>", () => {
     expect(again.status).toBe(200);
     expect(await again.text()).toContain("Pronto: a ");
     expect(await optoutsOf(shop.storeId)).toHaveLength(1);
+  });
+
+  test("POST de um lembrete para variante (+sufixo) → optout do e-mail exato e da caixa; contatos apagados só pelo exato", async () => {
+    const shop = await seedShop();
+    const id = randomUUID().slice(0, 8);
+    const variant = `cliente.${id}+promo@exemplo.com`;
+    const plain = `cliente.${id}@exemplo.com`;
+    const token = await seedReminder(shop, variant, plain);
+    await seedLead(shop, variant, "open");
+    const keep = await seedLead(shop, plain, "open");
+    const r = await post(shop, token, { ip: newIp() });
+    expect(r.status).toBe(200);
+    const rows = await optoutsOf(shop.storeId);
+    expect(rows.map((o) => [o.emailHash, o.reason]).sort()).toEqual(
+      [
+        [sha(variant), "unsubscribe"],
+        [sha(plain), "unsubscribe"],
+      ].sort(),
+    );
+    expect(await leadIdsOf(shop.storeId)).toEqual([keep]);
+    // De novo: nada duplicado.
+    await post(shop, token, { ip: newIp() });
+    expect(await optoutsOf(shop.storeId)).toHaveLength(2);
   });
 
   test("POST com corpo List-Unsubscribe=One-Click → optout gravado", async () => {

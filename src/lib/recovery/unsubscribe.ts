@@ -5,8 +5,9 @@
 //   fazem GET.
 // - POST (`recovery.unsubscribe`): o botão da página ou o um clique do RFC 8058 (`List-Unsubscribe=One-Click`, postado
 //   pelo servidor do provedor de e-mail, sem sessão nem Origin). Os dois descadastram; não há CSRF token: o próprio token
-//   do link é a autorização. Grava `email_optout` (`unsubscribe`, on conflict do nothing) e apaga os contatos `open` ou
-//   `contacted` da loja com o mesmo `email_hash` (o convertido em pedido fica). Idempotente.
+//   do link é a autorização. Grava em `email_optout` (`unsubscribe`, on conflict do nothing) duas linhas, o `email_hash`
+//   e o `mailbox_hash` do lembrete (o descadastro vale para a caixa: variantes com `+` e pontos do Gmail), e apaga os
+//   contatos `open` ou `contacted` da loja com o mesmo `email_hash` (o convertido em pedido fica). Idempotente.
 // - O token em claro só existe no link; `recovery_email.unsub_hash` guarda o sha256. A linha é procurada SEMPRE na
 //   transação da ação (RLS da loja do host): token de outra loja não é encontrado. Formato conferido antes da consulta.
 //   Vencido (`expires_at <= now()`, ainda não varrido), de outra loja, inventado ou malformado: a mesma página neutra.
@@ -39,14 +40,14 @@ async function storeName(ctx: Ctx): Promise<string> {
   return s?.name ?? "";
 }
 
-/** `email_hash` do lembrete do token, na loja da transação (RLS), se o link ainda vale; malformado nem consulta. */
-async function emailHashOf(ctx: Ctx, token: string): Promise<string | null> {
+/** Hashes (exato e da caixa) do lembrete do token, na loja da transação (RLS), se o link ainda vale; malformado nem consulta. */
+async function hashesOf(ctx: Ctx, token: string): Promise<{ emailHash: string; mailboxHash: string } | null> {
   if (!TOKEN_RE.test(token)) return null;
   const [row] = await ctx.tx
-    .select({ emailHash: recoveryEmail.emailHash })
+    .select({ emailHash: recoveryEmail.emailHash, mailboxHash: recoveryEmail.mailboxHash })
     .from(recoveryEmail)
     .where(and(eq(recoveryEmail.storeId, ctx.storeId), eq(recoveryEmail.unsubHash, sha256(token)), gt(recoveryEmail.expiresAt, sql`now()`)));
-  return row?.emailHash ?? null;
+  return row ?? null;
 }
 
 /** GET: só confere o link (não grava nada). */
@@ -57,7 +58,7 @@ export const unsubscribeView = defineAction({
   permission: "public",
   audit: false,
   async run(ctx, { token }) {
-    return { storeName: await storeName(ctx), valid: (await emailHashOf(ctx, token)) !== null };
+    return { storeName: await storeName(ctx), valid: (await hashesOf(ctx, token)) !== null };
   },
 });
 
@@ -74,9 +75,14 @@ export const unsubscribe = defineAction<z.infer<typeof input>, { done: boolean; 
       throw new ActionError("rate_limited", "Muitas tentativas");
     }
     const name = await storeName(ctx);
-    const emailHash = await emailHashOf(ctx, token);
-    if (emailHash === null) return { done: false, storeName: name };
-    await ctx.tx.insert(emailOptout).values({ storeId: ctx.storeId, emailHash, reason: "unsubscribe" }).onConflictDoNothing();
+    const h = await hashesOf(ctx, token);
+    if (h === null) return { done: false, storeName: name };
+    const { emailHash, mailboxHash } = h;
+    // O hash exato e o da caixa (iguais quando o endereço não tem `+` nem é do Gmail: uma linha só).
+    await ctx.tx
+      .insert(emailOptout)
+      .values([...new Set([emailHash, mailboxHash])].map((v) => ({ storeId: ctx.storeId, emailHash: v, reason: "unsubscribe" as const })))
+      .onConflictDoNothing();
     await ctx.tx
       .delete(checkoutLead)
       .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.emailHash, emailHash), inArray(checkoutLead.status, ["open", "contacted"])));

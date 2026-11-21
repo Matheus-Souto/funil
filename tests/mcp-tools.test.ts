@@ -463,6 +463,7 @@ describe("callMcpTool", () => {
       kind: "lead",
       offerId: m.offerId,
       emailHash: sha(email),
+      mailboxHash: sha(email),
       status: "sent",
       unsubHash: sha(randomUUID()),
       dueAt: new Date(now - 3_600_000),

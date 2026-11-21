@@ -123,6 +123,7 @@ describe("metrics.summary", () => {
       kind,
       offerId: p.offerId,
       emailHash: sha(email),
+      mailboxHash: sha(email),
       status: "sent",
       unsubHash: sha(randomUUID()),
       dueAt: over.sentAt ?? at(HOUR),

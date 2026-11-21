@@ -15,8 +15,10 @@ import { dateTimeSP } from "@/lib/format";
 import type { Job } from "@/lib/jobs";
 import { cardBreakerKey, cardDeclineIpKey } from "@/lib/payments/card-keys";
 import { recordEvent } from "@/lib/payments/ratelimit";
+import { mailboxHash, mailboxKey, simpleAddress } from "@/lib/recovery/rules";
 import { createRecoveryScanHandler } from "@/lib/recovery/scan";
 import { createRecoverySendHandler } from "@/lib/recovery/send";
+import { unsubscribe } from "@/lib/recovery/unsubscribe";
 import { createTestDb, seedStore, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
@@ -50,11 +52,14 @@ function row(
   kind: "lead" | "pix" | "card",
   over: Partial<typeof recoveryEmail.$inferInsert> = {},
 ): typeof recoveryEmail.$inferInsert {
+  // Sem `mailboxHash` explícito, a caixa é a do próprio e-mail (endereço simples sem `+` nem Gmail: o mesmo hash).
+  const h = over.emailHash ?? sha(randomUUID());
   return {
     storeId,
     offerId,
     kind,
-    emailHash: sha(randomUUID()),
+    emailHash: h,
+    mailboxHash: h,
     unsubHash: sha(randomUUID()),
     dueAt: new Date(),
     expiresAt: new Date(Date.now() + 90 * DAY_MS),
@@ -70,6 +75,42 @@ async function seedLead(storeId: string, offerId: string): Promise<string> {
     .returning({ id: checkoutLead.id });
   return l!.id;
 }
+
+describe("endereço simples e caixa (rules.ts)", () => {
+  test("simpleAddress: normaliza (trim + minúsculas) só o endereço simples; o resto é null", () => {
+    expect(simpleAddress("  Victim+1@Gmail.COM ")).toBe("victim+1@gmail.com");
+    expect(simpleAddress("jo.ao_silva%x-y@sub.exemplo.com.br")).toBe("jo.ao_silva%x-y@sub.exemplo.com.br");
+    for (const bad of [
+      "(c1)victim@x.com",
+      "x,victim@x.com",
+      "a;victim@x.com",
+      '"victim"@x.com',
+      "victim@[10.0.0.1]",
+      "<victim@x.com>",
+      "Vítima <victim@x.com>",
+      "vic tim@x.com",
+      "victim@x",
+      "victim@x.com.",
+      "victim@@x.com",
+      "victim",
+      "",
+    ]) {
+      expect(simpleAddress(bad)).toBeNull();
+    }
+  });
+
+  test("mailboxKey: sem +sufixo; Gmail e googlemail sem pontos e com domínio gmail.com; outros domínios mantêm os pontos", () => {
+    expect(mailboxKey("victim+1@gmail.com")).toBe("victim@gmail.com");
+    expect(mailboxKey("v.ictim@gmail.com")).toBe("victim@gmail.com");
+    expect(mailboxKey(" V.Ic.Tim+promo+2@GoogleMail.com ")).toBe("victim@gmail.com");
+    expect(mailboxKey("victim@gmail.com")).toBe("victim@gmail.com");
+    expect(mailboxKey("jo.ao+loja@exemplo.com.br")).toBe("jo.ao@exemplo.com.br");
+    expect(mailboxKey("jo.ao@exemplo.com.br")).toBe("jo.ao@exemplo.com.br");
+    expect(mailboxKey("v.ictim@gmail.com.br")).toBe("v.ictim@gmail.com.br");
+    expect(mailboxHash("victim+1@gmail.com")).toBe(sha("victim@gmail.com"));
+    expect(mailboxHash("v.ictim@googlemail.com")).toBe(sha("victim@gmail.com"));
+  });
+});
 
 describe("recovery_email e email_optout", () => {
   test("RLS: recovery_email e email_optout de outra loja não aparecem", async () => {
@@ -493,6 +534,57 @@ describe("recovery_scan", () => {
     expect(await rowsOf(s.storeId)).toHaveLength(1);
   });
 
+  test("variantes da mesma caixa (+sufixo, pontos do Gmail) → 1 queued e as outras skipped endereco_24h", async () => {
+    const s = await shop();
+    const variants = ["victim+1@gmail.com", "v.ictim@gmail.com", "victim@gmail.com"];
+    const ls = [];
+    // A mais antiga (pelo momento previsto) é a primeira da varredura.
+    for (const [i, email] of variants.entries()) ls.push(await lead(s, ago((63 - i) * MIN), { email, emailHash: sha(email) }));
+    await scan();
+    const rows = await rowsOf(s.storeId);
+    const of = (id: string) => rows.find((r) => r.leadId === id);
+    expect(of(ls[0]!.id)).toMatchObject({ status: "queued", skipReason: null });
+    expect(of(ls[1]!.id)).toMatchObject({ status: "skipped", skipReason: "endereco_24h" });
+    expect(of(ls[2]!.id)).toMatchObject({ status: "skipped", skipReason: "endereco_24h" });
+    // O hash exato continua o do texto digitado; a caixa é a mesma para as três.
+    for (const [i, email] of variants.entries()) {
+      expect(of(ls[i]!.id)!.emailHash).toBe(sha(email));
+      expect(of(ls[i]!.id)!.mailboxHash).toBe(sha("victim@gmail.com"));
+    }
+    expect(await sendJobsOf(s.storeId)).toHaveLength(1);
+  });
+
+  test('endereço não simples ("(c1)victim@x.com", "x,victim@x.com") → skipped endereco_invalido, nenhum job', async () => {
+    const s = await shop();
+    const ls = [];
+    for (const email of ["(c1)victim@x.com", "x,victim@x.com"]) ls.push(await lead(s, ago(61 * MIN), { email, emailHash: sha(email) }));
+    const p = await pixOrder(s, ago(31 * MIN), { email: "a;victim@x.com" });
+    await scan();
+    const rows = await rowsOf(s.storeId);
+    expect(rows).toHaveLength(3);
+    for (const l of ls) expect(rows.find((r) => r.leadId === l.id)).toMatchObject({ status: "skipped", skipReason: "endereco_invalido" });
+    expect(rows.find((r) => r.orderId === p.id)).toMatchObject({ status: "skipped", skipReason: "endereco_invalido" });
+    expect(await sendJobsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("descadastro pelo link de victim+1@gmail.com → próximo candidato victim@gmail.com → skipped optout", async () => {
+    const s = await shop();
+    await lead(s, ago(61 * MIN), { email: "victim+1@gmail.com", emailHash: sha("victim+1@gmail.com") });
+    await scan();
+    const [j] = await sendJobsOf(s.storeId);
+    const token = (j!.payload as { unsubToken: string }).unsubToken;
+    const out = await runAction(unsubscribe, { storeId: s.storeId, actor: { kind: "public" }, origin: "public" }, { token, clientIp: "unknown" });
+    expect(out.done).toBe(true);
+    // O descadastro grava o hash exato e o da caixa.
+    const optouts = await t.ownerDb.select({ h: emailOptout.emailHash }).from(emailOptout).where(eq(emailOptout.storeId, s.storeId));
+    expect(optouts.map((o) => o.h).sort()).toEqual([sha("victim+1@gmail.com"), sha("victim@gmail.com")].sort());
+
+    const next = await lead(s, ago(61 * MIN), { email: "victim@gmail.com", emailHash: sha("victim@gmail.com") });
+    await scan();
+    expect((await rowsOf(s.storeId)).find((r) => r.leadId === next.id)).toMatchObject({ status: "skipped", skipReason: "optout" });
+    expect(await sendJobsOf(s.storeId)).toHaveLength(1);
+  });
+
   test("já comprou a oferta há 10 dias → skipped ja_comprou", async () => {
     const s = await shop();
     const l = await lead(s, ago(61 * MIN));
@@ -901,6 +993,37 @@ describe("recovery_send", () => {
     await send(j);
     expect(outbox).toHaveLength(0);
     expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "email_mudou" });
+  });
+
+  test("e-mail do contato virou não simples depois da varredura → skipped endereco_invalido, nenhum e-mail", async () => {
+    const s = await mailShop();
+    const l = await lead(s, ago(61 * MIN));
+    const { row, job: j } = await queued(s.storeId);
+    const bad = `(c1)${l.email}`;
+    await t.ownerDb.update(checkoutLead).set({ email: bad, emailHash: sha(bad) }).where(eq(checkoutLead.id, l.id));
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "endereco_invalido", sentAt: null });
+    expect(await logsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("o destinatário é o endereço simples normalizado, nunca o texto cru", async () => {
+    const s = await mailShop();
+    const raw = ` Victim+2@Gmail.COM `;
+    await lead(s, ago(61 * MIN), { email: raw, emailHash: sha(raw.trim().toLowerCase()) });
+    const { job: j } = await queued(s.storeId);
+    await send(j);
+    expect(outbox.map((m) => m.to)).toEqual(["victim+2@gmail.com"]);
+  });
+
+  test("descadastro pela caixa (outra variante do Gmail) com o job na fila → skipped optout", async () => {
+    const s = await mailShop();
+    await lead(s, ago(61 * MIN), { email: "v.ictim+3@gmail.com", emailHash: sha("v.ictim+3@gmail.com") });
+    const { row, job: j } = await queued(s.storeId);
+    await t.ownerDb.insert(emailOptout).values({ storeId: s.storeId, emailHash: sha("victim@gmail.com"), reason: "unsubscribe" });
+    await send(j);
+    expect(outbox).toHaveLength(0);
+    expect(await rowOf(row.id)).toMatchObject({ status: "skipped", skipReason: "optout" });
   });
 
   test("caso ou chave geral desligados depois da varredura → skipped desligado", async () => {

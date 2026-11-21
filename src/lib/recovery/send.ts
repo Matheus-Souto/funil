@@ -2,9 +2,10 @@
 //
 // 1. Transação curta: reivindica a linha (`queued` -> `sending` com o id do job; o mesmo job pode reivindicar de novo
 //    depois de cair no meio) e confere de novo o caso, porque a fila pode ter rodado bem depois da varredura: token de
-//    descadastro, chave geral e caso ligados, descadastro, oferta ativa (contato e cartão), contato ainda aberto ou
-//    pedido ainda pendente, o mesmo endereço da varredura, "já comprou" e pedido mais novo (as mesmas consultas da
-//    varredura, em `checks.ts`). Não vale mais: `skipped` com o motivo. Lê destinatário, loja, produto e valor.
+//    descadastro, chave geral e caso ligados, descadastro (hash exato ou da caixa), oferta ativa (contato e cartão),
+//    contato ainda aberto ou pedido ainda pendente, endereço simples, o mesmo endereço da varredura, "já comprou" e
+//    pedido mais novo (as mesmas consultas da varredura, em `checks.ts`). Não vale mais: `skipped` com o motivo. Lê
+//    destinatário (o endereço simples normalizado, nunca o texto cru), loja, produto e valor.
 // 2. Fora de transação: `sendMail` (chave de idempotência = id do lembrete).
 // 3. Resultado: `sent`; `provider_error` definitivo (provedor não configurado, chave ou mensagem recusada) = `failed`
 //    sem relançar; erro temporário (rede, tempo-limite, ou `provider_error` com status 0, 429 ou 5xx) volta a `queued`
@@ -25,16 +26,18 @@ import type { JobHandler } from "@/lib/jobs";
 import { errorFields, log } from "@/lib/log";
 import { itemOrder } from "@/lib/orders/items";
 import { WAS_PAID, alreadyBought, hasNewerOrder, optedOut } from "./checks";
-import { RECOVERY, recoveryEmailHash } from "./rules";
+import { RECOVERY, recoveryEmailHash, simpleAddress } from "./rules";
 import type { RecoveryKind } from "./scan";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Token de descadastro: `randomToken(32)` em base64url (43 caracteres); a folga só aceita o mesmo alfabeto. */
 const TOKEN = /^[A-Za-z0-9_-]{16,128}$/;
 const UTM = "utm_source=recuperacao&utm_medium=email&utm_campaign=";
+const GRACE_MS = RECOVERY.sendGraceMin * 60_000;
 
 export type RecoverySendSkipReason =
   | "desligado"
+  | "endereco_invalido"
   | "optout"
   | "email_mudou"
   | "contato_apagado"
@@ -147,7 +150,7 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
     .where(eq(store.id, storeId));
   if (!s?.on || !s[kind] || (kind === "lead" && !s.capture)) return { skip: "desligado" };
 
-  if (await optedOut(tx, storeId, r.emailHash)) return { skip: "optout" };
+  if (await optedOut(tx, storeId, r.emailHash, r.mailboxHash)) return { skip: "optout" };
 
   const [of] = await tx
     .select({ name: offer.name, slug: offer.slug, priceCents: offer.priceCents, active: offer.active })
@@ -158,6 +161,9 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
   if (!of || (kind !== "pix" && !of.active)) return { skip: "oferta_inativa" };
   const c = kind === "lead" ? await leadMail(tx, r, of, t) : await orderMail(tx, r, of, t);
   if ("skip" in c) return c;
+  // Só endereço simples recebe; o `to` é o normalizado (comentário, vírgula ou `;` levariam a outra caixa).
+  const to = simpleAddress(c.to);
+  if (to === null) return { skip: "endereco_invalido" };
   // O endereço mudou desde a varredura (ex.: o contato trocou de e-mail na mesma chave): não manda para o novo.
   if (recoveryEmailHash(c.to) !== r.emailHash) return { skip: "email_mudou" };
   // Comprou por outro pedido ou outra sessão de checkout, ou abriu um pedido mais novo, depois da varredura.
@@ -171,7 +177,7 @@ async function prepare(tx: Tx, storeId: string, jobId: string, recoveryId: strin
       ? `${base}/o/${encodeURIComponent(c.order!.publicId)}`
       : `${base}/c/${encodeURIComponent(of.slug)}?${UTM}${kind === "lead" ? "contato" : "cartao"}`;
   return {
-    to: c.to,
+    to,
     kind,
     orderId: r.orderId,
     data: {
@@ -255,7 +261,7 @@ export function createRecoverySendHandler(now: () => Date = () => new Date()): J
       const retry = await withStore(storeId, async (tx) => {
         await logEmail(tx, { ...logRow, status: "failed", error, provider });
         const [r] = await tx.select({ dueAt: recoveryEmail.dueAt }).from(recoveryEmail).where(eq(recoveryEmail.id, recoveryId));
-        const again = !definitive && r !== undefined && t.getTime() < r.dueAt.getTime() + RECOVERY.sendGraceMin * 60_000;
+        const again = !definitive && r !== undefined && t.getTime() < r.dueAt.getTime() + GRACE_MS;
         await settle(tx, recoveryId, j.id, { status: again ? "queued" : "failed" });
         return again;
       });

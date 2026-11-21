@@ -7,7 +7,9 @@ import { orders } from "./orders";
 
 // Com RLS (enable_store_rls na migration). Um lembrete por e-mail de recuperação de venda: `lead` (quem deixou o contato
 // no checkout e não comprou), `pix` (Pix gerado e não pago) ou `card` (cartão recusado). Guarda só sha256 do e-mail
-// (`email_hash`) e o sha256 do token de descadastro (`unsub_hash`): nunca e-mail, token nem URL. `lead` não tem pedido
+// (`email_hash`, do texto digitado), o sha256 da chave da caixa de entrada (`mailbox_hash`, `mailboxKey` em
+// src/lib/recovery/rules.ts: sem `+sufixo` e, no Gmail, sem pontos; o limite por endereço e o descadastro valem para a
+// caixa) e o sha256 do token de descadastro (`unsub_hash`): nunca e-mail, token nem URL. `lead` não tem pedido
 // (`order_id` nulo); `pix` e `card` têm. Apagado o contato (`lead_id` vira nulo), a linha `lead` continua válida. Um
 // lembrete por contato e um por pedido e tipo. Retenção de 90 dias (`expires_at`). O papel `card` não lê nem escreve aqui.
 export const recoveryEmail = pgTable(
@@ -24,6 +26,7 @@ export const recoveryEmail = pgTable(
       .notNull()
       .references(() => offer.id, { onDelete: "cascade" }),
     emailHash: text("email_hash").notNull(),
+    mailboxHash: text("mailbox_hash").notNull(),
     status: text("status").notNull().default("queued"),
     skipReason: text("skip_reason"),
     unsubHash: text("unsub_hash").notNull(),
@@ -42,6 +45,7 @@ export const recoveryEmail = pgTable(
     uniqueIndex("recovery_email_lead_uniq").on(t.leadId).where(sql`${t.leadId} is not null`),
     uniqueIndex("recovery_email_order_kind_uniq").on(t.orderId, t.kind).where(sql`${t.orderId} is not null`),
     index("recovery_email_store_email_idx").on(t.storeId, t.emailHash, t.createdAt.desc()),
+    index("recovery_email_store_mailbox_idx").on(t.storeId, t.mailboxHash, t.createdAt.desc()),
     index("recovery_email_store_created_idx").on(t.storeId, t.createdAt.desc()),
     index("recovery_email_expires_idx").on(t.expiresAt),
   ],
