@@ -20,6 +20,7 @@ import { SECRET_FIELDS, SHOWN_IN_FULL, summarizeRequest } from "@/lib/mcp/approv
 import {
   approvalStatus,
   approveRequest,
+  HIDDEN_SUMMARY,
   listApprovals,
   pendingApprovalsCount,
   rejectRequest,
@@ -606,6 +607,57 @@ describe("leituras", () => {
   });
 });
 
+describe("quem vê e de onde se decide", () => {
+  test("list: resumo só para quem pode decidir o pedido; pendingCount conta só os que o papel decide", async () => {
+    const { s, request, panel } = await setup();
+    const order = await seedOrder(s);
+    const refund = await request("orders.refund", { orderId: order.id });
+    const pixel = await request("offers.setPixel", { id: s.offerId, pixelId: null });
+    const traffic: Actor = { kind: "user", userId: await seedUser("Tráfego"), role: "traffic" };
+    const support: Actor = { kind: "user", userId: await seedUser("Suporte"), role: "support" };
+
+    const byId = (l: Awaited<ReturnType<typeof listApprovals.run>>) => new Map(l.pending.map((r) => [r.id, r]));
+    const asTraffic = byId(await runAction(listApprovals, panel(traffic), {}));
+    expect(asTraffic.get(pixel.requestId)).toMatchObject({ canDecide: true, summary: { fields: [{ label: "id" }, { label: "pixelId", value: "(vazio)" }] } });
+    const hidden = asTraffic.get(refund.requestId)!;
+    // Quem não decide vê ação, agente e datas; o resumo (código do pedido etc.) não sai.
+    expect(hidden).toMatchObject({ canDecide: false, summary: null, action: "orders.refund", tokenName: "agente", createdAt: expect.any(Date), expiresAt: expect.any(Date) });
+    expect(JSON.stringify(hidden)).not.toContain(orderCode(order.publicId));
+    expect(HIDDEN_SUMMARY).toBe("Detalhes visíveis só para quem pode decidir este pedido.");
+
+    const asSupport = await runAction(listApprovals, panel(support), {});
+    expect(asSupport.pending.map((r) => r.summary)).toEqual([null, null]);
+    expect(JSON.stringify(asSupport)).not.toContain(orderCode(order.publicId));
+    // Histórico também sem resumo.
+    await runAction(rejectRequest, panel(), { id: pixel.requestId });
+    expect((await runAction(listApprovals, panel(), {})).history.map((r) => r.summary)).toEqual([null]);
+
+    expect(await runAction(pendingApprovalsCount, panel(), {})).toEqual({ count: 1 });
+    expect(await runAction(pendingApprovalsCount, panel(support), {})).toEqual({ count: 0 });
+    expect(await runAction(pendingApprovalsCount, panel(traffic), {})).toEqual({ count: 0 });
+    await request("offers.setPixel", { id: s.offerId, pixelId: null });
+    expect(await runAction(pendingApprovalsCount, panel(traffic), {})).toEqual({ count: 1 });
+    expect(await runAction(pendingApprovalsCount, panel(), {})).toEqual({ count: 2 });
+  });
+
+  test("approve, reject, list e pendingCount só pelo painel: origem ai ou mcp com ator usuário → forbidden", async () => {
+    const { s, storeId, owner, request } = await setup();
+    const req = await request("offers.setSlug", { id: s.offerId, slug: "fora-do-painel" });
+    for (const origin of ["ai", "mcp"] as const) {
+      const call = { storeId, actor: owner, origin };
+      expect([origin, await code(runAction(approveRequest, call, { id: req.requestId }))]).toEqual([origin, "forbidden"]);
+      expect([origin, await code(runAction(rejectRequest, call, { id: req.requestId }))]).toEqual([origin, "forbidden"]);
+      expect([origin, await code(runAction(listApprovals, call, {}))]).toEqual([origin, "forbidden"]);
+      expect([origin, await code(runAction(pendingApprovalsCount, call, {}))]).toEqual([origin, "forbidden"]);
+    }
+    const row = await requestRow(req.requestId);
+    expect(row).toMatchObject({ status: "pending", decidedBy: null });
+    expect(row.inputSealed).not.toBeNull();
+    const [o] = await t.ownerDb.select().from(offer).where(eq(offer.id, s.offerId));
+    expect(o!.slug).not.toBe("fora-do-painel");
+  });
+});
+
 describe("revogação e varredura", () => {
   test("revogar o token cancela os pendentes dele (input_sealed nulo); aprovar depois → conflict", async () => {
     const { s, storeId, tokenId, request, panel } = await setup();
@@ -618,6 +670,25 @@ describe("revogação e varredura", () => {
     expect(await code(runAction(approveRequest, panel(), { id: req.requestId }))).toBe("conflict");
     const [o] = await t.ownerDb.select().from(offer).where(eq(offer.id, s.offerId));
     expect(o!.slug).not.toBe("antes-de-revogar");
+  });
+
+  test("request de token já revogado → forbidden e nada gravado", async () => {
+    const { s, storeId, tokenId, request } = await setup();
+    await t.ownerDb.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, tokenId));
+    expect(await code(request("offers.setSlug", { id: s.offerId, slug: "token-revogado" }))).toBe("forbidden");
+    expect(await t.ownerDb.select().from(approvalRequest).where(eq(approvalRequest.storeId, storeId))).toHaveLength(0);
+  });
+
+  test("sweep_mcp: pendente de token revogado (fora do mcpTokens.revoke) vira canceled sem a entrada selada", async () => {
+    const { storeId, tokenId } = await setup();
+    const orphan = await seedRow(storeId, tokenId);
+    const otherToken = await seedToken(storeId);
+    const kept = await seedRow(storeId, otherToken);
+    await t.ownerDb.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, tokenId));
+    await t.ownerDb.transaction((tx) => enqueue(tx, { storeId: null, type: "sweep_mcp", payload: {} }));
+    expect(await runDueJobs(getHandlers(), 10, new Date(), { types: ["sweep_mcp"] })).toBe(1);
+    expect(await requestRow(orphan)).toMatchObject({ status: "canceled", inputSealed: null, decidedAt: expect.any(Date) });
+    expect(await requestRow(kept)).toMatchObject({ status: "pending" });
   });
 
   test("sweep_mcp: vencido vira expired com input_sealed nulo; link de upload vencido há mais de 24 h some", async () => {

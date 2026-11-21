@@ -4,9 +4,9 @@
 // reivindica o pedido na mesma transação) ou recusa. O token só lê os próprios pedidos (`approvals.status`), sem resumo
 // nem quem decidiu. A entrada selada vira null ao decidir, expirar (varredura `sweep_mcp`) ou cancelar (token revogado).
 import "@/lib/actions/all";
-import { and, count, desc, eq, gt, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, approvalInputSha256, defineAction, runAction, TOKEN_DENIED, type Action } from "@/lib/actions/core";
+import { ActionError, approvalInputSha256, defineAction, runAction, TOKEN_DENIED, type Action, type Actor, type Origin } from "@/lib/actions/core";
 import { hasPermission, type Permission, type Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
 import { open, seal } from "@/lib/crypto";
@@ -27,6 +27,9 @@ export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "
 /** Pendente vencido aparece como `expired` em toda leitura, mesmo antes da varredura (relógio do banco). */
 const shownStatus = sql<ApprovalStatus>`case when ${approvalRequest.status} = 'pending' and ${approvalRequest.expiresAt} <= now() then 'expired' else ${approvalRequest.status} end`;
 const livePending = and(eq(approvalRequest.status, "pending"), gt(approvalRequest.expiresAt, sql`now()`));
+
+/** O que o painel mostra no lugar do resumo para quem não decide o pedido. */
+export const HIDDEN_SUMMARY = "Detalhes visíveis só para quem pode decidir este pedido.";
 
 const toolName = (action: string) => action.replaceAll(".", "_");
 
@@ -104,6 +107,15 @@ export const requestApproval = defineAction({
     const [{ n: pending } = { n: 0 }] = await ctx.tx.select({ n: count() }).from(approvalRequest).where(livePending);
     if (pending >= PENDING_PER_STORE) throw new ActionError("rate_limited", `A loja já tem ${PENDING_PER_STORE} pedidos esperando aprovação`);
 
+    // Token revogado não pede. `for share` segura a linha do token até o commit: um `mcpTokens.revoke` simultâneo espera
+    // e então cancela também este pedido.
+    const [live] = await ctx.tx
+      .select({ id: mcpToken.id })
+      .from(mcpToken)
+      .where(and(eq(mcpToken.id, actor.tokenId), isNull(mcpToken.revokedAt)))
+      .for("share");
+    if (!live) throw new ActionError("forbidden", "Token revogado");
+
     const summary = await summarizeRequest(ctx.tx, target, parsed.data);
     const [row] = await ctx.tx
       .insert(approvalRequest)
@@ -162,9 +174,19 @@ export const approvalStatus = defineAction({
   },
 });
 
-function panelRole(actor: { kind: string; role?: Role }): Role {
-  if (actor.kind !== "user" || !actor.role) throw new ActionError("forbidden", "Só um membro da loja decide pedidos de aprovação");
-  return actor.role;
+/**
+ * Papel de quem decide: membro da loja, pelo painel. Outra origem (ex.: uma `ai` futura com ator usuário, ou `mcp`)
+ * nunca lê nem decide a fila.
+ */
+function panelRole(call: { actor: Actor; origin: Origin }): Role {
+  if (call.actor.kind !== "user") throw new ActionError("forbidden", "Só um membro da loja decide pedidos de aprovação");
+  if (call.origin !== "panel") throw new ActionError("forbidden", "Pedidos de aprovação só são vistos e decididos no painel");
+  return call.actor.role;
+}
+
+/** Ações registradas cujos pedidos este papel decide (para contar só o que ele pode decidir). */
+function decidableActions(role: Role): string[] {
+  return [...registry.values()].filter((a) => canDecide(a as Action<unknown, unknown>, role)).map((a) => a.name);
 }
 
 function panelRows(tx: Tx) {
@@ -194,7 +216,7 @@ export const listApprovals = defineAction({
   permission: "approvals.decide",
   audit: false,
   async run(ctx) {
-    const role = panelRole(ctx.actor);
+    const role = panelRole(ctx);
     const pending = await panelRows(ctx.tx).where(livePending).orderBy(desc(approvalRequest.createdAt), desc(approvalRequest.id));
     const history = await panelRows(ctx.tx)
       .where(or(sql`${approvalRequest.status} <> 'pending'`, lte(approvalRequest.expiresAt, sql`now()`)))
@@ -205,8 +227,9 @@ export const listApprovals = defineAction({
       const decides = r.status === "pending" && canDecide(target, role);
       return {
         ...r,
-        // Pendente: ofertas e produtos resolvidos agora (estado atual), com aviso do que mudou desde o pedido.
-        summary: await refreshSummary(ctx.tx, r.summary as ApprovalSummary),
+        // Só quem decide vê o resumo (o painel mostra HIDDEN_SUMMARY aos demais). Ofertas e produtos resolvidos agora
+        // (estado atual), com aviso do que mudou desde o pedido.
+        summary: decides ? await refreshSummary(ctx.tx, r.summary as ApprovalSummary) : null,
         tokenRole: r.tokenRole as Role,
         tool: toolName(r.action),
         description: target?.description ?? r.action,
@@ -219,12 +242,17 @@ export const listApprovals = defineAction({
 
 export const pendingApprovalsCount = defineAction({
   name: "approvals.pendingCount",
-  description: "Número de pedidos de aprovação pendentes (não vencidos) da loja.",
+  description: "Número de pedidos de aprovação pendentes (não vencidos) da loja que quem pergunta pode decidir.",
   input: z.object({}),
   permission: "approvals.decide",
   audit: false,
   async run(ctx) {
-    const [{ n } = { n: 0 }] = await ctx.tx.select({ n: count() }).from(approvalRequest).where(livePending);
+    const actions = decidableActions(panelRole(ctx));
+    if (actions.length === 0) return { count: 0 };
+    const [{ n } = { n: 0 }] = await ctx.tx
+      .select({ n: count() })
+      .from(approvalRequest)
+      .where(and(livePending, inArray(approvalRequest.action, actions)));
     return { count: n };
   },
 });
@@ -254,6 +282,7 @@ export const approveRequest = defineAction({
   // entrada de pedido que não pode mais ser aprovado.
   async prepare(call, { id }) {
     const { actor } = call;
+    panelRole(call);
     if (actor.kind !== "user") throw new ActionError("forbidden", "Só um membro da loja decide pedidos de aprovação");
     const [row] = await withStore(call.storeId, (tx) =>
       tx
@@ -267,7 +296,7 @@ export const approveRequest = defineAction({
     if (row.status !== "pending" || row.inputSealed === null) throw new ActionError("conflict", "Solicitação já decidida ou cancelada");
     if (row.revokedAt !== null) throw new ActionError("conflict", "O token que fez o pedido foi revogado");
     const target = registry.get(row.action) as Action<unknown, unknown> | undefined;
-    if (target && !canDecide(target, actor.role)) throw new ActionError("forbidden", `Só quem pode ${target.name} decide este pedido`);
+    if (target && !canDecide(target, actor.role)) throw new ActionError("forbidden", `Só quem tem permissão para “${target.description}” decide este pedido`);
 
     let args: unknown;
     try {
@@ -298,13 +327,13 @@ export const rejectRequest = defineAction({
   input: z.object({ id: z.uuid() }),
   permission: "approvals.decide",
   async run(ctx, { id }) {
-    const role = panelRole(ctx.actor);
+    const role = panelRole(ctx);
     const [row] = await ctx.tx.select({ action: approvalRequest.action, status: shownStatus }).from(approvalRequest).where(eq(approvalRequest.id, id)).for("update");
     if (!row) throw new ActionError("not_found", "Solicitação não encontrada");
     if (row.status !== "pending") throw new ActionError("conflict", "Solicitação já decidida, expirada ou cancelada");
     const target = registry.get(row.action) as Action<unknown, unknown> | undefined;
     // Ação que não existe mais: qualquer um com approvals.decide limpa o pedido.
-    if (target && !canDecide(target, role)) throw new ActionError("forbidden", `Só quem pode ${target.name} decide este pedido`);
+    if (target && !canDecide(target, role)) throw new ActionError("forbidden", `Só quem tem permissão para “${target.description}” decide este pedido`);
     await ctx.tx
       .update(approvalRequest)
       .set({ status: "rejected", decidedBy: ctx.actor.kind === "user" ? ctx.actor.userId : null, decidedAt: sql`now()`, inputSealed: null })
@@ -315,7 +344,7 @@ export const rejectRequest = defineAction({
 
 /**
  * Varredura de hora em hora, loja a loja (a tabela `store` não tem RLS): pendente vencido vira `expired` sem a entrada
- * selada; link de upload não usado e vencido há mais de 24 h é apagado. Falha numa loja não impede as demais; ao
+ * selada; pendente de token revogado vira `canceled`; link de upload não usado e vencido há mais de 24 h é apagado. Falha numa loja não impede as demais; ao
  * final, se alguma falhou, o job falha para tentar de novo.
  */
 export const sweepMcpJob: JobHandler = async (_job, signal) => {
@@ -330,11 +359,24 @@ export const sweepMcpJob: JobHandler = async (_job, signal) => {
           .set({ status: "expired", inputSealed: null })
           .where(and(eq(approvalRequest.status, "pending"), lte(approvalRequest.expiresAt, sql`now()`)))
           .returning({ id: approvalRequest.id });
+        // Pendente de token revogado (revogação que não passou por mcpTokens.revoke): cancelado, sem a entrada.
+        const canceled = await tx
+          .update(approvalRequest)
+          .set({ status: "canceled", inputSealed: null, decidedAt: sql`now()` })
+          .where(
+            and(
+              eq(approvalRequest.status, "pending"),
+              inArray(approvalRequest.tokenId, tx.select({ id: mcpToken.id }).from(mcpToken).where(isNotNull(mcpToken.revokedAt))),
+            ),
+          )
+          .returning({ id: approvalRequest.id });
         const removed = await tx
           .delete(uploadLink)
           .where(and(isNull(uploadLink.usedAt), lt(uploadLink.expiresAt, sql`now() - interval '24 hours'`)))
           .returning({ id: uploadLink.id });
-        if (expired.length > 0 || removed.length > 0) log.info("varredura do MCP", { storeId, expired: expired.length, uploadLinks: removed.length });
+        if (expired.length > 0 || canceled.length > 0 || removed.length > 0) {
+          log.info("varredura do MCP", { storeId, expired: expired.length, canceled: canceled.length, uploadLinks: removed.length });
+        }
       });
     } catch (e) {
       failed++;
