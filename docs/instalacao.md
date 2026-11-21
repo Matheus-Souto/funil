@@ -798,9 +798,17 @@ somando os três casos. Não sai para quem já comprou a mesma oferta (pago, con
 dias, nem para um pedido mais antigo quando o mesmo cliente tem um mais novo na mesma oferta (o lembrete vai para o mais
 novo). Quem digitou o e-mail e gerou o Pix recebe só o do Pix (o pedido converte o contato na hora). Teto da loja: 60
 lembretes por hora, dentro deles no máximo 10 do caso cartão; o excedente fica para a próxima varredura, ainda dentro
-das 6 horas. Antes de enviar, o app confere tudo de novo: se a pessoa pagou, descadastrou, o contato foi apagado ou a
-oferta foi desativada nesse meio-tempo, o lembrete não sai. Os links nunca levam e-mail nem nome (o checkout não vem
-preenchido); com a UTM, a venda recuperada aparece como origem `recuperacao`.
+das 6 horas. Antes de enviar, o app confere tudo de novo: se a pessoa pagou, descadastrou ou o contato foi apagado
+nesse meio-tempo, o lembrete não sai. **Oferta desativada:** contato e cartão só recebem lembrete com a oferta ativa,
+porque o botão leva ao checkout dela (a varredura nem os seleciona, e o envio confere de novo); o do Pix sai mesmo com
+a oferta desativada, porque a página do Pix (`/o/<pedido>`) continua funcionando. Os links nunca levam e-mail nem nome
+(o checkout não vem preenchido); com a UTM, a venda recuperada aparece como origem `recuperacao`.
+
+**Falha no envio.** Sem provedor de e-mail configurado ou com recusa definitiva do provedor (chave ou mensagem
+recusada), o lembrete fica como não enviado e não há nova tentativa (no pedido, a linha do tempo mostra **Lembrete por
+e-mail não enviado**). Com erro temporário (rede, tempo esgotado, limite do provedor, resposta 429 ou 5xx), a fila tenta
+de novo, mas só até 2 horas depois do horário previsto do lembrete; depois disso desiste e o lembrete fica como não
+enviado. Um lembrete muito atrasado não sai.
 
 **Os textos.** Fixos (a loja não edita), com o nome da loja, o produto (o produto principal; se a oferta tem mais de um,
 o nome da oferta) e o valor (contato: preço atual da oferta; Pix e cartão: total do pedido). Nunca o nome do comprador.

@@ -12,6 +12,7 @@ import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
 import { ForgetEmailForm, LeadRowActions } from "./lead-actions";
+import { remindedLabel } from "./reminded";
 import { whatsappUrl } from "./whatsapp";
 
 export const dynamic = "force-dynamic";
@@ -153,7 +154,7 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
                     </td>
                     <td>
                       <Badge tone={badge.tone}>{badge.label}</Badge>
-                      {l.remindedAt ? <small style={{ marginTop: 4 }}>Lembrete enviado em {shortWhen(l.remindedAt)}</small> : null}
+                      {l.remindedAt ? <small style={{ marginTop: 4 }}>{remindedLabel(l.remindedAt)}</small> : null}
                     </td>
                     {canWrite ? <td>{l.status === "converted" ? null : <LeadRowActions id={l.id} code={l.code} status={l.status} />}</td> : null}
                   </tr>
