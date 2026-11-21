@@ -1730,17 +1730,12 @@
 }
 
 /* ---------- Produtos ---------- */
-.fileTag {
-  display: grid;
-  place-items: center;
+.fileArt {
   flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: var(--radius-sm);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-  font-size: 12px;
-  font-weight: 700;
+  width: 40px;
+  height: 40px;
+  pointer-events: none;
+  user-select: none;
 }
 .productCell {
   display: flex;

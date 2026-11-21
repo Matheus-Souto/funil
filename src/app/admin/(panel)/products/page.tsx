@@ -45,9 +45,7 @@ export default async function ProductsPage() {
                   <tr key={p.id}>
                     <td>
                       <span className={s.productCell}>
-                        <span className={s.fileTag} aria-hidden="true">
-                          PDF
-                        </span>
+                        <Art name="pdf" size={40} className={s.fileArt} />
                         <b>{p.name}</b>
                       </span>
                     </td>

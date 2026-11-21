@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { Live } from "../../ui";
+import { Art } from "../../blocks";
 
 const MAX = 52_428_800;
 const mb = (n: number) => `${(n / 1_048_576).toFixed(1).replace(".", ",")} MB`;
@@ -123,7 +124,7 @@ export function ProductUpload() {
         </label>
         {file ? (
           <div className={s.progress}>
-            <span className={s.fileTag}>PDF</span>
+            <Art name="pdf" size={40} className={s.fileArt} />
             <div>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                 <b style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</b>
