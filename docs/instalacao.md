@@ -719,8 +719,12 @@ O **Saiba mais** abre ali mesmo:
 > concluir a compra, valem os dados do pedido e este registro perde o contato na hora. **Seus direitos:** peça acesso
 > ou exclusão a qualquer momento por {e-mail de privacidade}, ou toque em "Não salvar meus dados".
 
-**Não salvar meus dados** para a coleta e apaga o que já tinha sido guardado daquela pessoa; o aviso passa a dizer
-"Pronto: seus dados não serão guardados antes da compra."
+**Não salvar meus dados** para a coleta e apaga: o que foi guardado **nesta visita** e, se o e-mail digitado no campo
+for válido, os contatos **ainda abertos** (ou contatados) da loja com aquele e-mail, de visitas anteriores. A resposta é
+sempre a mesma (não revela se havia algo guardado). A escolha vale **para este navegador**: ao voltar ao checkout nele, a
+página já abre sem capturar. Contato guardado em outro navegador, com outro e-mail, ou que já virou pedido, só pelo
+**e-mail de privacidade** (a loja usa **Excluir todos deste e-mail** em **Contatos**). O aviso passa a dizer "Pronto:
+seus dados não serão guardados antes da compra."
 
 **Base legal: legítimo interesse (LGPD, art. 7º, IX).** Em vez de pedir consentimento, a loja se apoia no legítimo
 interesse de lembrar quem já demonstrou interesse na compra. Esse caminho exige que a loja **registre por escrito** o
@@ -732,7 +736,7 @@ copiar e adaptar:
 | **Finalidade** | Lembrar, uma vez e à mão, quem começou o checkout de um produto da loja e não concluiu a compra. |
 | **Necessidade** | Só e-mail e celular, que a própria pessoa digitou no checkout. Nada além disso é coletado, e nada é comprado de terceiros. |
 | **Expectativa do titular** | Quem preenche o checkout espera ser lembrado da compra. O aviso aparece antes da coleta e diz quem guarda, para quê e por quanto tempo. |
-| **Salvaguardas** | Aviso prévio e visível; coleta mínima; apagado em 30 dias; botão **Não salvar meus dados** (para a coleta e apaga o que foi guardado); exclusão por pedido no painel; contato apaga-se na hora quando a pessoa compra; acesso restrito (dono, admin e suporte). |
+| **Salvaguardas** | Aviso prévio e visível; coleta mínima; apagado em 30 dias; botão **Não salvar meus dados** (para a coleta neste navegador e apaga o que foi guardado nesta visita e o que estiver aberto com o e-mail digitado); exclusão por pedido no painel; contato apaga-se na hora quando a pessoa compra; acesso restrito (dono, admin e suporte). |
 | **Conclusão** | O interesse da loja é legítimo e proporcional; o impacto sobre o titular é baixo. Data e responsável pelo registro: ______. |
 
 Guarde esse registro junto com os documentos de privacidade da loja.
@@ -757,8 +761,8 @@ avisos por hora por loja (o resto fica só no painel).
 papel. A única coisa que ele recebe são dois **números** em `metrics.summary`: `leads` (contatos capturados no período) e
 `leadsConverted` (quantos viraram pedido).
 
-**Proteção contra abuso.** A captura tem limites por IP e por loja; passou do limite, a gravação é ignorada em silêncio
-(o comprador nunca vê erro). Não há e-mail automático, então um contato falso só causa efeito se a loja o contatar à mão:
+**Proteção contra abuso.** A captura tem limites por IP e por loja (e o **Não salvar meus dados**, por IP e por
+visita); passou do limite, o pedido é ignorado em silêncio (o comprador nunca vê erro). Não há e-mail automático, então um contato falso só causa efeito se a loja o contatar à mão:
 confira antes de escrever para alguém.
 
 ## 14. Problemas comuns

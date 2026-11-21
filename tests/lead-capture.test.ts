@@ -1,6 +1,6 @@
 // Quando o checkout chama o servidor para guardar o contato (lógica pura, src/app/c/[slug]/lead-capture.ts).
 import { describe, expect, test } from "bun:test";
-import { nextLeadSend } from "@/app/c/[slug]/lead-capture";
+import { LEAD_OPTOUT_KEY, forgetLeadInput, nextLeadSend, readLeadOptOut, writeLeadOptOut } from "@/app/c/[slug]/lead-capture";
 
 const none = { optedOut: false, sent: { email: null, phone: null } };
 const withEmail = { optedOut: false, sent: { email: "ana@exemplo.com.br", phone: null } };
@@ -42,5 +42,52 @@ describe("nextLeadSend", () => {
     expect(nextLeadSend(out, "email", { email: "bia@exemplo.com.br", phone: "" })).toBeNull();
     expect(nextLeadSend(out, "phone", values)).toBeNull();
     expect(nextLeadSend({ ...none, optedOut: true }, "email", values)).toBeNull();
+  });
+});
+
+describe("forgetLeadInput", () => {
+  const key = "0b7c2f5e-5d0a-4c55-9b0e-2a3f4c5d6e7f";
+  test("com e-mail válido digitado: manda a chave e o e-mail normalizado", () => {
+    expect(forgetLeadInput(key, " Ana@Exemplo.com.br ")).toEqual({ leadKey: key, email: "ana@exemplo.com.br" });
+  });
+  test("e-mail vazio ou inválido: só a chave", () => {
+    expect(forgetLeadInput(key, "")).toEqual({ leadKey: key });
+    expect(forgetLeadInput(key, "ana@")).toEqual({ leadKey: key });
+  });
+});
+
+describe("opt-out guardado no navegador", () => {
+  function memory(): Storage {
+    const m = new Map<string, string>();
+    return {
+      getItem: (k: string) => m.get(k) ?? null,
+      setItem: (k: string, v: string) => void m.set(k, v),
+      removeItem: (k: string) => void m.delete(k),
+      clear: () => m.clear(),
+      key: () => null,
+      get length() {
+        return m.size;
+      },
+    };
+  }
+  const broken = (): Storage => {
+    throw new Error("SecurityError");
+  };
+  const failing = (): Storage => ({ ...memory(), getItem: () => { throw new Error("bloqueado"); }, setItem: () => { throw new Error("cheio"); } });
+
+  test("sem marca: false; depois de gravar: true, na chave fixa", () => {
+    const st = memory();
+    expect(readLeadOptOut(() => st)).toBe(false);
+    writeLeadOptOut(() => st);
+    expect(readLeadOptOut(() => st)).toBe(true);
+    expect(st.getItem(LEAD_OPTOUT_KEY)).not.toBeNull();
+    expect(LEAD_OPTOUT_KEY).toBe("funil:lead-optout");
+  });
+
+  test("armazenamento indisponível ou que lança: lê false e grava sem erro", () => {
+    expect(readLeadOptOut(broken)).toBe(false);
+    expect(() => writeLeadOptOut(broken)).not.toThrow();
+    expect(readLeadOptOut(failing)).toBe(false);
+    expect(() => writeLeadOptOut(failing)).not.toThrow();
   });
 });

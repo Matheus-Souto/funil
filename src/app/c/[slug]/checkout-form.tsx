@@ -30,7 +30,7 @@ import {
   type FrameConfig,
   type FrameStatus,
 } from "./card-frame";
-import { nextLeadSend } from "./lead-capture";
+import { forgetLeadInput, nextLeadSend, readLeadOptOut, writeLeadOptOut } from "./lead-capture";
 import { checkoutTracking } from "./tracking";
 
 type Touch = { first: Record<string, string> | null; last: Record<string, string> | null };
@@ -194,7 +194,11 @@ export function CheckoutForm(props: {
   // ordem (um "Não salvar" nunca é ultrapassado por uma gravação que ainda estava no ar).
   const leadSent = useRef<{ email: string | null; phone: string | null }>({ email: null, phone: null });
   const leadQueue = useRef<Promise<void>>(Promise.resolve());
-  const [optedOut, setOptedOut] = useState(false);
+  const [optedOutNow, setOptedOut] = useState(false);
+  // "Não salvar" de uma visita anterior neste navegador (localStorage). No servidor e na hidratação vale `false`; a
+  // leitura do navegador entra logo depois, sem divergir do HTML do servidor.
+  const optedOutBefore = useSyncExternalStore(noop, () => readLeadOptOut(), () => false);
+  const optedOut = optedOutNow || optedOutBefore;
   const [leadMore, setLeadMore] = useState(false);
   // Pedido de cartão com o bilhete atual (nova tentativa reaproveita o pedido); iframe (remontado ao trocar
   // `frameKey`) e o seu estado.
@@ -223,12 +227,15 @@ export function CheckoutForm(props: {
     leadQueue.current = leadQueue.current.then(() => saveLeadAction({ slug: offer.slug, leadKey: lead.key, ...send })).catch(() => {});
   }
 
+  // Sempre chama o servidor (mesmo sem nada enviado nesta visita): com o e-mail digitado, apaga também o contato aberto
+  // de uma visita anterior. Na fila: nunca ultrapassado por uma gravação ainda no ar.
   function optOutOfLead() {
     if (!lead) return;
     setOptedOut(true);
     setLeadMore(false);
-    if (leadSent.current.email === null && leadSent.current.phone === null) return;
-    leadQueue.current = leadQueue.current.then(() => forgetLeadAction({ leadKey: lead.key })).catch(() => {});
+    writeLeadOptOut();
+    const input = forgetLeadInput(lead.key, v.email);
+    leadQueue.current = leadQueue.current.then(() => forgetLeadAction(input)).catch(() => {});
   }
 
   const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);

@@ -119,14 +119,21 @@ export async function saveLeadAction(input: unknown): Promise<void> {
   }
 }
 
-/** "Não salvar meus dados": apaga o contato da chave (`checkout.forgetLead`). Melhor esforço, sem erro para o comprador. */
+/**
+ * "Não salvar meus dados": apaga o contato da chave e, com o e-mail digitado, os abertos da loja com esse e-mail
+ * (`checkout.forgetLead`). Melhor esforço, sem erro para o comprador. Nada do contato nem a chave vai para log.
+ */
 export async function forgetLeadAction(input: unknown): Promise<void> {
   const h = await headers();
   const store = await resolveStore(h.get("host") ?? "");
   if (!store) return;
   const body = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
   try {
-    await runAction(checkoutForgetLead, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, { leadKey: body.leadKey });
+    await runAction(checkoutForgetLead, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, {
+      leadKey: body.leadKey,
+      email: body.email,
+      clientIp: clientIpFrom(h, env.TRUST_PROXY),
+    });
   } catch {
     /* sem registro ou limite: nada a mostrar */
   }

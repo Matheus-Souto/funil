@@ -149,6 +149,7 @@ const rowsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(
 const rowByKey = async (storeId: string, leadKey: string) => (await rowsOf(storeId)).find((r) => r.keyHash === sha(leadKey));
 const save = (s: { storeId: string; slug: string }, input: Record<string, unknown>) =>
   runAction(checkoutSaveLead, pub(s.storeId), { slug: s.slug, leadKey: randomUUID(), clientIp: nextIp(), ...input });
+const forget = (storeId: string, input: Record<string, unknown>) => runAction(checkoutForgetLead, pub(storeId), { clientIp: nextIp(), ...input });
 const code = (p: Promise<unknown>) =>
   p.then(
     () => "ok",
@@ -158,7 +159,7 @@ const code = (p: Promise<unknown>) =>
 describe("constantes", () => {
   test("retenção de 30 dias e os limites combinados", () => {
     expect(LEAD_TTL_DAYS).toBe(30);
-    expect(LEAD_LIMITS).toEqual({ newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20 });
+    expect(LEAD_LIMITS).toEqual({ newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20, forgetPerIpPerHour: 20 });
   });
 });
 
@@ -253,13 +254,13 @@ describe("checkout.forgetLead", () => {
     await save(s, { leadKey: keyB, email: mail() });
     await save(outra, { leadKey: keyA, email: mail() });
 
-    await runAction(checkoutForgetLead, pub(s.storeId), { leadKey: keyA });
+    await forget(s.storeId, { leadKey: keyA });
     expect(await rowByKey(s.storeId, keyA)).toBeUndefined();
     expect(await rowByKey(s.storeId, keyB)).toBeDefined();
     // a chave igual na outra loja continua lá
     expect(await rowByKey(outra.storeId, keyA)).toBeDefined();
 
-    expect(await runAction(checkoutForgetLead, pub(s.storeId), { leadKey: randomUUID() })).toEqual({ ok: true });
+    expect(await forget(s.storeId, { leadKey: randomUUID() })).toEqual({ ok: true });
     expect(await rowsOf(s.storeId)).toHaveLength(1);
   });
 
@@ -271,15 +272,65 @@ describe("checkout.forgetLead", () => {
     await t.ownerDb.insert(checkoutLead).values(leadRow(s.storeId, s.offerId, { keyHash: sha(keyB), email: null, status: "converted" }));
     await t.ownerDb.update(store).set({ leadCapture: false }).where(eq(store.id, s.storeId));
 
-    await runAction(checkoutForgetLead, pub(s.storeId), { leadKey: keyA });
-    await runAction(checkoutForgetLead, pub(s.storeId), { leadKey: keyB });
+    await forget(s.storeId, { leadKey: keyA });
+    await forget(s.storeId, { leadKey: keyB });
     expect(await rowByKey(s.storeId, keyA)).toBeUndefined();
     expect(await rowByKey(s.storeId, keyB)).toMatchObject({ status: "converted" });
   });
 
   test("entrada inválida: invalid_input", async () => {
     const s = await seedCapture();
-    expect(await code(runAction(checkoutForgetLead, pub(s.storeId), { leadKey: "x" }))).toBe("invalid_input");
+    expect(await code(forget(s.storeId, { leadKey: "x" }))).toBe("invalid_input");
+    expect(await code(forget(s.storeId, { leadKey: randomUUID(), email: "isto-nao-e-email" }))).toBe("invalid_input");
+  });
+
+  test("com e-mail: apaga também os contatos abertos ou contatados da loja com o mesmo e-mail (outra visita)", async () => {
+    const s = await seedCapture();
+    const outra = await seedCapture();
+    const email = mail();
+    const keyNow = randomUUID();
+    const before = await insertLead(s, { email, emailHash: sha(email) });
+    const contacted = await insertLead(s, { email, emailHash: sha(email), status: "contacted" });
+    const conv = await insertLead(s, { email: null, phone: null, emailHash: sha(email), status: "converted" });
+    const otherMail = await insertLead(s);
+    const foreign = await insertLead(outra, { email, emailHash: sha(email) });
+
+    // nada guardado com a chave desta visita: o e-mail digitado alcança a visita anterior
+    expect(await forget(s.storeId, { leadKey: keyNow, email: ` ${email.toUpperCase()} ` })).toEqual({ ok: true });
+    expect(await leftIds(s.storeId)).toEqual(new Set([conv.id, otherMail.id]));
+    expect(await leftIds(outra.storeId)).toEqual(new Set([foreign.id]));
+    expect([before.id, contacted.id]).toHaveLength(2);
+  });
+
+  test("sem e-mail: apaga só a linha da chave, mesmo havendo outra com o mesmo e-mail", async () => {
+    const s = await seedCapture();
+    const email = mail();
+    const leadKey = randomUUID();
+    await save(s, { leadKey, email });
+    const other = await insertLead(s, { email, emailHash: sha(email) });
+    expect(await forget(s.storeId, { leadKey })).toEqual({ ok: true });
+    expect(await leftIds(s.storeId)).toEqual(new Set([other.id]));
+  });
+
+  test("21º pedido do mesmo IP na hora: rate_limited (cada um com outra chave); IP desconhecido não limita por IP", async () => {
+    const s = await seedCapture();
+    const ip = nextIp();
+    for (let i = 0; i < LEAD_LIMITS.forgetPerIpPerHour; i++) expect(await code(forget(s.storeId, { leadKey: randomUUID(), clientIp: ip }))).toBe("ok");
+    expect(await code(forget(s.storeId, { leadKey: randomUUID(), clientIp: ip }))).toBe("rate_limited");
+    expect(await code(forget(s.storeId, { leadKey: randomUUID(), clientIp: nextIp() }))).toBe("ok");
+    for (let i = 0; i < 21; i++) expect(await code(forget(s.storeId, { leadKey: randomUUID(), clientIp: "unknown" }))).toBe("ok");
+  });
+
+  test("21º pedido da mesma chave na hora: rate_limited; as chaves do limite não levam o e-mail nem a chave em claro", async () => {
+    const s = await seedCapture();
+    const leadKey = randomUUID();
+    const email = mail();
+    const ip = nextIp();
+    for (let i = 0; i < LEAD_LIMITS.writesPerKeyPerHour; i++) expect(await code(forget(s.storeId, { leadKey, email }))).toBe("ok");
+    expect(await code(forget(s.storeId, { leadKey, email, clientIp: ip }))).toBe("rate_limited");
+    const keys = (await t.ownerDb.select({ key: rateLimit.key }).from(rateLimit).where(sql`${rateLimit.key} like ${"leads:forget%" + s.storeId + "%"}`)).map((r) => r.key);
+    expect(keys.length).toBeGreaterThanOrEqual(2);
+    for (const k of keys) for (const secret of [leadKey, email]) expect(k).not.toContain(secret);
   });
 });
 
@@ -380,7 +431,9 @@ describe("privacidade: log e auditoria", () => {
     await save(off, { leadKey, email, phone: PHONE }).catch(() => undefined); // conflict: falha pública vai ao log
     await save(s, { leadKey: "nao-e-uuid", email, phone: PHONE }).catch(() => undefined);
     for (let i = 0; i < LEAD_LIMITS.writesPerKeyPerHour; i++) await save(s, { leadKey, phone: PHONE, clientIp: ip }).catch(() => undefined);
-    await runAction(checkoutForgetLead, pub(s.storeId), { leadKey });
+    await forget(s.storeId, { leadKey });
+    await forget(s.storeId, { leadKey: randomUUID(), email });
+    await forget(s.storeId, { leadKey: "nao-e-uuid", email }).catch(() => undefined);
 
     const audit = JSON.stringify(await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(and(eq(auditLog.storeId, s.storeId)))));
     for (const text of [out, audit, JSON.stringify(await withStore(off.storeId, (tx) => tx.select().from(auditLog)))]) {

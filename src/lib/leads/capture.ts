@@ -6,8 +6,9 @@
 //   Quem já fez pedido da mesma oferta nas últimas 24 h (cliente da loja com o mesmo e-mail) não vira contato novo.
 //   Ao CRIAR a linha (nunca ao atualizar), agenda o aviso `lead_abandoned` do Telegram para criada + prazo, na mesma
 //   transação, se a loja tem o evento ligado (lê só a config pública; o job confere tudo de novo no envio).
-// - `checkout.forgetLead` (público, sem auditoria): "Não salvar meus dados" apaga a linha da chave (nunca a convertida);
-//   chave sem linha também é ok (não revela nada).
+// - `checkout.forgetLead` (público, sem auditoria): "Não salvar meus dados" apaga a linha da chave e, se veio o e-mail
+//   digitado, as linhas abertas ou contatadas da loja com o mesmo `email_hash` (outra visita); nunca a convertida.
+//   Responde sempre `{ ok: true }` (não revela se havia algo guardado). Limites por chave e por IP.
 // - `convertLeads`: na criação do pedido (mesma transação) o contato vira `converted` e perde e-mail e celular.
 // - Limites contra abuso, contados na transação da ação (atômicos contra rajada; rollback desfaz a contagem): contatos
 //   novos por IP e por loja contam só a linha criada; gravações por chave contam toda tentativa depois de conferir
@@ -26,7 +27,7 @@ import { normalizeBrMobile, validEmail } from "@/lib/validation/br";
 
 /** Retenção do contato: a linha vence 30 dias depois de criada (varredura diária). */
 export const LEAD_TTL_DAYS = 30;
-export const LEAD_LIMITS = { newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20 } as const;
+export const LEAD_LIMITS = { newPerIpPerHour: 10, newPerStorePerHour: 500, writesPerKeyPerHour: 20, forgetPerIpPerHour: 20 } as const;
 const HOUR = 3600;
 const DAY_MS = 86_400_000;
 /** Quem fez pedido da mesma oferta nesta janela (qualquer status) não vira contato numa visita nova. */
@@ -38,14 +39,16 @@ const newIpKey = (storeId: string, ip: string) => `leads:new:ip:${storeId}:${ipR
 const newStoreKey = (storeId: string) => `leads:new:store:${storeId}`;
 const writeKey = (storeId: string, keyHash: string) => `leads:key:${storeId}:${keyHash}`;
 const forgetKey = (storeId: string, keyHash: string) => `leads:forget:${storeId}:${keyHash}`;
+const forgetIpKey = (storeId: string, ip: string) => `leads:forget:ip:${storeId}:${ipRateKey(ip)}`;
 
 const leadKey = z.uuid();
+const emailInput = z.string().trim().toLowerCase().max(254).refine(validEmail, "Confira o e-mail");
 
 const saveInput = z
   .object({
     slug: z.string().min(1).max(100),
     leadKey,
-    email: z.string().trim().toLowerCase().max(254).refine(validEmail, "Confira o e-mail").optional(),
+    email: emailInput.optional(),
     phone: z
       .string()
       .max(30)
@@ -175,22 +178,30 @@ export const checkoutSaveLead = defineAction({
 
 export const checkoutForgetLead = defineAction({
   name: "checkout.forgetLead",
-  description: "\"Não salvar meus dados\": apaga o contato guardado para a chave do visitante (nunca o já convertido em pedido).",
-  input: z.object({ leadKey }),
+  description:
+    "\"Não salvar meus dados\": apaga o contato guardado para a chave do visitante e, com o e-mail digitado, os contatos abertos da loja com esse e-mail (nunca o já convertido em pedido). Responde sempre ok.",
+  input: z.object({
+    leadKey,
+    /** E-mail digitado no formulário (mesma normalização do `saveLead`): alcança o contato de uma visita anterior. */
+    email: emailInput.optional(),
+    /** Preenchido pela borda HTTP (nunca pelo navegador). */
+    clientIp: z.string().min(1).max(64),
+  }),
   permission: "public",
   audit: false,
-  /** Chave própria (não divide a contagem com as gravações: o visitante sempre consegue pedir para apagar). */
-  async prepare(call, input) {
+  async run(ctx, input) {
+    // Contadores próprios (não dividem a contagem com as gravações: o visitante sempre consegue pedir para apagar), na
+    // transação: por chave e, com IP conhecido, por IP (quem testa e-mails alheios esbarra no teto do IP).
     const keyHash = sha256(input.leadKey);
-    if (!(await checkRateLimit(forgetKey(call.storeId, keyHash), LEAD_LIMITS.writesPerKeyPerHour, HOUR))) {
-      throw new ActionError("rate_limited", "Muitas tentativas");
-    }
-    return { keyHash };
-  },
-  async run(ctx, _input, prepared) {
-    await ctx.tx
-      .delete(checkoutLead)
-      .where(and(eq(checkoutLead.storeId, ctx.storeId), eq(checkoutLead.keyHash, prepared.keyHash), inArray(checkoutLead.status, ["open", "contacted"])));
+    const now = new Date();
+    const keyOk = await checkRateLimit(forgetKey(ctx.storeId, keyHash), LEAD_LIMITS.writesPerKeyPerHour, HOUR, now, ctx.tx);
+    const ipOk = input.clientIp === UNKNOWN_IP || (await checkRateLimit(forgetIpKey(ctx.storeId, input.clientIp), LEAD_LIMITS.forgetPerIpPerHour, HOUR, now, ctx.tx));
+    if (!keyOk || !ipOk) throw new ActionError("rate_limited", "Muitas tentativas");
+
+    const same: SQL[] = [eq(checkoutLead.keyHash, keyHash)];
+    if (input.email !== undefined) same.push(eq(checkoutLead.emailHash, sha256(input.email)));
+    // Sem retorno do que foi apagado: a resposta é a mesma com ou sem contato (não revela se o e-mail estava guardado).
+    await ctx.tx.delete(checkoutLead).where(and(eq(checkoutLead.storeId, ctx.storeId), inArray(checkoutLead.status, ["open", "contacted"]), or(...same)));
     return { ok: true as const };
   },
 });
