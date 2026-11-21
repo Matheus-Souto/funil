@@ -23,6 +23,7 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | echarts (gráficos do painel) | 6.1.0 | Apache-2.0 |
 | motion (animações do painel) | 14.14.0 | MIT |
 | lucide-react (ícones do painel) | 1.77.0 | ISC |
+| pdfjs-dist (miniatura e visualizador de PDF do painel) | 6.5.438 | Apache-2.0 |
 | @radix-ui/react-tooltip, -dialog, -dropdown-menu, -select | 1.x | MIT |
 
 Logos das plataformas no gráfico "Por origem" (`src/app/admin/brand-icons.ts`): caminhos SVG do Simple Icons 16.38.0,

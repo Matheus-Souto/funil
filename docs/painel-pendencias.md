@@ -50,3 +50,11 @@ revogado os links certo (log "links de download revogados"); a rodada seguinte, 
 Causa provável: o `request` do Playwright reaproveita uma conexão keep-alive que o servidor (`next start`) fechou por
 inatividade (~5 s parado durante o diálogo de reembolso). Uma correção possível é fazer essa checagem num contexto de
 requisição novo (`playwright.request.newContext()`) ou com `Connection: close`, em vez de repetir o teste.
+
+## 6. Miniatura dos PDFs (página Produtos)
+
+**Hoje:** a tabela de produtos baixa o PDF inteiro de cada linha visível (rota `GET /admin/api/products/<id>/file`,
+ação `products.file`) e desenha a 1ª página no navegador com pdf.js. Para PDFs grandes isso pesa.
+
+**Sugestão:** gerar uma miniatura (PNG/WebP pequeno) no upload e guardar no storage ao lado do PDF, com o número de
+páginas na tabela `product`; a tabela passa a usar só a imagem e o visualizador continua lendo o PDF.
