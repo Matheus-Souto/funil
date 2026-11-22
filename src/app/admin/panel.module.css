@@ -3202,6 +3202,15 @@
   white-space: nowrap;
   overflow-wrap: normal;
 }
+/* Erro no histórico de Aprovações: o texto inteiro, quebrando linha (cortado com reticências, só aparecia no title,
+   que não abre no toque nem no leitor de tela). */
+.arcTable td small.cellError {
+  max-width: 40ch;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--color-danger);
+}
 
 /* ---------- Contatos ---------- */
 .leadCell {

@@ -200,7 +200,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                         return (
                           <span className={s.leadCell}>
                             <Badge tone={st.tone}>{st.label}</Badge>
-                            {r.error ? <small title={r.error}>Erro: {r.error}</small> : null}
+                            {r.error ? <small className={s.cellError}>Erro: {r.error}</small> : null}
                           </span>
                         );
                       },
