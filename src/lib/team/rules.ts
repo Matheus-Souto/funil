@@ -1,7 +1,7 @@
 // Regras de equipe: quem pode conceder qual papel, limites, lock por loja, donos, assentos e revogação dos tokens MCP
 // de quem deixa de ser dono (spec "Equipe e convites", seção 4). Só lógica e consultas: as ações usam estas funções
 // dentro da própria transação.
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { ROLE_PERMISSIONS, type Role } from "@/lib/actions/permissions";
 import { sha256 } from "@/lib/crypto";
 import type { Tx } from "@/lib/db/client";
@@ -70,7 +70,7 @@ export async function revokeTokensCreatedBy(tx: Tx, storeId: string, userId: str
   const rows = await tx
     .select({ id: mcpToken.id })
     .from(mcpToken)
-    .where(and(eq(mcpToken.storeId, storeId), eq(mcpToken.createdBy, userId), sql`${mcpToken.revokedAt} is null`))
+    .where(and(eq(mcpToken.storeId, storeId), eq(mcpToken.createdBy, userId), isNull(mcpToken.revokedAt)))
     .orderBy(mcpToken.id);
   let n = 0;
   for (const { id } of rows) if (await revokeToken(tx, id)) n++;

@@ -74,7 +74,7 @@ describe("canGrant", () => {
 });
 
 describe("lockTeam", () => {
-  test("segunda transação da mesma loja espera a primeira; outra loja não espera", async () => {
+  test("lock tomado na mesma loja, livre em outra", async () => {
     const { storeId } = await seedStore("Lock A");
     const { storeId: other } = await seedStore("Lock B");
     let release!: () => void;
@@ -86,22 +86,24 @@ describe("lockTeam", () => {
       held();
       await gate;
     });
-    await holding;
-    // Outra loja passa direto.
-    await withStore(other, (tx) => lockTeam(tx, other));
-    // Mesma loja: o lock está tomado (try-lock por fora enxerga isso).
-    const taken = await withStore(storeId, async (tx) => {
-      const r = await tx.execute<{ ok: boolean }>(sql`select pg_try_advisory_xact_lock(hashtext(${"team:" + storeId})) as ok`);
-      return r[0]!.ok;
-    });
-    expect(taken).toBe(false);
-    release();
-    await first;
-    const freed = await withStore(storeId, async (tx) => {
-      const r = await tx.execute<{ ok: boolean }>(sql`select pg_try_advisory_xact_lock(hashtext(${"team:" + storeId})) as ok`);
-      return r[0]!.ok;
-    });
-    expect(freed).toBe(true);
+    const tryLock = (id: string) =>
+      withStore(id, async (tx) => {
+        const r = await tx.execute<{ ok: boolean }>(sql`select pg_try_advisory_xact_lock(hashtext(${"team:" + storeId})) as ok`);
+        return r[0]!.ok;
+      });
+    try {
+      await holding;
+      // Outra loja passa direto.
+      await withStore(other, (tx) => lockTeam(tx, other));
+      // Mesma loja: o lock está tomado (try-lock por fora enxerga isso).
+      expect(await tryLock(storeId)).toBe(false);
+      release();
+      await first;
+      expect(await tryLock(storeId)).toBe(true);
+    } finally {
+      release();
+      await first;
+    }
   });
 });
 
@@ -136,6 +138,8 @@ describe("ownerCount e seatsUsed", () => {
     ]);
     expect(await withStore(storeId, (tx) => ownerCount(tx, storeId))).toBe(2);
     expect(await withStore(other, (tx) => ownerCount(tx, other))).toBe(1);
+    // Convite pendente de outra loja não muda a contagem da loja testada.
+    await t.ownerDb.insert(teamInvite).values({ ...invite("fora@example.com", future), storeId: other });
     // 3 membros + 2 convites no prazo.
     expect(await withStore(storeId, (tx) => seatsUsed(tx, storeId))).toBe(5);
     // Convite que vence depois de gravado deixa de contar (data alterada no banco).
@@ -180,6 +184,10 @@ describe("revokeTokensCreatedBy", () => {
     const pMine = await pendingOf(storeId, mine1);
     const pTheirs = await pendingOf(storeId, theirs);
     const pOther = await pendingOf(other, otherStore);
+
+    // Transação da loja A com o storeId da loja B: 0 (filtro explícito, não só o RLS) e nada é revogado.
+    expect(await withStore(storeId, (tx) => revokeTokensCreatedBy(tx, other, u))).toBe(0);
+    expect((await t.ownerDb.select({ r: mcpToken.revokedAt }).from(mcpToken).where(eq(mcpToken.id, otherStore)))[0]!.r).toBeNull();
 
     const n = await withStore(storeId, (tx) => revokeTokensCreatedBy(tx, storeId, u));
     expect(n).toBe(2);
