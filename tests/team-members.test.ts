@@ -6,6 +6,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { listTeam, revokeMemberSessions } from "@/lib/auth/account";
+import { hashPassword } from "@/lib/auth/password";
 import { createSession, lookupSession } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
 import { approvalRequest, auditLog, mcpToken, membership, session, store, teamInvite, users } from "@/lib/db/schema";
@@ -14,8 +15,12 @@ import { accountStores, changeRole, leaveStore, removeMember } from "@/lib/team/
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
+/** Senha de todo usuário do teste (promover a Dono ou Administrador pede a senha de quem promove). */
+const PASSWORD = "senha-do-teste-123";
+let passwordHash = "";
 beforeAll(async () => {
   t = await createTestDb();
+  passwordHash = await hashPassword(PASSWORD);
 });
 afterAll(async () => {
   await t.drop();
@@ -28,7 +33,7 @@ let n = 0;
 async function seedUser(storeId: string, role: MemberRole) {
   const [u] = await t.ownerDb
     .insert(users)
-    .values({ email: `membro${++n}-${randomUUID().slice(0, 6)}@example.com`, name: `Pessoa ${n}`, passwordHash: "x" })
+    .values({ email: `membro${++n}-${randomUUID().slice(0, 6)}@example.com`, name: `Pessoa ${n}`, passwordHash })
     .returning({ id: users.id });
   await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
   return { userId: u!.id, actor: { kind: "user", userId: u!.id, role } as UserActor };
@@ -107,10 +112,55 @@ describe("team.changeRole", () => {
     const { storeId } = await seedStore();
     const owner = await seedUser(storeId, "owner");
     const admin = await seedUser(storeId, "admin");
-    expect(await runAction(changeRole, panel(storeId, owner.actor), { userId: admin.userId, role: "owner" })).toEqual({ tokensRevoked: 0 });
+    expect(await runAction(changeRole, panel(storeId, owner.actor), { userId: admin.userId, role: "owner", password: PASSWORD })).toEqual({
+      tokensRevoked: 0,
+    });
     expect(await roleOf(storeId, admin.userId)).toBe("owner");
     const [a] = await auditsOf(storeId, "team.changeRole");
     expect(a!.input).toEqual({ userId: admin.userId, from: "admin", to: "owner", result: { tokensRevoked: 0 } });
+  });
+
+  test("promover a Dono ou Administrador pede a senha de quem promove; sem ela ou errada, nada muda", async () => {
+    const { storeId } = await seedStore();
+    const owner = await seedUser(storeId, "owner");
+    const sup = await seedUser(storeId, "support");
+    const traffic = await seedUser(storeId, "traffic");
+    const adm = await seedUser(storeId, "admin");
+    const as = panel(storeId, owner.actor);
+    for (const [who, to] of [[sup, "admin"], [traffic, "admin"], [sup, "owner"], [adm, "owner"]] as const) {
+      const missing = await failure(runAction(changeRole, as, { userId: who.userId, role: to }));
+      expect([to, missing.code, missing.message]).toEqual([to, "forbidden", "Digite a sua senha para dar esse papel"]);
+      const wrong = await failure(runAction(changeRole, as, { userId: who.userId, role: to, password: "senha-errada-123" }));
+      expect([to, wrong.code, wrong.message]).toEqual([to, "forbidden", "A sua senha não confere"]);
+    }
+    expect([await roleOf(storeId, sup.userId), await roleOf(storeId, traffic.userId), await roleOf(storeId, adm.userId)]).toEqual(["support", "traffic", "admin"]);
+    // Sem senha não gasta tentativa; com as 4 erradas acima e mais esta, são 5 em 15 min (o balde da troca de senha).
+    expect(await code(runAction(changeRole, as, { userId: sup.userId, role: "admin", password: "senha-errada-456" }))).toBe("forbidden");
+    expect(await code(runAction(changeRole, as, { userId: sup.userId, role: "admin", password: PASSWORD }))).toBe("rate_limited");
+  });
+
+  test("com a senha certa promove; a senha não vai para a auditoria", async () => {
+    const { storeId } = await seedStore();
+    const owner = await seedUser(storeId, "owner");
+    const sup = await seedUser(storeId, "support");
+    await runAction(changeRole, panel(storeId, owner.actor), { userId: sup.userId, role: "admin", password: PASSWORD });
+    expect(await roleOf(storeId, sup.userId)).toBe("admin");
+    const [a] = await auditsOf(storeId, "team.changeRole");
+    expect(a!.input).toEqual({ userId: sup.userId, from: "support", to: "admin", result: { tokensRevoked: 0 } });
+    expect(JSON.stringify(a)).not.toContain(PASSWORD);
+  });
+
+  test("rebaixar e trocar entre Atendimento e Tráfego não pedem senha", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    await seedUser(storeId, "owner");
+    const adm = await seedUser(storeId, "admin");
+    const sup = await seedUser(storeId, "support");
+    await runAction(changeRole, panel(storeId, a.actor), { userId: adm.userId, role: "support" });
+    await runAction(changeRole, panel(storeId, a.actor), { userId: sup.userId, role: "traffic" });
+    // Deixar de ser dono (para Administrador) também não.
+    await runAction(changeRole, panel(storeId, a.actor), { userId: a.userId, role: "admin" });
+    expect([await roleOf(storeId, adm.userId), await roleOf(storeId, sup.userId), await roleOf(storeId, a.userId)]).toEqual(["support", "traffic", "admin"]);
   });
 
   test("dono tenta rebaixar outro dono: forbidden, e nada muda", async () => {
@@ -185,7 +235,7 @@ describe("team.changeRole", () => {
     const owner = await seedUser(storeId, "owner");
     const adm = await seedUser(storeId, "admin");
     const inv = await inviteFrom(storeId, adm.userId);
-    await runAction(changeRole, panel(storeId, owner.actor), { userId: adm.userId, role: "owner" });
+    await runAction(changeRole, panel(storeId, owner.actor), { userId: adm.userId, role: "owner", password: PASSWORD });
     await expectPending(inv);
   });
 

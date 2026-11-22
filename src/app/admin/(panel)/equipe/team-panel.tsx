@@ -14,6 +14,7 @@ import type { ActionResult } from "../../result";
 import s from "../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../ui";
 import { changeRoleAction, inviteAction, leaveStoreAction, removeMemberAction, resendInviteAction, revokeInviteAction, revokeMemberSessionsAction } from "../actions";
+import { needsPassword } from "@/lib/team/grant";
 import { inviteSentText, notSentText } from "./messages";
 import { ROLE_INFO, roleLabel, type MemberRole } from "./roles";
 
@@ -55,6 +56,25 @@ function RoleHelp({ role }: { role: MemberRole }) {
   );
 }
 
+/** A senha de quem dá o papel: promover a Dono ou Administrador pede (uma sessão roubada sozinha não basta). */
+function PasswordConfirm({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <label className={s.field}>
+      <span className={s.label}>Sua senha</span>
+      <input
+        className={s.input}
+        type="password"
+        value={value}
+        required
+        maxLength={256}
+        autoComplete="current-password"
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <span className={s.hint}>Esse papel dá muito acesso à loja: confirme que é você.</span>
+    </label>
+  );
+}
+
 const sessionsText = (n: number) => (n === 0 ? "sem sessão ativa" : n === 1 ? "1 sessão ativa" : `${n} sessões ativas`);
 
 /** Frase do Dialog sobre os tokens MCP que a ação vai revogar. */
@@ -73,11 +93,14 @@ export function InviteButton({ roles, disabled }: { roles: MemberRole[]; disable
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<MemberRole>(initial);
+  const [password, setPassword] = useState("");
   const [done, setDone] = useState(false);
   const invite = useActionRunner();
+  const askPassword = needsPassword(null, role);
   const reset = () => {
     setEmail("");
     setRole(initial);
+    setPassword("");
     setDone(false);
     invite.setMsg(null);
   };
@@ -117,7 +140,7 @@ export function InviteButton({ roles, disabled }: { roles: MemberRole[]; disable
               <button type="button" className={s.btn} onClick={close}>
                 Cancelar
               </button>
-              <button type="submit" form="invite-form" className={`${s.btn} ${s.btnPrimary}`} disabled={invite.pending || email.trim() === ""}>
+              <button type="submit" form="invite-form" className={`${s.btn} ${s.btnPrimary}`} disabled={invite.pending || email.trim() === "" || (askPassword && password === "")}>
                 {invite.pending ? "Enviando…" : "Enviar convite"}
               </button>
             </>
@@ -133,8 +156,9 @@ export function InviteButton({ roles, disabled }: { roles: MemberRole[]; disable
             onSubmit={async (e) => {
               e.preventDefault();
               const to = email.trim().toLowerCase();
-              const r = await invite.run(() => inviteAction({ email: to, role }), { ok: (d) => (d.sent ? inviteSentText(to) : notSentText("Convite criado", d.reason)) });
+              const r = await invite.run(() => inviteAction({ email: to, role, ...(askPassword ? { password } : {}) }), { ok: (d) => (d.sent ? inviteSentText(to) : notSentText("Convite criado", d.reason)) });
               if (r.ok) {
+                setPassword("");
                 setDone(true);
                 // Convite gravado, mas o e-mail não saiu: a mensagem é de erro (com o caminho para resolver).
                 if (!r.data.sent) invite.setMsg({ tone: "error", text: notSentText("Convite criado", r.data.reason) });
@@ -166,6 +190,7 @@ export function InviteButton({ roles, disabled }: { roles: MemberRole[]; disable
               />
               <RoleHelp role={role} />
             </div>
+            {askPassword ? <PasswordConfirm value={password} onChange={setPassword} /> : null}
             <Live msg={invite.msg} />
           </form>
         )}
@@ -181,16 +206,19 @@ type MemberDialog = { kind: "role" | "sessions" | "remove" | "demote" | "leave";
 export function MembersTable({ members, roles, owners }: { members: MemberRow[]; roles: MemberRole[]; owners: number }) {
   const [open, setOpen] = useState<MemberDialog | null>(null);
   const [nextRole, setNextRole] = useState<MemberRole>("admin");
+  const [password, setPassword] = useState("");
   const act = useActionRunner();
   const soleOwner = owners <= 1;
   const show = (kind: MemberDialog["kind"], member: MemberRow) => {
     act.setMsg(null);
+    setPassword("");
     // Trocar papel começa no papel atual; deixar de ser dono, no Administrador.
     setNextRole(kind === "role" && roles.includes(member.role as MemberRole) ? (member.role as MemberRole) : "admin");
     setOpen({ kind, member });
   };
   const close = () => {
     act.setMsg(null);
+    setPassword("");
     setOpen(null);
   };
   const confirm = async <T,>(fn: () => Promise<ActionResult<T>>) => {
@@ -199,6 +227,7 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
   };
 
   const m = open?.member;
+  const askPassword = open?.kind === "role" && !!m && needsPassword(m.role as MemberRole, nextRole);
   const demoteRoles = roles.filter((r) => r !== "owner");
 
   const actionsFor = (row: MemberRow) => {
@@ -289,8 +318,8 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
             <button
               type="button"
               className={`${s.btn} ${s.btnPrimary}`}
-              disabled={act.pending || nextRole === m?.role}
-              onClick={() => m && confirm(() => changeRoleAction(m.userId, nextRole))}
+              disabled={act.pending || nextRole === m?.role || (askPassword && password === "")}
+              onClick={() => m && confirm(() => changeRoleAction(m.userId, nextRole, askPassword ? password : undefined))}
             >
               {act.pending ? "Salvando…" : "Trocar papel"}
             </button>
@@ -314,6 +343,7 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
           </p>
         ) : null}
         <p>A troca vale no próximo clique de {m?.name}, sem precisar entrar de novo.</p>
+        {askPassword ? <PasswordConfirm value={password} onChange={setPassword} /> : null}
         {act.msg?.tone === "error" ? <Live msg={act.msg} /> : null}
       </Dialog>
 

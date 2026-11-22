@@ -720,6 +720,10 @@ clique, sem derrubar a sessão. Remover apaga o acesso e as sessões da pessoa n
 criou aqui; a conta continua existindo. Na sua linha ficam "Deixar de ser dono" e "Sair da loja". Um dono não muda o
 papel nem remove outro dono, e a loja nunca fica sem dono.
 
+**Senha para dar Dono ou Administrador.** Promover alguém a Dono ou Administrador, e convidar como Administrador, pede a
+sua senha: uma sessão roubada sozinha não cria um dono, que outro dono não consegue remover. Depois de 5 senhas erradas
+em 15 minutos (contando a troca de senha), espere. Rebaixar e trocar entre Atendimento e Tráfego não pedem.
+
 **Transferir a loja.** Troque o papel de quem vai assumir para **Dono** e depois, na sua linha, clique em "Deixar de ser
 dono" (ou "Sair da loja"). Os tokens MCP que você criou são revogados nesse passo.
 

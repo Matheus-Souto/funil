@@ -11,13 +11,15 @@ import { storeBaseUrl } from "@/lib/delivery/links";
 import { env } from "@/lib/env";
 import { revokeInvitesSentBy } from "./invites";
 import { lockTeam, memberRole, requireCurrentManager } from "./lock";
-import { canGrant, ownerCount, revokeTokensCreatedBy } from "./rules";
+import { confirmOwnPassword, MAX_PASSWORD } from "@/lib/auth/confirm";
+import { canGrant, needsPassword, ownerCount, revokeTokensCreatedBy } from "./rules";
 
 /** Papéis de uma pessoa na loja (o `reader` só existe para tokens: `membership_role_check`). */
 export const MEMBER_ROLES = ["owner", "admin", "support", "traffic"] as const;
 
 const LAST_OWNER = "A loja precisa de pelo menos um dono";
 const ABOVE_YOURS = "Você não pode mexer num papel acima do seu";
+const PASSWORD_NEEDED = "Digite a sua senha para dar esse papel";
 
 const userIdOf = (actor: Actor): string => {
   if (actor.kind !== "user") throw new ActionError("forbidden", "Só usuários do painel");
@@ -40,7 +42,7 @@ async function dropMember(tx: Tx, storeId: string, userId: string): Promise<{ se
  * O papel que a ação leu sob o lock vai para a auditoria: `prepare` devolve esta nota vazia e `run` a preenche (a
  * auditoria é montada depois de `run`, inclusive na falha).
  */
-type AuditNote = { from?: Role; userId?: string };
+type AuditNote = { from?: Role; userId?: string; passwordConfirmed?: boolean };
 const note = async (): Promise<AuditNote> => ({});
 
 type Removed = { sessionsEnded: number; tokensRevoked: number };
@@ -48,11 +50,17 @@ const removedResult = (o: Removed) => ({ sessionsEnded: o.sessionsEnded, tokensR
 
 export const changeRole = defineAction({
   name: "team.changeRole",
-  description: "Troca o papel de um membro da loja. Rebaixar um dono revoga os tokens MCP e os convites pendentes que ele criou.",
-  input: z.object({ userId: z.uuid(), role: z.enum(MEMBER_ROLES) }),
+  description:
+    "Troca o papel de um membro da loja. Promover a Dono ou Administrador pede a senha de quem promove. Rebaixar um dono revoga os tokens MCP e os convites pendentes que ele criou.",
+  input: z.object({ userId: z.uuid(), role: z.enum(MEMBER_ROLES), password: z.string().max(MAX_PASSWORD).optional() }),
   permission: "team.manage",
   sensitive: true,
-  prepare: note,
+  // A senha (quando vem) é conferida aqui, fora da transação; se a troca é mesmo uma promoção, só dá para saber sob o
+  // lock, em `run`, que recusa a promoção sem senha conferida. A senha nunca vai para a auditoria.
+  async prepare(call, input): Promise<AuditNote> {
+    if (input.password !== undefined) await confirmOwnPassword(userIdOf(call.actor), input.password);
+    return { passwordConfirmed: input.password !== undefined };
+  },
   auditInput: (i, p?: AuditNote) => ({ userId: i.userId, from: p?.from, to: i.role }),
   auditResult: (o: { tokensRevoked: number }) => ({ tokensRevoked: o.tokensRevoked }),
   async run(ctx, input, audit): Promise<{ tokensRevoked: number }> {
@@ -65,6 +73,7 @@ export const changeRole = defineAction({
     const self = input.userId === me.userId;
     if (from === "owner" && !self) throw new ActionError("forbidden", "Um dono não muda o papel de outro dono");
     if (from === input.role) return { tokensRevoked: 0 };
+    if (needsPassword(from, input.role) && !audit.passwordConfirmed) throw new ActionError("forbidden", PASSWORD_NEEDED);
     const leavesOwner = from === "owner";
     if (leavesOwner && (await ownerCount(tx, storeId)) <= 1) throw new ActionError("conflict", LAST_OWNER);
     await tx

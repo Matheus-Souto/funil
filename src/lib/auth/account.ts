@@ -4,17 +4,12 @@
 import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import { db } from "@/lib/db/client";
 import { mcpToken, membership, session, teamInvite, users } from "@/lib/db/schema";
-import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { expireStaleInvites } from "@/lib/team/invites";
 import { lockTeam, requireCurrentManager } from "@/lib/team/lock";
-import { hashPassword, verifyPassword } from "./password";
+import { confirmOwnPassword, MAX_PASSWORD } from "./confirm";
+import { hashPassword } from "./password";
 
-const MAX_PASSWORD = 256;
-/** Tentativas de senha atual por usuário em 15 min (cada uma custa um scrypt). */
-const CHANGE_ATTEMPTS = 5;
-const CHANGE_WINDOW_SEC = 15 * 60;
 
 const userIdOf = (actor: { kind: string; userId?: string }) => {
   if (actor.kind !== "user" || !actor.userId) throw new ActionError("forbidden", "Só usuários do painel");
@@ -39,13 +34,7 @@ export const changePassword = defineAction({
   auditInput: () => ({}),
   async prepare(call, input) {
     const userId = userIdOf(call.actor);
-    if (!(await checkRateLimit(`account:password:${userId}`, CHANGE_ATTEMPTS, CHANGE_WINDOW_SEC))) {
-      throw new ActionError("rate_limited", "Muitas tentativas. Espere 15 minutos e tente de novo.");
-    }
-    const [u] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, userId)).limit(1);
-    if (!u || !(await verifyPassword(input.currentPassword, u.passwordHash))) {
-      throw new ActionError("forbidden", "A senha atual não confere");
-    }
+    await confirmOwnPassword(userId, input.currentPassword, "A senha atual não confere");
     if (input.newPassword === input.currentPassword) throw new ActionError("invalid_input", "A senha nova precisa ser diferente da atual");
     return { passwordHash: await hashPassword(input.newPassword) };
   },

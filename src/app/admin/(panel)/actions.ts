@@ -101,7 +101,7 @@ const NO_REASON = "o provedor não respondeu";
  * Convida por e-mail. A resposta traz só se o e-mail saiu e o motivo curto da falha: nem o e-mail do convidado, nem o
  * token, nem o link (a tela monta a mensagem com o e-mail que já está no formulário).
  */
-export async function inviteAction(input: { email: string; role: string }) {
+export async function inviteAction(input: { email: string; role: string; password?: string }) {
   const panel = await requirePanelActor();
   const r = await call(panel, inviteMember, input);
   if (!r.ok) return r;
@@ -122,9 +122,10 @@ export async function revokeInviteAction(inviteId: string) {
 
 const tokensText = (n: number) => (n === 0 ? "" : n === 1 ? " 1 token MCP revogado." : ` ${n} tokens MCP revogados.`);
 
-export async function changeRoleAction(userId: string, role: string) {
+/** `password`: a senha de quem troca, obrigatória para promover a Dono ou Administrador (`needsPassword`). */
+export async function changeRoleAction(userId: string, role: string, password?: string) {
   const panel = await requirePanelActor();
-  const r = await call(panel, changeRole, { userId, role }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
+  const r = await call(panel, changeRole, { userId, role, ...(password === undefined ? {} : { password }) }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
   // Deixar de ser dono: a página Equipe deixa de existir para esta pessoa (404 no refresh); vai para o início do painel.
   if (r.ok && userId === panel.actor.userId && role !== "owner") redirect("/admin");
   return r;
