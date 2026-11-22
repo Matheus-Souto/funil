@@ -12,7 +12,7 @@ import { storeBaseUrl } from "@/lib/delivery/links";
 import { logEmail, sendMail, type EmailProvider } from "@/lib/delivery/mailer";
 import { EMAIL } from "@/lib/delivery/resend";
 import { teamInviteEmail } from "@/lib/delivery/templates";
-import { log, safeErrorMessage } from "@/lib/log";
+import { errorFields, log } from "@/lib/log";
 import { ROLE_LABEL } from "@/lib/orders/labels";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { emailProviderReady } from "@/lib/recovery/settings";
@@ -43,9 +43,14 @@ export async function expireStaleInvites(tx: Tx, storeId: string): Promise<numbe
   return rows.length;
 }
 
-/** Texto curto do motivo da falha de envio, sem o e-mail do convidado (nem de ninguém), com no máximo 500 caracteres. */
+/**
+ * Texto curto do motivo da falha de envio. Só a mensagem de um `provider_error` nosso é aproveitada (como em
+ * `recovery/send.ts`); qualquer outro erro (ex.: a recusa do SMTP, que pode ecoar o destinatário) vira um texto fixo.
+ * Máximo de 500 caracteres.
+ */
 function sendReason(e: unknown): string {
-  const msg = (e instanceof ActionError ? e.message : safeErrorMessage(e)).trim();
+  if (!(e instanceof ActionError) || e.code !== "provider_error") return SEND_FAILED;
+  const msg = e.message.trim();
   return (EMAIL_LIKE.test(msg) || msg === "" ? SEND_FAILED : msg).slice(0, 500);
 }
 
@@ -76,7 +81,7 @@ type Prepared = { token: string; senderId: string | null };
 
 /**
  * Depois do commit, fora de transação: envia o e-mail e grava o resultado no convite (`send_status`, `send_error`,
- * `send_count + 1`, `last_sent_at`) e no `email_log`. Só vale para o token que ainda é o do convite (um reenvio
+ * e no `email_log`. Só vale para o token que ainda é o do convite (um reenvio
  * concorrente ou uma revogação encerra este envio sem mandar nada). Falha de envio não é erro da ação: vira "Não enviado".
  */
 async function deliver(storeId: string, inviteId: string, p: Prepared): Promise<void> {
@@ -108,12 +113,12 @@ async function deliver(storeId: string, inviteId: string, p: Prepared): Promise<
     await sendMail(storeId, { to: info.to, ...mail }, { onProvider: (v) => (provider = v) });
   } catch (e) {
     reason = sendReason(e);
-    log.warn("convite: falha no envio do e-mail", { storeId, inviteId, reason });
+    log.warn("convite: falha no envio do e-mail", { storeId, inviteId, ...errorFields(e) });
   }
   await withStore(storeId, async (tx) => {
     await tx
       .update(teamInvite)
-      .set({ sendStatus: reason === null ? "sent" : "failed", sendError: reason, sendCount: sql`${teamInvite.sendCount} + 1`, lastSentAt: sql`now()` })
+      .set({ sendStatus: reason === null ? "sent" : "failed", sendError: reason })
       .where(and(eq(teamInvite.id, inviteId), eq(teamInvite.tokenHash, tokenHash)));
     await logEmail(tx, { storeId, to: info.to, kind: "team_invite", status: reason === null ? "sent" : "failed", ...(reason === null ? {} : { error: reason }), provider });
   });
@@ -174,6 +179,9 @@ export const inviteMember = defineAction({
         role: input.role,
         tokenHash: inviteTokenHash(prepared.token),
         invitedBy: prepared.senderId,
+        // O envio é reservado aqui, sob o lock: o primeiro envio conta 1.
+        sendCount: 1,
+        lastSentAt: sql`now()`,
         expiresAt: expiryFrom(new Date()),
       })
       .returning({ id: teamInvite.id });
@@ -219,7 +227,15 @@ export const resendInvite = defineAction({
     await chargeDailyLimit(tx, storeId);
     await tx
       .update(teamInvite)
-      .set({ tokenHash: inviteTokenHash(prepared.token), expiresAt: expiryFrom(new Date()) })
+      // Reserva do envio sob o lock (reenvios em paralelo não furam o limite); o resultado antigo não vale para o link novo.
+      .set({
+        tokenHash: inviteTokenHash(prepared.token),
+        expiresAt: expiryFrom(new Date()),
+        sendCount: sql`${teamInvite.sendCount} + 1`,
+        lastSentAt: sql`now()`,
+        sendStatus: null,
+        sendError: null,
+      })
       .where(and(eq(teamInvite.id, inviteId), eq(teamInvite.status, "pending")));
     return { inviteId };
   },

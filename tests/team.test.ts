@@ -6,7 +6,7 @@ import { and, eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { listTeam } from "@/lib/auth/account";
 import { withStore } from "@/lib/db/client";
-import { auditLog, emailLog, membership, teamInvite, users } from "@/lib/db/schema";
+import { auditLog, emailLog, integration, membership, teamInvite, users } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
 import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
@@ -183,6 +183,17 @@ describe("convites por e-mail", () => {
     () => runAction(revokeInvite, c, { inviteId }),
     () => runAction(inviteStatus, c, { inviteId }),
   ];
+  /**
+   * Enche o limite diário da loja na janela de agora e na seguinte (a janela é fixa, alinhada ao UTC): o resultado é o mesmo
+   * de qualquer lado da meia-noite, mesmo que o teste a cruze.
+   */
+  async function fillDailyLimit(storeId: string): Promise<void> {
+    const key = `team:invite:${storeId}`;
+    for (const at of [new Date(), new Date(Date.now() + 86_400_000)]) {
+      // Pode já haver envios na janela de agora: passar de 30 só deixa o contador mais cheio.
+      for (let i = 0; i < TEAM.invitesPerDay; i++) await checkRateLimit(key, TEAM.invitesPerDay, 86_400, at);
+    }
+  }
   const ago = (ms: number) => new Date(Date.now() - ms);
 
   test("o convite chega com o link e o token do link bate com o token_hash", async () => {
@@ -295,7 +306,7 @@ describe("convites por e-mail", () => {
 
   test("31º e-mail de convite do dia recusado (rate_limited), sem gravar nem enviar", async () => {
     const { storeId, call } = await shop();
-    for (let i = 0; i < TEAM.invitesPerDay; i++) expect(await checkRateLimit(`team:invite:${storeId}`, TEAM.invitesPerDay, 86_400)).toBe(true);
+    await fillDailyLimit(storeId);
     const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }));
     expect(e.code).toBe("rate_limited");
     expect(await rowsOf(storeId)).toHaveLength(0);
@@ -365,6 +376,84 @@ describe("convites por e-mail", () => {
     // A validade volta a 7 dias a partir do reenvio.
     expect(row.expiresAt.getTime() - Date.now()).toBeGreaterThan((TEAM.inviteDays - 1) * 86_400_000);
     expect(row.sendCount).toBe(2);
+  });
+
+  test("reenvio também conta no limite diário: com o contador cheio, rate_limited", async () => {
+    const { storeId, call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    const before = await rowOf(inviteId);
+    await fillDailyLimit(storeId);
+    expect((await failure(runAction(resendInvite, call, { inviteId }))).code).toBe("rate_limited");
+    expect(outbox).toHaveLength(1);
+    expect(await rowOf(inviteId)).toMatchObject({ tokenHash: before.tokenHash, sendCount: 1 });
+  });
+
+  test("reenviar sem e-mail conectado: invalid_input, sem trocar o link", async () => {
+    const { storeId, call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    const before = await rowOf(inviteId);
+    await t.ownerDb.delete(integration).where(and(eq(integration.storeId, storeId), eq(integration.kind, "smtp")));
+    const e = await failure(runAction(resendInvite, call, { inviteId }));
+    expect(e.code).toBe("invalid_input");
+    expect(e.details).toEqual([expect.objectContaining({ path: ["email"], message: e.message })]);
+    expect((await rowOf(inviteId)).tokenHash).toBe(before.tokenHash);
+    expect(outbox).toHaveLength(1);
+  });
+
+  test("dois reenvios em paralelo: um passa e o outro dá rate_limited (o envio é reservado sob o lock)", async () => {
+    const { call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    const results = await Promise.allSettled([runAction(resendInvite, call, { inviteId }), runAction(resendInvite, call, { inviteId })]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0]!.reason as ActionError).code).toBe("rate_limited");
+    expect(outbox).toHaveLength(2);
+    expect(await rowOf(inviteId)).toMatchObject({ sendCount: 2, sendStatus: "sent" });
+  });
+
+  test("reenvio zera o resultado do envio anterior até o novo e-mail sair", async () => {
+    const { call } = await shop();
+    sendError = new Error("recusado");
+    const quiet = spyOn(process.stdout, "write").mockImplementation((() => true) as never);
+    let inviteId: string;
+    try {
+      ({ inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" }));
+    } finally {
+      quiet.mockRestore();
+    }
+    expect((await rowOf(inviteId)).sendStatus).toBe("failed");
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    sendError = null;
+    await runAction(resendInvite, call, { inviteId });
+    expect(await rowOf(inviteId)).toMatchObject({ sendStatus: "sent", sendError: null });
+  });
+
+  test("texto livre do provedor (parte local do e-mail) não chega a send_error, ao log nem ao email_log", async () => {
+    const { storeId, call } = await shop();
+    const local = `joao.silva${++n}x${randomBytes(2).toString("hex")}`;
+    const email = `${local}@example.com`;
+    sendError = new Error(`Mailbox "${local}" does not exist`);
+    const out: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+    try {
+      await runAction(inviteMember, call, { email, role: "support" });
+    } finally {
+      write.mockRestore();
+    }
+    const [row] = await rowsOf(storeId);
+    expect(row).toMatchObject({ sendStatus: "failed", sendError: "Não foi possível enviar o e-mail", sendCount: 1 });
+    const logs = await t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.error).toBe("Não foi possível enviar o e-mail");
+    for (const text of [row!.sendError!, JSON.stringify(logs), out.join("")]) {
+      expect(text).not.toContain(local);
+      expect(text).not.toContain("does not exist");
+    }
+    expect(out.join("")).toContain("falha no envio do e-mail");
   });
 
   test("reenvio: no máximo 5 envios por convite", async () => {
