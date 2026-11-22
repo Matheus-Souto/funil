@@ -13,8 +13,17 @@ export const MAX_PASSWORD = 256;
 const ATTEMPTS = 5;
 const WINDOW_SEC = 15 * 60;
 
+export const WRONG_PASSWORD = "A sua senha não confere";
+export const PASSWORD_FOR_ROLE = "Digite a sua senha para dar esse papel";
+export const PASSWORD_FOR_ADMIN_INVITE = "Digite a sua senha para convidar como Administrador";
+/**
+ * Recusas `forbidden` que falam da senha, não do papel: o painel mostra estas como vieram (as outras `forbidden` viram
+ * "Seu papel na loja não permite esta ação."). A troca de senha usa "A senha atual não confere" pelo próprio formulário.
+ */
+export const PASSWORD_REFUSALS: ReadonlySet<string> = new Set([WRONG_PASSWORD, PASSWORD_FOR_ROLE, PASSWORD_FOR_ADMIN_INVITE]);
+
 /** Confere a senha do próprio usuário. Recusa com `rate_limited` depois de 5 tentativas em 15 min e com `forbidden` se não confere. */
-export async function confirmOwnPassword(userId: string, password: string, wrong = "A sua senha não confere"): Promise<void> {
+export async function confirmOwnPassword(userId: string, password: string, wrong = WRONG_PASSWORD): Promise<void> {
   if (!(await checkRateLimit(`account:password:${userId}`, ATTEMPTS, WINDOW_SEC))) {
     throw new ActionError("rate_limited", "Muitas tentativas. Espere 15 minutos e tente de novo.");
   }
