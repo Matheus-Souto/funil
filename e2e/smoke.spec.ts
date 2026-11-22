@@ -1029,6 +1029,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   // Spec "Equipe e convites", seção 11 (E2E): convite pelo e-mail da loja (Mailpit), aceite com conta nova, link de uso
   // único, troca de papel sem novo login, senha para dar Administrador, remoção, convite revogado e Equipe no celular.
   test("equipe: convite por e-mail, aceite, troca de papel, remoção e convite revogado", async ({ browser, request }) => {
+    // Convite, aceite, troca de papel, remoção e revogação somam uns 30 s de ações.
+    test.slow();
     const GONE = "Este convite não vale mais. Peça um novo a quem convidou você.";
     const guest = { email: `convidado.${stamp}@exemplo.com`, name: "Bruno Convidado", password: "senha-convidado-123" };
 
