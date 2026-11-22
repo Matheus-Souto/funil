@@ -285,3 +285,12 @@ Seguem `docs/padrao-de-paginas.md`. Podem ser esboçadas no Doop antes de implem
 | P3 | O admin pode convidar e gerir Atendimento e Tráfego? | Não por enquanto (como na spec do MVP). O `canGrant` já deixa isso seguro se mudar |
 | P4 | Criar o papel "Editor de catálogo"? | Não agora. Entra quando aparecer alguém que precise |
 | P5 | Esboçar as telas no Doop antes? | Não precisa: as telas copiam padrões que já existem (Tokens, Configurações, Login) |
+
+### Respostas do dono (22/11/2026)
+
+O dono aprovou a spec e o plano com as recomendações acima:
+- P1: convite nunca para dono; um membro vira dono só por promoção; um dono não rebaixa nem remove outro.
+- P2: sem e-mail conectado, ninguém é convidado; não há "copiar link".
+- P3: só o dono gere a equipe.
+- P4: o papel "Editor de catálogo" não entra agora.
+- P5: as telas não passam pelo Doop antes.

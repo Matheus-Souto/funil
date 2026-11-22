@@ -23,8 +23,8 @@ revoga convites. A loja nunca fica sem dono, ninguém concede mais do que tem, e
 
 **Stack:** Next 16 (rotas em Node), Drizzle e Postgres 17 (RLS), Zod 4, nodemailer e Resend, testes em Bun.
 
-**Spec:** `docs/superpowers/specs/2026-11-22-equipe-convites-design.md`. As perguntas P1 a P5 estão lá. Este plano
-segue as recomendações. Se o dono decidir diferente, mudam só os pontos marcados com **(P1)**, **(P2)** e **(P3)**.
+**Spec:** `docs/superpowers/specs/2026-11-22-equipe-convites-design.md`. **Aprovado pelo dono em 22/11/2026**, com as
+recomendações de P1 a P5. Os pontos marcados com **(P1)**, **(P2)** e **(P3)** estão decididos como escritos.
 
 ## O que encontrei no código e que muda o pedido
 
