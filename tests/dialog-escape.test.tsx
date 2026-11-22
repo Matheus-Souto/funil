@@ -99,8 +99,15 @@ describe("Dialog: Esc com um diálogo aberto sobre outro", () => {
     expect(state).toEqual({ outer: true, inner: false });
     // A confirmação ainda está no DOM (animando a saída) e segue como a camada de cima para o Radix.
     expect(document.body.textContent).toContain("confirmação");
-    await new Promise((r) => setTimeout(r, 5));
-    await escape();
+    // O repasse só vale se a saída começou antes da tecla (`at < event.timeStamp`). O relógio do teste anda 1 ms à força,
+    // em vez de esperar: o Event do happy-dom e o diálogo leem o mesmo `performance.now()`.
+    const realNow = performance.now.bind(performance);
+    performance.now = () => realNow() + 1;
+    try {
+      await escape();
+    } finally {
+      performance.now = realNow;
+    }
     expect(state.outer).toBe(false);
   });
 

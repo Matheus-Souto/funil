@@ -1,5 +1,5 @@
 // Higiene de testes: proíbe skip/only/todo, retries e esperas fixas em tests/ e e2e/.
-// Varre só arquivos *.test.ts, *.spec.ts e *.test.sh (não helpers nem fakes).
+// Varre só arquivos *.test.ts(x), *.spec.ts(x) e *.test.sh (não helpers nem fakes).
 // Exceção: playwright.config.ts precisa ter `retries: 0` explícito.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -20,7 +20,7 @@ const FORBIDDEN: readonly Rule[] = [
   { re: /(^|[\s;&|(`])sleep(\s|$)/, label: "sleep (shell)", shellOnly: true },
 ];
 const RETRIES = /retries\s*:\s*([^\s,};]+)/;
-const SCANNED = /\.(test\.ts|spec\.ts|test\.sh)$/;
+const SCANNED = /\.(test\.tsx?|spec\.tsx?|test\.sh)$/;
 
 function walk(dir: string, out: string[]): void {
   if (!existsSync(dir)) return;
