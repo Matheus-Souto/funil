@@ -1,13 +1,16 @@
 // Cliente da Bot API do Telegram (aviso da loja no Telegram da própria loja; o bot é da loja, a plataforma não fornece
-// nenhum). Destino fixo (`api.telegram.org`): sem host configurável, logo sem SSRF. O token vai no CAMINHO da URL, então
+// nenhum). Destino fixo (`api.telegram.org`): sem host configurável pela loja, logo sem SSRF (o env só aceita
+// `TELEGRAM_BASE_URL` em loopback, para o Telegram falso do smoke). O token vai no CAMINHO da URL, então
 // a URL nunca vai a log nem a erro e o erro original do `fetch` é sempre descartado (a mensagem pode conter a URL).
 // Só o status HTTP e o `error_code` do Telegram são registrados; o texto do provedor nunca. Nada aqui toca o banco.
 import { oneLine } from "@/lib/delivery/templates";
 import { brl } from "@/lib/format";
+import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import type { OrderMethod } from "@/lib/orders/labels";
 
 const API = "https://api.telegram.org";
+const apiBase = () => (env.TELEGRAM_BASE_URL ?? API).replace(/\/+$/, "");
 /** Curto: o worker é serial, e um Telegram lento não deve prender os outros jobs. */
 const TIMEOUT_MS = 5_000;
 /** Limite de leitura do corpo de erro (só o `error_code` interessa). */
@@ -91,7 +94,7 @@ async function call(token: string, method: "getMe" | "sendMessage", payload: unk
   const signal = signalIn ? AbortSignal.any([signalIn, timeout]) : timeout;
   let res: Response;
   try {
-    res = await (fetchOverride ?? fetch)(`${API}/bot${token}/${method}`, {
+    res = await (fetchOverride ?? fetch)(`${apiBase()}/bot${token}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

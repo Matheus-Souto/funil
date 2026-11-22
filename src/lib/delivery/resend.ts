@@ -1,5 +1,5 @@
-// Cliente da API do Resend (e-mail pela conta da própria loja). Destino fixo (`api.resend.com`): sem host configurável,
-// logo sem SSRF. A chave vai SÓ no header `Authorization`; a mensagem de erro vem só do status HTTP (nunca do corpo da
+// Cliente da API do Resend (e-mail pela conta da própria loja). Destino fixo (`api.resend.com`): sem host configurável
+// pela loja, logo sem SSRF (o env só aceita `RESEND_BASE_URL` em loopback, para o Resend falso do smoke). A chave vai SÓ no header `Authorization`; a mensagem de erro vem só do status HTTP (nunca do corpo da
 // resposta) e o log leva só o status. Nada aqui toca o banco nem roda dentro de transação.
 // Também guarda a conexão, a escolha do provedor ativo e o teste (ações). Só importa o TIPO de `./mailer` (o mailer importa este módulo: sem ciclo em runtime).
 import { and, eq, notExists } from "drizzle-orm";
@@ -9,13 +9,15 @@ import { sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { integration, store } from "@/lib/db/schema";
 import { IntegrationSecretUnreadable, getIntegration, readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
+import { env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { limitConnectionTest } from "@/lib/mcp/limits";
 import { NOT_CONFIGURED, logEmail } from "./email-log";
 import type { MailMessage } from "./mailer";
 import { cleanHeaders, oneLine } from "./templates";
 
-const RESEND_URL = "https://api.resend.com/emails";
+const RESEND_BASE = "https://api.resend.com";
+const resendUrl = () => `${(env.RESEND_BASE_URL ?? RESEND_BASE).replace(/\/+$/, "")}/emails`;
 const TIMEOUT_MS = 15_000;
 const MAX_NAME = 100;
 /** Maior id de mensagem aceito na resposta (cabe em `email_log.provider_message_id` e no `email_id` do webhook). */
@@ -81,7 +83,7 @@ export async function sendViaResend(
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
   let res: Response;
   try {
-    res = await (fetchOverride ?? fetch)(RESEND_URL, {
+    res = await (fetchOverride ?? fetch)(resendUrl(), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${s.apiKey}`,
