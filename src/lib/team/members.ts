@@ -11,7 +11,7 @@ import { storeBaseUrl } from "@/lib/delivery/links";
 import { env } from "@/lib/env";
 import { revokeInvitesSentBy } from "./invites";
 import { lockTeam, memberRole, requireCurrentManager } from "./lock";
-import { confirmOwnPassword, MAX_PASSWORD } from "@/lib/auth/confirm";
+import { confirmOwnPassword, MAX_PASSWORD, PASSWORD_FOR_ROLE } from "@/lib/auth/confirm";
 import { canGrant, needsPassword, ownerCount, revokeTokensCreatedBy } from "./rules";
 
 /** Papéis de uma pessoa na loja (o `reader` só existe para tokens: `membership_role_check`). */
@@ -19,7 +19,6 @@ export const MEMBER_ROLES = ["owner", "admin", "support", "traffic"] as const;
 
 const LAST_OWNER = "A loja precisa de pelo menos um dono";
 const ABOVE_YOURS = "Você não pode mexer num papel acima do seu";
-const PASSWORD_NEEDED = "Digite a sua senha para dar esse papel";
 
 const userIdOf = (actor: Actor): string => {
   if (actor.kind !== "user") throw new ActionError("forbidden", "Só usuários do painel");
@@ -73,7 +72,7 @@ export const changeRole = defineAction({
     const self = input.userId === me.userId;
     if (from === "owner" && !self) throw new ActionError("forbidden", "Um dono não muda o papel de outro dono");
     if (from === input.role) return { tokensRevoked: 0 };
-    if (needsPassword(from, input.role) && !audit.passwordConfirmed) throw new ActionError("forbidden", PASSWORD_NEEDED);
+    if (needsPassword(from, input.role) && !audit.passwordConfirmed) throw new ActionError("forbidden", PASSWORD_FOR_ROLE);
     const leavesOwner = from === "owner";
     if (leavesOwner && (await ownerCount(tx, storeId)) <= 1) throw new ActionError("conflict", LAST_OWNER);
     await tx

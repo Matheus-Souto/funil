@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { ackAlert } from "@/lib/alerts";
 import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
+import { PASSWORD_REFUSALS } from "@/lib/auth/confirm";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
@@ -34,7 +35,8 @@ const ISSUE_TEXT: Record<string, string> = {
 
 /** Mensagem para a pessoa: nunca a pilha; para entrada inválida, a primeira mensagem do schema (as nossas são em pt-BR). */
 function describe(e: ActionError): string {
-  if (e.code === "forbidden") return "Seu papel na loja não permite esta ação.";
+  // A senha errada (ou que faltou) ao dar um papel é uma recusa `forbidden` que não fala do papel: vai como veio.
+  if (e.code === "forbidden") return PASSWORD_REFUSALS.has(e.message) ? `${e.message}.` : "Seu papel na loja não permite esta ação.";
   if (e.code === "invalid_input" && Array.isArray(e.details) && e.details.length > 0) {
     const first = e.details[0] as { path?: unknown[]; message?: string; code?: string };
     if (first.code === "custom" || (first.message && /[ãáçéêíóõú]|Use |Informe|inválid/i.test(first.message))) return first.message ?? e.message;

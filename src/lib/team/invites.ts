@@ -5,7 +5,7 @@
 import { and, eq, isNotNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import { confirmOwnPassword, MAX_PASSWORD } from "@/lib/auth/confirm";
+import { confirmOwnPassword, MAX_PASSWORD, PASSWORD_FOR_ADMIN_INVITE } from "@/lib/auth/confirm";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { membership, store, teamInvite, users } from "@/lib/db/schema";
@@ -174,7 +174,7 @@ export const inviteMember = defineAction({
     if (!role || !canGrant(role, input.role)) throw new ActionError("forbidden", "Você não pode dar um papel acima do seu");
     // Senha conferida fora da transação (scrypt e limite de tentativas); nunca vai para a auditoria.
     if (needsPassword(null, input.role)) {
-      if (input.password === undefined) throw new ActionError("forbidden", "Digite a sua senha para convidar como Administrador");
+      if (input.password === undefined) throw new ActionError("forbidden", PASSWORD_FOR_ADMIN_INVITE);
       const me = userIdOf(call.actor);
       if (me === null) throw new ActionError("forbidden", "Só usuários do painel");
       await confirmOwnPassword(me, input.password);

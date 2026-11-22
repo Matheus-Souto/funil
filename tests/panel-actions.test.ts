@@ -791,6 +791,25 @@ describe("Equipe e convites: server actions", () => {
     expect(row!.role).toBe("admin");
   });
 
+  test("changeRoleAction e inviteAction: senha errada ou que faltou aparece como tal, não como falta de papel", async () => {
+    const { changeRoleAction, inviteAction } = await import("@/app/admin/(panel)/actions");
+    const { storeId } = await seedStore();
+    const sup = await member(storeId, "support", false);
+    const owner = await member(storeId, "owner");
+    await t.ownerDb.update(users).set({ passwordHash: await hashPassword("senha-do-dono-123") }).where(eq(users.id, owner.userId));
+    expect(await changeRoleAction(sup.userId, "admin")).toMatchObject({ ok: false, code: "forbidden", error: "Digite a sua senha para dar esse papel." });
+    expect(await changeRoleAction(sup.userId, "admin", "senha-errada-000")).toMatchObject({ ok: false, code: "forbidden", error: "A sua senha não confere." });
+    expect(await inviteAction({ email: newEmail(), role: "admin" })).toMatchObject({
+      ok: false,
+      code: "forbidden",
+      error: "Digite a sua senha para convidar como Administrador.",
+    });
+    expect(await changeRoleAction(sup.userId, "admin", "senha-do-dono-123")).toMatchObject({ ok: true, message: "Papel trocado." });
+    // As outras recusas `forbidden` continuam genéricas.
+    jar.set(SESSION_COOKIE, sup.token);
+    expect(await changeRoleAction(owner.userId, "traffic")).toMatchObject({ ok: false, code: "forbidden", error: "Seu papel na loja não permite esta ação." });
+  });
+
   test("acceptInviteAction: apaga a sessão anterior, grava o cookie da conta nova e leva ao painel", async () => {
     const { acceptInviteAction } = await import("@/app/admin/actions");
     // O aceite usa a loja do host (no MODE=single, a primeira loja da instalação).
