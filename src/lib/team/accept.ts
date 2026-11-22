@@ -9,6 +9,7 @@ import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { hashPassword } from "@/lib/auth/password";
 import { MAX_PASSWORD_LENGTH, clearLoginAttempts, verifyCredentials } from "@/lib/auth/session";
+import { UNKNOWN_IP } from "@/lib/client-ip";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { membership, store, teamInvite, users } from "@/lib/db/schema";
 import { ROLE_LABEL } from "@/lib/orders/labels";
@@ -17,6 +18,8 @@ import { TEAM, inviteTokenHash, lockTeam } from "./rules";
 
 const GONE = "Este convite não vale mais";
 const gone = () => new ActionError("not_found", GONE);
+/** A mesma mensagem nos dois limites (IP e convite): uma diferente diria que o token existe. */
+const tooMany = () => new ActionError("rate_limited", "Muitas tentativas. Espere alguns minutos e tente de novo");
 const hasAccount = () => new ActionError("conflict", "Você já tem conta na plataforma. Entre com a sua senha para aceitar", { hasAccount: true });
 
 /** Formato frouxo de propósito: qualquer texto curto vira só "não achei" (a validação não responde se o token existe). */
@@ -96,15 +99,16 @@ export const acceptInvite = defineAction({
     const now = server?.now ?? new Date();
     const ip = server?.ip?.trim();
     // Os limites contam fora da transação da ação: a recusa (que desfaz a transação) também gasta a tentativa.
-    if (ip && !(await checkRateLimit(`team:accept:ip:${ipRateKey(ip)}`, TEAM.acceptPerIp, TEAM.acceptWindowSec, now))) {
-      throw new ActionError("rate_limited", "Muitas tentativas. Espere alguns minutos e tente de novo");
+    // IP desconhecido (sem proxy confiável) não vira um balde único para todo mundo: o limite por IP é pulado e valem o
+    // limite por convite e o bloqueio do login, como no checkout, no descadastro e no download.
+    const knownIp = ip !== undefined && ip !== "" && ip !== UNKNOWN_IP;
+    if (knownIp && !(await checkRateLimit(`team:accept:ip:${ipRateKey(ip)}`, TEAM.acceptPerIp, TEAM.acceptWindowSec, now))) {
+      throw tooMany();
     }
     // Só para decidir o caminho; quem vale é a reivindicação dentro de `run`, sob o lock.
     const inv = await withStore(call.storeId, (tx) => findPending(tx, call.storeId, input.token));
     if (!inv) throw gone();
-    if (!(await checkRateLimit(`team:accept:invite:${inv.id}`, TEAM.acceptPerInvite, TEAM.acceptWindowSec, now))) {
-      throw new ActionError("rate_limited", "Muitas tentativas neste convite. Espere alguns minutos e tente de novo");
-    }
+    if (!(await checkRateLimit(`team:accept:invite:${inv.id}`, TEAM.acceptPerInvite, TEAM.acceptWindowSec, now))) throw tooMany();
     if (input.mode === "existing") {
       // O mesmo caminho do login: bloqueio de 5 tentativas por e-mail em 15 min e tempo constante.
       const cred = await verifyCredentials(inv.email, input.password);
@@ -144,6 +148,13 @@ export const acceptInvite = defineAction({
       if (!created) throw hasAccount();
       userId = created.id;
     } else {
+      // A conta conferida no prepare ainda existe e ainda é a do e-mail do convite (sem FK estourando no vínculo).
+      const [same] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.id, prepared.userId), eq(users.email, prepared.email)))
+        .limit(1);
+      if (!same) throw gone();
       userId = prepared.userId;
     }
 

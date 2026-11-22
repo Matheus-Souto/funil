@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
+import { UNKNOWN_IP } from "@/lib/client-ip";
 import { sha256 } from "@/lib/crypto";
 import { auditLog, loginAttempt, membership, teamInvite, users } from "@/lib/db/schema";
 import { acceptInvite, inviteInfo } from "@/lib/team/accept";
@@ -225,6 +226,83 @@ describe("team.acceptInvite", () => {
     expect(e.code).toBe("rate_limited");
     // Outro IP passa.
     await runAction(acceptInvite, publicCall(storeId), { token: inv.token, mode: "new", name: "Duda", password: NEW_PASSWORD });
+  }, HEAVY_TEST_MS);
+
+  test("IP desconhecido não é um balde único: 11 tentativas sem rate_limited por IP, e o limite por convite vale", async () => {
+    const { storeId } = await seedStore();
+    const call = publicCall(storeId, UNKNOWN_IP);
+    for (let i = 0; i <= TEAM.acceptPerIp; i++) {
+      const e = await failure(runAction(acceptInvite, call, { token: newToken(), mode: "existing", password: PASSWORD }));
+      expect(e.code).toBe("not_found");
+    }
+    const inv = await seedInvite(storeId);
+    await seedAccount(inv.email);
+    for (let i = 0; i < TEAM.acceptPerInvite; i++) {
+      const e = await failure(runAction(acceptInvite, call, { token: inv.token, mode: "new", name: "Lia", password: NEW_PASSWORD }));
+      expect(e.code).toBe("conflict");
+    }
+    const e = await failure(runAction(acceptInvite, call, { token: inv.token, mode: "new", name: "Lia", password: NEW_PASSWORD }));
+    expect(e.code).toBe("rate_limited");
+  });
+
+  test("limite por IP e por convite dão a mesma mensagem", async () => {
+    const { storeId } = await seedStore();
+    const ipCall = publicCall(storeId);
+    for (let i = 0; i < TEAM.acceptPerIp; i++) await failure(runAction(acceptInvite, ipCall, { token: newToken(), mode: "existing", password: PASSWORD }));
+    const byIp = await failure(runAction(acceptInvite, ipCall, { token: newToken(), mode: "existing", password: PASSWORD }));
+    const inv = await seedInvite(storeId);
+    await seedAccount(inv.email);
+    for (let i = 0; i < TEAM.acceptPerInvite; i++) {
+      await failure(runAction(acceptInvite, publicCall(storeId), { token: inv.token, mode: "new", name: "Lia", password: NEW_PASSWORD }));
+    }
+    const byInvite = await failure(runAction(acceptInvite, publicCall(storeId), { token: inv.token, mode: "new", name: "Lia", password: NEW_PASSWORD }));
+    expect([byIp.code, byIp.message]).toEqual([byInvite.code, byInvite.message]);
+    expect(byIp.code).toBe("rate_limited");
+  });
+
+  test("conta existente cujo e-mail mudou (ou que sumiu) entre o prepare e o run: not_found padrão, convite pendente", async () => {
+    const { storeId } = await seedStore();
+    const inv = await seedInvite(storeId);
+    const userId = await seedAccount(inv.email, { password: PASSWORD });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const holder = t.ownerDb.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"team:" + storeId}))`);
+      locked();
+      await held;
+      await tx.update(users).set({ email: `trocado-${randomBytes(3).toString("hex")}@example.com` }).where(eq(users.id, userId));
+    });
+    await isLocked;
+    const pending = failure(runAction(acceptInvite, publicCall(storeId), { token: inv.token, mode: "existing", password: PASSWORD }));
+    await waitForAdvisoryWaiter();
+    release();
+    await holder;
+    const e = await pending;
+    expect([e.code, e.message]).toEqual(["not_found", GONE]);
+    expect(await inviteRow(inv.inviteId)).toMatchObject({ status: "pending", email: inv.email });
+    expect(await membersOf(storeId)).toHaveLength(0);
+    // Conta apagada: o mesmo not_found (sem estourar a FK do vínculo).
+    const inv2 = await seedInvite(storeId);
+    const gone = await seedAccount(inv2.email, { password: PASSWORD });
+    let release2!: () => void;
+    const held2 = new Promise<void>((r) => (release2 = r));
+    let locked2!: () => void;
+    const isLocked2 = new Promise<void>((r) => (locked2 = r));
+    const holder2 = t.ownerDb.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"team:" + storeId}))`);
+      locked2();
+      await held2;
+      await tx.delete(users).where(eq(users.id, gone));
+    });
+    await isLocked2;
+    const pending2 = failure(runAction(acceptInvite, publicCall(storeId), { token: inv2.token, mode: "existing", password: PASSWORD }));
+    await waitForAdvisoryWaiter();
+    release2();
+    await holder2;
+    const e2 = await pending2;
+    expect([e2.code, e2.message]).toEqual(["not_found", GONE]);
   }, HEAVY_TEST_MS);
 
   test(`${TEAM.acceptPerInvite + 1} tentativas no mesmo convite (IPs diferentes): rate_limited`, async () => {
