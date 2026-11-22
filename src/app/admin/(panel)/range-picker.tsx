@@ -5,22 +5,32 @@
 import { useRouter } from "next/navigation";
 import { useTransition } from "react";
 import { DateRangePicker, type DateRange, type DateRangePreset } from "@/components/arc/date-range-picker/date-range-picker";
+import { spDay } from "../date-range";
 
-/** "AAAA-MM-DD" com os campos locais da data (o calendário trabalha com o dia local do navegador). */
+/** "AAAA-MM-DD" com os campos locais da data (o calendário guarda o dia escolhido como data local). */
 const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const fromIso = (day: string) => {
   const [y, m, d] = day.split("-").map(Number);
   return new Date(y!, m! - 1, d!);
 };
 const shift = (d: Date, n: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+/** "Hoje" é o dia de São Paulo (o mesmo que o servidor usa), não o do navegador: num fuso diferente perto da meia-noite
+ *  os atalhos e o limite do calendário ficariam um dia para trás ou para a frente. */
+const spToday = () => fromIso(spDay(new Date()));
 
 const PRESETS: DateRangePreset[] = [
-  { label: "Hoje", range: (t) => ({ start: t, end: t }) },
-  { label: "Ontem", range: (t) => ({ start: shift(t, -1), end: shift(t, -1) }) },
-  { label: "Últimos 7 dias", range: (t) => ({ start: shift(t, -6), end: t }) },
-  { label: "Últimos 30 dias", range: (t) => ({ start: shift(t, -29), end: t }) },
-  { label: "Este mês", range: (t) => ({ start: new Date(t.getFullYear(), t.getMonth(), 1), end: t }) },
-  { label: "Mês passado", range: (t) => ({ start: new Date(t.getFullYear(), t.getMonth() - 1, 1), end: new Date(t.getFullYear(), t.getMonth(), 0) }) },
+  { label: "Hoje", range: () => ({ start: spToday(), end: spToday() }) },
+  { label: "Ontem", range: () => ({ start: shift(spToday(), -1), end: shift(spToday(), -1) }) },
+  { label: "Últimos 7 dias", range: () => ({ start: shift(spToday(), -6), end: spToday() }) },
+  { label: "Últimos 30 dias", range: () => ({ start: shift(spToday(), -29), end: spToday() }) },
+  { label: "Este mês", range: () => ({ start: new Date(spToday().getFullYear(), spToday().getMonth(), 1), end: spToday() }) },
+  {
+    label: "Mês passado",
+    range: () => {
+      const t = spToday();
+      return { start: new Date(t.getFullYear(), t.getMonth() - 1, 1), end: new Date(t.getFullYear(), t.getMonth(), 0) };
+    },
+  },
 ];
 
 export function RangePicker({ de, ate }: { de: string; ate: string }) {
@@ -33,7 +43,7 @@ export function RangePicker({ de, ate }: { de: string; ate: string }) {
       label="Período"
       placeholder="Escolha as datas"
       presets={PRESETS}
-      maxDate={new Date()}
+      maxDate={spToday()}
       locale="pt-BR"
       onChange={(r) => start(() => router.push(`/admin?de=${iso(r.start)}&ate=${iso(r.end)}`, { scroll: false }))}
     />

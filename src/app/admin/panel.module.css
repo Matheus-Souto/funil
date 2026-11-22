@@ -3714,6 +3714,13 @@
   }
 }
 
+/* Observação curta abaixo do número de um KPI. */
+.kpiNote {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+
 /* ---------- Aprovações (abas do Arc; cada pedido numa linha, ações à direita) ---------- */
 .apCount {
   display: inline-grid;

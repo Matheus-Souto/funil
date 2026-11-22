@@ -14,7 +14,8 @@ export function internalTarget(e: Pick<MouseEvent, "button" | "metaKey" | "ctrlK
   const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a || (a.target && a.target !== "_self") || a.hasAttribute("download")) return null;
   const url = new URL(a.getAttribute("href")!, here);
-  if (url.origin !== here.origin) return null;
+  // "//outro.site" (ex.: href "/.//outro.site") seria levado pelo router.push a outro domínio.
+  if (url.origin !== here.origin || url.pathname.startsWith("//")) return null;
   if (url.pathname === here.pathname && url.search === here.search) return null;
   return `${url.pathname}${url.search}${url.hash}`;
 }

@@ -17,6 +17,9 @@ export interface TokenRow {
   role: string;
   last4: string;
   createdAt: string;
+  /** Carimbos para ordenar as colunas de data (o texto "dd/mm/aaaa" ordenaria pelo dia do mês). */
+  createdTs: number;
+  lastUsedTs: number;
   createdBy: string | null;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -68,6 +71,8 @@ export function NewTokenButton({ mcpUrl }: { mcpUrl: string }) {
       <Dialog
         open={open}
         onClose={close}
+        // Com o token na tela, só "Pronto" fecha: um Esc ou clique fora sem querer perderia o token para sempre.
+        dismissable={!created}
         title={created ? `Token “${created.name}” criado` : "Novo token"}
         footer={
           created ? (
@@ -183,9 +188,9 @@ export function TokensTable({ tokens }: { tokens: TokenRow[] }) {
                 ),
               },
               { key: "role", label: "Papel", render: (_, t) => (t.revokedAt ? <Badge tone="neutral">Revogado</Badge> : <Badge tone="info">{ROLE_NAME[t.role] ?? t.role}</Badge>) },
-              { key: "lastUsedAt", label: "Último uso", render: (_, t) => <span className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</span> },
+              { key: "lastUsedTs", label: "Último uso", render: (_, t) => <span className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</span> },
               {
-                key: "createdAt",
+                key: "createdTs",
                 label: "Criado",
                 render: (_, t) => (
                   <span className={s.leadCell}>

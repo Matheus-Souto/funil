@@ -20,6 +20,7 @@ export function Dialog({
   tone,
   children,
   footer,
+  dismissable = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -27,13 +28,21 @@ export function Dialog({
   tone?: "danger";
   children: ReactNode;
   footer: ReactNode;
+  /** false: Esc, clique fora e X não fecham (só o botão do rodapé), ex.: o token MCP que aparece uma única vez. */
+  dismissable?: boolean;
 }) {
+  const block = (e: Event) => {
+    if (!dismissable) e.preventDefault();
+  };
   return (
-    <ArcDialog open={open} onOpenChange={(next) => !next && onClose()}>
+    <ArcDialog open={open} onOpenChange={(next) => !next && dismissable && onClose()}>
       <DialogContent
         title={title}
         className={`${s.themeVars} ${s.arcDialog}`}
         aria-describedby={undefined}
+        showClose={dismissable}
+        onEscapeKeyDown={block}
+        onPointerDownOutside={block}
         // Foco inicial no elemento marcado com data-autofocus (ex.: "Cancelar" nos diálogos de risco), não no X.
         onOpenAutoFocus={(e) => {
           const el = (e.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>("[data-autofocus]");

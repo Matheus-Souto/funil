@@ -69,9 +69,10 @@ export function FunnelChart({ views, orders, paid }: { views: number; orders: nu
   );
 }
 
-/** Rosca da receita por método (Arc). A legenda com ícones fica na página; as cores seguem a mesma ordem (--series-*). */
-export function DonutChart({ rows }: { rows: Array<{ key: string; label: string; cents: number }> }) {
-  const data = rows.filter((r) => r.cents > 0).map((r) => ({ key: r.key, label: r.label, value: r.cents }));
+/** Rosca da receita por método (Arc). A legenda com ícones fica na página e usa a mesma `color` de cada linha: a cor é
+ *  fixa por método (o Arc guardaria a cor pela ordem em que viu cada chave, e ela mudaria ao trocar o período). */
+export function DonutChart({ rows }: { rows: Array<{ key: string; label: string; cents: number; color: string }> }) {
+  const data = rows.filter((r) => r.cents > 0).map((r) => ({ key: r.key, label: r.label, value: r.cents, color: r.color }));
   return <ArcDonut data={data} label="Receita por método" totalLabel="no período" formatValue={brlCenter} size={200} thickness={22} legend={false} emptyLabel="Sem vendas no período" />;
 }
 

@@ -23,6 +23,7 @@ describe("internalTarget", () => {
   test("não intercepta: âncora na mesma tela, outro site, nova aba, download, teclas e botão do meio", () => {
     expect(click(`<a href="#preco" data-hit>âncora</a>`)).toBeNull();
     expect(click(`<a href="https://outro.example/" data-hit>fora</a>`)).toBeNull();
+    expect(click(`<a href="/.//outro.example/x" data-hit>caminho que vira outro domínio</a>`)).toBeNull();
     expect(click(`<a href="/admin/orders" target="_blank" data-hit>nova aba</a>`)).toBeNull();
     expect(click(`<a href="/admin/file" download data-hit>baixar</a>`)).toBeNull();
     expect(click(`<a href="/admin/orders" data-hit>x</a>`, { metaKey: true })).toBeNull();

@@ -26,6 +26,9 @@ import { AckButton, CopyField } from "../ui";
 import { FailedDeliveries } from "../blocks";
 import { ackAlertAction } from "./actions";
 
+/** Cor fixa de cada método na rosca e na legenda de "Por método". */
+const METHOD_COLOR: Record<keyof typeof METHOD_LABEL, string> = { pix_manual: "var(--series-1)", pix_asaas: "var(--series-2)", card_asaas: "var(--series-3)" };
+
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard" };
 
@@ -54,6 +57,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const prev = await runAction(metricsSummary, call, prevRange);
   // Contatos somem com 30 dias: janela anterior que começa antes disso não tem com o que comparar.
   const leadsCompare = leadWindowCovered(prevRange.from, now) ? range.compare : undefined;
+  // Contatos são apagados 30 dias depois da captura: um período que começa antes disso só conta os que sobraram.
+  const leadsNote = leadWindowCovered(range.from, now) ? undefined : "Só os últimos 30 dias (contatos são apagados depois disso).";
   const b = await runAction(metricsBreakdown, call, cur);
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
@@ -127,12 +132,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
 
         {lifetime.leads > 0 ? (
           <section className={s.grid2} aria-label="Contatos do período">
-            <Kpi label="Contatos capturados" value={String(m.leads)} delta={leadsCompare ? deltaOf(m.leads, prev.leads) : undefined} compare={leadsCompare} />
+            <Kpi label="Contatos capturados" value={String(m.leads)} delta={leadsCompare ? deltaOf(m.leads, prev.leads) : undefined} compare={leadsCompare} note={leadsNote} />
             <Kpi
               label="Viraram pedido"
               value={String(m.leadsConverted)}
               delta={leadsCompare ? deltaOf(m.leadsConverted, prev.leadsConverted) : undefined}
               compare={leadsCompare}
+              note={leadsNote}
             />
           </section>
         ) : null}
@@ -193,13 +199,13 @@ export default async function Overview({ searchParams }: { searchParams: Promise
                 Por método
               </h2>
             </div>
-            <DonutChart rows={methods.map((r) => ({ key: r.k, label: METHOD_LABEL[r.k], cents: r.revenueCents }))} />
+            <DonutChart rows={methods.map((r) => ({ key: r.k, label: METHOD_LABEL[r.k], cents: r.revenueCents, color: METHOD_COLOR[r.k] }))} />
             <ul className={s.legend}>
               {methods.map((r) => (
                 <li key={r.k}>
                   <span
                     className={s.legendIcon}
-                    style={{ color: r.revenueCents > 0 ? `var(--series-${(methods.filter((x) => x.revenueCents > 0).indexOf(r) % 5) + 1})` : "var(--color-text-muted)" }}
+                    style={{ color: r.revenueCents > 0 ? METHOD_COLOR[r.k] : "var(--color-text-muted)" }}
                   >
                     <MethodIcon method={r.k} />
                   </span>
@@ -287,7 +293,7 @@ async function EmptyOverview({ call, storeName }: { call: Parameters<typeof runA
     { label: "Enviar o PDF do produto", done: products.length > 0, href: "/admin/products", cta: "Enviar PDF" },
     { label: "Criar a primeira oferta", done: offers.length > 0, href: offers.length ? "/admin/offers" : "/admin/offers/nova", cta: "Criar oferta" },
     { label: "Conectar o Meta Pixel (use o mesmo Pixel ID de antes)", done: Boolean(conn.meta), href: "/admin/connections#meta", cta: "Conectar" },
-    { label: "Colocar o script na sua página de vendas", done: false, href: "/admin/settings#script", cta: "Copiar script" },
+    { label: "Colocar o script na sua página de vendas", done: false, href: "/admin/settings?aba=pagina", cta: "Copiar script" },
   ];
   const done = steps.filter((x) => x.done).length;
   return (
