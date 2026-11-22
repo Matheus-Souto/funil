@@ -3,6 +3,7 @@
 // Controles das tabelas do painel (pedidos, produtos): busca dentro do cartão, filtros no cabeçalho das colunas (como
 // no Excel, com o menu do Arc, marcando várias opções) e o botão de maximizar a tabela. Os filtros ficam na URL
 // (?status=paid&status=pending&method=..., ?q=), aplicados a cada clique.
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition, type ReactNode } from "react";
 import {
@@ -21,6 +22,7 @@ import {
   TimerOff,
   CircleX,
   Zap,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { DropdownMenu } from "@/components/arc/dropdown-menu/dropdown-menu";
@@ -119,10 +121,54 @@ export function ColumnFilter({ title, param, values, options, compact = false }:
   );
 }
 
-/** Cartão da tabela com a barra de cima (busca, total e maximizar). Maximizada, ocupa a tela; Esc volta. */
+/** Um filtro de coluna ligado, mostrado como chip na barra da tabela. */
+export interface ActiveFilter {
+  /** Parâmetro da URL, ex.: "status". */
+  param: string;
+  value: string;
+  /** Texto do chip, ex.: "Status: Pago". */
+  label: string;
+}
+
+/**
+ * Chips dos filtros ligados (cada um com ×) e "Limpar filtros", na barra da tabela. No celular os filtros ficam nos
+ * títulos de uma faixa que rola de lado; sem os chips, quem chega por um link já filtrado (o "Conferir" do Dashboard)
+ * não vê o filtro nem tem como tirá-lo. Tirar um filtro volta à 1ª página e mantém a busca e o "por página".
+ */
+function ActiveFilters({ filters }: { filters: ActiveFilter[] }) {
+  const pathname = usePathname();
+  const params = useSearchParams();
+  const filterParams = new Set(filters.map((f) => f.param));
+  const href = (drop: (param: string, value: string) => boolean) => {
+    const p = new URLSearchParams();
+    // Os filtros aceitam ?status=a&status=b e também ?status=a,b (links antigos): tira valor por valor.
+    for (const [k, raw] of params) {
+      if (k === "pagina") continue;
+      for (const v of filterParams.has(k) ? raw.split(",").map((x) => x.trim()) : [raw]) if (!drop(k, v)) p.append(k, v);
+    }
+    const str = p.toString();
+    return `${pathname}${str ? `?${str}` : ""}`;
+  };
+  return (
+    <div className={s.filterChips} role="group" aria-label="Filtros ligados">
+      {filters.map((f) => (
+        <Link key={`${f.param}-${f.value}`} className={s.filterChip} href={href((k, v) => k === f.param && v === f.value)} scroll={false} aria-label={`Tirar o filtro ${f.label}`}>
+          {f.label}
+          <X size={13} strokeWidth={2} aria-hidden="true" />
+        </Link>
+      ))}
+      <Link className={s.linkBtn} href={href((k) => filterParams.has(k))} scroll={false}>
+        Limpar filtros
+      </Link>
+    </div>
+  );
+}
+
+/** Cartão da tabela com a barra de cima (busca, total, maximizar e os filtros ligados). Maximizada, ocupa a tela; Esc volta. */
 export function TableShell({
   q,
   keep,
+  active = [],
   placeholder,
   searchLabel,
   count,
@@ -131,6 +177,8 @@ export function TableShell({
   q?: string;
   /** Filtros das colunas que a busca mantém, ex.: { status: ["paid"], method: [] }. */
   keep: Record<string, string[]>;
+  /** Filtros de coluna ligados, mostrados como chips com × e "Limpar filtros". */
+  active?: ActiveFilter[];
   placeholder: string;
   searchLabel: string;
   /** Texto do total ao lado da busca, ex.: "12 pedidos com estes filtros". */
@@ -167,6 +215,7 @@ export function TableShell({
         >
           {max ? <Minimize2 size={16} strokeWidth={1.75} /> : <Maximize2 size={16} strokeWidth={1.75} />}
         </button>
+        {active.length > 0 ? <ActiveFilters filters={active} /> : null}
       </div>
       {children}
     </section>

@@ -71,6 +71,7 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
       <TableShell
         q={q}
         keep={{ status: statuses, por: perPage === LEADS_PER_PAGE ? [] : [String(perPage)] }}
+        active={statuses.map((v) => ({ param: "status", value: v, label: `Status: ${STATUS_FILTER[v]}` }))}
         placeholder="Buscar por código ou e-mail"
         searchLabel="Buscar contatos"
         count={`${data.total} ${data.total === 1 ? "contato" : "contatos"}${filtered ? " com estes filtros" : ""}`}

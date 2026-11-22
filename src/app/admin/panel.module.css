@@ -2293,6 +2293,33 @@
   font: inherit;
   font-size: 14px;
 }
+.filterChips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  width: 100%;
+  font-size: 13px;
+}
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 6px 0 10px;
+  border-radius: 999px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-ink);
+  font-weight: 500;
+  text-decoration: none;
+}
+.filterChip:hover {
+  background: color-mix(in srgb, var(--color-primary-soft) 70%, var(--color-primary-ink) 12%);
+}
+.filterChip:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: 2px;
+}
 .tableCount {
   flex: 1;
   white-space: nowrap;

@@ -122,6 +122,10 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
       <TableShell
         q={q}
         keep={{ status: statuses, method: methods, por: perPage === ORDERS_PER_PAGE ? [] : [String(perPage)] }}
+        active={[
+          ...statuses.map((v) => ({ param: "status", value: v, label: `Status: ${STATUS_FILTER_LABEL[v]}` })),
+          ...methods.map((v) => ({ param: "method", value: v, label: `Método: ${METHOD_LABEL[v]}` })),
+        ]}
         placeholder="Buscar por nome ou e-mail"
         searchLabel="Buscar pedidos"
         count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}

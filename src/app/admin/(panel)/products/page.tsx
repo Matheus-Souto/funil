@@ -52,6 +52,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
           <TableShell
             q={q}
             keep={{ status: statuses, por: perPage === PER_PAGE_OPTIONS[0] ? [] : [String(perPage)] }}
+            active={statuses.map((v) => ({ param: "status", value: v, label: `Status: ${USES[v]}` }))}
             placeholder="Buscar produto"
             searchLabel="Buscar produtos"
             count={`${products.length} ${products.length === 1 ? "produto" : "produtos"}${filtered ? " com estes filtros" : ""}`}
