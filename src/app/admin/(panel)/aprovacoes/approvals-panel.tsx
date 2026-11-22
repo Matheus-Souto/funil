@@ -27,6 +27,8 @@ export interface ApprovalRow {
   hiddenSummary: string | null;
   status: string;
   createdAt: string;
+  /** Para ordenar "Pedido em" pela data, não pelo texto. */
+  createdTs: number;
   expiresAt: string;
   decidedAt: string | null;
   decidedBy: string | null;
@@ -203,7 +205,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                         );
                       },
                     },
-                    { key: "createdAt", label: "Pedido em", render: (_, r) => <span className={s.nowrap}>{r.createdAt}</span> },
+                    { key: "createdTs", label: "Pedido em", render: (_, r) => <span className={s.nowrap}>{r.createdAt}</span> },
                     { key: "decision", label: "Decisão", sortable: false, render: (_, r) => <span className={s.muted}>{r.decision}</span> },
                   ]}
                 />

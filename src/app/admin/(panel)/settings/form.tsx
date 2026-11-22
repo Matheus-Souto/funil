@@ -31,6 +31,18 @@ interface Initial {
 
 const formOf = (i: Initial) => ({ name: i.name, notifyEmail: i.notifyEmail, color: i.brandColor ?? "", leadCapture: i.leadCapture, privacyEmail: i.privacyEmail, recovery: i.recovery });
 
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Primeiro problema do formulário e a aba onde ele está (a mesma regra que o servidor confere). */
+function problemOf(f: ReturnType<typeof formOf>, colorOk: boolean): { tab: SettingsTab; text: string } | null {
+  if (!f.name.trim()) return { tab: "loja", text: "Informe o nome da loja." };
+  if (f.notifyEmail.trim() && !EMAIL.test(f.notifyEmail.trim())) return { tab: "loja", text: "O e-mail para aviso de venda parece inválido." };
+  if (!colorOk) return { tab: "checkout", text: "Use uma cor no formato #RRGGBB." };
+  if (f.leadCapture && !f.privacyEmail.trim()) return { tab: "contatos", text: "Com a captura ligada, informe o e-mail para pedidos de privacidade." };
+  if (f.privacyEmail.trim() && !EMAIL.test(f.privacyEmail.trim())) return { tab: "contatos", text: "O e-mail para pedidos de privacidade parece inválido." };
+  return null;
+}
+
 /** Título e explicação de uma linha de ajuste; os ids ligam o texto ao controle (leitor de tela). */
 function SetText({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
@@ -64,9 +76,14 @@ export function SettingsPanel({
   // Depois de salvar, a página volta do servidor com os valores novos: o formulário passa a compará-los com eles.
   const [saved, setSaved] = useState(() => formOf(initial));
   const [seen, setSeen] = useState(initial);
+  // O que foi enviado: se a pessoa não mexeu depois de salvar, o formulário passa a mostrar o que o servidor gravou (ele
+  // normaliza, ex.: e-mail em minúsculas), senão a barra de "alterações não salvas" ficaria presa.
+  const [submitted, setSubmitted] = useState<string | null>(null);
   if (initial !== seen) {
     setSeen(initial);
     setSaved(formOf(initial));
+    if (submitted !== null && submitted === JSON.stringify(f)) setF(formOf(initial));
+    setSubmitted(null);
   }
   const dirty = JSON.stringify({ ...f, name: f.name.trim(), notifyEmail: f.notifyEmail.trim(), privacyEmail: f.privacyEmail.trim() }) !== JSON.stringify(saved);
   const run = useActionRunner();
@@ -88,11 +105,14 @@ export function SettingsPanel({
       id="settings-form"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!valid) {
-          go("checkout");
-          run.setMsg({ tone: "error", text: "Use uma cor no formato #RRGGBB." });
+        // Só a aba aberta fica montada, então a validação do navegador não alcança as outras: confere aqui e leva à aba.
+        const problem = problemOf(f, valid);
+        if (problem) {
+          go(problem.tab);
+          run.setMsg({ tone: "error", text: problem.text });
           return;
         }
+        setSubmitted(JSON.stringify(f));
         void run.run(() =>
           updateSettingsAction({
             name: f.name.trim(),

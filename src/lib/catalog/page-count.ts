@@ -10,7 +10,7 @@ import { scheduleOnce, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { db, withStore } from "@/lib/db/client";
 import { product, store } from "@/lib/db/schema";
-import { inspectInSandbox } from "@/lib/pdf/sandbox";
+import { inspectInSandbox, PdfBusyError } from "@/lib/pdf/sandbox";
 import { storage } from "@/lib/storage";
 
 /** Produtos contados por rodada do job (cada PDF vai ao Worker isolado; o lote cabe folgado nos 120 s do job). */
@@ -19,6 +19,8 @@ export const PAGE_COUNT_BATCH = 20;
 export const PAGE_COUNT_UNKNOWN = 0;
 /** Intervalo até a próxima rodada quando o lote não terminou. */
 const NEXT_ROUND_MS = 5_000;
+/** Fila do Worker de PDF cheia (ex.: rajada de entregas carimbadas): espera mais antes de tentar de novo. */
+const BUSY_RETRY_MS = 60_000;
 
 /** Motivos fixos (o texto do erro do pdf-lib não vai para o log). */
 export type BackfillFailure = "arquivo não encontrado no storage" | "PDF criptografado" | "PDF inválido" | "falha ao abrir o PDF";
@@ -27,8 +29,10 @@ export interface BackfillResult {
   updated: number;
   /** Marcados com PAGE_COUNT_UNKNOWN: não são relidos. */
   failed: Array<{ storeId: string; productId: string; reason: BackfillFailure }>;
-  /** Ficaram produtos para a próxima rodada (lote cheio ou `signal` abortado). */
+  /** Ficaram produtos para a próxima rodada (lote cheio, `signal` abortado ou fila do Worker cheia). */
   more: boolean;
+  /** A rodada parou porque a fila do Worker de PDF estava cheia: nada foi marcado, tenta de novo mais tarde. */
+  busy: boolean;
 }
 
 /** Conta as páginas de até `limit` produtos sem page_count (todas as lojas, ou só `storeId`). */
@@ -36,9 +40,9 @@ export async function backfillPageCounts(opts: { storeId?: string; limit?: numbe
   const limit = opts.limit ?? PAGE_COUNT_BATCH;
   // A tabela `store` não tem RLS; `product` tem (FORCE), então cada loja é lida e gravada dentro de withStore.
   const stores = opts.storeId ? [{ id: opts.storeId }] : await db.select({ id: store.id }).from(store).orderBy(asc(store.id));
-  const out: BackfillResult = { updated: 0, failed: [], more: false };
+  const out: BackfillResult = { updated: 0, failed: [], more: false, busy: false };
   let done = 0;
-  for (const st of stores) {
+  stores: for (const st of stores) {
     if (opts.signal?.aborted || done >= limit) {
       out.more = true;
       break;
@@ -57,8 +61,14 @@ export async function backfillPageCounts(opts: { storeId?: string; limit?: numbe
         out.more = true;
         break;
       }
-      done++;
       const pages = await countPages(r.fileKey);
+      // Fila cheia é passageira: não marca o produto (ele seria dado como "não abre" para sempre); para e tenta depois.
+      if (pages === "busy") {
+        out.more = true;
+        out.busy = true;
+        break stores;
+      }
+      done++;
       await withStore(st.id, (tx) =>
         tx
           .update(product)
@@ -72,14 +82,17 @@ export async function backfillPageCounts(opts: { storeId?: string; limit?: numbe
   return out;
 }
 
-async function countPages(fileKey: string): Promise<number | BackfillFailure> {
+async function countPages(fileKey: string): Promise<number | BackfillFailure | "busy"> {
   const bytes = await storage.get(fileKey);
   if (!bytes) return "arquivo não encontrado no storage";
   try {
     const res = await inspectInSandbox(bytes);
     if ("error" in res) return res.error === "encrypted" ? "PDF criptografado" : "PDF inválido";
     return res.pages;
-  } catch {
+  } catch (e) {
+    if (e instanceof PdfBusyError) return "busy";
+    // Tempo-limite ou Worker que caiu: o mesmo PDF passou na validação do envio dentro do mesmo limite, então a falha
+    // agora é do arquivo; marcar evita reler (e estourar o tempo) a cada rodada.
     return "falha ao abrir o PDF";
   }
 }
@@ -89,5 +102,5 @@ export const backfillPageCountJob: JobHandler = async (_job, signal) => {
   const r = await backfillPageCounts({ signal });
   if (r.updated > 0) log.info("número de páginas dos produtos antigos preenchido", { count: r.updated });
   for (const f of r.failed) log.warn("não foi possível contar as páginas de um produto", f);
-  if (r.more && !signal.aborted) await scheduleOnce("backfill_page_count", new Date(Date.now() + NEXT_ROUND_MS));
+  if (r.more && !signal.aborted) await scheduleOnce("backfill_page_count", new Date(Date.now() + (r.busy ? BUSY_RETRY_MS : NEXT_ROUND_MS)));
 };

@@ -226,10 +226,10 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const [bRow] = await withStore(storeId, (tx) => tx.select({ fileKey: product.fileKey }).from(product).where(eq(product.id, b.id)));
     await storage.delete(bRow!.fileKey);
     const r = await backfillPageCounts({ storeId });
-    expect(r).toEqual({ updated: 1, failed: [{ storeId, productId: b.id, reason: "arquivo não encontrado no storage" }], more: false });
+    expect(r).toEqual({ updated: 1, failed: [{ storeId, productId: b.id, reason: "arquivo não encontrado no storage" }], more: false, busy: false });
     expect(await pageCounts(storeId)).toEqual({ [a.id]: 4, [b.id]: PAGE_COUNT_UNKNOWN, [c.id]: 99 });
     // O marcado não volta para a fila e, para quem lê, é desconhecido.
-    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false });
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false, busy: false });
     const listed = await call(listProducts, storeId, owner, {});
     expect(Object.fromEntries(listed.map((p) => [p.id, p.pageCount]))).toEqual({ [a.id]: 4, [b.id]: null, [c.id]: 99 });
   }, HEAVY_TEST_MS);
@@ -249,7 +249,7 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const p = await call(createProduct, storeId, owner, { name: "Excluído", fileName: "x.pdf", file: await makePdf(3) });
     await call(deleteProduct, storeId, owner, { id: p.id });
     await clear(storeId, [p.id]);
-    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false });
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false, busy: false });
     expect((await pageCounts(storeId))[p.id]).toBeNull();
   }, HEAVY_TEST_MS);
 
@@ -258,8 +258,8 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const ids: string[] = [];
     for (const n of [1, 2, 3]) ids.push((await call(createProduct, storeId, owner, { name: `P${n}`, fileName: `p${n}.pdf`, file: await makePdf(n) })).id);
     await clear(storeId, ids);
-    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 2, failed: [], more: true });
-    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 1, failed: [], more: false });
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 2, failed: [], more: true, busy: false });
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 1, failed: [], more: false, busy: false });
     expect(await pageCounts(storeId)).toEqual({ [ids[0]!]: 1, [ids[1]!]: 2, [ids[2]!]: 3 });
   }, HEAVY_TEST_MS);
 
@@ -269,7 +269,7 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     await clear(storeId, [p.id]);
     const ac = new AbortController();
     ac.abort();
-    expect(await backfillPageCounts({ storeId, signal: ac.signal })).toEqual({ updated: 0, failed: [], more: true });
+    expect(await backfillPageCounts({ storeId, signal: ac.signal })).toEqual({ updated: 0, failed: [], more: true, busy: false });
     expect((await pageCounts(storeId))[p.id]).toBeNull();
   }, HEAVY_TEST_MS);
 

@@ -172,7 +172,7 @@ export function PanelShell({
         </div>
 
         <Tip show={collapsed} label={id.storeName}>
-          <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados e foto da loja em Configurações"}>
+          <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados da loja em Configurações"}>
             <span className={s.storeMark} aria-hidden="true">
               {id.storeName.slice(0, 1).toUpperCase()}
             </span>

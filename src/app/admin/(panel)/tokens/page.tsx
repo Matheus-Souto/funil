@@ -25,8 +25,11 @@ export default async function TokensPage() {
     role: t.role,
     last4: t.last4,
     createdAt: dateTimeSP(t.createdAt),
+    createdTs: t.createdAt.getTime(),
     createdBy: t.createdBy,
     lastUsedAt: t.lastUsedAt ? dateTimeSP(t.lastUsedAt) : null,
+    // Ordenação de "Último uso": revogados e nunca usados vão para o fim (0).
+    lastUsedTs: t.revokedAt ? 0 : (t.lastUsedAt?.getTime() ?? 0),
     revokedAt: t.revokedAt ? dateTimeSP(t.revokedAt) : null,
   }));
   const mcpUrl = `${st.checkoutBaseUrl.replace(/\/+$/, "")}/api/mcp`;
