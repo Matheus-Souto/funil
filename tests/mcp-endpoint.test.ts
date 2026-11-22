@@ -9,7 +9,7 @@ import { z } from "zod";
 import { ActionError, defineAction, runAction, type Action } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
-import { approvalRequest, auditLog, customer, emailLog, mcpToken, orders, rateLimit, storeAlert, users } from "@/lib/db/schema";
+import { approvalRequest, auditLog, customer, emailLog, mcpToken, membership, orders, rateLimit, storeAlert, teamInvite, users } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { setMailTransportForTests } from "@/lib/delivery/mailer";
 import { setResendFetchForTests } from "@/lib/delivery/resend";
@@ -18,7 +18,8 @@ import { setTelegramFetchForTests } from "@/lib/notify/telegram";
 import { setMetaFetchForTests } from "@/lib/tracking/meta";
 import { handleMcpRequest, type McpHttpOptions } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
-import { MCP_EXCLUDED } from "@/lib/mcp/tools";
+import { sha256 } from "@/lib/crypto";
+import { MCP_EXCLUDED, mcpTools } from "@/lib/mcp/tools";
 import { createTestDb, HEAVY_TEST_MS, type TestDb } from "./db";
 import { seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
@@ -372,6 +373,43 @@ describe("registro do uso", () => {
       { tokenId: owner.id, tool: "products_list", args: {} },
     ]);
     for (const secret of ["segredo", "zuleica", "Zuleica", "Y3Vyc29y"]) expect([secret, out.includes(secret)]).toEqual([secret, false]);
+  });
+});
+
+describe("equipe fora do MCP", () => {
+  test("owner chamando team_invite pelo endpoint recebe ferramenta indisponível", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    const r = await callTool(owner.token, "team_invite", { email: "alguem@example.com", role: "support" });
+    expect([r.isError, r.content]).toEqual([true, [{ type: "text", text: "forbidden: ferramenta indisponível" }]]);
+    expect(await t.ownerDb.select().from(teamInvite).where(eq(teamInvite.storeId, s.storeId))).toEqual([]);
+  });
+
+  test("nenhuma resposta de ferramenta contém o e-mail de um membro ou de um convite", async () => {
+    const s = await seedPanelStore();
+    const memberEmail = `membro-${randomUUID()}@example.com`;
+    const inviteEmail = `convite-${randomUUID()}@example.com`;
+    const [member] = await t.ownerDb.insert(users).values({ email: memberEmail, name: "Membro Teste", passwordHash: "x" }).returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ storeId: s.storeId, userId: member!.id, role: "support" });
+    await t.ownerDb.insert(teamInvite).values({
+      storeId: s.storeId,
+      email: inviteEmail,
+      emailHash: sha256(inviteEmail),
+      role: "traffic",
+      tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 72 * 3_600_000),
+    });
+    const owner = await mkToken(s.storeId, "owner");
+    const reads = mcpTools("owner").filter((x) => registry.get(x.action)?.audit === false);
+    expect(reads.length).toBeGreaterThan(5);
+    const bodies: string[] = [];
+    for (const tool of reads) {
+      const r = await callTool(owner.token, tool.name, {});
+      bodies.push(JSON.stringify(r));
+    }
+    for (const needle of [memberEmail, inviteEmail, "Membro Teste"]) {
+      expect([needle, bodies.some((b) => b.includes(needle))]).toEqual([needle, false]);
+    }
   });
 });
 

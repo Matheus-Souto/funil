@@ -159,6 +159,25 @@ describe("classificação", () => {
     }
   });
 
+  test("as ações de equipe e de conta fora do MCP não aparecem como ferramenta em nenhum papel", () => {
+    const names = [
+      "team.invite",
+      "team.resendInvite",
+      "team.revokeInvite",
+      "team.inviteStatus",
+      "team.changeRole",
+      "team.remove",
+      "team.leave",
+      "team.inviteInfo",
+      "team.acceptInvite",
+      "account.stores",
+    ];
+    for (const role of ROLES) {
+      const exposed = mcpTools(role).map((x) => x.action);
+      for (const name of names) expect([role, name, exposed.includes(name)]).toEqual([role, name, false]);
+    }
+  });
+
   test("recovery.* não aparece como ferramenta em nenhum papel", () => {
     // As ações do descadastro são públicas (como checkout.saveLead): ficam de fora pela permissão.
     for (const name of ["recovery.unsubscribeView", "recovery.unsubscribe"]) {
