@@ -1113,7 +1113,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     }
   }
 
-  test("Kids, painel: 6 produtos com PDF, oferta Completo com os 6 e Almanaque com bump de 5 kits", async () => {
+  // Dividido em dois testes (produtos; ofertas): juntos passavam dos 30 s por teste com o painel novo (26,5 s antes).
+  test("Kids, painel: 6 produtos com PDF", async () => {
     const page = owner;
     await page.goto("/admin/products");
     for (const p of KIDS) {
@@ -1125,6 +1126,10 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
       await page.getByRole("button", { name: "Criar produto" }).click();
       await expect(page.getByText(`Produto “${p.name}” criado.`)).toBeVisible();
     }
+  });
+
+  test("Kids, painel: oferta Completo com os 6 e Almanaque com bump de 5 kits", async () => {
+    const page = owner;
 
     /** Preenche uma lista de produtos do editor: a 1ª linha já existe; cada nova linha entra pelo botão e é escolhida. */
     async function pick(names: string[], first: string, nth: (n: number) => string, add: string) {
