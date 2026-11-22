@@ -66,18 +66,18 @@ export default async function PanelLayout({ children }: { children: ReactNode })
       : []),
   ];
 
-  // "Suas lojas" (só no MODE=multi e só com mais de uma loja). Se a consulta falhar, o menu aparece sem a lista: recusa
-  // da ação (ActionError) é esperada; qualquer outro erro vai para o log, só com ids e códigos (sem dado pessoal).
-  const stores =
-    env.MODE === "multi"
-      ? await runAction(accountStores, { ...panel, origin: "panel" }, {}).then(
-          (r) => (r.length > 1 ? r.map((x) => ({ name: x.name, url: x.panelUrl, current: x.current })) : []),
-          (e: unknown) => {
-            if (!(e instanceof ActionError)) log.error("painel: falha ao listar as lojas da conta", { storeId: panel.storeId, ...errorFields(e) });
-            return [];
-          },
-        )
-      : [];
+  // As lojas da conta: "Suas lojas" (só no MODE=multi e só com mais de uma loja) e se a pessoa pode "Sair da loja" (todo
+  // papel, menos a única dona). Se a consulta falhar, o menu aparece sem a lista e sem "Sair da loja": recusa da ação
+  // (ActionError) é esperada; qualquer outro erro vai para o log, só com ids e códigos (sem dado pessoal).
+  const mine = await runAction(accountStores, { ...panel, origin: "panel" }, {}).then(
+    (r) => r,
+    (e: unknown) => {
+      if (!(e instanceof ActionError)) log.error("painel: falha ao listar as lojas da conta", { storeId: panel.storeId, ...errorFields(e) });
+      return [];
+    },
+  );
+  const stores = env.MODE === "multi" && mine.length > 1 ? mine.map((x) => ({ name: x.name, url: x.panelUrl, current: x.current })) : [];
+  const canLeave = mine.find((x) => x.current)?.canLeave ?? false;
 
   return (
     <div className={s.root}>
@@ -98,12 +98,13 @@ export default async function PanelLayout({ children }: { children: ReactNode })
         id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail }}
         logout={logoutAction}
         stores={stores}
+        canLeave={canLeave}
         initialCollapsed={jar.get("funil-sidebar")?.value === "collapsed"}
         initialTheme={theme === "light" || theme === "dark" ? theme : undefined}
       >
         {children}
       </PanelShell>
-      <TabBar items={items} stores={stores} logout={logoutAction} />
+      <TabBar items={items} stores={stores} logout={logoutAction} canLeave={canLeave} />
     </div>
   );
 }

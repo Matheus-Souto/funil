@@ -45,6 +45,20 @@ export async function expireStaleInvites(tx: Tx, storeId: string): Promise<numbe
 }
 
 /**
+ * Revoga (e apaga o e-mail de) os convites `pending` que o usuário mandou nesta loja. Roda junto com
+ * `revokeTokensCreatedBy`, quando a pessoa deixa de ser dona, é removida ou sai: o link que ela mandou deixa de valer.
+ * Chamar sob `lockTeam`. Devolve quantos foram revogados.
+ */
+export async function revokeInvitesSentBy(tx: Tx, storeId: string, userId: string): Promise<number> {
+  const rows = await tx
+    .update(teamInvite)
+    .set({ status: "revoked", email: null, endedAt: sql`now()` })
+    .where(and(eq(teamInvite.storeId, storeId), eq(teamInvite.invitedBy, userId), eq(teamInvite.status, "pending")))
+    .returning({ id: teamInvite.id });
+  return rows.length;
+}
+
+/**
  * Retenção dos convites de uma loja: pendente vencido vira `expired` (sem e-mail) e convite encerrado há mais de
  * `TEAM.retentionDays` dias, contados a partir de `now`, é apagado.
  */
@@ -98,9 +112,9 @@ async function chargeDailyLimit(tx: Tx, storeId: string): Promise<void> {
 type Prepared = { token: string; senderId: string | null };
 
 /**
- * Depois do commit, fora de transação: envia o e-mail e grava o resultado no convite (`send_status`, `send_error`,
- * e no `email_log`. Só vale para o token que ainda é o do convite (um reenvio
- * concorrente ou uma revogação encerra este envio sem mandar nada). Falha de envio não é erro da ação: vira "Não enviado".
+ * Depois do commit, fora de transação: envia o e-mail e grava o resultado no convite (`send_status` e `send_error`) e
+ * no `email_log`. Só vale para o token que ainda é o do convite (um reenvio concorrente ou uma revogação encerra este
+ * envio sem mandar nada). Falha de envio não é erro da ação: vira "Não enviado".
  */
 async function deliver(storeId: string, inviteId: string, p: Prepared): Promise<void> {
   const tokenHash = inviteTokenHash(p.token);

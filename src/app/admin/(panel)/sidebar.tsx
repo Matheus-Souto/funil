@@ -8,13 +8,13 @@ import { BrandLogo } from "../brand";
 import { Avatar } from "@/components/arc/avatar/avatar";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Settings, Store } from "lucide-react";
+import { DoorOpen, KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Settings, Store } from "lucide-react";
 import { DropdownMenu } from "@/components/arc/dropdown-menu/dropdown-menu";
 import { motion, useReducedMotion } from "motion/react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Tooltip } from "@/components/arc/tooltip/tooltip";
 import s from "../panel.module.css";
-import { NavIcon, isActive, type NavEntry, type StoreLink } from "./nav";
+import { LeaveStoreDialog, NavIcon, isActive, type NavEntry, type StoreLink } from "./nav";
 
 const YEAR = 60 * 60 * 24 * 365;
 const setCookie = (name: string, value: string) => {
@@ -79,6 +79,7 @@ export function PanelShell({
   id,
   logout,
   stores,
+  canLeave,
   initialCollapsed,
   initialTheme,
   children,
@@ -88,6 +89,8 @@ export function PanelShell({
   logout: () => Promise<void>;
   /** Lojas da conta (MODE=multi, mais de uma); vazio esconde "Suas lojas". */
   stores: StoreLink[];
+  /** Mostra "Sair da loja" no rodapé (escondido para a única dona). */
+  canLeave: boolean;
   initialCollapsed: boolean;
   initialTheme: Theme | undefined;
   children: ReactNode;
@@ -101,6 +104,7 @@ export function PanelShell({
   const hoverBg = (key: string) =>
     hovered === key ? <motion.span layoutId="nav-hover" className={s.navHover} transition={glide} aria-hidden="true" /> : null;
   const [theme, changeTheme] = useTheme(initialTheme);
+  const [leaving, setLeaving] = useState(false);
 
   const toggle = useCallback(() => {
     setCollapsed((v) => {
@@ -239,6 +243,13 @@ export function PanelShell({
                 <KeyRound size={15} strokeWidth={1.75} />
               </Link>
             </Tip>
+            {canLeave ? (
+              <Tip show label="Sair da loja" side={collapsed ? "right" : "top"}>
+                <button type="button" className={s.footBtn} aria-label="Sair da loja" onClick={() => setLeaving(true)}>
+                  <DoorOpen size={15} strokeWidth={1.75} />
+                </button>
+              </Tip>
+            ) : null}
             <form action={logout}>
               <Tip show label="Sair" side={collapsed ? "right" : "top"}>
                 <button type="submit" className={s.footBtn} aria-label="Sair">
@@ -257,6 +268,7 @@ export function PanelShell({
             </div>
           </Tip>
         </div>
+        {canLeave ? <LeaveStoreDialog open={leaving} onClose={() => setLeaving(false)} /> : null}
       </aside>
       <main id="conteudo" className={s.main}>
         <div className={s.mainInner}>{children}</div>

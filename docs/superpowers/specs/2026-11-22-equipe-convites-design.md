@@ -76,7 +76,7 @@ um dono.
   dono sumir, o operador da instalação resolve pela CLI.
 - **Tokens MCP de quem deixa de ser dono.** Só o dono cria tokens, e o token pode ter papel `owner`. Quando um dono é
   rebaixado, sai ou é removido, os tokens que ele criou **nesta loja** são revogados
-  (`mcp_token.created_by = user`). A revogação já cancela os pedidos pendentes desses tokens na fila. Custo: o agente
+  (`mcp_token.created_by = user`), e também os convites pendentes que ele mandou aqui (`team_invite.invited_by = user`). A revogação já cancela os pedidos pendentes desses tokens na fila. Custo: o agente
   que usava esses tokens para de funcionar até alguém criar outro. Sem isso, um dono afastado continuaria com acesso de
   dono pelo MCP.
 
@@ -184,7 +184,7 @@ Página `/admin/convite/<token>`, fora do grupo `(panel)` (como `/admin/login`),
 | `team.leave` | `account.self` | Qualquer membro sai da loja. Um dono só sai se outro dono continuar. Apaga as próprias sessões desta loja e manda para o login |
 | `team.resendInvite` | `team.manage` | Só convite pendente e no prazo; token novo, validade reiniciada, limites de reenvio. Vencido: convidar de novo |
 | `team.revokeInvite` | `team.manage` | `pending → revoked`, link morto |
-| `team.revokeSessions` (existe) | `team.manage` | Sem mudança |
+| `team.revokeSessions` (existe) | `team.manage` | P1: não encerra as sessões de outro dono |
 
 Trocar o papel de alguém não derruba a sessão dessa pessoa. O papel novo vale já no próximo clique, porque
 `lookupSession` lê `membership` a cada requisição.
@@ -238,6 +238,7 @@ Seguem `docs/padrao-de-paginas.md`. Podem ser esboçadas no Doop antes de implem
 - **Aceite, `/admin/convite/<token>`:** visual das telas de login (`s.auth`), com "{loja} convidou você como {papel}",
   um dos dois formulários da seção 6 e os estados de convite inválido e de bloqueio por tentativas.
 - **Sidebar, rodapé:** "Suas lojas" (seção 8), só no `MODE=multi` e só com mais de uma loja.
+- **Menu do usuário (rodapé da sidebar e "Mais" no celular):** "Sair da loja" (Dialog `tone="danger"`, `team.leave`) para todos os papéis, escondido para a única dona.
 
 ## 11. Testes
 

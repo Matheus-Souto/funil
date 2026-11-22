@@ -8,7 +8,7 @@ import type { Role } from "@/lib/actions/permissions";
 import { listTeam, revokeMemberSessions } from "@/lib/auth/account";
 import { createSession, lookupSession } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
-import { approvalRequest, auditLog, mcpToken, membership, session, store, users } from "@/lib/db/schema";
+import { approvalRequest, auditLog, mcpToken, membership, session, store, teamInvite, users } from "@/lib/db/schema";
 import { createMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { accountStores, changeRole, leaveStore, removeMember } from "@/lib/team/members";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -80,6 +80,23 @@ async function waitUntil(cond: () => Promise<boolean>): Promise<void> {
 }
 const waitForLockWaiter = (locktype: string) => waitUntil(async () => (await lockWaiters(locktype)) > 0);
 
+/** Convite `pending` gravado direto no banco, mandado por `invitedBy` (sem passar pelo envio do e-mail). */
+async function inviteFrom(storeId: string, invitedBy: string) {
+  const email = `convidado${++n}-${randomUUID().slice(0, 6)}@example.com`;
+  const [row] = await t.ownerDb
+    .insert(teamInvite)
+    .values({ storeId, email, emailHash: sha256(email), role: "support", tokenHash: sha256(randomUUID()), invitedBy, expiresAt: new Date(Date.now() + 86_400_000) })
+    .returning({ id: teamInvite.id });
+  return row!.id;
+}
+const inviteRow = async (id: string) => (await t.ownerDb.select().from(teamInvite).where(eq(teamInvite.id, id)))[0]!;
+/** Revogado pelo afastamento de quem convidou: `revoked`, sem e-mail e com `ended_at`. */
+const expectRevoked = async (id: string) => {
+  const row = await inviteRow(id);
+  expect([row.status, row.email, row.endedAt === null]).toEqual(["revoked", null, false]);
+};
+const expectPending = async (id: string) => expect((await inviteRow(id)).status).toBe("pending");
+
 const tokenRow = async (id: string) => (await t.ownerDb.select().from(mcpToken).where(eq(mcpToken.id, id)))[0]!;
 const requestRow = async (id: string) => (await t.ownerDb.select().from(approvalRequest).where(eq(approvalRequest.id, id)))[0]!;
 const auditsOf = (storeId: string, action: string) =>
@@ -146,6 +163,30 @@ describe("team.changeRole", () => {
     expect((await tokenRow(theirs)).revokedAt).toBeNull();
     expect((await tokenRow(elsewhere)).revokedAt).toBeNull();
     expect(await requestRow(req)).toMatchObject({ status: "canceled", inputSealed: null });
+  });
+
+  test("dono que se rebaixa tem os convites pendentes que mandou revogados; os dos outros e de outra loja seguem", async () => {
+    const { storeId } = await seedStore();
+    const other = await seedStore("Outra");
+    const a = await seedUser(storeId, "owner");
+    const b = await seedUser(storeId, "owner");
+    await t.ownerDb.insert(membership).values({ userId: a.userId, storeId: other.storeId, role: "owner" });
+    const mine = await inviteFrom(storeId, a.userId);
+    const theirs = await inviteFrom(storeId, b.userId);
+    const elsewhere = await inviteFrom(other.storeId, a.userId);
+    await runAction(changeRole, panel(storeId, a.actor), { userId: a.userId, role: "admin" });
+    await expectRevoked(mine);
+    await expectPending(theirs);
+    await expectPending(elsewhere);
+  });
+
+  test("promover alguém não revoga os convites que essa pessoa mandou", async () => {
+    const { storeId } = await seedStore();
+    const owner = await seedUser(storeId, "owner");
+    const adm = await seedUser(storeId, "admin");
+    const inv = await inviteFrom(storeId, adm.userId);
+    await runAction(changeRole, panel(storeId, owner.actor), { userId: adm.userId, role: "owner" });
+    await expectPending(inv);
   });
 
   test("trocar papel não apaga a sessão, e lookupSession devolve o papel novo", async () => {
@@ -223,6 +264,18 @@ describe("team.remove", () => {
     expect(await runAction(removeMember, panel(storeId, owner.actor), { userId: adm.userId })).toEqual({ sessionsEnded: 0, tokensRevoked: 1 });
     expect((await tokenRow(tok)).revokedAt).not.toBeNull();
   });
+
+  test("revoga os convites pendentes que a pessoa mandou nesta loja; os do dono seguem", async () => {
+    const { storeId } = await seedStore();
+    const owner = await seedUser(storeId, "owner");
+    const adm = await seedUser(storeId, "admin");
+    // Convite que sobrou de quando a pessoa era dona.
+    const hers = await inviteFrom(storeId, adm.userId);
+    const ownerInvite = await inviteFrom(storeId, owner.userId);
+    await runAction(removeMember, panel(storeId, owner.actor), { userId: adm.userId });
+    await expectRevoked(hers);
+    await expectPending(ownerInvite);
+  });
 });
 
 describe("team.leave", () => {
@@ -261,6 +314,17 @@ describe("team.leave", () => {
     expect((await tokenRow(tok)).revokedAt).not.toBeNull();
     expect(await owners(storeId)).toBe(1);
   });
+
+  test("dono sai e os convites pendentes que mandou são revogados; os do outro dono seguem", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    const b = await seedUser(storeId, "owner");
+    const mine = await inviteFrom(storeId, a.userId);
+    const theirs = await inviteFrom(storeId, b.userId);
+    await runAction(leaveStore, panel(storeId, a.actor), {});
+    await expectRevoked(mine);
+    await expectPending(theirs);
+  });
 });
 
 describe("account.stores", () => {
@@ -279,8 +343,9 @@ describe("account.stores", () => {
 
     const out = await runAction(accountStores, { ...panel(a.storeId, me.actor), server: multi }, {});
     expect(out).toEqual([
-      { storeId: a.storeId, name: "Loja A", panelUrl: `https://${slugA!.slug}.lojas.example.com/admin`, current: true },
-      { storeId: b.storeId, name: "Loja B", panelUrl: "https://loja-b.example.com/admin", current: false },
+      { storeId: a.storeId, name: "Loja A", panelUrl: `https://${slugA!.slug}.lojas.example.com/admin`, current: true, canLeave: true },
+      // Única dona da Loja B: não pode sair.
+      { storeId: b.storeId, name: "Loja B", panelUrl: "https://loja-b.example.com/admin", current: false, canLeave: false },
     ]);
     expect(JSON.stringify(out)).not.toContain(c.storeId);
     expect(await auditsOf(a.storeId, "account.stores")).toHaveLength(0);
@@ -292,8 +357,17 @@ describe("account.stores", () => {
     const me = await seedUser(a.storeId, "traffic");
     await t.ownerDb.insert(membership).values({ userId: me.userId, storeId: b.storeId, role: "owner" });
     expect(await runAction(accountStores, { ...panel(a.storeId, me.actor), server: single }, {})).toEqual([
-      { storeId: a.storeId, name: "Única", panelUrl: "https://base.example.com/admin", current: true },
+      { storeId: a.storeId, name: "Única", panelUrl: "https://base.example.com/admin", current: true, canLeave: true },
     ]);
+  });
+
+  test("canLeave: a única dona não sai; com outro dono, sai", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    const leave = async () => (await runAction(accountStores, { ...panel(storeId, a.actor), server: single }, {}))[0]!.canLeave;
+    expect(await leave()).toBe(false);
+    await seedUser(storeId, "owner");
+    expect(await leave()).toBe(true);
   });
 });
 

@@ -1,7 +1,7 @@
 // Gerir a equipe (spec "Equipe e convites", seções 4.1, 4.2, 7 e 8): trocar papel, remover, sair da loja e as lojas da
 // própria conta. Toda mutação pega `lockTeam` e relê, sob o lock, o papel ATUAL de quem age (`requireCurrentManager`).
 // `users`, `membership`, `session` e `store` são globais (sem RLS): toda consulta filtra pela loja e pelo usuário.
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
@@ -9,6 +9,7 @@ import type { Tx } from "@/lib/db/client";
 import { membership, session, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { env } from "@/lib/env";
+import { revokeInvitesSentBy } from "./invites";
 import { lockTeam, memberRole, requireCurrentManager } from "./lock";
 import { canGrant, ownerCount, revokeTokensCreatedBy } from "./rules";
 
@@ -23,7 +24,7 @@ const userIdOf = (actor: Actor): string => {
   return actor.userId;
 };
 
-/** Apaga o vínculo e as sessões da pessoa NESTA loja e revoga os tokens MCP que ela criou aqui. */
+/** Apaga o vínculo e as sessões da pessoa NESTA loja e revoga os tokens MCP que ela criou e os convites pendentes que mandou aqui. */
 async function dropMember(tx: Tx, storeId: string, userId: string): Promise<{ sessionsEnded: number; tokensRevoked: number }> {
   await tx.delete(membership).where(and(eq(membership.storeId, storeId), eq(membership.userId, userId)));
   const ended = await tx
@@ -31,6 +32,7 @@ async function dropMember(tx: Tx, storeId: string, userId: string): Promise<{ se
     .where(and(eq(session.storeId, storeId), eq(session.userId, userId)))
     .returning({ idHash: session.idHash });
   const tokensRevoked = await revokeTokensCreatedBy(tx, storeId, userId);
+  await revokeInvitesSentBy(tx, storeId, userId);
   return { sessionsEnded: ended.length, tokensRevoked };
 }
 
@@ -46,7 +48,7 @@ const removedResult = (o: Removed) => ({ sessionsEnded: o.sessionsEnded, tokensR
 
 export const changeRole = defineAction({
   name: "team.changeRole",
-  description: "Troca o papel de um membro da loja. Rebaixar um dono revoga os tokens MCP que ele criou.",
+  description: "Troca o papel de um membro da loja. Rebaixar um dono revoga os tokens MCP e os convites pendentes que ele criou.",
   input: z.object({ userId: z.uuid(), role: z.enum(MEMBER_ROLES) }),
   permission: "team.manage",
   sensitive: true,
@@ -70,7 +72,10 @@ export const changeRole = defineAction({
       .set({ role: input.role })
       .where(and(eq(membership.storeId, storeId), eq(membership.userId, input.userId)));
     // A sessão da pessoa continua: `lookupSession` relê o papel a cada requisição.
-    return { tokensRevoked: leavesOwner ? await revokeTokensCreatedBy(tx, storeId, input.userId) : 0 };
+    if (!leavesOwner) return { tokensRevoked: 0 };
+    // Quem deixa de ser dono perde os tokens MCP e os convites pendentes que criou nesta loja.
+    await revokeInvitesSentBy(tx, storeId, input.userId);
+    return { tokensRevoked: await revokeTokensCreatedBy(tx, storeId, input.userId) };
   },
 });
 
@@ -123,7 +128,7 @@ type StoresEnv = Pick<typeof env, "MODE" | "BASE_URL" | "PLATFORM_DOMAIN">;
 
 export const accountStores = defineAction({
   name: "account.stores",
-  description: "As lojas em que a própria pessoa tem vínculo (nome e endereço do painel). No MODE=single, só a atual.",
+  description: "As lojas em que a própria pessoa tem vínculo (nome, endereço do painel e se pode sair dela). No MODE=single, só a atual.",
   input: z.object({}),
   permission: "account.self",
   audit: false,
@@ -133,11 +138,26 @@ export const accountStores = defineAction({
     const e = server?.env ?? env;
     const mine = eq(membership.userId, userId);
     const rows = await ctx.tx
-      .select({ storeId: store.id, name: store.name, domain: store.domain, slug: store.slug })
+      .select({
+        storeId: store.id,
+        name: store.name,
+        domain: store.domain,
+        slug: store.slug,
+        role: membership.role,
+        // Donos da loja (só importa quando a pessoa é dona: a única dona não pode sair).
+        owners: sql<number>`(select count(*)::int from ${membership} o where o.store_id = ${store.id} and o.role = 'owner')`,
+      })
       .from(membership)
       .innerJoin(store, eq(store.id, membership.storeId))
       .where(e.MODE === "single" ? and(mine, eq(membership.storeId, ctx.storeId)) : mine)
       .orderBy(asc(store.name), asc(store.id));
-    return rows.map((s) => ({ storeId: s.storeId, name: s.name, panelUrl: `${storeBaseUrl(s, e)}/admin`, current: s.storeId === ctx.storeId }));
+    return rows.map((s) => ({
+      storeId: s.storeId,
+      name: s.name,
+      panelUrl: `${storeBaseUrl(s, e)}/admin`,
+      current: s.storeId === ctx.storeId,
+      // "Sair da loja" no menu do usuário: qualquer membro, menos a única dona (`team.leave` recusaria).
+      canLeave: s.role !== "owner" || Number(s.owners) > 1,
+    }));
   },
 });

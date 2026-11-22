@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { runAction } from "@/lib/actions/core";
+import { clientIpFrom } from "@/lib/client-ip";
+import { env } from "@/lib/env";
 import { dateTimeSP } from "@/lib/format";
 import { resolveStore } from "@/lib/stores";
 import { inviteInfo } from "@/lib/team/accept";
@@ -19,8 +21,11 @@ export const metadata: Metadata = { title: "Convite para a equipe", referrer: "n
 // mensagem, para a página não dizer se um token existe.
 export default async function InvitePage({ params }: { params: Promise<{ token?: string }> }) {
   const { token = "" } = await params;
-  const found = await resolveStore((await headers()).get("host") ?? "");
-  const info = found ? await runAction(inviteInfo, { storeId: found.id, actor: { kind: "public" }, origin: "public" }, { token: token.slice(0, 200) }) : null;
+  const h = await headers();
+  const found = await resolveStore(h.get("host") ?? "");
+  const info = found
+    ? await runAction(inviteInfo, { storeId: found.id, actor: { kind: "public" }, origin: "public", server: { ip: clientIpFrom(h, env.TRUST_PROXY) } }, { token: token.slice(0, 200) })
+    : null;
   return (
     <div className={`${s.root} ${s.auth}`}>
       <header className={s.authTop}>

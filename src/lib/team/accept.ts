@@ -1,11 +1,11 @@
 // Aceite do convite da equipe (spec "Equipe e convites", seções 4.3, 4.4 e 6). Duas ações públicas, chamadas pela página
-// `/admin/convite/<token>` no host da loja que convidou: `team.inviteInfo` (GET, não consome nada) e
+// `/admin/convite/<token>` no host da loja que convidou: `team.inviteInfo` (GET, não consome o convite; conta no limite por IP) e
 // `team.acceptInvite` (POST, com conta nova ou com a conta que já existe). Token inválido de qualquer tipo (mal formado,
 // inventado, de outra loja, vencido, revogado ou já usado) dá a mesma resposta, para a página não dizer se um token
 // existe. Nunca token nem e-mail em log ou auditoria; a sessão é criada por quem chama, depois do commit.
 import { and, eq, gt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { ActionError, defineAction } from "@/lib/actions/core";
+import { ActionError, defineAction, type Actor, type Origin } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { hashPassword } from "@/lib/auth/password";
 import { MAX_PASSWORD_LENGTH, clearLoginAttempts, verifyCredentials } from "@/lib/auth/session";
@@ -25,8 +25,17 @@ const hasAccount = () => new ActionError("conflict", "Você já tem conta na pla
 /** Formato frouxo de propósito: qualquer texto curto vira só "não achei" (a validação não responde se o token existe). */
 const TOKEN = z.string().max(200);
 
-/** Dados do servidor (fora da entrada): o IP de quem chama e, em testes, o relógio dos limites de tentativa. */
-type Server = { ip?: string; now?: Date };
+/**
+ * Dados do servidor (fora da entrada): o IP de quem chama (obrigatório: a página e o POST passam `clientIpFrom`) e, em
+ * testes, o relógio dos limites de tentativa.
+ */
+type Server = { ip: string; now?: Date };
+
+/** IP conhecido (com proxy confiável). Desconhecido não vira um balde único para todo mundo: o limite por IP é pulado. */
+function knownIpOf(server: Server | undefined): string | null {
+  const ip = server?.ip?.trim();
+  return ip !== undefined && ip !== "" && ip !== UNKNOWN_IP ? ip : null;
+}
 
 type PendingInvite = { id: string; email: string; role: Role; expiresAt: Date };
 
@@ -59,7 +68,16 @@ export const inviteInfo = defineAction({
   input: z.object({ token: TOKEN }),
   permission: "public",
   audit: false,
-  async run(ctx, { token }): Promise<{ storeName: string; roleLabel: string; email: string; hasAccount: boolean; expiresAt: Date } | null> {
+  // Limite por IP conhecido, fora da transação: sem ele a página vira um oráculo de tokens. Estourou, a resposta é a
+  // mesma de um token que não vale (`null`), para o limite também não dizer nada.
+  async prepare(call: { storeId: string; actor: Actor; origin: Origin; server?: Server }): Promise<{ limited: boolean }> {
+    const ip = knownIpOf(call.server);
+    if (ip === null) return { limited: false };
+    const now = call.server?.now ?? new Date();
+    return { limited: !(await checkRateLimit(`team:info:ip:${ipRateKey(ip)}`, TEAM.inviteInfoPerIp, TEAM.acceptWindowSec, now)) };
+  },
+  async run(ctx, { token }, prepared): Promise<{ storeName: string; roleLabel: string; email: string; hasAccount: boolean; expiresAt: Date } | null> {
+    if (prepared.limited) return null;
     const inv = await findPending(ctx.tx, ctx.storeId, token);
     if (!inv) return null;
     const [s] = await ctx.tx.select({ name: store.name }).from(store).where(eq(store.id, ctx.storeId)).limit(1);
@@ -94,15 +112,13 @@ export const acceptInvite = defineAction({
   // Só o id do convite (achado pelo hash do token no prepare): nunca token, e-mail, nome ou senha.
   auditInput: (_input, prepared?: Prepared) => ({ inviteId: prepared?.inviteId ?? null }),
   auditResult: (o: { userId: string; role: Role; newAccount: boolean }) => ({ userId: o.userId, role: o.role, newAccount: o.newAccount }),
-  async prepare(call, input): Promise<Prepared> {
-    const server = call.server as Server | undefined;
-    const now = server?.now ?? new Date();
-    const ip = server?.ip?.trim();
+  async prepare(call: { storeId: string; actor: Actor; origin: Origin; server?: Server }, input): Promise<Prepared> {
+    const now = call.server?.now ?? new Date();
     // Os limites contam fora da transação da ação: a recusa (que desfaz a transação) também gasta a tentativa.
     // IP desconhecido (sem proxy confiável) não vira um balde único para todo mundo: o limite por IP é pulado e valem o
     // limite por convite e o bloqueio do login, como no checkout, no descadastro e no download.
-    const knownIp = ip !== undefined && ip !== "" && ip !== UNKNOWN_IP;
-    if (knownIp && !(await checkRateLimit(`team:accept:ip:${ipRateKey(ip)}`, TEAM.acceptPerIp, TEAM.acceptWindowSec, now))) {
+    const ip = knownIpOf(call.server);
+    if (ip !== null && !(await checkRateLimit(`team:accept:ip:${ipRateKey(ip)}`, TEAM.acceptPerIp, TEAM.acceptWindowSec, now))) {
       throw tooMany();
     }
     // Só para decidir o caminho; quem vale é a reivindicação dentro de `run`, sob o lock.

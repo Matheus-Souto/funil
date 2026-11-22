@@ -38,6 +38,8 @@ export interface InviteRow {
   sendStatus: "sent" | "failed" | null;
   sendError: string | null;
   lastSentAt: string | null;
+  /** Sem resultado do envio há mais de 5 minutos: o envio provavelmente se perdeu ("Envio não confirmado"). */
+  sendStuck: boolean;
 }
 
 const ROLE_TONE: Record<string, "success" | "info" | "warning" | "neutral"> = { owner: "success", admin: "info", support: "info", traffic: "warning" };
@@ -215,11 +217,11 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
         </span>
       );
     }
-    // Um dono não muda o papel nem remove outro dono (só encerra as sessões dele).
+    // Um dono não muda o papel, não remove nem encerra as sessões de outro dono.
     const otherOwner = row.role === "owner";
     return (
       <span className={s.rowActions}>
-        {row.activeSessions > 0 ? (
+        {row.activeSessions > 0 && !otherOwner ? (
           <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => show("sessions", row)}>
             Encerrar sessões
           </button>
@@ -471,6 +473,8 @@ export function InvitesTable({ invites }: { invites: InviteRow[] }) {
                       <Badge tone="danger">Não enviado</Badge>
                       <small>{inv.sendError ?? "sem motivo informado"}</small>
                     </span>
+                  ) : inv.sendStuck ? (
+                    <Badge tone="warning">Envio não confirmado</Badge>
                   ) : (
                     <Badge tone="neutral">Enviando</Badge>
                   ),

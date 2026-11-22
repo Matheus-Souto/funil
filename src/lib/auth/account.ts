@@ -116,7 +116,10 @@ export const listTeam = defineAction({
   },
 });
 
-/** Encerra todas as sessões de um membro NESTA loja (as de outras lojas, no MODE=multi, não são da conta do dono). */
+/**
+ * Encerra todas as sessões de um membro NESTA loja (as de outras lojas, no MODE=multi, não são da conta do dono). Nunca
+ * as de outro dono.
+ */
 export const revokeMemberSessions = defineAction({
   name: "team.revokeSessions",
   description: "Encerra todas as sessões de um membro da loja no painel (ele precisa entrar de novo).",
@@ -127,11 +130,13 @@ export const revokeMemberSessions = defineAction({
     const me = await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
     if (me.userId === userId) throw new ActionError("conflict", "Para encerrar as suas outras sessões, troque a sua senha");
     const [m] = await ctx.tx
-      .select({ userId: membership.userId })
+      .select({ role: membership.role })
       .from(membership)
       .where(and(eq(membership.storeId, ctx.storeId), eq(membership.userId, userId)))
       .limit(1);
     if (!m) throw new ActionError("not_found", "Membro não encontrado");
+    // P1, como em `team.changeRole`: um sócio não derruba o outro (o próprio caso já foi recusado acima).
+    if (m.role === "owner") throw new ActionError("forbidden", "Um dono não encerra as sessões de outro dono");
     const ended = await ctx.tx
       .delete(session)
       .where(and(eq(session.userId, userId), eq(session.storeId, ctx.storeId)))

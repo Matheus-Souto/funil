@@ -143,4 +143,18 @@ describe("equipe: listar e encerrar sessões de um membro (dono)", () => {
     expect(await code(runAction(revokeMemberSessions, call, { userId: stranger.userId }))).toBe("not_found");
     expect(await code(runAction(revokeMemberSessions, call, { userId: owner.userId }))).toBe("conflict");
   });
+
+  test("um dono não encerra as sessões de outro dono: forbidden, e as sessões continuam", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    const b = await seedUser(storeId, "owner");
+    await createSession(b.userId, storeId);
+    const e = await runAction(revokeMemberSessions, { storeId, actor: a.actor, origin: "panel" as const }, { userId: b.userId }).then(
+      () => null,
+      (x: unknown) => x,
+    );
+    expect(e).toBeInstanceOf(ActionError);
+    expect([(e as ActionError).code, (e as ActionError).message]).toEqual(["forbidden", "Um dono não encerra as sessões de outro dono"]);
+    expect(await sessionsOf(b.userId)).toHaveLength(1);
+  });
 });

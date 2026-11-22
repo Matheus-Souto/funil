@@ -16,6 +16,9 @@ import { InviteButton, InvitesTable, MembersTable, type InviteRow, type MemberRo
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Equipe" };
 
+/** Sem resultado do envio depois disso, a situação vira "Envio não confirmado" em vez de "Enviando". */
+const STUCK_SEND_MS = 5 * 60_000;
+
 // Equipe (spec "Equipe e convites", seção 10): membros, convites pendentes e o convite por e-mail. Só quem gere a equipe
 // (`team.manage`, hoje só o dono); sem a permissão, 404 como as outras telas protegidas por papel.
 export default async function TeamPage() {
@@ -45,6 +48,7 @@ export default async function TeamPage() {
     sendStatus: i.sendStatus === "sent" || i.sendStatus === "failed" ? i.sendStatus : null,
     sendError: i.sendError,
     lastSentAt: i.lastSentAt ? shortWhenSP(i.lastSentAt, now) : null,
+    sendStuck: i.sendStatus === null && i.lastSentAt !== null && now.getTime() - i.lastSentAt.getTime() > STUCK_SEND_MS,
   }));
   // Só os papéis que quem está logado pode conceder (a ação confere de novo, sob o lock).
   const inviteRoles = INVITE_ROLES.filter((r) => canGrant(role, r)) as MemberRole[];

@@ -25,6 +25,8 @@ export const TEAM = {
   acceptPerIp: 10,
   /** Tentativas de aceite por convite na janela. */
   acceptPerInvite: 10,
+  /** Aberturas da página do convite (`team.inviteInfo`) por IP na janela. */
+  inviteInfoPerIp: 60,
   acceptWindowSec: 900,
   /** Dias que um convite encerrado fica no banco antes da limpeza. */
   retentionDays: 30,

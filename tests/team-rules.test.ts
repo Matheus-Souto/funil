@@ -39,6 +39,7 @@ describe("constantes", () => {
       maxSends: 5,
       acceptPerIp: 10,
       acceptPerInvite: 10,
+      inviteInfoPerIp: 60,
       acceptWindowSec: 900,
       retentionDays: 30,
     });

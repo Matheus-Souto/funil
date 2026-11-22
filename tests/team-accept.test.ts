@@ -77,7 +77,7 @@ const inviteRow = async (id: string) => (await t.ownerDb.select().from(teamInvit
 const membersOf = (storeId: string) => t.ownerDb.select().from(membership).where(eq(membership.storeId, storeId));
 
 describe("team.inviteInfo", () => {
-  test("devolve loja, papel, e-mail, se tem conta e a validade; GET não consome nada", async () => {
+  test("devolve loja, papel, e-mail, se tem conta e a validade; GET não consome o convite", async () => {
     const { storeId } = await seedStore("Maná Kids");
     const inv = await seedInvite(storeId, { role: "traffic" });
     const info = await runAction(inviteInfo, publicCall(storeId), { token: inv.token });
@@ -108,6 +108,25 @@ describe("team.inviteInfo", () => {
     await runAction(inviteInfo, publicCall(storeId), { token: inv.token });
     expect(await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId))).toHaveLength(0);
   });
+
+  test(`${TEAM.inviteInfoPerIp + 1}ª abertura do mesmo IP: null (como token que não vale), e outro IP ainda vê o convite`, async () => {
+    const { storeId } = await seedStore();
+    const call = publicCall(storeId);
+    for (let i = 0; i < TEAM.inviteInfoPerIp; i++) expect(await runAction(inviteInfo, call, { token: newToken() })).toBeNull();
+    const inv = await seedInvite(storeId);
+    expect(await runAction(inviteInfo, call, { token: inv.token })).toBeNull();
+    expect((await runAction(inviteInfo, publicCall(storeId), { token: inv.token }))?.email).toBe(inv.email);
+    // O convite segue pendente: o limite não consome nada.
+    expect((await inviteRow(inv.inviteId)).status).toBe("pending");
+  }, HEAVY_TEST_MS);
+
+  test("IP desconhecido não é um balde único: o limite por IP é pulado", async () => {
+    const { storeId } = await seedStore();
+    const call = publicCall(storeId, UNKNOWN_IP);
+    for (let i = 0; i < TEAM.inviteInfoPerIp; i++) await runAction(inviteInfo, call, { token: newToken() });
+    const inv = await seedInvite(storeId);
+    expect((await runAction(inviteInfo, call, { token: inv.token }))?.email).toBe(inv.email);
+  }, HEAVY_TEST_MS);
 });
 
 describe("team.acceptInvite", () => {
