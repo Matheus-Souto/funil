@@ -5,10 +5,11 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import type { Role } from "@/lib/actions/permissions";
+import { hasPermission, type Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
-import { approvalRequest, mcpToken, users } from "@/lib/db/schema";
+import { approvalRequest, mcpToken, membership, users } from "@/lib/db/schema";
+import { lockTeam } from "@/lib/team/rules";
 
 /** Papéis que um token pode ter (o `reader` só existe para tokens). */
 export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader"] as const satisfies readonly Role[];
@@ -61,6 +62,17 @@ export const createMcpToken = defineAction({
   // Nunca o token: só o que identifica o pedido.
   auditInput: (i) => ({ name: i.name, role: i.role }),
   async run(ctx, input) {
+    // Sob o lock da equipe e com o papel ATUAL de quem cria: um dono rebaixado (ou que saiu) ao mesmo tempo não deixa um
+    // token novo para trás, que `revokeTokensCreatedBy` não pegaria.
+    await lockTeam(ctx.tx, ctx.storeId);
+    if (ctx.actor.kind === "user") {
+      const [m] = await ctx.tx
+        .select({ role: membership.role })
+        .from(membership)
+        .where(and(eq(membership.storeId, ctx.storeId), eq(membership.userId, ctx.actor.userId)))
+        .limit(1);
+      if (!m || !hasPermission(m.role as Role, "team.manage")) throw new ActionError("forbidden", "Sem permissão: team.manage");
+    }
     const { token, hash, last4 } = mintMcpToken(ctx.storeId);
     const [row] = await ctx.tx
       .insert(mcpToken)

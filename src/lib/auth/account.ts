@@ -1,11 +1,11 @@
 // Conta e equipe: troca da própria senha (exige a atual; derruba todas as sessões do usuário) e, para o dono, a lista
 // de membros da loja com o número de sessões ativas e o encerramento das sessões de um membro.
 // `users`, `membership` e `session` são tabelas globais (sem RLS): toda consulta aqui filtra pela loja do ator.
-import { and, count, desc, eq, gt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { db } from "@/lib/db/client";
-import { membership, session, teamInvite, users } from "@/lib/db/schema";
+import { mcpToken, membership, session, teamInvite, users } from "@/lib/db/schema";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { expireStaleInvites } from "@/lib/team/invites";
 import { lockTeam } from "@/lib/team/rules";
@@ -74,6 +74,13 @@ export const listTeam = defineAction({
       .where(and(eq(session.storeId, ctx.storeId), gt(session.expiresAt, sql`now()`)))
       .groupBy(session.userId)
       .as("active");
+    // Tokens MCP ainda ativos que cada pessoa criou nesta loja (o aviso de quantos serão revogados ao rebaixar/remover).
+    const tokens = ctx.tx
+      .select({ createdBy: mcpToken.createdBy, tokenCount: count().as("token_count") })
+      .from(mcpToken)
+      .where(and(eq(mcpToken.storeId, ctx.storeId), isNull(mcpToken.revokedAt)))
+      .groupBy(mcpToken.createdBy)
+      .as("tokens");
     const rows = await ctx.tx
       .select({
         userId: users.id,
@@ -82,14 +89,16 @@ export const listTeam = defineAction({
         role: membership.role,
         mustChangePassword: users.mustChangePassword,
         activeSessions: sql<number>`coalesce(${active.n}, 0)::int`,
+        tokensCreated: sql<number>`coalesce(${tokens.tokenCount}, 0)::int`,
       })
       .from(membership)
       .innerJoin(users, eq(users.id, membership.userId))
       .leftJoin(active, eq(active.userId, membership.userId))
+      .leftJoin(tokens, eq(tokens.createdBy, membership.userId))
       .where(eq(membership.storeId, ctx.storeId))
       .orderBy(users.email);
     const me = ctx.actor.kind === "user" ? ctx.actor.userId : null;
-    const members = rows.map((r) => ({ ...r, activeSessions: Number(r.activeSessions), isYou: r.userId === me }));
+    const members = rows.map((r) => ({ ...r, activeSessions: Number(r.activeSessions), tokensCreated: Number(r.tokensCreated), isYou: r.userId === me }));
     const invites = await ctx.tx
       .select({
         id: teamInvite.id,

@@ -28,4 +28,5 @@ import "@/lib/recovery/unsubscribe";
 import "@/lib/store-settings";
 import "@/lib/team/accept";
 import "@/lib/team/invites";
+import "@/lib/team/members";
 import "@/lib/tracking/meta";
