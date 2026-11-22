@@ -131,7 +131,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             <Art name="pedidos" size={96} />
             <h2>Nenhum pedido com estes filtros</h2>
             <p>Tente outra busca ou tire algum filtro das colunas.</p>
-            <Link className={`${s.btn} ${s.btnSm}`} href="/admin/orders">
+            <Link className={`${s.btn} ${s.btnSm}`} href={perPage === ORDERS_PER_PAGE ? "/admin/orders" : `/admin/orders?por=${perPage}`}>
               Limpar filtros
             </Link>
           </div>

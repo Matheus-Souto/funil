@@ -180,11 +180,22 @@ describe("rotas do painel com sessão", () => {
 
   test("GET /admin/orders.csv: vários status saem só com eles; status inválido é 400 (não uma planilha com tudo)", async () => {
     const { GET } = await import("@/app/admin/orders.csv/route");
-    const { storeId } = await seedStore();
-    await login(storeId, "owner");
+    const { seedOrder, seedPanelStore } = await import("./panel-helpers");
+    const s = await seedPanelStore();
+    await seedOrder(s, { status: "paid", name: "Cliente Pago" });
+    await seedOrder(s, { status: "pending", name: "Cliente Pendente" });
+    await seedOrder(s, { status: "expired", name: "Cliente Expirado" });
+    await login(s.storeId, "owner");
     const ok = await GET(new Request("http://localhost/admin/orders.csv?status=paid&status=pending"));
     expect(ok.status).toBe(200);
     expect(ok.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    // As linhas da planilha: só os dois status pedidos (o cabeçalho fica na 1ª linha).
+    const lines = (await ok.text()).replace(/^\uFEFF/, "").trim().split("\r\n");
+    expect(lines).toHaveLength(3);
+    const body = lines.slice(1).join("\n");
+    expect(body).toContain("Cliente Pago");
+    expect(body).toContain("Cliente Pendente");
+    expect(body).not.toContain("Cliente Expirado");
     const bad = await GET(new Request("http://localhost/admin/orders.csv?status=pago"));
     expect(bad.status).toBe(400);
   });

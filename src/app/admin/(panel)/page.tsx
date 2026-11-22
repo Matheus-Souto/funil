@@ -94,9 +94,9 @@ export default async function Overview({ searchParams }: { searchParams: Promise
             action={<Link href="/admin/orders?status=pending&method=pix_manual">Conferir</Link>}
           >
             <b>
-              {pending} {pending === 1 ? "Pix manual" : "Pix manuais"}
+              {pending} {pending === 1 ? "pedido com Pix manual" : "pedidos com Pix manual"}
             </b>{" "}
-            {pending === 1 ? "aguarda" : "aguardam"} conferência
+            {pending === 1 ? "aguarda" : "aguardam"} você conferir no extrato e liberar.
           </Notice>
         ) : null}
         {alerts?.alerts.map((a) => (

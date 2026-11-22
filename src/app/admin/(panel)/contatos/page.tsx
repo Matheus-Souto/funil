@@ -87,7 +87,7 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
                   : "Com a captura ligada, quem digitar o e-mail no checkout e sair sem comprar aparece aqui."}
             </p>
             {filtered ? (
-              <Link className={`${s.btn} ${s.btnSm}`} href="/admin/contatos">
+              <Link className={`${s.btn} ${s.btnSm}`} href={perPage === LEADS_PER_PAGE ? "/admin/contatos" : `/admin/contatos?por=${perPage}`}>
                 Limpar filtros
               </Link>
             ) : null}

@@ -8,7 +8,7 @@ import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
 import { auditLog, offer, offerProduct, product, store } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
-import { backfillPageCounts } from "@/lib/catalog/page-count";
+import { backfillPageCounts, PAGE_COUNT_UNKNOWN } from "@/lib/catalog/page-count";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, readProductFile, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import {
@@ -211,22 +211,66 @@ describe("products.pageCount", () => {
   });
 });
 describe("backfillPageCounts (produtos antigos sem page_count)", () => {
-  test("preenche só os nulos da loja; arquivo ausente fica nulo e vai para a lista de falhas", async () => {
+  const pageCounts = async (storeId: string) =>
+    Object.fromEntries((await withStore(storeId, (tx) => tx.select({ id: product.id, n: product.pageCount }).from(product))).map((x) => [x.id, x.n]));
+  const clear = (storeId: string, ids: string[]) =>
+    withStore(storeId, (tx) => tx.update(product).set({ pageCount: null }).where(sql`${product.id} in ${ids}`));
+
+  test("preenche só os nulos da loja; arquivo ausente é marcado (motivo fixo), não é relido e lê como nulo", async () => {
     const { storeId } = await seedStore();
     const a = await call(createProduct, storeId, owner, { name: "Antigo", fileName: "a.pdf", file: await makePdf(4) });
     const b = await call(createProduct, storeId, owner, { name: "Sem arquivo", fileName: "b.pdf", file: await makePdf(2) });
     const c = await call(createProduct, storeId, owner, { name: "Novo", fileName: "c.pdf", file: await makePdf(1) });
-    await withStore(storeId, (tx) => tx.update(product).set({ pageCount: null }).where(sql`${product.id} in (${a.id}, ${b.id})`));
+    await clear(storeId, [a.id, b.id]);
     await withStore(storeId, (tx) => tx.update(product).set({ pageCount: 99 }).where(eq(product.id, c.id)));
     const [bRow] = await withStore(storeId, (tx) => tx.select({ fileKey: product.fileKey }).from(product).where(eq(product.id, b.id)));
     await storage.delete(bRow!.fileKey);
     const r = await backfillPageCounts({ storeId });
-    expect(r.updated).toBe(1);
-    expect(r.failed.map((f) => f.productId)).toEqual([b.id]);
-    const rows = await withStore(storeId, (tx) => tx.select({ id: product.id, pageCount: product.pageCount }).from(product));
-    const by = Object.fromEntries(rows.map((x) => [x.id, x.pageCount]));
-    expect(by).toEqual({ [a.id]: 4, [b.id]: null, [c.id]: 99 });
-    expect((await backfillPageCounts({ storeId })).updated).toBe(0);
+    expect(r).toEqual({ updated: 1, failed: [{ storeId, productId: b.id, reason: "arquivo não encontrado no storage" }], more: false });
+    expect(await pageCounts(storeId)).toEqual({ [a.id]: 4, [b.id]: PAGE_COUNT_UNKNOWN, [c.id]: 99 });
+    // O marcado não volta para a fila e, para quem lê, é desconhecido.
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false });
+    const listed = await call(listProducts, storeId, owner, {});
+    expect(Object.fromEntries(listed.map((p) => [p.id, p.pageCount]))).toEqual({ [a.id]: 4, [b.id]: null, [c.id]: 99 });
+  }, HEAVY_TEST_MS);
+
+  test("PDF que não abre: motivo fixo, sem o texto do erro", async () => {
+    const { storeId } = await seedStore();
+    const p = await call(createProduct, storeId, owner, { name: "Quebrado", fileName: "q.pdf", file: await makePdf(1) });
+    await clear(storeId, [p.id]);
+    const [row] = await withStore(storeId, (tx) => tx.select({ fileKey: product.fileKey }).from(product).where(eq(product.id, p.id)));
+    await storage.put(row!.fileKey, CORRUPT_PDF);
+    const r = await backfillPageCounts({ storeId });
+    expect(r.failed).toEqual([{ storeId, productId: p.id, reason: "PDF inválido" }]);
+  }, HEAVY_TEST_MS);
+
+  test("produto excluído fica de fora", async () => {
+    const { storeId } = await seedStore();
+    const p = await call(createProduct, storeId, owner, { name: "Excluído", fileName: "x.pdf", file: await makePdf(3) });
+    await call(deleteProduct, storeId, owner, { id: p.id });
+    await clear(storeId, [p.id]);
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false });
+    expect((await pageCounts(storeId))[p.id]).toBeNull();
+  }, HEAVY_TEST_MS);
+
+  test("lote: conta até `limit` e avisa que sobrou; a rodada seguinte termina", async () => {
+    const { storeId } = await seedStore();
+    const ids: string[] = [];
+    for (const n of [1, 2, 3]) ids.push((await call(createProduct, storeId, owner, { name: `P${n}`, fileName: `p${n}.pdf`, file: await makePdf(n) })).id);
+    await clear(storeId, ids);
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 2, failed: [], more: true });
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 1, failed: [], more: false });
+    expect(await pageCounts(storeId)).toEqual({ [ids[0]!]: 1, [ids[1]!]: 2, [ids[2]!]: 3 });
+  }, HEAVY_TEST_MS);
+
+  test("signal abortado (tempo-limite do job): para sem contar e deixa para a próxima", async () => {
+    const { storeId } = await seedStore();
+    const p = await call(createProduct, storeId, owner, { name: "Parado", fileName: "s.pdf", file: await makePdf(2) });
+    await clear(storeId, [p.id]);
+    const ac = new AbortController();
+    ac.abort();
+    expect(await backfillPageCounts({ storeId, signal: ac.signal })).toEqual({ updated: 0, failed: [], more: true });
+    expect((await pageCounts(storeId))[p.id]).toBeNull();
   }, HEAVY_TEST_MS);
 
   test("roda como job a cada subida (backfill_page_count registrado no worker)", async () => {

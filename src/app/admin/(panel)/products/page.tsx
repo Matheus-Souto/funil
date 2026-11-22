@@ -87,7 +87,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
               <div className={s.empty}>
                 <Art name="produto" size={96} />
                 <h2>Nenhum produto com estes filtros</h2>
-                <Link className={`${s.btn} ${s.btnSm}`} href="/admin/products">
+                <Link className={`${s.btn} ${s.btnSm}`} href={perPage === PER_PAGE_OPTIONS[0] ? "/admin/products" : `/admin/products?por=${perPage}`}>
                   Limpar filtros
                 </Link>
               </div>

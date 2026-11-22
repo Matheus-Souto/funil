@@ -22,7 +22,7 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "orders.export": "CSV com dados do comprador",
   "products.create": "recebe o arquivo; use products_createUploadLink",
   "products.completeUpload": "chamada pela URL de upload",
-  "products.file": "devolve o PDF inteiro; só para a miniatura e o visualizador do painel",
+  "products.file": "devolve o PDF inteiro; só para o visualizador do painel",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
 };
 
