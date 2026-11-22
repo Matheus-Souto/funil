@@ -46,8 +46,12 @@ export interface ActionDef<I, O, P = undefined, S = undefined> {
   permission: Permission | "public" | "system";
   sensitive?: boolean;
   audit?: boolean;
-  /** Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB. */
-  auditInput?: (input: I) => unknown;
+  /**
+   * Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB.
+   * `prepared` (o resultado de `prepare`, quando já rodou) serve para auditar um id que a ação achou sozinha (ex.: o
+   * convite achado pelo hash do token): nunca devolva dele segredo nem dado pessoal.
+   */
+  auditInput?: (input: I, prepared?: P) => unknown;
   /**
    * Parte da saída gravada na auditoria de sucesso, como `result` ao lado da entrada (ou de `auditInput`): ex. um efeito
    * que a ação decidiu sozinha. Também passa por redact e pelo limite de 8 KB; nunca devolva segredo nem dado do comprador.
@@ -56,9 +60,10 @@ export interface ActionDef<I, O, P = undefined, S = undefined> {
   /**
    * Trabalho externo (ex.: testar uma chave num provedor) que NÃO deve segurar transação. Roda depois de permissão,
    * validação e portão de ação sensível, e antes de `withStore`; o resultado vai como 3º argumento de `run`.
-   * Falhas são auditadas como as demais rejeições (só chaves da entrada).
+   * Falhas são auditadas como as demais rejeições (só chaves da entrada). Recebe também `server` (como `run`), ex. o IP
+   * de quem chama, para um limite de tentativas que precisa valer antes do trabalho caro e fora da transação.
    */
-  prepare?: (call: { storeId: string; actor: Actor; origin: Origin }, input: I) => Promise<P>;
+  prepare?(call: { storeId: string; actor: Actor; origin: Origin; server?: S }, input: I): Promise<P>;
   /**
    * `server`: dados do servidor que NÃO são entrada (ex.: uma chave do ambiente). Vem de `call.server` em `runAction`,
    * fora do schema, do catálogo de ações e da auditoria; quem chama a ação de fora (MCP, IA) não consegue escolhê-los.
@@ -223,7 +228,7 @@ export async function runAction<I, O, P = any, S = any>(
     if (action.sensitive && !approval && (origin === "mcp" || origin === "ai" || actor.kind === "token")) {
       throw new ActionError("approval_required", `Ação sensível exige aprovação: ${action.name}`);
     }
-    if (action.prepare) prepared = await action.prepare({ storeId, actor, origin }, input);
+    if (action.prepare) prepared = await action.prepare({ storeId, actor, origin, server: call.server }, input);
   } catch (e) {
     if (actor.kind === "public") {
       // Falha de requisição anônima: sem linha em audit_log (sem limite nem retenção = disco e pool). Só o código em log.
@@ -237,7 +242,7 @@ export async function runAction<I, O, P = any, S = any>(
   const auditView = (): unknown => {
     if (!action.auditInput) return input;
     try {
-      return action.auditInput(input);
+      return action.auditInput(input, prepared);
     } catch {
       return { omitted: "audit_input_error", keys: topKeys(raw) };
     }
