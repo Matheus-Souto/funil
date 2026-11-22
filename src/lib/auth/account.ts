@@ -1,12 +1,14 @@
 // Conta e equipe: troca da própria senha (exige a atual; derruba todas as sessões do usuário) e, para o dono, a lista
 // de membros da loja com o número de sessões ativas e o encerramento das sessões de um membro.
 // `users`, `membership` e `session` são tabelas globais (sem RLS): toda consulta aqui filtra pela loja do ator.
-import { and, count, eq, gt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { db } from "@/lib/db/client";
-import { membership, session, users } from "@/lib/db/schema";
+import { membership, session, teamInvite, users } from "@/lib/db/schema";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
+import { expireStaleInvites } from "@/lib/team/invites";
+import { lockTeam } from "@/lib/team/rules";
 import { hashPassword, verifyPassword } from "./password";
 
 const MAX_PASSWORD = 256;
@@ -57,11 +59,15 @@ export const changePassword = defineAction({
 
 export const listTeam = defineAction({
   name: "team.list",
-  description: "Membros da loja (nome, e-mail, papel) com o número de sessões ativas no painel desta loja.",
+  description:
+    "Membros da loja (nome, e-mail, papel) com o número de sessões ativas no painel desta loja e os convites pendentes (e-mail, papel, validade, resultado do envio).",
   input: z.object({}),
   permission: "team.manage",
   audit: false,
   async run(ctx) {
+    // Convites com prazo vencido viram `expired` (sem e-mail) na leitura, sob o lock da equipe.
+    await lockTeam(ctx.tx, ctx.storeId);
+    await expireStaleInvites(ctx.tx, ctx.storeId);
     const active = ctx.tx
       .select({ userId: session.userId, n: count().as("n") })
       .from(session)
@@ -83,7 +89,21 @@ export const listTeam = defineAction({
       .where(eq(membership.storeId, ctx.storeId))
       .orderBy(users.email);
     const me = ctx.actor.kind === "user" ? ctx.actor.userId : null;
-    return rows.map((r) => ({ ...r, activeSessions: Number(r.activeSessions), isYou: r.userId === me }));
+    const members = rows.map((r) => ({ ...r, activeSessions: Number(r.activeSessions), isYou: r.userId === me }));
+    const invites = await ctx.tx
+      .select({
+        id: teamInvite.id,
+        email: teamInvite.email,
+        role: teamInvite.role,
+        expiresAt: teamInvite.expiresAt,
+        sendStatus: teamInvite.sendStatus,
+        sendError: teamInvite.sendError,
+        lastSentAt: teamInvite.lastSentAt,
+      })
+      .from(teamInvite)
+      .where(and(eq(teamInvite.storeId, ctx.storeId), eq(teamInvite.status, "pending")))
+      .orderBy(desc(teamInvite.createdAt), teamInvite.id);
+    return { members, invites };
   },
 });
 

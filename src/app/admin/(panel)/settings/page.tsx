@@ -95,7 +95,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                 Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
                 <a href="/admin/senha">Trocar senha</a>.
               </p>
-              <TeamList members={team} />
+              <TeamList members={team.members} />
             </div>
           ) : null
         }

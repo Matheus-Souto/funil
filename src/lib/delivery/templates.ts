@@ -239,3 +239,38 @@ ${button(d.actionUrl, copy.button, brandV["--color-brand"], brandV["--color-on-b
     headers: cleanHeaders({ "List-Unsubscribe": `<${d.unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" }),
   };
 }
+
+export interface TeamInviteEmailData {
+  storeName: string;
+  brandColor: string | null;
+  inviterName: string;
+  roleLabel: string;
+  /** `<origem do painel da loja>/admin/convite/<token>`: nunca vai para log nem auditoria. */
+  acceptUrl: string;
+  expiresAt: Date;
+}
+
+/** Convite para a equipe da loja (spec "Equipe e convites", seção 5): textos fixos, sem cabeçalho de descadastro. */
+export function teamInviteEmail(d: TeamInviteEmailData): { subject: string; html: string; text: string } {
+  const b = brandVars(d.brandColor);
+  const brand = b["--color-brand-strong"];
+  const until = dateTimeSP(d.expiresAt);
+  const inviter = oneLine(d.inviterName);
+  const store = oneLine(d.storeName);
+  const role = oneLine(d.roleLabel);
+  const subject = `${inviter} convidou você para a equipe da ${store}`;
+  const title = "Você foi convidado para a equipe";
+  const bodyText = (who: string, shop: string, r: string) => `${who} convidou você para ajudar na ${shop} como ${r}. O convite vale até ${until}.`;
+  const cancel = "Se você não esperava este convite, ignore este e-mail. Ninguém entra na loja sem abrir este link.";
+
+  const body = `<tr><td style="padding:32px 32px 30px">
+<h1 style="margin:0;font-size:24px;line-height:1.3;letter-spacing:-0.01em">${esc(title)}</h1>
+<p style="margin:12px 0 20px;font-size:16px;color:${C.muted}">${bodyText(esc(d.inviterName), esc(d.storeName), esc(d.roleLabel))}</p>
+${button(d.acceptUrl, "Aceitar convite", b["--color-brand"], b["--color-on-brand"])}
+</td></tr>`;
+  const footer = `<p style="margin:0">${esc(cancel)}</p>
+<p style="margin:6px 0 0;word-break:break-all">Se o botão não funcionar, copie o link: ${esc(d.acceptUrl)}</p>`;
+
+  const text = [title, "", bodyText(inviter, store, role), `Aceitar convite: ${oneLine(d.acceptUrl)}`, "", cancel].join("\n");
+  return { subject, html: layout({ title: subject, storeName: d.storeName, brand, body, footer }), text };
+}

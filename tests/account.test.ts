@@ -117,7 +117,7 @@ describe("equipe: listar e encerrar sessões de um membro (dono)", () => {
     await createSession(member.userId, other.storeId);
     const call = { storeId, actor: owner.actor, origin: "panel" as const };
 
-    const team = await runAction(listTeam, call, {});
+    const team = (await runAction(listTeam, call, {})).members;
     expect(team.map((m) => [m.email, m.role, m.activeSessions]).sort()).toEqual(
       [
         [owner.email, "owner", 0],

@@ -1,11 +1,17 @@
 // Tabela `team_invite` (convites da equipe): isolamento por loja (RLS) e restrições do banco (um convite pendente por
 // e-mail na loja, e-mail só enquanto pendente, papel sem `owner`). Só o sha256 do e-mail e do token é guardado.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import { listTeam } from "@/lib/auth/account";
 import { withStore } from "@/lib/db/client";
-import { emailLog, teamInvite } from "@/lib/db/schema";
+import { auditLog, emailLog, membership, teamInvite, users } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
+import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
+import { checkRateLimit } from "@/lib/payments/ratelimit";
+import { inviteMember, inviteStatus, resendInvite, revokeInvite } from "@/lib/team/invites";
+import { TEAM, inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -112,5 +118,361 @@ describe("team_invite", () => {
     for (const role of ["admin", "support", "traffic"]) {
       await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { role }));
     }
+  });
+});
+
+// ---- Convidar, reenviar, revogar (team.invite, team.resendInvite, team.revokeInvite, team.inviteStatus) ---------------
+
+describe("convites por e-mail", () => {
+  let outbox: SentMail[] = [];
+  let sendError: Error | null = null;
+  const fakeSmtp = () =>
+    setMailTransportForTests(() => ({
+      async verify() {
+        return true;
+      },
+      async sendMail(m) {
+        if (sendError) throw sendError;
+        outbox.push(m);
+        return {};
+      },
+      close() {},
+    }));
+  beforeAll(fakeSmtp);
+  afterEach(() => {
+    outbox = [];
+    sendError = null;
+    fakeSmtp();
+  });
+  afterAll(() => setMailTransportForTests());
+
+  const SMTP = { host: "smtp.exemplo.com", port: 587, secure: false, user: "loja@exemplo.com", password: "senha-smtp-de-teste", from: "contato@loja.com" };
+  type UserActor = Extract<Actor, { kind: "user" }>;
+  const MINUTE_MS = 60_000;
+  let n = 0;
+
+  async function newUser(storeId: string, role: "owner" | "admin" | "support" | "traffic"): Promise<{ userId: string; email: string; actor: UserActor }> {
+    const email = `membro${++n}-${randomBytes(3).toString("hex")}@example.com`;
+    const [u] = await t.ownerDb.insert(users).values({ email, name: `Pessoa ${n}`, passwordHash: "x" }).returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
+    return { userId: u!.id, email, actor: { kind: "user", userId: u!.id, role } };
+  }
+
+  /** Loja com um dono e, salvo `smtp: false`, o SMTP (falso) conectado. */
+  async function shop(o: { smtp?: boolean } = {}) {
+    const { storeId } = await seedStore("Maná Kids");
+    const owner = await newUser(storeId, "owner");
+    const call = { storeId, actor: owner.actor, origin: "panel" as const };
+    if (o.smtp !== false) await runAction(saveSmtp, call, SMTP);
+    return { storeId, owner, call };
+  }
+
+  const newEmail = () => `convidado${++n}-${randomBytes(3).toString("hex")}@example.com`;
+  const rowsOf = (storeId: string) => t.ownerDb.select().from(teamInvite).where(eq(teamInvite.storeId, storeId));
+  const rowOf = async (id: string) => (await t.ownerDb.select().from(teamInvite).where(eq(teamInvite.id, id)))[0]!;
+  const failure = async (p: Promise<unknown>): Promise<ActionError> => {
+    const e = await p.then(() => null, (x: unknown) => x);
+    if (!(e instanceof ActionError)) throw new Error("esperava um ActionError");
+    return e;
+  };
+  /** Token do link do último e-mail enviado (só em memória do teste). */
+  const tokenOf = (m: SentMail): string => /\/admin\/convite\/([A-Za-z0-9_-]+)/.exec(m.text)![1]!;
+  /** As três ações por id de convite, para conferir a mesma recusa em todas. */
+  const byId = (c: Parameters<typeof runAction>[1], inviteId: string): Array<() => Promise<unknown>> => [
+    () => runAction(resendInvite, c, { inviteId }),
+    () => runAction(revokeInvite, c, { inviteId }),
+    () => runAction(inviteStatus, c, { inviteId }),
+  ];
+  const ago = (ms: number) => new Date(Date.now() - ms);
+
+  test("o convite chega com o link e o token do link bate com o token_hash", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    const out = await runAction(inviteMember, call, { email: `  ${email.toUpperCase()} `, role: "support" });
+    expect(Object.keys(out)).toEqual(["inviteId"]);
+
+    expect(outbox).toHaveLength(1);
+    const mail = outbox[0]!;
+    expect(mail.to).toBe(email);
+    expect(mail.subject).toMatch(/^Pessoa \d+ convidou você para a equipe da Maná Kids$/);
+    expect(mail.text).toContain("como Atendimento");
+    const token = tokenOf(mail);
+    expect(token.startsWith("inv" + "_")).toBe(true);
+    expect(mail.html).toContain(`/admin/convite/${token}`);
+
+    const [row] = await rowsOf(storeId);
+    expect(row).toMatchObject({ id: out.inviteId, status: "pending", role: "support", email, emailHash: sha256(email), tokenHash: inviteTokenHash(token), sendStatus: "sent", sendError: null, sendCount: 1 });
+    expect(row!.lastSentAt).not.toBeNull();
+    expect(row!.endedAt).toBeNull();
+    const days = (row!.expiresAt.getTime() - Date.now()) / 86_400_000;
+    expect(days).toBeGreaterThan(TEAM.inviteDays - 0.01);
+    expect(days).toBeLessThanOrEqual(TEAM.inviteDays);
+  });
+
+  test("a saída, o audit_log e o log não contêm o e-mail nem o token", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    const out: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+    let result: unknown;
+    try {
+      result = await runAction(inviteMember, call, { email, role: "traffic" });
+      // Uma recusa também passa pela auditoria de falha e pelo log.
+      await failure(runAction(inviteMember, call, { email, role: "traffic" }));
+    } finally {
+      write.mockRestore();
+    }
+    const token = tokenOf(outbox[0]!);
+    const audit = await t.ownerDb.select().from(auditLog).where(and(eq(auditLog.storeId, storeId), eq(auditLog.action, "team.invite")));
+    expect(audit).toHaveLength(2);
+    const ok = audit.find((a) => a.ok)!;
+    expect(ok.input).toEqual({ role: "traffic", emailHash: sha256(email), result: { inviteId: (result as { inviteId: string }).inviteId } });
+    const everything = JSON.stringify([result, audit]) + out.join("");
+    for (const secret of [email, email.split("@")[0]!, token]) expect(everything).not.toContain(secret);
+    const local = (await t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId))).map((r) => JSON.stringify(r)).join("");
+    for (const secret of [email, token]) expect(local).not.toContain(secret);
+  });
+
+  test("email_log com team_invite e to_hash (sem o e-mail)", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    await runAction(inviteMember, call, { email, role: "admin" });
+    const logs = await t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ kind: "team_invite", status: "sent", toHash: sha256(email), error: null, provider: "smtp" });
+  });
+
+  test("sem e-mail conectado: invalid_input com o caminho do e-mail; nada gravado nem enviado", async () => {
+    const { storeId, call } = await shop({ smtp: false });
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }));
+    expect(e.code).toBe("invalid_input");
+    expect(e.message).toBe("Para convidar alguém, conecte o e-mail da loja em Conexões");
+    expect(e.details).toEqual([expect.objectContaining({ path: ["email"], message: e.message })]);
+    expect(await rowsOf(storeId)).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("já é membro: conflict (sem diferenciar maiúsculas); convite pendente: conflict", async () => {
+    const { storeId, call, owner } = await shop();
+    const m = await newUser(storeId, "support");
+    const member = await failure(runAction(inviteMember, call, { email: ` ${m.email.toUpperCase()} `, role: "admin" }));
+    expect([member.code, member.message]).toEqual(["conflict", "Essa pessoa já faz parte da equipe"]);
+    const self = await failure(runAction(inviteMember, call, { email: owner.email, role: "admin" }));
+    expect(self.code).toBe("conflict");
+
+    const email = newEmail();
+    await runAction(inviteMember, call, { email, role: "support" });
+    const dup = await failure(runAction(inviteMember, call, { email: email.toUpperCase(), role: "traffic" }));
+    expect([dup.code, dup.message]).toEqual(["conflict", "Já existe um convite para esse e-mail. Use Reenviar"]);
+    expect(await rowsOf(storeId)).toHaveLength(1);
+    expect(outbox).toHaveLength(1);
+  });
+
+  test("21º convite pendente recusado (conflict com o limite)", async () => {
+    const { storeId, call } = await shop();
+    await t.ownerDb.insert(teamInvite).values(Array.from({ length: TEAM.maxPending }, () => invite(storeId)));
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }));
+    expect(e.code).toBe("conflict");
+    expect(e.message).toContain(String(TEAM.maxPending));
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("51º assento recusado: membros mais convites pendentes", async () => {
+    const { storeId, call } = await shop();
+    // 1 dono + 30 membros + 19 pendentes = 50 assentos (abaixo do limite de 20 pendentes).
+    for (let i = 0; i < 30; i++) await newUser(storeId, "support");
+    await t.ownerDb.insert(teamInvite).values(Array.from({ length: 19 }, () => invite(storeId)));
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }));
+    expect(e.code).toBe("conflict");
+    expect(e.message).toContain(String(TEAM.maxSeats));
+    expect(outbox).toHaveLength(0);
+    // Um assento a menos (convite revogado) e o convite passa.
+    const [one] = await rowsOf(storeId);
+    await t.ownerDb.update(teamInvite).set({ status: "revoked", email: null, endedAt: new Date() }).where(eq(teamInvite.id, one!.id));
+    await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    expect(outbox).toHaveLength(1);
+  });
+
+  test("31º e-mail de convite do dia recusado (rate_limited), sem gravar nem enviar", async () => {
+    const { storeId, call } = await shop();
+    for (let i = 0; i < TEAM.invitesPerDay; i++) expect(await checkRateLimit(`team:invite:${storeId}`, TEAM.invitesPerDay, 86_400)).toBe(true);
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }));
+    expect(e.code).toBe("rate_limited");
+    expect(await rowsOf(storeId)).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
+  });
+
+  test("SMTP fora: send_status failed, inviteStatus devolve o motivo (sem o e-mail) e Reenviar depois de 2 min envia", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    sendError = new Error(`550 5.1.1 <${email}>: usuário desconhecido`);
+    const out: string[] = [];
+    const write = spyOn(process.stdout, "write").mockImplementation(((s: string) => void out.push(String(s))) as never);
+    let inviteId: string;
+    try {
+      ({ inviteId } = await runAction(inviteMember, call, { email, role: "support" }));
+    } finally {
+      write.mockRestore();
+    }
+    expect(out.join("")).not.toContain(email);
+    expect(outbox).toHaveLength(0);
+
+    const failed = await rowOf(inviteId);
+    expect(failed).toMatchObject({ status: "pending", sendStatus: "failed", sendCount: 1 });
+    expect(failed.sendError).toBeTruthy();
+    expect(failed.sendError!.length).toBeLessThanOrEqual(500);
+    expect(failed.sendError).not.toContain(email);
+    expect(await runAction(inviteStatus, call, { inviteId })).toEqual({ sendStatus: "failed", sendError: failed.sendError });
+    const logs = await t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId));
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ kind: "team_invite", status: "failed", toHash: sha256(email) });
+    expect(logs[0]!.error).not.toContain(email);
+
+    // Dentro dos 2 minutos: recusado. Depois deles (data alterada no banco): envia.
+    sendError = null;
+    expect((await failure(runAction(resendInvite, call, { inviteId }))).code).toBe("rate_limited");
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    await runAction(resendInvite, call, { inviteId });
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.to).toBe(email);
+    expect(await rowOf(inviteId)).toMatchObject({ sendStatus: "sent", sendError: null, sendCount: 2 });
+    expect(await runAction(inviteStatus, call, { inviteId })).toEqual({ sendStatus: "sent", sendError: null });
+  });
+
+  test("reenviar antes de 2 min dá rate_limited e não troca o link", async () => {
+    const { call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    const before = await rowOf(inviteId);
+    const e = await failure(runAction(resendInvite, call, { inviteId }));
+    expect(e.code).toBe("rate_limited");
+    expect(outbox).toHaveLength(1);
+    expect((await rowOf(inviteId)).tokenHash).toBe(before.tokenHash);
+  });
+
+  test("reenviar mata o link antigo: o hash antigo some e o novo vem no e-mail novo", async () => {
+    const { call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    const oldToken = tokenOf(outbox[0]!);
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS), expiresAt: new Date(Date.now() + 60 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    await runAction(resendInvite, call, { inviteId });
+    expect(outbox).toHaveLength(2);
+    const newToken = tokenOf(outbox[1]!);
+    expect(newToken).not.toBe(oldToken);
+    const rows = await t.ownerDb.select().from(teamInvite).where(eq(teamInvite.tokenHash, inviteTokenHash(oldToken)));
+    expect(rows).toHaveLength(0);
+    const row = await rowOf(inviteId);
+    expect(row.tokenHash).toBe(inviteTokenHash(newToken));
+    // A validade volta a 7 dias a partir do reenvio.
+    expect(row.expiresAt.getTime() - Date.now()).toBeGreaterThan((TEAM.inviteDays - 1) * 86_400_000);
+    expect(row.sendCount).toBe(2);
+  });
+
+  test("reenvio: no máximo 5 envios por convite", async () => {
+    const { call } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await t.ownerDb.update(teamInvite).set({ sendCount: TEAM.maxSends - 1, lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    await runAction(resendInvite, call, { inviteId });
+    expect((await rowOf(inviteId)).sendCount).toBe(TEAM.maxSends);
+    await t.ownerDb.update(teamInvite).set({ lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    expect((await failure(runAction(resendInvite, call, { inviteId }))).code).toBe("rate_limited");
+    expect(outbox).toHaveLength(2);
+  });
+
+  test("reenviar convite vencido: conflict; o convite passa a expired sem e-mail e libera um novo convite", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    const { inviteId } = await runAction(inviteMember, call, { email, role: "support" });
+    await t.ownerDb.update(teamInvite).set({ expiresAt: ago(MINUTE_MS), lastSentAt: ago(3 * MINUTE_MS) }).where(eq(teamInvite.id, inviteId));
+    const e = await failure(runAction(resendInvite, call, { inviteId }));
+    expect([e.code, e.message]).toEqual(["conflict", "Este convite venceu. Convide de novo"]);
+    const row = await rowOf(inviteId);
+    expect(row).toMatchObject({ status: "expired", email: null });
+    expect(row.endedAt).not.toBeNull();
+    expect(outbox).toHaveLength(1);
+    // O mesmo e-mail pode ser convidado de novo.
+    await runAction(inviteMember, call, { email, role: "traffic" });
+    expect((await rowsOf(storeId)).filter((r) => r.status === "pending")).toHaveLength(1);
+  });
+
+  test("convite vencido não segura o e-mail nem ocupa vaga ao convidar de novo", async () => {
+    const { storeId, call } = await shop();
+    const email = newEmail();
+    await t.ownerDb.insert(teamInvite).values(invite(storeId, { email, expiresAt: ago(MINUTE_MS) }));
+    await runAction(inviteMember, call, { email, role: "support" });
+    const rows = await rowsOf(storeId);
+    expect(rows.map((r) => r.status).sort()).toEqual(["expired", "pending"]);
+    expect(rows.find((r) => r.status === "expired")!.email).toBeNull();
+  });
+
+  test("revogar apaga o e-mail e encerra o convite; não dá para reenviar nem revogar de novo", async () => {
+    const { call } = await shop();
+    const email = newEmail();
+    const { inviteId } = await runAction(inviteMember, call, { email, role: "support" });
+    expect(await runAction(revokeInvite, call, { inviteId })).toEqual({ inviteId });
+    const row = await rowOf(inviteId);
+    expect(row).toMatchObject({ status: "revoked", email: null, emailHash: sha256(email) });
+    expect(row.endedAt).not.toBeNull();
+    expect((await failure(runAction(resendInvite, call, { inviteId }))).code).toBe("conflict");
+    expect((await failure(runAction(revokeInvite, call, { inviteId }))).code).toBe("conflict");
+    expect((await failure(runAction(revokeInvite, call, { inviteId: crypto.randomUUID() }))).code).toBe("not_found");
+  });
+
+  test("convite de outra loja: not_found", async () => {
+    const a = await shop();
+    const b = await shop();
+    const { inviteId } = await runAction(inviteMember, a.call, { email: newEmail(), role: "support" });
+    for (const p of byId(b.call, inviteId)) expect((await failure(p())).code).toBe("not_found");
+  });
+
+  test("role owner dá invalid_input (P1)", async () => {
+    const { storeId, call } = await shop();
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "owner" }));
+    expect(e.code).toBe("invalid_input");
+    expect(await rowsOf(storeId)).toHaveLength(0);
+  });
+
+  test("papel admin chamando: forbidden em todas as ações", async () => {
+    const { storeId, call } = await shop();
+    const admin = await newUser(storeId, "admin");
+    const asAdmin = { ...call, actor: admin.actor };
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    expect((await failure(runAction(inviteMember, asAdmin, { email: newEmail(), role: "support" }))).code).toBe("forbidden");
+    for (const p of byId(asAdmin, inviteId)) expect((await failure(p())).code).toBe("forbidden");
+    expect((await rowOf(inviteId)).status).toBe("pending");
+  });
+
+  test("token MCP (mesmo com papel owner) chamando: forbidden", async () => {
+    const { storeId, call } = await shop();
+    const tokenCall = { storeId, actor: { kind: "token", tokenId: crypto.randomUUID(), role: "owner" } as Actor, origin: "mcp" as const };
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    expect((await failure(runAction(inviteMember, tokenCall, { email: newEmail(), role: "support" }))).code).toBe("forbidden");
+    for (const p of byId(tokenCall, inviteId)) expect((await failure(p())).code).toBe("forbidden");
+    expect(outbox).toHaveLength(1);
+  });
+
+  test("team.list devolve membros e só os convites pendentes; os vencidos viram expired sem e-mail", async () => {
+    const { storeId, call, owner } = await shop();
+    const live = newEmail();
+    const stale = newEmail();
+    const gone = newEmail();
+    await runAction(inviteMember, call, { email: live, role: "admin" });
+    await t.ownerDb.insert(teamInvite).values(invite(storeId, { email: stale, expiresAt: ago(MINUTE_MS) }));
+    const { inviteId: revoked } = await runAction(inviteMember, call, { email: gone, role: "traffic" });
+    await runAction(revokeInvite, call, { inviteId: revoked });
+
+    const out = await runAction(listTeam, call, {});
+    expect(out.members.map((m) => m.userId)).toEqual([owner.userId]);
+    expect(out.invites).toHaveLength(1);
+    expect(out.invites[0]).toEqual({
+      id: expect.any(String),
+      email: live,
+      role: "admin",
+      expiresAt: expect.any(Date),
+      sendStatus: "sent",
+      sendError: null,
+      lastSentAt: expect.any(Date),
+    });
+    const [expired] = await t.ownerDb.select().from(teamInvite).where(and(eq(teamInvite.storeId, storeId), eq(teamInvite.emailHash, sha256(stale))));
+    expect(expired).toMatchObject({ status: "expired", email: null });
   });
 });
