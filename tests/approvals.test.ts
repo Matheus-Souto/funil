@@ -685,7 +685,9 @@ describe("revogação e varredura", () => {
     const otherToken = await seedToken(storeId);
     const kept = await seedRow(storeId, otherToken);
     await t.ownerDb.update(mcpToken).set({ revokedAt: new Date() }).where(eq(mcpToken.id, tokenId));
-    await t.ownerDb.transaction((tx) => enqueue(tx, { storeId: null, type: "sweep_mcp", payload: {} }));
+    // run_at no passado: o default do banco (now(), em microssegundos) pode cair no mesmo milissegundo do `new Date()`
+    // abaixo e ficar "no futuro" para o claim (`run_at <= now`), que então não pega o job (falhou assim no CI).
+    await t.ownerDb.transaction((tx) => enqueue(tx, { storeId: null, type: "sweep_mcp", payload: {}, runAt: new Date(Date.now() - 1000) }));
     expect(await runDueJobs(getHandlers(), 10, new Date(), { types: ["sweep_mcp"] })).toBe(1);
     expect(await requestRow(orphan)).toMatchObject({ status: "canceled", inputSealed: null, decidedAt: expect.any(Date) });
     expect(await requestRow(kept)).toMatchObject({ status: "pending" });
@@ -705,7 +707,9 @@ describe("revogação e varredura", () => {
     const recent = await link(new Date(Date.now() - 3_600_000));
     const used = await link(new Date(Date.now() - 25 * 3_600_000), new Date(Date.now() - 26 * 3_600_000));
 
-    await t.ownerDb.transaction((tx) => enqueue(tx, { storeId: null, type: "sweep_mcp", payload: {} }));
+    // run_at no passado: o default do banco (now(), em microssegundos) pode cair no mesmo milissegundo do `new Date()`
+    // abaixo e ficar "no futuro" para o claim (`run_at <= now`), que então não pega o job (falhou assim no CI).
+    await t.ownerDb.transaction((tx) => enqueue(tx, { storeId: null, type: "sweep_mcp", payload: {}, runAt: new Date(Date.now() - 1000) }));
     expect(await runDueJobs(getHandlers(), 10, new Date(), { types: ["sweep_mcp"] })).toBe(1);
     const [j] = await t.ownerDb.select().from(job).where(and(eq(job.type, "sweep_mcp")));
     expect(j!.status).toBe("done");
