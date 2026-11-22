@@ -7,8 +7,9 @@ import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
-import { withStore } from "@/lib/db/client";
+import { withStore, type Tx } from "@/lib/db/client";
 import { approvalRequest, mcpToken, users } from "@/lib/db/schema";
+import { requireCurrentManager } from "@/lib/team/lock";
 
 /** Papéis que um token pode ter (o `reader` só existe para tokens). */
 export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader"] as const satisfies readonly Role[];
@@ -61,6 +62,9 @@ export const createMcpToken = defineAction({
   // Nunca o token: só o que identifica o pedido.
   auditInput: (i) => ({ name: i.name, role: i.role }),
   async run(ctx, input) {
+    // Sob o lock da equipe e com o papel ATUAL de quem cria: um dono rebaixado (ou que saiu) ao mesmo tempo não deixa um
+    // token novo para trás, que `revokeTokensCreatedBy` não pegaria.
+    const me = await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
     const { token, hash, last4 } = mintMcpToken(ctx.storeId);
     const [row] = await ctx.tx
       .insert(mcpToken)
@@ -70,7 +74,7 @@ export const createMcpToken = defineAction({
         role: input.role,
         tokenHash: hash,
         last4,
-        createdBy: ctx.actor.kind === "user" ? ctx.actor.userId : null,
+        createdBy: me.userId,
       })
       .returning({ id: mcpToken.id });
     return { id: row!.id, token, name: input.name, role: input.role, last4 };
@@ -100,6 +104,26 @@ export const listMcpTokens = defineAction({
       .orderBy(desc(mcpToken.createdAt), desc(mcpToken.id)),
 });
 
+/**
+ * Revoga um token (deixa de autenticar na hora) e cancela os pedidos de aprovação pendentes dele. `false` se o token
+ * não existe ou já estava revogado. Pedido pendente do token não pode mais ser aprovado: cancela e apaga a entrada
+ * selada. A reivindicação de uma aprovação em andamento trava a linha do token (for share): esta revogação espera o
+ * commit dela.
+ */
+export async function revokeToken(tx: Tx, id: string): Promise<boolean> {
+  const revoked = await tx
+    .update(mcpToken)
+    .set({ revokedAt: sql`now()` })
+    .where(and(eq(mcpToken.id, id), isNull(mcpToken.revokedAt)))
+    .returning({ id: mcpToken.id });
+  if (revoked.length === 0) return false;
+  await tx
+    .update(approvalRequest)
+    .set({ status: "canceled", inputSealed: null, decidedAt: sql`now()` })
+    .where(and(eq(approvalRequest.tokenId, id), eq(approvalRequest.status, "pending")));
+  return true;
+}
+
 export const revokeMcpToken = defineAction({
   name: "mcpTokens.revoke",
   description: "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados).",
@@ -107,20 +131,8 @@ export const revokeMcpToken = defineAction({
   permission: "team.manage",
   sensitive: true,
   async run(ctx, { id }) {
-    const revoked = await ctx.tx
-      .update(mcpToken)
-      .set({ revokedAt: sql`now()` })
-      .where(and(eq(mcpToken.id, id), isNull(mcpToken.revokedAt)))
-      .returning({ id: mcpToken.id });
-    if (revoked.length > 0) {
-      // Pedido pendente do token não pode mais ser aprovado: cancela e apaga a entrada selada. A reivindicação de uma
-      // aprovação em andamento trava a linha do token (for share): esta revogação espera o commit dela.
-      await ctx.tx
-        .update(approvalRequest)
-        .set({ status: "canceled", inputSealed: null, decidedAt: sql`now()` })
-        .where(and(eq(approvalRequest.tokenId, id), eq(approvalRequest.status, "pending")));
-      return { revoked: true };
-    }
+    await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
+    if (await revokeToken(ctx.tx, id)) return { revoked: true };
     const [found] = await ctx.tx.select({ id: mcpToken.id }).from(mcpToken).where(eq(mcpToken.id, id));
     if (!found) throw new ActionError("not_found", "Token não encontrado");
     return { revoked: false };

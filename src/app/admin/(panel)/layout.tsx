@@ -2,12 +2,15 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { runAction } from "@/lib/actions/core";
+import { ActionError, runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
+import { env } from "@/lib/env";
+import { errorFields, log } from "@/lib/log";
 import { pendingApprovalsCount } from "@/lib/mcp/approvals";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
+import { accountStores } from "@/lib/team/members";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { logoutAction } from "./actions";
@@ -55,8 +58,26 @@ export default async function PanelLayout({ children }: { children: ReactNode })
     ...(can("approvals.decide")
       ? [{ href: "/admin/aprovacoes", label: "Aprovações", icon: "circle-check" as const, section: "loja" as const, ...(approvals > 0 ? { badge: approvals } : {}) }]
       : []),
-    ...(can("team.manage") ? [{ href: "/admin/tokens", label: "Agentes (MCP)", icon: "code" as const, section: "loja" as const }] : []),
+    ...(can("team.manage")
+      ? [
+          { href: "/admin/tokens", label: "Agentes (MCP)", icon: "code" as const, section: "loja" as const },
+          { href: "/admin/equipe", label: "Equipe", icon: "users" as const, section: "loja" as const },
+        ]
+      : []),
   ];
+
+  // As lojas da conta: "Suas lojas" (só no MODE=multi e só com mais de uma loja) e se a pessoa pode "Sair da loja" (todo
+  // papel, menos a única dona). Se a consulta falhar, o menu aparece sem a lista e sem "Sair da loja": recusa da ação
+  // (ActionError) é esperada; qualquer outro erro vai para o log, só com ids e códigos (sem dado pessoal).
+  const mine = await runAction(accountStores, { ...panel, origin: "panel" }, {}).then(
+    (r) => r,
+    (e: unknown) => {
+      if (!(e instanceof ActionError)) log.error("painel: falha ao listar as lojas da conta", { storeId: panel.storeId, ...errorFields(e) });
+      return [];
+    },
+  );
+  const stores = env.MODE === "multi" && mine.length > 1 ? mine.map((x) => ({ name: x.name, url: x.panelUrl, current: x.current })) : [];
+  const canLeave = mine.find((x) => x.current)?.canLeave ?? false;
 
   return (
     <div className={s.root}>
@@ -76,12 +97,14 @@ export default async function PanelLayout({ children }: { children: ReactNode })
         items={items}
         id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail }}
         logout={logoutAction}
+        stores={stores}
+        canLeave={canLeave}
         initialCollapsed={jar.get("funil-sidebar")?.value === "collapsed"}
         initialTheme={theme === "light" || theme === "dark" ? theme : undefined}
       >
         {children}
       </PanelShell>
-      <TabBar items={items} logout={logoutAction} />
+      <TabBar items={items} stores={stores} logout={logoutAction} canLeave={canLeave} />
     </div>
   );
 }

@@ -12,7 +12,7 @@ import { listProducts, updateProduct } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { seal, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { auditLog, emailLog, integration, mcpToken, users } from "@/lib/db/schema";
+import { auditLog, emailLog, integration, mcpToken, membership, users } from "@/lib/db/schema";
 import { authenticateMcpToken, createMcpToken, listMcpTokens, mintMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { metricsSummary } from "@/lib/metrics";
 import { removeTelegram } from "@/lib/notify/telegram-connection";
@@ -31,13 +31,15 @@ afterAll(async () => {
 const PREFIX = ["fnl", ""].join("_");
 const TOKEN_RE = new RegExp(`^${PREFIX}([0-9a-f]{32})_([A-Za-z0-9_-]{43})$`);
 
-/** Dono de verdade (created_by → users): loja + usuário. */
+/** Dono de verdade (created_by → users, vínculo em membership): loja + usuário. */
 async function ownerStore(name = "Loja MCP") {
   const { storeId } = await seedStore(name);
   const [u] = await t.ownerDb
     .insert(users)
     .values({ email: `dono-${randomUUID()}@example.com`, name: "Dona Ana", passwordHash: "x" })
     .returning({ id: users.id });
+  // `mcpTokens.create` reconfere o papel atual em `membership` (sob o lock da equipe).
+  await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "owner" });
   const owner: Actor = { kind: "user", userId: u!.id, role: "owner" };
   return { storeId, owner, panel: { storeId, actor: owner, origin: "panel" as const } };
 }

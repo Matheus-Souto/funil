@@ -9,7 +9,7 @@ import { z } from "zod";
 import { ActionError, defineAction, runAction, type Action } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
-import { approvalRequest, auditLog, customer, emailLog, mcpToken, orders, rateLimit, storeAlert, users } from "@/lib/db/schema";
+import { approvalRequest, auditLog, customer, emailLog, mcpToken, membership, orders, rateLimit, storeAlert, teamInvite, users } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { setMailTransportForTests } from "@/lib/delivery/mailer";
 import { setResendFetchForTests } from "@/lib/delivery/resend";
@@ -18,9 +18,13 @@ import { setTelegramFetchForTests } from "@/lib/notify/telegram";
 import { setMetaFetchForTests } from "@/lib/tracking/meta";
 import { handleMcpRequest, type McpHttpOptions } from "@/lib/mcp/server";
 import { mintMcpToken } from "@/lib/mcp/tokens";
-import { MCP_EXCLUDED } from "@/lib/mcp/tools";
+import { sha256 } from "@/lib/crypto";
+import { ROLE_PERMISSIONS } from "@/lib/actions/permissions";
+import { MCP_EXCLUDED, mcpTools } from "@/lib/mcp/tools";
 import { createTestDb, HEAVY_TEST_MS, type TestDb } from "./db";
 import { seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
+
+const ROLES = Object.keys(ROLE_PERMISSIONS) as Role[];
 
 let t: TestDb;
 beforeAll(async () => {
@@ -372,6 +376,57 @@ describe("registro do uso", () => {
       { tokenId: owner.id, tool: "products_list", args: {} },
     ]);
     for (const secret of ["segredo", "zuleica", "Zuleica", "Y3Vyc29y"]) expect([secret, out.includes(secret)]).toEqual([secret, false]);
+  });
+});
+
+describe("equipe fora do MCP", () => {
+  test("owner chamando team_invite pelo endpoint recebe ferramenta indisponível", async () => {
+    const s = await seedPanelStore();
+    const owner = await mkToken(s.storeId, "owner");
+    const r = await callTool(owner.token, "team_invite", { email: "alguem@example.com", role: "support" });
+    expect([r.isError, r.content]).toEqual([true, [{ type: "text", text: "forbidden: ferramenta indisponível" }]]);
+    expect(await t.ownerDb.select().from(teamInvite).where(eq(teamInvite.storeId, s.storeId))).toEqual([]);
+  });
+
+  test("nenhuma resposta de ferramenta, em nenhum papel, contém o e-mail de um membro, do dono ou de um convite", async () => {
+    const s = await seedPanelStore();
+    const order = await seedOrder(s);
+    const mk = async (label: string, role: Role) => {
+      const email = `${label}-${randomUUID()}@example.com`;
+      const [u] = await t.ownerDb.insert(users).values({ email, name: `Nome ${label} ${randomUUID().slice(0, 8)}`, passwordHash: "x" }).returning({ id: users.id });
+      await t.ownerDb.insert(membership).values({ storeId: s.storeId, userId: u!.id, role });
+      return email;
+    };
+    const ownerEmail = await mk("dono", "owner");
+    const memberEmail = await mk("membro", "support");
+    const inviteEmail = `convite-${randomUUID()}@example.com`;
+    await t.ownerDb.insert(teamInvite).values({
+      storeId: s.storeId,
+      email: inviteEmail,
+      emailHash: sha256(inviteEmail),
+      role: "traffic",
+      tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 72 * 3_600_000),
+    });
+    const names = [ownerEmail, memberEmail, inviteEmail].map((e) => e.split("@")[0]!);
+    const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    const argsOf = (tool: string): Record<string, unknown> =>
+      ({ orders_get: { id: order.id }, offers_get: { id: s.offerId }, metrics_summary: range, metrics_breakdown: range, orders_paidReport: range })[tool] ?? {};
+    const minOk: Record<Role, number> = { owner: 3, admin: 3, support: 3, traffic: 3, reader: 3 };
+    for (const role of ROLES) {
+      const tok = await mkToken(s.storeId, role);
+      const reads = mcpTools(role).filter((x) => !x.approval && registry.get(x.action)?.audit === false);
+      let ok = 0;
+      for (const tool of reads) {
+        const r = await callTool(tok.token, tool.name, argsOf(tool.name));
+        if (!r.isError) ok++;
+        const body = JSON.stringify(r);
+        for (const needle of [ownerEmail, memberEmail, inviteEmail, ...names]) {
+          expect([role, tool.name, needle, body.includes(needle)]).toEqual([role, tool.name, needle, false]);
+        }
+      }
+      expect([role, ok >= minOk[role]]).toEqual([role, true]);
+    }
   });
 });
 

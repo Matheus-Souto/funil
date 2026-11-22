@@ -1,7 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { ActionError } from "@/lib/actions/core";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
-import { createSession, login, lookupSession } from "@/lib/auth/session";
+import { createSession, login, lookupSession, verifyCredentials } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
 import { loginAttempt, membership, session, users } from "@/lib/db/schema";
 import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
@@ -169,6 +169,31 @@ describe("login", () => {
     await login({ email: u.email, password: PASSWORD, storeId });
     for (let i = 0; i < 4; i++) await rejects(login({ email: u.email, password: "errada-errada-1", storeId }));
     expect(await login({ email: u.email, password: PASSWORD, storeId })).toBeString();
+  }, HEAVY_TEST_MS);
+});
+
+describe("verifyCredentials (o mesmo caminho do login)", () => {
+  test("senha certa devolve o usuário mesmo sem vínculo; errada e e-mail desconhecido devolvem null", async () => {
+    const u = await seedUser(null);
+    expect(await verifyCredentials(u.email.toUpperCase(), PASSWORD)).toEqual({ userId: u.userId });
+    expect(await verifyCredentials(u.email, "senha-errada-123")).toBeNull();
+    expect(await verifyCredentials("ninguem-aqui@exemplo.com", PASSWORD)).toBeNull();
+    expect(await verifyCredentials(`${"a".repeat(250)}@exemplo.com`, PASSWORD)).toBeNull();
+    expect(await verifyCredentials(u.email, "x".repeat(257))).toBeNull();
+  }, HEAVY_TEST_MS);
+
+  test("divide o bloqueio com o login: 5 erros pela verificação bloqueiam o login, e vice-versa", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId);
+    for (let i = 0; i < 5; i++) expect(await verifyCredentials(a.email, "errada-errada-1")).toBeNull();
+    await rejects(login({ email: a.email, password: PASSWORD, storeId }));
+    const b = await seedUser(storeId);
+    for (let i = 0; i < 5; i++) await rejects(login({ email: b.email, password: "errada-errada-1", storeId }));
+    expect(await verifyCredentials(b.email, PASSWORD)).toBeNull();
+    const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(b.email)));
+    expect(rows).toHaveLength(5);
+    await t.ownerDb.update(loginAttempt).set({ at: sql`now() - interval '16 minutes'` }).where(eq(loginAttempt.emailHash, sha256(b.email)));
+    expect(await verifyCredentials(b.email, PASSWORD)).toEqual({ userId: b.userId });
   }, HEAVY_TEST_MS);
 });
 

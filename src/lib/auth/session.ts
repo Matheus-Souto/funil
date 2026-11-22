@@ -85,38 +85,49 @@ async function reserveAttempt(emailHash: string): Promise<boolean> {
   });
 }
 
+const tooLong = (email: unknown, password: unknown): boolean =>
+  typeof email !== "string" || typeof password !== "string" || email.length > MAX_EMAIL_LENGTH || password.length > MAX_PASSWORD_LENGTH;
+
+/**
+ * Confere e-mail e senha de uma conta (sem olhar vínculo com loja). É o caminho do login: limite de 5 tentativas
+ * malsucedidas por e-mail em 15 min (a tentativa é reservada antes do scrypt) e hash de mentira quando o e-mail não
+ * existe, para gastar o mesmo tempo. Devolve o usuário ou `null` (e-mail desconhecido, senha errada ou bloqueado).
+ * Não apaga as tentativas no sucesso: quem chama decide (ver `clearLoginAttempts`).
+ */
+export async function verifyCredentials(email: string, password: string): Promise<{ userId: string } | null> {
+  if (tooLong(email, password)) return null;
+  const normalized = normalizeEmail(email);
+  const locked = await reserveAttempt(sha256(normalized));
+  const [user] = await db.select({ id: users.id, passwordHash: users.passwordHash }).from(users).where(eq(users.email, normalized)).limit(1);
+  dummyHash ??= hashPassword("senha-de-mentira-só-para-o-tempo");
+  const passwordOk = await verifyPassword(password, user?.passwordHash ?? (await dummyHash));
+  return locked || !user || !passwordOk ? null : { userId: user.id };
+}
+
+/** Zera as tentativas de login do e-mail (depois de um login ou aceite de convite com a senha certa). */
+export async function clearLoginAttempts(email: string): Promise<void> {
+  await db.delete(loginAttempt).where(eq(loginAttempt.emailHash, sha256(normalizeEmail(email))));
+}
+
 /**
  * Login por e-mail e senha na loja `storeId`. Devolve o token da sessão.
  * Erro único e genérico para e-mail desconhecido, senha errada, sem vínculo e conta bloqueada.
  * Limite: 5 tentativas malsucedidas por e-mail em 15 min; sucesso apaga as tentativas do e-mail.
  */
 export async function login(input: { email: string; password: string; storeId: string }): Promise<string> {
-  if (
-    typeof input.email !== "string" ||
-    typeof input.password !== "string" ||
-    input.email.length > MAX_EMAIL_LENGTH ||
-    input.password.length > MAX_PASSWORD_LENGTH
-  ) {
-    throw bad();
-  }
-  const email = normalizeEmail(input.email);
-  const emailHash = sha256(email);
-  const locked = await reserveAttempt(emailHash);
-
-  const [user] = await db.select().from(users).where(eq(users.email, email)).limit(1);
-  dummyHash ??= hashPassword("senha-de-mentira-só-para-o-tempo");
-  const passwordOk = await verifyPassword(input.password, user?.passwordHash ?? (await dummyHash));
-  const [member] = user
+  if (tooLong(input.email, input.password)) throw bad();
+  const cred = await verifyCredentials(input.email, input.password);
+  const [member] = cred
     ? await db
         .select({ role: membership.role })
         .from(membership)
-        .where(and(eq(membership.userId, user.id), eq(membership.storeId, input.storeId)))
+        .where(and(eq(membership.userId, cred.userId), eq(membership.storeId, input.storeId)))
         .limit(1)
     : [];
 
-  if (locked || !user || !passwordOk || !member) throw bad();
-  await db.delete(loginAttempt).where(eq(loginAttempt.emailHash, emailHash));
-  return createSession(user.id, input.storeId);
+  if (!cred || !member) throw bad();
+  await clearLoginAttempts(input.email);
+  return createSession(cred.userId, input.storeId);
 }
 
 /** Grava o cookie de sessão (só em server action ou route handler). */

@@ -19,6 +19,8 @@ import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
 import { updateStoreSettings } from "@/lib/store-settings";
+import { inviteMember, inviteStatus, resendInvite, revokeInvite } from "@/lib/team/invites";
+import { changeRole, leaveStore, removeMember } from "@/lib/team/members";
 import { saveMeta, testMeta } from "@/lib/tracking/meta";
 import type { ActionResult } from "../result";
 
@@ -75,6 +77,71 @@ export async function changePasswordFormAction(form: FormData): Promise<void> {
 export async function revokeMemberSessionsAction(userId: string) {
   const panel = await requirePanelActor();
   return call(panel, revokeMemberSessions, { userId }, (o) => (o.revoked === 1 ? "1 sessão encerrada." : `${o.revoked} sessões encerradas.`));
+}
+
+// ---- página Equipe: convites, papéis e saída (spec "Equipe e convites", seções 5 e 7) ------------------------------
+
+/**
+ * O e-mail sai no `afterCommit`, que já terminou quando `runAction` volta: o resultado do envio vem de `team.inviteStatus`.
+ * O convite já existe nesse ponto: uma recusa dessa leitura vira "não enviado" com o motivo padrão, nunca um erro 500.
+ */
+async function sendResult(panel: PanelActor, inviteId: string): Promise<{ sent: boolean; reason?: string }> {
+  try {
+    const st = await runAction(inviteStatus, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, { inviteId });
+    return st.sendStatus === "sent" ? { sent: true } : { sent: false, reason: st.sendError ?? NO_REASON };
+  } catch (e) {
+    if (!(e instanceof ActionError)) throw e;
+    return { sent: false, reason: NO_REASON };
+  }
+}
+
+const NO_REASON = "o provedor não respondeu";
+
+/**
+ * Convida por e-mail. A resposta traz só se o e-mail saiu e o motivo curto da falha: nem o e-mail do convidado, nem o
+ * token, nem o link (a tela monta a mensagem com o e-mail que já está no formulário).
+ */
+export async function inviteAction(input: { email: string; role: string }) {
+  const panel = await requirePanelActor();
+  const r = await call(panel, inviteMember, input);
+  if (!r.ok) return r;
+  return { ok: true as const, data: await sendResult(panel, r.data.inviteId) };
+}
+
+export async function resendInviteAction(inviteId: string) {
+  const panel = await requirePanelActor();
+  const r = await call(panel, resendInvite, { inviteId });
+  if (!r.ok) return r;
+  return { ok: true as const, data: await sendResult(panel, inviteId) };
+}
+
+export async function revokeInviteAction(inviteId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, revokeInvite, { inviteId }, () => "Convite revogado. O link deixou de valer.");
+}
+
+const tokensText = (n: number) => (n === 0 ? "" : n === 1 ? " 1 token MCP revogado." : ` ${n} tokens MCP revogados.`);
+
+export async function changeRoleAction(userId: string, role: string) {
+  const panel = await requirePanelActor();
+  const r = await call(panel, changeRole, { userId, role }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
+  // Deixar de ser dono: a página Equipe deixa de existir para esta pessoa (404 no refresh); vai para o início do painel.
+  if (r.ok && userId === panel.actor.userId && role !== "owner") redirect("/admin");
+  return r;
+}
+
+export async function removeMemberAction(userId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, removeMember, { userId }, (o) => `Pessoa removida da equipe.${tokensText(o.tokensRevoked)}`);
+}
+
+/** Sair da loja: a ação apaga o vínculo e as sessões desta loja; aqui só o cookie e a ida para o login. */
+export async function leaveStoreAction() {
+  const panel = await requirePanelActor();
+  const r = await call(panel, leaveStore, {});
+  if (!r.ok) return r;
+  await destroySession();
+  redirect("/admin/login");
 }
 
 export async function logoutAction(): Promise<void> {

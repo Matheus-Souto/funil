@@ -12,7 +12,7 @@ import { registry } from "@/lib/actions/registry";
 import { updateOffer } from "@/lib/catalog/offers";
 import { open, seal, sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { approvalRequest, auditLog, job, mcpToken, offer, product, storeAlert, uploadLink, users } from "@/lib/db/schema";
+import { approvalRequest, auditLog, job, mcpToken, membership, offer, product, storeAlert, uploadLink, users } from "@/lib/db/schema";
 import { dateSP, dateTimeSP, orderCode } from "@/lib/format";
 import { runDueJobs, enqueue } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
@@ -660,7 +660,9 @@ describe("quem vê e de onde se decide", () => {
 
 describe("revogação e varredura", () => {
   test("revogar o token cancela os pendentes dele (input_sealed nulo); aprovar depois → conflict", async () => {
-    const { s, storeId, tokenId, request, panel } = await setup();
+    const { s, storeId, userId, tokenId, request, panel } = await setup();
+    // `mcpTokens.revoke` relê o papel atual em `membership` (sob o lock da equipe).
+    await t.ownerDb.insert(membership).values({ userId, storeId, role: "owner" });
     const req = await request("offers.setSlug", { id: s.offerId, slug: "antes-de-revogar" });
     const otherToken = await seedToken(storeId);
     const kept = await seedRow(storeId, otherToken);

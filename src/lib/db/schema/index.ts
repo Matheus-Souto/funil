@@ -13,3 +13,4 @@ export * from "./mcp";
 export * from "./approvals";
 export * from "./leads";
 export * from "./recovery";
+export * from "./team";

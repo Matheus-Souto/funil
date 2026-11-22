@@ -200,3 +200,51 @@ describe("rotas do painel com sessão", () => {
     expect(bad.status).toBe(400);
   });
 });
+
+/** Chama `fn` e diz se ela deu `notFound()` do Next. */
+async function isNotFound(fn: () => unknown): Promise<boolean> {
+  try {
+    await fn();
+    return false;
+  } catch (e) {
+    const digest = (e as { digest?: unknown }).digest;
+    if (typeof digest === "string" && digest.startsWith("NEXT_HTTP_ERROR_FALLBACK;404")) return true;
+    throw e;
+  }
+}
+
+describe("Equipe e convites: páginas", () => {
+  async function loginAs(storeId: string, role: "owner" | "admin" | "support" | "traffic") {
+    const [u] = await t.ownerDb
+      .insert(users)
+      .values({ email: `${role}.${crypto.randomUUID()}@exemplo.com`, name: role, passwordHash: await hashPassword("senha-correta-123") })
+      .returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
+    jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
+  }
+  const props = { params: Promise.resolve({}), searchParams: Promise.resolve({}) };
+
+  test("/admin/equipe: notFound para admin, atendimento e tráfego; o dono abre", async () => {
+    const mod = (await import(join(PANEL_DIR, "equipe", "page.tsx"))) as { default: (p: unknown) => unknown };
+    const { storeId } = await seedStore();
+    for (const role of ["admin", "support", "traffic"] as const) {
+      await loginAs(storeId, role);
+      expect(await isNotFound(() => mod.default(props)), role).toBe(true);
+    }
+    await loginAs(storeId, "owner");
+    expect(await isNotFound(() => mod.default(props))).toBe(false);
+  });
+
+  test("/admin/convite/<token> abre sem sessão (convite inválido mostra a mensagem, sem redirecionar)", async () => {
+    const mod = (await import(join(import.meta.dir, "..", "src", "app", "admin", "convite", "[token]", "page.tsx"))) as { default: (p: unknown) => unknown };
+    await seedStore();
+    expect(await redirectTarget(() => mod.default({ params: Promise.resolve({ token: "x" }), searchParams: Promise.resolve({}) }))).toBeNull();
+  });
+
+  test("Configurações ?aba=equipe redireciona para /admin/equipe", async () => {
+    const mod = (await import(join(PANEL_DIR, "settings", "page.tsx"))) as { default: (p: unknown) => unknown };
+    const { storeId } = await seedStore();
+    await loginAs(storeId, "owner");
+    expect(await redirectTarget(() => mod.default({ searchParams: Promise.resolve({ aba: "equipe" }) }))).toBe("/admin/equipe");
+  });
+});

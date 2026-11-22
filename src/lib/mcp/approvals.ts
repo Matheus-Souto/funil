@@ -14,6 +14,7 @@ import { db, withStore, type Tx } from "@/lib/db/client";
 import { approvalRequest, mcpToken, store, uploadLink, users } from "@/lib/db/schema";
 import type { JobHandler } from "@/lib/jobs";
 import { log, redact } from "@/lib/log";
+import { sweepInvites } from "@/lib/team/invites";
 import { refreshSummary, summarizeRequest, type ApprovalSummary } from "./approval-summary";
 
 /** Entrada da ação-alvo: até 16 KB de JSON. */
@@ -344,7 +345,7 @@ export const rejectRequest = defineAction({
 
 /**
  * Varredura de hora em hora, loja a loja (a tabela `store` não tem RLS): pendente vencido vira `expired` sem a entrada
- * selada; pendente de token revogado vira `canceled`; link de upload não usado e vencido há mais de 24 h é apagado. Falha numa loja não impede as demais; ao
+ * selada; pendente de token revogado vira `canceled`; link de upload não usado e vencido há mais de 24 h é apagado; convites da equipe vencidos expiram e os encerrados há 30 dias são apagados. Falha numa loja não impede as demais; ao
  * final, se alguma falhou, o job falha para tentar de novo.
  */
 export const sweepMcpJob: JobHandler = async (_job, signal) => {
@@ -381,6 +382,14 @@ export const sweepMcpJob: JobHandler = async (_job, signal) => {
     } catch (e) {
       failed++;
       log.error("falha na varredura do MCP da loja", { storeId, error: e });
+    }
+    // Retenção dos convites da equipe, em passo próprio: falha aqui não pula a varredura do MCP, nem o contrário.
+    try {
+      const invites = await sweepInvites(storeId, new Date());
+      if (invites.expired > 0 || invites.removed > 0) log.info("varredura dos convites", { storeId, ...invites });
+    } catch (e) {
+      failed++;
+      log.error("falha na varredura dos convites da loja", { storeId, error: e });
     }
   }
   if (failed > 0) throw new Error(`sweep_mcp falhou em ${failed} loja(s)`);

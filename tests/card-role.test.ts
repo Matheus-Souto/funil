@@ -25,6 +25,7 @@ import {
   rateLimit,
   recoveryEmail,
   storeAlert,
+  teamInvite,
   telegramNotice,
   uploadLink,
 } from "@/lib/db/schema";
@@ -245,6 +246,30 @@ describe("papel card: atributos e o que fica de fora", () => {
     await expect(asCardIn(shop.storeId, (tx) => tx`update email_optout set reason = 'bounce'`)).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(shop.storeId, (tx) => tx`delete from recovery_email`)).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(shop.storeId, (tx) => tx`delete from email_optout`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("team_invite (convites da equipe): select, insert, update e delete dão permission denied", async () => {
+    const { shop } = await pendingOrder();
+    const hash = randomBytes(32).toString("hex");
+    await t.ownerDb.insert(teamInvite).values({
+      storeId: shop.storeId,
+      email: `convidado-${randomUUID()}@example.com`,
+      emailHash: hash,
+      role: "support",
+      tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    await expect(asCardIn(shop.storeId, (tx) => tx`select email_hash from team_invite`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(
+        shop.storeId,
+        (tx) =>
+          tx`insert into team_invite (store_id, email, email_hash, role, token_hash, expires_at)
+             values (${shop.storeId}, 'a@example.com', 'h', 'support', 't', now() + interval '1 day')`,
+      ),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`update team_invite set status = 'revoked'`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from team_invite`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {
