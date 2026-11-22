@@ -219,6 +219,8 @@ start_app() {
   # Dependências externas de teste: Mailpit real; Asaas falso (o servidor falso entra com os pagamentos).
   # E2E_SEED_ROUTES=1 liga a rota só do smoke (/api/test-only); o app a recusa fora de BASE_URL em loopback.
   # META_GRAPH_BASE_URL: API de Conversões do Meta falsa (mesmo servidor falso, em /meta); também só em loopback.
+  # RESEND_BASE_URL e TELEGRAM_BASE_URL: Resend e Bot API do Telegram falsos (mesmo servidor, em /resend e /telegram);
+  # mesma regra de loopback. Um app sem essas variáveis no schema as ignora.
   local asaas_url="http://127.0.0.1:1/fake-asaas"
   if [ -f e2e/fakes/asaas-server.ts ]; then
     local fake_port; fake_port="$(free_port)" || { INFRA=1; return 1; }
@@ -245,6 +247,7 @@ start_app() {
   fi
   env OWNER_DATABASE_URL="$owner_url" DATABASE_URL="$app_url" APP_DB_PASSWORD=app \
     SMTP_HOST=localhost SMTP_PORT=1025 ASAAS_BASE_URL="$asaas_url" META_GRAPH_BASE_URL="$asaas_url/meta" \
+    RESEND_BASE_URL="$asaas_url/resend" TELEGRAM_BASE_URL="$asaas_url/telegram" \
     BASE_URL="$base_url" SECRET="$secret" MODE=single E2E_SEED_ROUTES=1 SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" \
     "${isolated[@]}" PORT="$port" HOSTNAME=127.0.0.1 NODE_ENV=production bun run start > "$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
