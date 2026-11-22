@@ -1,5 +1,5 @@
 {
-  "id": "640f0ae6-2a4c-4678-94c3-5f3eb42d443a",
+  "id": "fa3e7e6e-d69e-42c3-ae00-6a59ab130082",
   "prevId": "548d9901-2e34-42e3-83aa-403611b6598a",
   "version": "7",
   "dialect": "postgresql",
@@ -4209,6 +4209,14 @@
         "team_invite_email_status_check": {
           "name": "team_invite_email_status_check",
           "value": "(\"team_invite\".\"status\" = 'pending') = (\"team_invite\".\"email\" is not null)"
+        },
+        "team_invite_ended_check": {
+          "name": "team_invite_ended_check",
+          "value": "(\"team_invite\".\"status\" = 'pending') = (\"team_invite\".\"ended_at\" is null)"
+        },
+        "team_invite_send_error_check": {
+          "name": "team_invite_send_error_check",
+          "value": "char_length(\"team_invite\".\"send_error\") <= 500"
         }
       },
       "isRLSEnabled": false

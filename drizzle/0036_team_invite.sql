@@ -20,7 +20,9 @@ CREATE TABLE "team_invite" (
 	CONSTRAINT "team_invite_role_check" CHECK ("team_invite"."role" in ('admin','support','traffic')),
 	CONSTRAINT "team_invite_status_check" CHECK ("team_invite"."status" in ('pending','accepted','revoked','expired')),
 	CONSTRAINT "team_invite_send_status_check" CHECK ("team_invite"."send_status" is null or "team_invite"."send_status" in ('sent','failed')),
-	CONSTRAINT "team_invite_email_status_check" CHECK (("team_invite"."status" = 'pending') = ("team_invite"."email" is not null))
+	CONSTRAINT "team_invite_email_status_check" CHECK (("team_invite"."status" = 'pending') = ("team_invite"."email" is not null)),
+	CONSTRAINT "team_invite_ended_check" CHECK (("team_invite"."status" = 'pending') = ("team_invite"."ended_at" is null)),
+	CONSTRAINT "team_invite_send_error_check" CHECK (char_length("team_invite"."send_error") <= 500)
 );
 --> statement-breakpoint
 ALTER TABLE "email_log" DROP CONSTRAINT "email_log_kind_check";--> statement-breakpoint

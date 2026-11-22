@@ -22,6 +22,7 @@ export const teamInvite = pgTable(
     invitedBy: uuid("invited_by").references(() => users.id, { onDelete: "set null" }),
     status: text("status").notNull().default("pending"),
     sendStatus: text("send_status"),
+    /** Erro do envio: precisa ser sanitizado (safeErrorMessage) e cortado em 500 caracteres, como o `error` do `email_log`. */
     sendError: text("send_error"),
     sendCount: integer("send_count").notNull().default(0),
     lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
@@ -37,6 +38,8 @@ export const teamInvite = pgTable(
     check("team_invite_status_check", sql`${t.status} in ('pending','accepted','revoked','expired')`),
     check("team_invite_send_status_check", sql`${t.sendStatus} is null or ${t.sendStatus} in ('sent','failed')`),
     check("team_invite_email_status_check", sql`(${t.status} = 'pending') = (${t.email} is not null)`),
+    check("team_invite_ended_check", sql`(${t.status} = 'pending') = (${t.endedAt} is null)`),
+    check("team_invite_send_error_check", sql`char_length(${t.sendError}) <= 500`),
     uniqueIndex("team_invite_pending_email_uniq")
       .on(t.storeId, t.emailHash)
       .where(sql`${t.status} = 'pending'`),

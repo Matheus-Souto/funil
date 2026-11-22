@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { withStore } from "@/lib/db/client";
-import { teamInvite } from "@/lib/db/schema";
+import { emailLog, teamInvite } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -56,12 +56,12 @@ describe("team_invite", () => {
     const a = await seedStore();
     const b = await seedStore();
     const email = `dupla-${randomBytes(4).toString("hex")}@example.com`;
-    await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email }));
+    const [first] = await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email })).returning({ id: teamInvite.id });
     const err = await pgError(() => t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email: ` ${email.toUpperCase()} ` })));
     expect(err).toEqual({ code: "23505", constraint: "team_invite_pending_email_uniq" });
     // Outra loja pode convidar o mesmo e-mail; e, encerrado o primeiro, a mesma loja também.
     await t.ownerDb.insert(teamInvite).values(invite(b.storeId, { email }));
-    await t.ownerDb.update(teamInvite).set({ status: "revoked", email: null, endedAt: new Date() }).where(eq(teamInvite.storeId, a.storeId));
+    await t.ownerDb.update(teamInvite).set({ status: "revoked", email: null, endedAt: new Date() }).where(eq(teamInvite.id, first!.id));
     await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email }));
   });
 
@@ -77,6 +77,32 @@ describe("team_invite", () => {
     for (const status of ["accepted", "revoked", "expired"]) {
       await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email: null, status, endedAt: new Date() }));
     }
+  });
+
+  test("encerrado sem ended_at recusado; pendente com ended_at recusado", async () => {
+    const a = await seedStore();
+    for (const status of ["accepted", "revoked", "expired"]) {
+      const err = await pgError(() => t.ownerDb.insert(teamInvite).values(invite(a.storeId, { email: null, status })));
+      expect(err, status).toEqual({ code: "23514", constraint: "team_invite_ended_check" });
+    }
+    const pending = await pgError(() => t.ownerDb.insert(teamInvite).values(invite(a.storeId, { endedAt: new Date() })));
+    expect(pending).toEqual({ code: "23514", constraint: "team_invite_ended_check" });
+  });
+
+  test("send_error com mais de 500 caracteres recusado; até 500 aceito", async () => {
+    const a = await seedStore();
+    const err = await pgError(() => t.ownerDb.insert(teamInvite).values(invite(a.storeId, { sendStatus: "failed", sendError: "x".repeat(501) })));
+    expect(err).toEqual({ code: "23514", constraint: "team_invite_send_error_check" });
+    await t.ownerDb.insert(teamInvite).values(invite(a.storeId, { sendStatus: "failed", sendError: "x".repeat(500) }));
+  });
+
+  test("email_log aceita kind team_invite", async () => {
+    const a = await seedStore();
+    const [row] = await t.ownerDb
+      .insert(emailLog)
+      .values({ storeId: a.storeId, toHash: emailHash("convidado@example.com"), kind: "team_invite", status: "sent" })
+      .returning({ kind: emailLog.kind });
+    expect(row!.kind).toBe("team_invite");
   });
 
   test("role owner recusado pelo check", async () => {
