@@ -8,9 +8,14 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request): Promise<Response> {
   const panel = await requirePanelActor();
   const p = new URL(req.url).searchParams;
+  // Mesmos filtros da lista, inclusive vários status ou métodos (?status=paid&status=pending ou "paid,pending"). Os valores
+  // vão crus para a ação: um status ou método inválido é invalid_input (400), nunca uma planilha com tudo.
+  const all = (k: string) => [...new Set(p.getAll(k).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean))];
+  const statuses = all("status");
+  const methods = all("method");
   const input = {
-    ...(p.get("status") ? { status: p.get("status") } : {}),
-    ...(p.get("method") ? { method: p.get("method") } : {}),
+    ...(statuses.length ? { statuses } : {}),
+    ...(methods.length ? { methods } : {}),
     ...(p.get("q") ? { q: p.get("q") } : {}),
   };
   try {

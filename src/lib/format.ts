@@ -60,6 +60,11 @@ const SP_DAY_MONTH_TIME = new Intl.DateTimeFormat("pt-BR", {
   hourCycle: "h23",
 });
 
+const SP_SHORT_DATE = new Intl.DateTimeFormat("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", year: "2-digit" });
+
+/** "21/11/26 09:08" (São Paulo): data real e hora, nas listas e no histórico do painel. */
+export const dateTimeShortSP = (d: Date): string => `${SP_SHORT_DATE.format(d)} ${SP_TIME.format(d)}`;
+
 /** "hoje, 15:12" / "ontem, 22:14" / "16/11, 09:40" (São Paulo). */
 export function shortWhenSP(d: Date, now: Date = new Date()): string {
   const day = SP_DAY_KEY.format(d);

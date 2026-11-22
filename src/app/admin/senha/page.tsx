@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { changePasswordFormAction, logoutAction } from "../(panel)/actions";
 import { PIcon } from "../icons";
+import { Art } from "../blocks";
 import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +40,7 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
         )}
       </header>
       <main className={s.authBody}>
+        <Art name="funil" size={120} className={s.authArt} />
         <h1>Trocar senha</h1>
         <p className={s.authLead}>
           {id.userEmail} · {id.storeName}

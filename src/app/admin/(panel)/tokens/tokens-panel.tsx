@@ -3,7 +3,7 @@
 // Tokens MCP: lista, criação e revogação. O token recém-criado vive SÓ no estado deste componente (nada de cookie, URL,
 // localStorage nem log): some ao sair da página ou ao clicar "Pronto". Sem regra de negócio: tudo passa pelas actions.
 import { useEffect, useRef, useState } from "react";
-import { Badge } from "../../blocks";
+import { Art, Badge } from "../../blocks";
 import s from "../../panel.module.css";
 import { CopyField, Dialog, Live, useActionRunner } from "../../ui";
 import { createMcpTokenAction, revokeMcpTokenAction } from "../actions";
@@ -139,7 +139,10 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
             Tokens da loja
           </h2>
           {tokens.length === 0 ? (
-            <p className={s.muted}>Nenhum token ainda.</p>
+            <div className={s.emptyInline}>
+              <Art name="agentes" size={88} />
+              <p className={s.muted}>Nenhum token ainda. Crie um para conectar um agente de IA à loja.</p>
+            </div>
           ) : (
             <div className={s.rows}>
               {tokens.map((t) => (
@@ -171,7 +174,6 @@ export function TokensPanel({ tokens, mcpUrl }: { tokens: TokenRow[]; mcpUrl: st
       <Dialog
         open={target !== null}
         onClose={closeRevoke}
-        icon="lock"
         tone="danger"
         title={`Revogar o token ${target?.name ?? ""}?`}
         footer={

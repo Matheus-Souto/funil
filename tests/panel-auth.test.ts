@@ -137,3 +137,55 @@ describe("rotas do painel exigem sessão", () => {
     });
   }
 });
+
+describe("rotas do painel com sessão", () => {
+  /** Usuário com o papel pedido na loja, já logado (cookie no jar). */
+  async function login(storeId: string, role: "owner" | "admin" | "support" | "traffic") {
+    const [u] = await t.ownerDb
+      .insert(users)
+      .values({ email: `${role}.${crypto.randomUUID()}@exemplo.com`, name: role, passwordHash: await hashPassword("senha-correta-123") })
+      .returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
+    jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
+  }
+
+  test("GET /admin/api/products/<id>/file: dono baixa como anexo (pdf, nosniff, no-store); support e tráfego recebem 403; produto de outra loja 404", async () => {
+    const { runAction } = await import("@/lib/actions/core");
+    const { createProduct } = await import("@/lib/catalog/products");
+    const { makePdf } = await import("./pdf-fixtures");
+    const { GET } = await import("@/app/admin/api/products/[id]/file/route");
+    const { storeId } = await seedStore();
+    const raw = await makePdf(1);
+    const p = await runAction(createProduct, { storeId, actor: { kind: "user", userId: "u1", role: "owner" }, origin: "panel" }, { name: "Guia", fileName: "guia.pdf", file: raw });
+    const get = (id: string) => GET(new Request(`http://localhost/admin/api/products/${id}/file`), { params: Promise.resolve({ id }) });
+
+    await login(storeId, "owner");
+    const ok = await get(p.id);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("application/pdf");
+    expect(ok.headers.get("content-disposition")).toMatch(/^attachment;/);
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(ok.headers.get("cache-control")).toBe("private, no-store");
+    expect(Buffer.from(await ok.arrayBuffer()).equals(Buffer.from(raw))).toBe(true);
+    // O `sandbox` que chega ao navegador vem do next.config.ts (o E2E confere o cabeçalho real da resposta HTTP).
+
+    for (const role of ["support", "traffic"] as const) {
+      await login(storeId, role);
+      expect((await get(p.id)).status, role).toBe(403);
+    }
+    const other = await seedStore();
+    await login(other.storeId, "owner");
+    expect((await get(p.id)).status).toBe(404);
+  });
+
+  test("GET /admin/orders.csv: vários status saem só com eles; status inválido é 400 (não uma planilha com tudo)", async () => {
+    const { GET } = await import("@/app/admin/orders.csv/route");
+    const { storeId } = await seedStore();
+    await login(storeId, "owner");
+    const ok = await GET(new Request("http://localhost/admin/orders.csv?status=paid&status=pending"));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    const bad = await GET(new Request("http://localhost/admin/orders.csv?status=pago"));
+    expect(bad.status).toBe(400);
+  });
+});

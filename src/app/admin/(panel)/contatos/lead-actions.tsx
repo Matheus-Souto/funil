@@ -40,7 +40,6 @@ export function LeadRowActions({ id, code, status }: { id: string; code: string;
       <Dialog
         open={confirm}
         onClose={close}
-        icon="shield-alert"
         tone="danger"
         title={`Excluir o contato #${code}?`}
         footer={
@@ -103,7 +102,6 @@ export function ForgetEmailForm() {
       <Dialog
         open={confirm}
         onClose={close}
-        icon="shield-alert"
         tone="danger"
         title="Excluir todos os contatos deste e-mail?"
         footer={

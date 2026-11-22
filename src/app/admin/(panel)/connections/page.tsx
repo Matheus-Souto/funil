@@ -2,8 +2,7 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { connectionsStatus } from "@/lib/connections";
-import { PageHead } from "../../blocks";
-import { PIcon } from "../../icons";
+import { Art, Notice, PageHead } from "../../blocks";
 import s from "../../panel.module.css";
 import { AsaasCard, MetaCard, PixManualCard, ResendCard, SmtpCard, TelegramCard } from "./cards";
 
@@ -20,44 +19,49 @@ export default async function ConnectionsPage() {
   const { userEmail, storeName } = await getPanelIdentity(panel);
   return (
     <>
-      <PageHead title="Conexões" sub="Chaves e tokens ficam criptografados e nunca são exibidos de novo: só aparece “configurado” ou o final da chave." />
-      {st.emailUsable ? null : (
-        <div className={s.alerts}>
-          <div className={s.banner} data-tone="danger" role="alert" id="email-inutilizavel">
-            <PIcon name="mail" />
-            <div>
-              <b>Nenhum provedor de e-mail utilizável: os e-mails de acesso e os avisos de venda vão falhar.</b>
-              <p>Configure o SMTP ou o Resend em Conexões e ative um deles.</p>
-            </div>
-          </div>
-        </div>
-      )}
-      {st.turnstile.recommended ? (
-        <div className={s.alerts}>
-          <div className={s.banner} role="note" id="turnstile-recomendado">
-            <PIcon name="triangle-alert" />
-            <div>
-              <b>Recomendado: configure a verificação anti-robô (Cloudflare Turnstile).</b>
-              <p>
-                A loja vende com cartão e o servidor está sem Turnstile. Com muitas recusas de cartão em pouco tempo, cada
-                comprador fica limitado a 3 tentativas por hora em vez de passar pela verificação. Quem instalou o servidor
-                define TURNSTILE_SITE_KEY e TURNSTILE_SECRET no .env (docs/instalacao.md).
-              </p>
-            </div>
-          </div>
+      <PageHead title="Conexões" />
+      {!st.emailUsable || st.turnstile.recommended ? (
+        <div className={s.noticeStrip}>
+          {st.emailUsable ? null : (
+            <Notice tone="danger" alert>
+              <b>Nenhum e-mail configurado:</b> os acessos e os avisos de venda vão falhar. Ative o SMTP ou o Resend.
+            </Notice>
+          )}
+          {st.turnstile.recommended ? (
+            <Notice tone="warning">
+              <b>Recomendado:</b> ative a verificação anti-robô (Cloudflare Turnstile). Sem ela, com muitas recusas de cartão em
+              pouco tempo, cada comprador fica limitado a 3 tentativas por hora. Quem instalou o servidor define TURNSTILE_SITE_KEY e
+              TURNSTILE_SECRET no .env (docs/instalacao.md).
+            </Notice>
+          ) : null}
         </div>
       ) : null}
-      <div className={s.grid2} style={{ alignItems: "start" }}>
-        <div className={s.stack}>
+      <div className={s.connGroups}>
+        <section className={`${s.card} ${s.cardFlush}`} aria-labelledby="conn-receber">
+          <header className={s.connGroupHead}>
+            <Art name="carteira" size={32} className={s.connGroupArt} />
+            <h2 id="conn-receber">Como receber</h2>
+          </header>
           <PixManualCard data={st.pixManual} canWrite={canWrite} />
+          <AsaasCard data={st.asaas} canWrite={canWrite} />
+        </section>
+        <section className={`${s.card} ${s.cardFlush}`} aria-labelledby="conn-email">
+          <header className={s.connGroupHead}>
+            <Art name="email" size={32} className={s.connGroupArt} />
+            <h2 id="conn-email">E-mail para o comprador</h2>
+            <span className={s.connGroupHint}>Basta um dos dois</span>
+          </header>
           <SmtpCard data={st.smtp} canWrite={canWrite} defaultTo={userEmail} active={st.emailProvider === "smtp"} usable={st.emailUsable} />
           <ResendCard data={st.resend} canWrite={canWrite} defaultTo={userEmail} storeName={storeName} active={st.emailProvider === "resend"} usable={st.emailUsable} />
-          <TelegramCard data={st.telegram} canWrite={canWrite} />
-        </div>
-        <div className={s.stack}>
-          <AsaasCard data={st.asaas} canWrite={canWrite} />
+        </section>
+        <section className={`${s.card} ${s.cardFlush}`} aria-labelledby="conn-avisos">
+          <header className={s.connGroupHead}>
+            <Art name="avisos" size={32} className={s.connGroupArt} />
+            <h2 id="conn-avisos">Rastreamento e avisos</h2>
+          </header>
           <MetaCard data={st.meta} canWrite={canWrite} canTest={canTestMeta} />
-        </div>
+          <TelegramCard data={st.telegram} canWrite={canWrite} />
+        </section>
       </div>
     </>
   );

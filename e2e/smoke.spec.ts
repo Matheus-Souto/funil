@@ -176,6 +176,20 @@ const stamp = Date.now();
 const buyerEmail = (tag: string) => `comprador.${tag}.${stamp}@exemplo.com`;
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 390, height: 844 };
+/** Escolhe uma opção num menu do painel (Select do Arc: botão "combobox" que abre a lista de opções). */
+async function pickOption(page: Page, name: string, option: string) {
+  await page.getByRole("combobox", { name, exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
+}
+
+/**
+ * Confere, de forma exata, a opção escolhida num Select do Arc. O botão repete o texto (o valor real, só para leitor de
+ * tela, e a cópia visível animada), então a conferência é no 1º filho: o valor do Radix.
+ */
+async function expectPicked(page: Page, name: string, option: string) {
+  await expect(page.getByRole("combobox", { name, exact: true }).locator(":scope > span").first()).toHaveText(option);
+}
+
 /** Código curto do pedido no painel (#XXXXXXXX): 8 primeiros caracteres alfanuméricos do id público, em maiúsculas. */
 const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
 
@@ -213,7 +227,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   }
 
   test.beforeAll(async ({ browser }) => {
-    owner = await browser.newPage({ viewport: DESKTOP });
+    // Movimento reduzido: os menus, diálogos e gráficos do painel (Arc + motion) quase não animam, e cada clique não
+    // espera a animação acabar (o teste do Kids escolhe ~15 itens nos menus do editor).
+    owner = await browser.newPage({ viewport: DESKTOP, reducedMotion: "reduce" });
     await owner.goto("/admin/login");
     await owner.getByLabel("E-mail").fill(OWNER.email);
     await owner.getByLabel("Senha").fill(OWNER.password);
@@ -230,6 +246,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     await page.goto("/admin/connections");
     await shot(page, "p14a-conexoes-vazias-1280");
+    // Cada conexão é uma linha; o formulário abre num modal (o id fica no modal).
+    await page.getByRole("button", { name: "Conectar Pix manual" }).click();
     const pix = page.locator("#pix-manual-card");
     await pix.getByLabel("Chave Pix").fill("contato@manakids.com.br");
     await pix.getByLabel("Nome do recebedor").fill("Mana Kids");
@@ -244,6 +262,10 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(pix.getByText("Chave Pix salva.")).toBeVisible();
     await expect(pix.getByText("MANA KIDS")).toBeVisible();
 
+    // Esc logo depois de salvar fecha o modal da conexão (o diálogo de confirmação que está saindo repassa o Esc).
+    await page.keyboard.press("Escape");
+    await expect(pix).toBeHidden();
+    await page.getByRole("button", { name: "Conectar Asaas" }).click();
     const asaas = page.locator("#asaas");
     const { apiKey } = (await (await request.get(`${asaasBase}/__control/key`)).json()) as { apiKey: string };
     await asaas.getByLabel("Chave de API").fill(apiKey);
@@ -262,6 +284,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(asaas.getByText("reative a fila")).toBeVisible();
 
     // SMTP da loja: Mailpit do compose (a ação testa a conexão antes de salvar).
+    await asaas.getByRole("button", { name: "Fechar" }).click();
+    await expect(asaas).toBeHidden();
+    await page.getByRole("button", { name: "Conectar SMTP" }).click();
     const smtp = page.locator("#smtp");
     await smtp.getByLabel("Servidor").fill("127.0.0.1");
     await smtp.getByLabel("Porta", { exact: true }).fill("1025");
@@ -272,6 +297,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     // Meta: Pixel + API de Conversões falsa do verify (${asaasBase}/meta). O token é testado antes de salvar.
     const { token: metaToken } = (await (await request.get(`${asaasBase}/__control/meta`)).json()) as { token: string };
+    await page.keyboard.press("Escape");
+    await expect(smtp).toBeHidden();
+    await page.getByRole("button", { name: "Conectar Meta" }).click();
     const meta = page.locator("#meta");
     await meta.getByLabel("Pixel ID").fill(PIXEL_ID);
     await meta.getByLabel("Token da API de Conversões").fill(metaToken);
@@ -288,6 +316,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   test("painel: produtos com upload do PDF (validação e progresso) e oferta com bump pelo editor", async () => {
     const page = owner;
     await page.goto("/admin/products");
+    const newProduct = () => page.getByRole("button", { name: "Novo produto", exact: true }).click();
+    await newProduct();
     // Arquivo que não é PDF: recusado antes de enviar.
     await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "nota.txt", mimeType: "text/plain", buffer: Buffer.from("oi") });
     await expect(page.getByText("Envie um arquivo PDF.")).toBeVisible();
@@ -296,32 +326,50 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "quebrado.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\nnada") });
     await page.getByRole("button", { name: "Criar produto" }).click();
     await expect(page.getByText("O PDF está corrompido ou tem estrutura inválida.", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Cancelar", exact: true }).click();
 
     const doc = await PDFDocument.create();
     doc.addPage([200, 200]);
     const pdf = Buffer.from(await doc.save());
     for (const name of ["Maná bíblico · versão básica", "Maná bíblico · versão completa"]) {
+      await newProduct();
       await page.getByLabel("Nome do produto").fill(name);
       await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: "mana.pdf", mimeType: "application/pdf", buffer: pdf });
       await page.getByRole("button", { name: "Criar produto" }).click();
       await expect(page.getByText(`Produto “${name}” criado.`)).toBeVisible();
     }
-    await expect(page.getByRole("cell", { name: "Maná bíblico · versão completa" })).toBeVisible();
+    // A célula do nome (a de ações também cita o nome, no rótulo "Ver o PDF de …").
+    await expect(page.getByRole("cell", { name: /^Maná bíblico · versão completa/ })).toBeVisible();
     await shot(page, "p13-produtos-1280");
+
+    // "Ver PDF" (só dono e admin): o PDF original sai como anexo e com a CSP `sandbox` de verdade na resposta HTTP
+    // (vem do next.config.ts; o cabeçalho que a rota devolve não substitui o de /admin).
+    await page.getByRole("button", { name: "Ver o PDF de Maná bíblico · versão completa" }).click();
+    const viewer = page.getByRole("dialog", { name: "Maná bíblico · versão completa" });
+    const pdfUrl = (await viewer.getByRole("link", { name: "Baixar" }).getAttribute("href"))!;
+    expect(pdfUrl).toMatch(/^\/admin\/api\/products\/[0-9a-f-]{36}\/file$/);
+    const pdfRes = await page.request.get(pdfUrl);
+    expect(pdfRes.status()).toBe(200);
+    expect(pdfRes.headers()["content-type"]).toBe("application/pdf");
+    expect(pdfRes.headers()["content-disposition"]).toMatch(/^attachment;/);
+    expect(pdfRes.headers()["x-content-type-options"]).toBe("nosniff");
+    expect(pdfRes.headers()["content-security-policy"]).toBe("frame-ancestors 'none'; sandbox");
+    await page.keyboard.press("Escape");
+    await expect(viewer).toBeHidden();
 
     async function newOffer(o: { slug: string; manual: boolean; bump: boolean; maxInstallments?: number }) {
       await page.goto("/admin/offers/nova");
       await page.getByLabel("Nome da oferta").fill("Maná bíblico para crianças");
       await page.getByLabel("Preço", { exact: true }).fill("9,90");
-      await page.getByLabel("Produto entregue").selectOption({ label: "Maná bíblico · versão básica" });
+      await pickOption(page, "Produto entregue", "Maná bíblico · versão básica");
       await page.getByLabel("Endereço (slug)").fill(o.slug);
       await page.getByLabel("Cartão de crédito").check();
-      if (o.maxInstallments) await page.getByLabel("Parcelas máximas no cartão").selectOption(String(o.maxInstallments));
+      if (o.maxInstallments) await pickOption(page, "Parcelas máximas no cartão", `até ${o.maxInstallments}x`);
       await page.locator("label", { hasText: o.manual ? /^Manual$/ : /^Asaas \(automático\)$/ }).click();
       await expect(page.getByLabel(o.manual ? "Manual" : "Asaas (automático)", { exact: true })).toBeChecked();
       if (o.bump) {
         await page.getByLabel("Oferecer order bump").check();
-        await page.getByLabel("Produto do bump").selectOption({ label: "Maná bíblico · versão completa" });
+        await pickOption(page, "Produto do bump", "Maná bíblico · versão completa");
         await page.getByLabel("Preço do acréscimo").fill("17,10");
         await page.getByLabel("Título da caixa").fill("Quero a versão completa");
       }
@@ -953,7 +1001,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
   test("painel: telas no desktop (1280) e no celular (390, tema escuro)", async ({ browser }) => {
     await owner.goto("/admin");
-    await expect(owner.getByRole("heading", { name: "Visão geral" })).toBeVisible();
+    await expect(owner.getByRole("heading", { name: "Dashboard" })).toBeVisible();
     await expect(owner.getByText("Por origem")).toBeVisible();
     await shot(owner, "p03-visao-geral-1280");
     await owner.goto("/admin?periodo=30d");
@@ -967,7 +1015,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     const dark = await browser.newContext({ viewport: MOBILE, colorScheme: "dark", storageState: state });
     const m = await dark.newPage();
     await m.goto("/admin");
-    await expect(m.getByRole("heading", { name: "Visão geral" })).toBeVisible();
+    await expect(m.getByRole("heading", { name: "Dashboard" })).toBeVisible();
     await shot(m, "p09-visao-geral-390-escuro");
     await m.goto("/admin/orders");
     await shot(m, "p05c-pedidos-390-escuro");
@@ -1070,6 +1118,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     for (const p of KIDS) {
       const doc = await PDFDocument.create();
       doc.addPage([p.width, 300]);
+      await page.getByRole("button", { name: "Novo produto", exact: true }).click();
       await page.getByLabel("Nome do produto").fill(p.name);
       await page.getByLabel("Arquivo PDF do produto").setInputFiles({ name: p.file, mimeType: "application/pdf", buffer: Buffer.from(await doc.save()) });
       await page.getByRole("button", { name: "Criar produto" }).click();
@@ -1078,10 +1127,10 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
 
     /** Preenche uma lista de produtos do editor: a 1ª linha já existe; cada nova linha entra pelo botão e é escolhida. */
     async function pick(names: string[], first: string, nth: (n: number) => string, add: string) {
-      await page.getByRole("combobox", { name: first, exact: true }).selectOption({ label: names[0]! });
+      await pickOption(page, first, names[0]!);
       for (let i = 1; i < names.length; i++) {
         await page.getByRole("button", { name: add, exact: true }).click();
-        await page.getByRole("combobox", { name: nth(i + 1), exact: true }).selectOption({ label: names[i]! });
+        await pickOption(page, nth(i + 1), names[i]!);
       }
     }
 
@@ -1102,9 +1151,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
     // Gravada na ordem: o editor recarregado mostra as 6 linhas como foram escolhidas.
-    await expect(page.getByRole("combobox", { name: "Produto entregue", exact: true }).locator("option:checked")).toHaveText(KIDS[0]!.name);
+    await expectPicked(page, "Produto entregue", KIDS[0]!.name);
     for (let n = 2; n <= KIDS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n}`, exact: true }).locator("option:checked")).toHaveText(KIDS[n - 1]!.name);
+      await expectPicked(page, `Produto ${n}`, KIDS[n - 1]!.name);
     }
     await shot(page, "p12d-oferta-completo-6-produtos-1280");
 
@@ -1112,7 +1161,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.goto("/admin/offers/nova");
     await page.getByLabel("Nome da oferta").fill("Almanaque Bíblico Kids");
     await page.getByLabel("Preço", { exact: true }).fill("9,90");
-    await page.getByRole("combobox", { name: "Produto entregue", exact: true }).selectOption({ label: KIDS[0]!.name });
+    await pickOption(page, "Produto entregue", KIDS[0]!.name);
     await page.getByLabel("Endereço (slug)").fill("almanaque-kids");
     await page.getByLabel("Cartão de crédito").check();
     await page.locator("label", { hasText: /^Manual$/ }).click();
@@ -1130,9 +1179,9 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.getByRole("button", { name: "Criar oferta" }).click();
     await expect(page).toHaveURL(/\/admin\/offers\/[0-9a-f-]{36}\?criada=1$/);
     await expect(page.getByText("Oferta criada.")).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Produto do bump", exact: true }).locator("option:checked")).toHaveText(KITS[0]!.name);
+    await expectPicked(page, "Produto do bump", KITS[0]!.name);
     for (let n = 2; n <= KITS.length; n++) {
-      await expect(page.getByRole("combobox", { name: `Produto ${n} do bump`, exact: true }).locator("option:checked")).toHaveText(KITS[n - 1]!.name);
+      await expectPicked(page, `Produto ${n} do bump`, KITS[n - 1]!.name);
     }
     await shot(page, "p12e-oferta-almanaque-bump-5-kits-1280");
   });

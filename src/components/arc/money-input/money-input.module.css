@@ -1,0 +1,54 @@
+/* No row gap: grid tracks clamp a negative margin at zero, so a closed message row would still pay the gap. Each row carries its own space instead. */
+.field { display: grid; min-width: 0; font-family: var(--font-body); letter-spacing: var(--tracking-body); }
+.label { justify-self: start; margin-bottom: var(--space-2); color: var(--foreground); font-size: var(--text-sm); font-weight: 500; line-height: var(--leading-body); }
+
+/* One tall shell with the amount. Set --money-input-height to resize it. */
+.control { position: relative; display: flex; min-width: 0; height: var(--money-input-height, 76px); box-sizing: border-box; align-items: center; gap: var(--space-2); padding: 0 8px 0 18px; border: 1px solid var(--border-strong); border-radius: var(--radius-panel); background: var(--surface); transition: border-color var(--duration-fast) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .control:hover:not([data-invalid]) { border-color: var(--foreground); } }
+.control[data-focused] { border-color: var(--foreground); }
+.control[data-invalid] { border-color: var(--danger); }
+.field[data-disabled] .control { opacity: .5; background: var(--surface-muted); }
+
+/* The amount scales down to fit rather than scroll, so a long number is always read whole. */
+.amountWrap { position: relative; display: flex; min-width: 0; height: 100%; flex: 1; align-items: center; overflow: hidden; cursor: text; }
+.field[data-disabled] .amountWrap { cursor: not-allowed; }
+.group { display: inline-flex; flex: none; align-items: baseline; transform-origin: 0 50%; white-space: nowrap; color: var(--foreground); font-family: var(--font-display); font-size: var(--text-3xl); font-weight: 500; line-height: 1.2; letter-spacing: var(--tracking-display); font-variant-numeric: tabular-nums; font-kerning: none; }
+
+.symbol { position: relative; display: inline-block; margin-right: .06em; color: var(--text-secondary); white-space: pre; }
+.group > .symbol:last-child { margin-right: 0; margin-left: .18em; }
+.symbolSizer { position: absolute; top: 0; left: 0; visibility: hidden; white-space: pre; }
+.symbolGlyph { display: inline-block; white-space: pre; }
+
+/* The input only draws the caret and selection. Its text is always painted by the mirror, so settled, rolling, and typed amounts share one position. */
+.number { position: relative; display: inline-flex; }
+.mirror { display: inline-flex; }
+.input { position: absolute; z-index: 1; top: 0; left: 0; width: calc(100% + .5em); height: 100%; margin: 0; padding: 0; border: 0; background: transparent; color: transparent; caret-color: var(--foreground); font: inherit; font-variant-numeric: inherit; font-kerning: none; letter-spacing: inherit; line-height: inherit; outline: none; }
+.input::selection { background: color-mix(in oklab, var(--foreground) 16%, transparent); color: transparent; }
+.input:disabled { cursor: not-allowed; }
+
+/* Each character is a column: a hidden sizer holds its width and the glyph rolls inside, feathered at the top and bottom edge. */
+.column { --feather: .18em; position: relative; display: inline-block; overflow-x: visible; overflow-y: clip; margin-block: calc(var(--feather) * -1); padding-block: var(--feather); mask-image: linear-gradient(to bottom, transparent, #000 calc(var(--feather) * 1.4), #000 calc(100% - var(--feather) * 1.4), transparent); transition: color var(--duration-standard) var(--ease-standard); }
+/* Missing cents wait as ghosts, so settling the amount only changes their color. */
+.column[data-ghost] { color: color-mix(in oklab, var(--text-muted) 55%, transparent); }
+.sizer { visibility: hidden; white-space: pre; }
+.glyph { position: absolute; inset: var(--feather) 0; text-align: center; white-space: pre; }
+
+/* The allowed range, when shown, sits in one row under the shell. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-3); padding-top: var(--space-3); }
+.range { color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; transition: color var(--duration-standard) var(--ease-standard); }
+.range[data-flash] { color: var(--warning); transition-duration: var(--duration-instant); }
+
+.messageSlot { position: relative; display: block; overflow: hidden; }
+.hint, .error { display: block; padding-top: var(--space-2); font-size: var(--text-xs); line-height: var(--leading-body); }
+.hint { color: var(--text-muted); }
+.error { color: var(--danger); }
+
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+
+@media (max-width: 420px) { .control { padding-left: 14px; } .group { font-size: var(--text-2xl); } }
+
+/* Funil: no painel o campo segue o padrão dos outros inputs (44px, texto 16px, rótulo 14px forte). */
+.field .label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.control { height: var(--money-input-height, 44px); padding: 0 13px; border-color: var(--border-strong); border-radius: 10px; }
+.group { font-family: var(--font-body); font-size: 16px; font-weight: 400; letter-spacing: 0; line-height: 1.2; }
+.symbol { margin-right: .3em; }

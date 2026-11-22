@@ -173,7 +173,8 @@ const MAX_DAYS = 400;
 
 export const metricsBreakdown = defineAction({
   name: "metrics.breakdown",
-  description: "Detalhes do período para o painel: receita por dia (São Paulo), pagos com bump e números por oferta.",
+  description:
+    "Detalhes do período para o painel: receita por dia (São Paulo), pagos com bump, números por oferta e vendas pagas de cada oferta por dia.",
   input: range,
   permission: "metrics.read",
   audit: false,
@@ -219,6 +220,17 @@ export const metricsBreakdown = defineAction({
     for (const r of created) at(r.offerId).orders = r.n;
     for (const r of paid) Object.assign(at(r.offerId), { paid: r.n, bumpPaid: r.bump, revenueCents: r.cents });
 
-    return { byDay: byDay.length > MAX_DAYS - 1 ? [] : byDay, bumpPaid: b?.n ?? 0, byOffer: [...offers.values()] };
+    // Vendas pagas de cada oferta por dia (São Paulo): o mini gráfico da lista de ofertas. Só com o período no limite do
+    // `byDay` (períodos longos devolvem vazio, como ele); dias sem venda não vêm.
+    const long = byDay.length > MAX_DAYS - 1;
+    const byOfferDay = long
+      ? []
+      : await ctx.tx
+          .select({ offerId: orders.offerId, day, paid: n(), revenueCents: money(orders.totalCents) })
+          .from(orders)
+          .where(paidIn)
+          .groupBy(orders.offerId, day);
+
+    return { byDay: long ? [] : byDay, bumpPaid: b?.n ?? 0, byOffer: [...offers.values()], byOfferDay };
   },
 });

@@ -37,7 +37,7 @@ export default async function ApprovalsPage() {
   });
   return (
     <>
-      <PageHead title="Aprovações" sub="Ações sensíveis que um agente de IA pediu pelo MCP. Nada roda até alguém da loja aprovar." />
+      <PageHead title="Aprovações" />
       <div className={s.alerts}>
         <div className={s.banner} data-tone="info" role="note">
           <PIcon name="shield-check" />

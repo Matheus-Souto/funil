@@ -24,17 +24,29 @@ const REFUND_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const status = z.enum(ORDER_STATUSES as [OrderStatus, ...OrderStatus[]]);
 const method = z.enum(ORDER_METHODS as [OrderMethod, ...OrderMethod[]]);
-const filters = { status: status.optional(), method: method.optional(), q: z.string().trim().max(100).optional() };
+// `status`/`method`: um valor (MCP e chamadas antigas). `statuses`/`methods`: vários de uma vez (filtros do painel).
+const filters = {
+  status: status.optional(),
+  method: method.optional(),
+  statuses: z.array(status).max(ORDER_STATUSES.length).optional(),
+  methods: z.array(method).max(ORDER_METHODS.length).optional(),
+  q: z.string().trim().max(100).optional(),
+};
 
 /** Texto da busca como literal do LIKE (%, _ e \ não são curingas). */
 const likeLiteral = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const buyerName = sql<string>`coalesce(${orders.buyerName}, ${customer.name})`;
 
-function where(f: { status?: OrderStatus; method?: OrderMethod; q?: string }, withStatus: boolean): SQL | undefined {
+function where(
+  f: { status?: OrderStatus; method?: OrderMethod; statuses?: OrderStatus[]; methods?: OrderMethod[]; q?: string },
+  withStatus: boolean,
+): SQL | undefined {
   const parts: (SQL | undefined)[] = [];
-  if (withStatus && f.status) parts.push(eq(orders.status, f.status));
-  if (f.method) parts.push(eq(orders.method, f.method));
+  if (withStatus && f.statuses?.length) parts.push(inArray(orders.status, f.statuses));
+  else if (withStatus && f.status) parts.push(eq(orders.status, f.status));
+  if (f.methods?.length) parts.push(inArray(orders.method, f.methods));
+  else if (f.method) parts.push(eq(orders.method, f.method));
   if (f.q) {
     const like = likeLiteral(f.q);
     parts.push(or(ilike(buyerName, like), ilike(customer.email, like)));
@@ -44,8 +56,13 @@ function where(f: { status?: OrderStatus; method?: OrderMethod; q?: string }, wi
 
 export const listOrders = defineAction({
   name: "orders.list",
-  description: "Lista pedidos (50 por página, mais recentes primeiro) com filtros de status e método e busca por e-mail ou nome.",
-  input: z.object({ ...filters, page: z.number().int().min(1).max(10_000).default(1) }),
+  description: "Lista pedidos (50 por página por padrão, mais recentes primeiro) com filtros de status e método e busca por e-mail ou nome.",
+  input: z.object({
+    ...filters,
+    page: z.number().int().min(1).max(10_000).default(1),
+    // Tamanho da página (o painel escolhe 10, 25, 50 ou 100); sem ele, 50 como antes (MCP).
+    pageSize: z.union([z.literal(10), z.literal(25), z.literal(50), z.literal(100)]).default(PAGE_SIZE),
+  }),
   permission: "orders.read",
   audit: false,
   async run(ctx, input) {
@@ -84,13 +101,13 @@ export const listOrders = defineAction({
       .innerJoin(offer, eq(offer.id, orders.offerId))
       .where(where(input, true))
       .orderBy(desc(orders.createdAt), desc(orders.id))
-      .limit(PAGE_SIZE)
-      .offset((input.page - 1) * PAGE_SIZE);
+      .limit(input.pageSize)
+      .offset((input.page - 1) * input.pageSize);
     return {
       items: rows.map(({ publicId, ...r }) => ({ ...r, code: orderCode(publicId) })),
       total: total?.n ?? 0,
       page: input.page,
-      pageSize: PAGE_SIZE,
+      pageSize: input.pageSize,
       counts,
     };
   },

@@ -19,7 +19,21 @@ Diretas (`dependencies` do `package.json`; parte delas é empacotada no servidor
 | qrcode | 1.5.4 | MIT |
 | @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | geist (fonte) | 1.9.2 | SIL Open Font License 1.1 |
-| @fontsource-variable/bricolage-grotesque (fonte) | 5.3.0 | OFL-1.1 |
+| @fontsource-variable/inter (fonte) | 5.3.0 | OFL-1.1 |
+| echarts (gráficos do painel) | 6.1.0 | Apache-2.0 |
+| motion (animações do painel) | 14.14.0 | MIT |
+| lucide-react (ícones do painel) | 1.73.0 | ISC |
+| pdfjs-dist (miniatura e visualizador de PDF do painel) | 6.5.438 | Apache-2.0 |
+| @radix-ui/react-tooltip, -dialog | 1.x | MIT |
+| @radix-ui/react-dropdown-menu, -select | 2.x | MIT |
+
+Logos das plataformas no gráfico "Por origem" e na página Conexões (`src/app/admin/brand-icons.ts`): caminhos SVG do
+Simple Icons 16.38.0, CC0-1.0 (https://simpleicons.org); o "A" do Asaas vem do logo publicado no site do Asaas. As marcas
+pertencem aos donos; aparecem só para identificar a origem do tráfego e as integrações.
+
+Componentes copiados para `src/components/arc` (Arc, https://uiarc.dev, só a parte grátis): MIT, Copyright (c) Elia
+Kuratli. Texto completo da licença e a origem de cada componente em `src/components/arc/LICENSE`. Itens Arc Pro não
+entram neste repositório (a licença deles proíbe redistribuir).
 
 Copiadas pelo `output: "standalone"` do Next para `/app/node_modules` da imagem:
 

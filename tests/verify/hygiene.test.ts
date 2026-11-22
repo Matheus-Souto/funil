@@ -133,3 +133,13 @@ test("aceita nomes parecidos: next, text, expect.extend", () => {
   expect(scan(dir)).toEqual([]);
   rmSync(dir, { recursive: true });
 });
+
+test("varre também *.test.tsx e *.spec.tsx", () => {
+  const dir = fixture({
+    "tests/componente.test.tsx": `${TIMER}\n`,
+    "e2e/tela.spec.tsx": `${SKIP}"x", () => {});\n`,
+    "playwright.config.ts": GOOD_CONFIG,
+  });
+  expect(scan(dir).sort()).toEqual(["e2e/tela.spec.tsx:1: skip/only/todo/fixme", `tests/componente.test.tsx:1: set${"Timeout"}(`]);
+  rmSync(dir, { recursive: true });
+});

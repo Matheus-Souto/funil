@@ -5,10 +5,9 @@
 // preço por offers.updatePrice. As duas são sensíveis: diálogo de confirmação que diz o que muda. Endereço por
 // offers.setSlug (sensível; o dono no painel executa direto); os demais campos por offers.update; pixel próprio por
 // offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado. Regras puras em offer-editing.ts.
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { brandVars } from "@/lib/brand";
 import {
   MAX_PRODUCTS_PER_GROUP,
   changeDialog,
@@ -29,12 +28,23 @@ import {
 } from "@/lib/catalog/offer-editing";
 import { brl, centsToInput, parseBrl } from "@/lib/format";
 import { cardToggle } from "@/lib/payments/card-messages";
-import { Badge } from "../../../blocks";
+import { Art, Badge } from "../../../blocks";
+import { PIX_BRAND } from "../../../brand-icons";
+import { CreditCard, Info } from "lucide-react";
+import { MoneyInput } from "@/components/arc/money-input/money-input";
+import { Select } from "@/components/arc/select/select";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
 import type { ActionResult } from "../../../result";
 import { CopyButton, Dialog, Live, useActionRunner } from "../../../ui";
-import { createOfferAction, setOfferPixelAction, setOfferProductsAction, setOfferSlugAction, updateOfferAction, updateOfferPriceAction } from "../../actions";
+import {
+  createOfferAction,
+  setOfferPixelAction,
+  setOfferProductsAction,
+  setOfferSlugAction,
+  updateOfferAction,
+  updateOfferPriceAction,
+} from "../../actions";
 
 export interface OfferData {
   id: string;
@@ -64,6 +74,8 @@ type Line = { key: string; id: string };
 let lineSeq = 0;
 const newLine = (id: string): Line => ({ key: `linha-${++lineSeq}`, id });
 const ids = (lines: Line[]) => lines.map((l) => l.id);
+/** Valor do menu para "nenhum produto" (o menu do Arc não aceita valor vazio). */
+const NONE = "__nenhum__";
 
 const slugify = (t: string) =>
   t
@@ -74,22 +86,9 @@ const slugify = (t: string) =>
     .replace(/^-+|-+$/g, "")
     .slice(0, 60);
 
-export function OfferEditor(props: {
-  offer: OfferData | null;
-  products: ProductOption[];
-  checkoutBase: string;
-  storeName: string;
-  brandColor: string | null;
-  canWrite: boolean;
-  canPixel: boolean;
-  /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
-  cardAvailable: boolean;
-  /** Acabou de ser criada (a página nova mostra a confirmação). */
-  created?: boolean;
-}) {
-  const { offer, products, canWrite } = props;
-  const router = useRouter();
-  const [f, setF] = useState(() => ({
+/** Formulário a partir da oferta salva (ou vazio, para uma oferta nova). */
+function initialForm(offer: OfferData | null, products: ProductOption[]) {
+  return {
     name: offer?.name ?? "",
     slug: offer?.slug ?? "",
     main: (offer?.productIds ?? [products.find((p) => !p.deleted)?.id ?? ""]).map(newLine),
@@ -104,7 +103,51 @@ export function OfferEditor(props: {
     bumpLabel: offer?.bump?.label ?? "",
     thankYouText: offer?.thankYouText ?? "",
     active: offer?.active ?? true,
-  }));
+  };
+}
+
+/**
+ * O que importa para saber se mudou: sem as chaves locais das linhas de produto, com os textos aparados como o salvar
+ * grava, e sem os campos do bump quando ele está desligado (não são salvos).
+ */
+const comparable = (f: ReturnType<typeof initialForm>) => ({
+  ...f,
+  name: f.name.trim(),
+  thankYouText: f.thankYouText.trim(),
+  main: ids(f.main),
+  bumpLines: f.bumpOn ? ids(f.bumpLines) : [],
+  bumpPrice: f.bumpOn ? f.bumpPrice : "",
+  bumpLabel: f.bumpOn ? f.bumpLabel.trim() : "",
+});
+
+/** Maior valor em centavos que o banco guarda (integer do Postgres): o campo recusa o que passar disso. */
+const MAX_CENTS = 2_147_483_647;
+
+export function OfferEditor(props: {
+  offer: OfferData | null;
+  products: ProductOption[];
+  checkoutBase: string;
+  canWrite: boolean;
+  canPixel: boolean;
+  /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
+  cardAvailable: boolean;
+  /** Acabou de ser criada (a página nova mostra a confirmação). */
+  created?: boolean;
+}) {
+  const { offer, products, canWrite } = props;
+  const router = useRouter();
+  const [f, setF] = useState(() => initialForm(offer, products));
+  /** Há diferença entre o formulário e a oferta salva (a barra de baixo avisa e permite descartar). */
+  const changed = JSON.stringify(comparable(f)) !== JSON.stringify(comparable(initialForm(offer, products)));
+  const dirty = !offer || changed;
+  const discard = () => offer && setF(initialForm(offer, products));
+  // Sair da página (fechar a aba, recarregar, link externo) com alterações não salvas pede confirmação do navegador.
+  useEffect(() => {
+    if (!changed || !canWrite) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [changed, canWrite]);
   const [slugTouched, setSlugTouched] = useState(Boolean(offer));
   const [pixelOn, setPixelOn] = useState(Boolean(offer?.pixelId));
   const [pixel, setPixel] = useState(offer?.pixelId ?? "");
@@ -135,7 +178,10 @@ export function OfferEditor(props: {
   /** Bump como as ações recebem (offers.create / offers.setProducts). */
   const bumpInput = f.bumpOn && bumpCents ? { productIds: bumpProductIds, priceCents: bumpCents, label: bumpLabel } : null;
   const changes = offer
-    ? offerChanges({ priceCents: offer.priceCents, productIds: offer.productIds, bump: offer.bump }, { priceCents, productIds: productIds, bump: bumpInput })
+    ? offerChanges(
+        { priceCents: offer.priceCents, productIds: offer.productIds, bump: offer.bump },
+        { priceCents, productIds: productIds, bump: bumpInput },
+      )
     : null;
   const slugChanged = offer !== null && f.slug !== offer.slug;
   const methods = [...(f.pix ? ["pix"] : []), ...(f.card ? ["card"] : [])];
@@ -143,8 +189,6 @@ export function OfferEditor(props: {
   const link = `${props.checkoutBase}/c/${f.slug || "endereco-da-oferta"}`;
   const nameOf = (id: string) => products.find((p) => p.id === id)?.name ?? "Produto";
   const namesOf = (ids: string[]) => ids.map(nameOf).join(" · ");
-  const productName = productIds.length > 1 ? f.name.trim() || "Oferta" : nameOf(productIds[0] ?? "");
-  const vars = useMemo(() => brandVars(props.brandColor) as CSSProperties, [props.brandColor]);
   /** Produtos já escolhidos em alguma linha (o bump só conta ligado): o mesmo produto não entra duas vezes. */
   const used = new Set([...productIds, ...(f.bumpOn ? bumpProductIds : [])].filter(Boolean));
   const available = products.filter((p) => !p.deleted).map((p) => p.id);
@@ -251,7 +295,8 @@ export function OfferEditor(props: {
   }
 
   const dialogText = changes ? changeDialog(changes) : null;
-  const bumpSummary = (b: { productIds: string[]; priceCents: number } | null) => (b ? `${namesOf(b.productIds)} + ${brl(b.priceCents)}` : "sem bump");
+  const bumpSummary = (b: { productIds: string[]; priceCents: number } | null) =>
+    b ? `${namesOf(b.productIds)} + ${brl(b.priceCents)}` : "sem bump";
   const quoted = (t: string | null) => (t ? `“${t}”` : "sem título");
 
   /** Lista ordenada de selects de produto: a primeira linha leva `firstLabel` (os rótulos que o E2E usa). */
@@ -279,25 +324,31 @@ export function OfferEditor(props: {
           const empty = emptyOptionLabel({ firstMain: o.group === "main" && i === 0, value: line.id, hasProducts: products.length > 0 });
           return (
             <div className={s.productLine} key={line.key}>
-              <label className={s.field}>
-                <span className={s.label}>{label}</span>
-                <select
-                  ref={focusRef(`${line.key}:select`)}
-                  className={s.select}
-                  value={line.id}
-                  onChange={(e) => setLines(lines.map((l, j) => (j === i ? { ...l, id: e.target.value } : l)))}
-                >
-                  {empty !== null ? <option value="">{empty}</option> : null}
-                  {products.map((p) => (
-                    <option key={p.id} value={p.id} disabled={p.id !== line.id && (p.deleted || used.has(p.id))}>
-                      {p.deleted ? `${p.name} (excluído)` : p.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <Select
+                ref={focusRef(`${line.key}:select`)}
+                className={s.arcField}
+                label={label}
+                value={line.id || NONE}
+                onValueChange={(v) => setLines(lines.map((l, j) => (j === i ? { ...l, id: v === NONE ? "" : v } : l)))}
+                options={[
+                  ...(empty !== null ? [{ value: NONE, label: empty }] : []),
+                  ...products.map((p) => ({
+                    value: p.id,
+                    label: p.deleted ? `${p.name} (excluído)` : p.name,
+                    disabled: p.id !== line.id && (p.deleted || used.has(p.id)),
+                  })),
+                ]}
+              />
               {lines.length > 1 ? (
                 <>
-                  <button type="button" ref={focusRef(`${line.key}:up`)} className={s.iconBtn} aria-label={`Mover ${what} para cima`} disabled={i === 0} onClick={() => move(i, -1)}>
+                  <button
+                    type="button"
+                    ref={focusRef(`${line.key}:up`)}
+                    className={s.iconBtn}
+                    aria-label={`Mover ${what} para cima`}
+                    disabled={i === 0}
+                    onClick={() => move(i, -1)}
+                  >
                     <PIcon name="chevron-up" size={16} />
                   </button>
                   <button
@@ -356,11 +407,6 @@ export function OfferEditor(props: {
               Ver checkout
             </a>
           ) : null}
-          {canWrite ? (
-            <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={submit} disabled={save.pending}>
-              {save.pending ? "Salvando…" : offer ? "Salvar" : "Criar oferta"}
-            </button>
-          ) : null}
         </div>
       </div>
       <Live msg={save.msg ?? (props.created ? { tone: "ok", text: "Oferta criada." } : null)} />
@@ -368,225 +414,232 @@ export function OfferEditor(props: {
         {announce}
       </p>
 
-      <div className={s.split}>
-        <form
-          className={s.stack}
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submit();
-          }}
-        >
-          <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
-              Oferta
-            </legend>
-            <p className={s.cardSub} style={{ clear: "both", margin: "0 0 16px" }}>
-              O que o comprador vê no topo do checkout.
-            </p>
-            <div className={s.stack}>
-              <div className={s.formGrid}>
-                <label className={s.field}>
-                  <span className={s.label}>Nome da oferta</span>
-                  <input
-                    className={s.input}
-                    value={f.name}
-                    maxLength={200}
-                    onChange={(e) => {
-                      set("name", e.target.value);
-                      if (!slugTouched) set("slug", slugify(e.target.value));
-                    }}
-                  />
-                </label>
-                <div className={s.field}>
-                  <label className={s.field}>
-                  <span className={s.label}>Preço</span>
-                  <input className={s.input} value={f.price} inputMode="decimal" placeholder="9,90" onChange={(e) => set("price", e.target.value)} />
-                  </label>
-                  {priceCents ? <span className={s.hint}>{brl(priceCents)}</span> : null}
-                </div>
-              </div>
-              <div className={s.formGrid}>
-                {productList({ group: "main", firstLabel: "Produto entregue", lineLabel: (n) => `Produto ${n}` })}
-                <div className={s.field}>
-                  <label className={s.field}>
-                  <span className={s.label}>Endereço (slug)</span>
-                  <input
-                    className={`${s.input} ${s.mono}`}
-                    value={f.slug}
-                    maxLength={60}
-                    onChange={(e) => {
-                      setSlugTouched(true);
-                      set("slug", e.target.value.toLowerCase());
-                    }}
-                  />
-                  </label>
-                  <span className={s.hint}>Só letras minúsculas, números e hífen.</span>
-                </div>
-              </div>
-              <div className={s.field}>
-                <span className={s.label}>Link do checkout</span>
-                <div className={s.copyBox}>
-                  <code>{link}</code>
-                  <CopyButton text={link} small />
-                </div>
-              </div>
-              <label className={s.switch}>
-                <input type="checkbox" checked={f.active} onChange={(e) => set("active", e.target.checked)} />
-                Oferta ativa (checkout aberto para compras)
-              </label>
-            </div>
-          </fieldset>
-
-          <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
-              Pagamento
-            </legend>
-            <p className={s.cardSub} style={{ clear: "both", margin: "0 0 16px" }}>
-              Quais métodos aparecem neste checkout.
-            </p>
-            <div className={s.stack}>
-              <div className={s.grid2}>
-                <label className={s.check}>
-                  <input type="checkbox" checked={f.pix} onChange={(e) => set("pix", e.target.checked)} />
-                  Pix
-                </label>
-                <label className={s.check}>
-                  <input type="checkbox" checked={f.card} onChange={(e) => set("card", e.target.checked)} disabled={cardBox.disabled} aria-describedby={cardBox.notice ? "cartao-indisponivel" : undefined} />
-                  Cartão de crédito
-                </label>
-              </div>
-              {cardBox.notice ? (
-                <p id="cartao-indisponivel" className={s.hint} role="note">
-                  {cardBox.notice}
-                </p>
-              ) : null}
-              <div className={s.grid2}>
-                <div className={s.field} role="radiogroup" aria-label="Modo do Pix">
-                  <span className={s.label}>Modo do Pix</span>
-                  <div className={s.segment} style={{ alignSelf: "flex-start" }}>
-                    <label>
-                      <input type="radio" name="pixMode" checked={f.pixMode === "asaas"} onChange={() => set("pixMode", "asaas")} />
-                      Asaas (automático)
-                    </label>
-                    <label>
-                      <input type="radio" name="pixMode" checked={f.pixMode === "manual"} onChange={() => set("pixMode", "manual")} />
-                      Manual
-                    </label>
-                  </div>
-                  <span className={s.hint}>
-                    {f.pixMode === "asaas"
-                      ? "Com Asaas o pedido é liberado sozinho e o comprador informa CPF."
-                      : "Pix direto na sua chave: você confere no extrato e libera cada pedido."}
-                  </span>
-                </div>
-                <div className={s.field}>
-                  <label className={s.field}>
-                  <span className={s.label}>Parcelas máximas no cartão</span>
-                  <select className={s.select} value={f.maxInstallments} onChange={(e) => set("maxInstallments", Number(e.target.value))} disabled={ro || !f.card}>
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
-                      <option key={n} value={n}>
-                        {n === 1 ? "1x (à vista)" : `até ${n}x`}
-                      </option>
-                    ))}
-                  </select>
-                  </label>
-                  <span className={s.hint}>Parcela mínima do Asaas: R$ 5,00.</span>
-                </div>
-              </div>
-            </div>
-          </fieldset>
-
-          <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <div className={s.cardHead} style={{ marginBottom: 4 }}>
-              <legend className={s.sectionTitle}>Order bump</legend>
-              <label className={s.switch}>
-                <span className={s.srOnly}>Oferecer order bump</span>
-                <input
-                  type="checkbox"
-                  checked={f.bumpOn}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    // Ao ligar, linhas vazias ou repetidas ganham produtos livres, sem repetir entre si.
-                    const filled = fillBumpLines(productIds, bumpProductIds, available);
-                    setF((x) => ({ ...x, bumpOn: on, bumpLines: on ? x.bumpLines.map((l, i) => ({ ...l, id: filled[i]! })) : x.bumpLines }));
-                  }}
-                />
-              </label>
-            </div>
-            <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
-              Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
-            </p>
-            {f.bumpOn ? (
+      <div>
+        <div className={s.stack}>
+          <form
+            className={s.stack}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submit();
+            }}
+          >
+            <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
+              <legend className={s.sectionLegend}>
+                <Art name="ticket" size={24} className={s.cardArt} />
+                Oferta
+              </legend>
               <div className={s.stack}>
-                {productList({ group: "bumpLines", firstLabel: "Produto do bump", lineLabel: (n) => `Produto ${n} do bump`, addLabel: "Adicionar produto ao bump" })}
-                <div className={s.grid2}>
-                  <div className={s.field}>
-                    <label className={s.field}>
-                    <span className={s.label}>Preço do acréscimo</span>
-                    <input className={s.input} value={f.bumpPrice} inputMode="decimal" placeholder="17,10" onChange={(e) => set("bumpPrice", e.target.value)} />
-                    </label>
-                    {priceCents && bumpCents ? <span className={s.hint}>Total com bump: {brl(priceCents + bumpCents)}</span> : null}
-                  </div>
-                  <div className={s.field}>
-                    <label className={s.field}>
-                    <span className={s.label}>Título da caixa</span>
+                <div className={s.formGrid}>
+                  <label className={s.field}>
+                    <span className={s.label}>Nome da oferta</span>
                     <input
                       className={s.input}
-                      value={f.bumpLabel}
+                      value={f.name}
                       maxLength={200}
-                      placeholder={bumpProductIds.length > 1 ? "5 Kits Extras" : "Quero a versão completa"}
-                      aria-required={bumpProductIds.length > 1}
-                      aria-describedby="titulo-caixa-dica"
-                      onChange={(e) => set("bumpLabel", e.target.value)}
+                      onChange={(e) => {
+                        set("name", e.target.value);
+                        if (!slugTouched) set("slug", slugify(e.target.value));
+                      }}
                     />
+                  </label>
+                  <MoneyInput
+                    className={s.arcField}
+                    label="Preço"
+                    value={priceCents}
+                    onValueChange={(v) => set("price", v === null ? "" : centsToInput(v))}
+                    max={MAX_CENTS}
+                  />
+                </div>
+                <div className={s.formGrid}>
+                  {productList({ group: "main", firstLabel: "Produto entregue", lineLabel: (n) => `Produto ${n}` })}
+                  <div className={s.field}>
+                    <label className={s.field}>
+                      <span className={s.label}>Endereço (slug)</span>
+                      <input
+                        className={`${s.input} ${s.mono}`}
+                        value={f.slug}
+                        maxLength={60}
+                        onChange={(e) => {
+                          setSlugTouched(true);
+                          set("slug", e.target.value.toLowerCase());
+                        }}
+                      />
                     </label>
-                    <span id="titulo-caixa-dica" className={s.hint}>
-                      {bumpProductIds.length > 1 ? "Obrigatório com mais de um produto. " : ""}Quem marca recebe tudo no mesmo e-mail.
-                    </span>
+                    <span className={s.hint}>Só letras minúsculas, números e hífen.</span>
                   </div>
                 </div>
+                <div className={s.field}>
+                  <span className={s.label}>Link do checkout</span>
+                  <div className={s.copyBox}>
+                    <code>{link}</code>
+                    <CopyButton text={link} small />
+                  </div>
+                </div>
+                <label className={s.switch}>
+                  <input type="checkbox" checked={f.active} onChange={(e) => set("active", e.target.checked)} />
+                  Oferta ativa (checkout aberto para compras)
+                </label>
               </div>
-            ) : null}
-          </fieldset>
+            </fieldset>
 
-          <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-            <legend className={s.sectionTitle} style={{ float: "left", width: "100%" }}>
-              Página de obrigado
-            </legend>
-            <label className={s.field} style={{ clear: "both" }}>
-              <span className={s.label}>Mensagem exibida depois do pagamento confirmado</span>
-              <textarea className={s.textarea} value={f.thankYouText} maxLength={2000} onChange={(e) => set("thankYouText", e.target.value)} />
-            </label>
-          </fieldset>
-          <button type="submit" hidden />
-        </form>
-
-        <div className={s.stack}>
-          <span className={s.eyebrow}>Prévia no celular</span>
-          <div className={s.preview} style={vars} aria-hidden="true">
-            <div className={s.previewHead}>
-              <b>{props.storeName}</b>
-              <span>Pagamento seguro</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span>{productName}</span>
-              <b>{priceCents ? brl(priceCents) : "—"}</b>
-            </div>
-            {productIds.length > 1 ? <p className={s.previewIncludes}>Inclui: {namesOf(productIds.filter(Boolean))}</p> : null}
-            {f.bumpOn && bumpCents ? (
-              <div className={s.previewBump}>
-                <b>{f.bumpLabel || "Acrescentar"}</b> + {brl(bumpCents)}
+            <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
+              <legend className={s.sectionLegend}>
+                <Art name="pagos" size={24} className={s.cardArt} />
+                Pagamento
+              </legend>
+              <div className={s.stack}>
+                <div className={s.grid2}>
+                  <label className={s.payTile}>
+                    <span className={s.payIcon} aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="20" height="20">
+                        <path fill={PIX_BRAND.hex} d={PIX_BRAND.path} />
+                      </svg>
+                    </span>
+                    <span className={s.payText}>
+                      Pix
+                      <small>{f.pixMode === "asaas" ? "Liberado sozinho pelo Asaas" : "Você confere e libera"}</small>
+                    </span>
+                    <input type="checkbox" checked={f.pix} onChange={(e) => set("pix", e.target.checked)} />
+                  </label>
+                  <label className={s.payTile} data-disabled={cardBox.disabled ? "true" : undefined}>
+                    <span className={s.payIcon} aria-hidden="true">
+                      <CreditCard size={20} strokeWidth={1.8} />
+                    </span>
+                    <span className={s.payText}>
+                      Cartão de crédito
+                      <small>Visa, Mastercard, Elo · {f.maxInstallments > 1 ? `até ${f.maxInstallments}x` : "à vista"}</small>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={f.card}
+                      onChange={(e) => set("card", e.target.checked)}
+                      disabled={cardBox.disabled}
+                      aria-describedby={cardBox.notice ? "cartao-indisponivel" : undefined}
+                    />
+                  </label>
+                </div>
+                {cardBox.notice ? (
+                  <p id="cartao-indisponivel" className={s.payNote} role="note">
+                    <Info size={14} strokeWidth={2} aria-hidden="true" />
+                    {cardBox.notice}
+                  </p>
+                ) : null}
+                <div className={s.grid2}>
+                  <div className={s.field} role="radiogroup" aria-label="Modo do Pix">
+                    <span className={s.label}>Modo do Pix</span>
+                    <div className={s.segment} style={{ alignSelf: "flex-start" }}>
+                      <label>
+                        <input type="radio" name="pixMode" checked={f.pixMode === "asaas"} onChange={() => set("pixMode", "asaas")} />
+                        Asaas (automático)
+                      </label>
+                      <label>
+                        <input type="radio" name="pixMode" checked={f.pixMode === "manual"} onChange={() => set("pixMode", "manual")} />
+                        Manual
+                      </label>
+                    </div>
+                    <span className={s.hint}>
+                      {f.pixMode === "asaas"
+                        ? "Com Asaas o pedido é liberado sozinho e o comprador informa CPF."
+                        : "Pix direto na sua chave: você confere no extrato e libera cada pedido."}
+                    </span>
+                  </div>
+                  <Select
+                    className={s.arcField}
+                    label="Parcelas máximas no cartão"
+                    description="Parcela mínima do Asaas: R$ 5,00."
+                    value={String(f.maxInstallments)}
+                    onValueChange={(v) => set("maxInstallments", Number(v))}
+                    disabled={ro || !f.card}
+                    options={Array.from({ length: 12 }, (_, i) => i + 1).map((n) => ({
+                      value: String(n),
+                      label: n === 1 ? "1x (à vista)" : `até ${n}x`,
+                    }))}
+                  />
+                </div>
               </div>
-            ) : null}
-            <span className={s.previewBtn}>
-              {f.pix ? "Gerar Pix" : "Pagar"} de {priceCents ? brl(priceCents) : "R$ —"}
-            </span>
-          </div>
+            </fieldset>
 
+            <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
+              <div className={s.cardHead} style={{ marginBottom: 4 }}>
+                <legend className={s.sectionLegend}>
+                  <Art name="receita" size={24} className={s.cardArt} />
+                  Order bump
+                </legend>
+                <label className={s.switch}>
+                  <span className={s.srOnly}>Oferecer order bump</span>
+                  <input
+                    type="checkbox"
+                    checked={f.bumpOn}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      // Ao ligar, linhas vazias ou repetidas ganham produtos livres, sem repetir entre si.
+                      const filled = fillBumpLines(productIds, bumpProductIds, available);
+                      setF((x) => ({ ...x, bumpOn: on, bumpLines: on ? x.bumpLines.map((l, i) => ({ ...l, id: filled[i]! })) : x.bumpLines }));
+                    }}
+                  />
+                </label>
+              </div>
+              <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
+                Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
+              </p>
+              {f.bumpOn ? (
+                <div className={s.stack}>
+                  {productList({
+                    group: "bumpLines",
+                    firstLabel: "Produto do bump",
+                    lineLabel: (n) => `Produto ${n} do bump`,
+                    addLabel: "Adicionar produto ao bump",
+                  })}
+                  <div className={s.grid2}>
+                    <MoneyInput
+                      className={s.arcField}
+                      label="Preço do acréscimo"
+                      value={parseBrl(f.bumpPrice)}
+                      onValueChange={(v) => set("bumpPrice", v === null ? "" : centsToInput(v))}
+                      max={MAX_CENTS}
+                      description={priceCents && bumpCents ? `Total com bump: ${brl(priceCents + bumpCents)}` : undefined}
+                    />
+                    <div className={s.field}>
+                      <label className={s.field}>
+                        <span className={s.label}>Título da caixa</span>
+                        <input
+                          className={s.input}
+                          value={f.bumpLabel}
+                          maxLength={200}
+                          placeholder={bumpProductIds.length > 1 ? "5 Kits Extras" : "Quero a versão completa"}
+                          aria-required={bumpProductIds.length > 1}
+                          aria-describedby="titulo-caixa-dica"
+                          onChange={(e) => set("bumpLabel", e.target.value)}
+                        />
+                      </label>
+                      <span id="titulo-caixa-dica" className={s.hint}>
+                        {bumpProductIds.length > 1 ? "Obrigatório com mais de um produto. " : ""}Quem marca recebe tudo no mesmo e-mail.
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </fieldset>
+
+            <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
+              <legend className={s.sectionLegend}>
+                <Art name="funil" size={24} className={s.cardArt} />
+                Página de obrigado
+              </legend>
+              <label className={s.field}>
+                <span className={s.label}>Mensagem exibida depois do pagamento confirmado</span>
+                <textarea className={s.textarea} value={f.thankYouText} maxLength={2000} onChange={(e) => set("thankYouText", e.target.value)} />
+              </label>
+            </fieldset>
+            <button type="submit" hidden />
+          </form>
           {offer ? (
             <section className={s.card} aria-labelledby="pixel-titulo">
               <div className={s.cardHead}>
-                <h2 id="pixel-titulo">Pixel próprio desta oferta</h2>
+                <h2 id="pixel-titulo">
+                  <Art name="origem" size={24} className={s.cardArt} />
+                  Pixel próprio
+                </h2>
                 {props.canPixel ? (
                   <label className={s.switch}>
                     <span className={s.srOnly}>Usar pixel próprio</span>
@@ -629,13 +682,27 @@ export function OfferEditor(props: {
               <Live msg={px.msg} />
             </section>
           ) : null}
+          {canWrite ? (
+            <div className={s.saveBar} data-dirty={dirty ? "true" : undefined}>
+              <span className={s.saveState}>{offer ? (dirty ? "Alterações não salvas" : "Tudo salvo") : "Oferta nova"}</span>
+              <div className={s.headActions}>
+                {offer && dirty ? (
+                  <button type="button" className={s.btn} onClick={discard} disabled={save.pending}>
+                    Descartar
+                  </button>
+                ) : null}
+                <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={submit} disabled={save.pending}>
+                  {save.pending ? "Salvando…" : offer ? "Salvar" : "Criar oferta"}
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
       <Dialog
         open={dialog === "price"}
         onClose={() => setDialog(null)}
-        icon={changes?.products || changes?.bump ? "package" : "tag"}
         title={dialogText?.title ?? ""}
         footer={
           <>
@@ -693,7 +760,6 @@ export function OfferEditor(props: {
       <Dialog
         open={dialog === "pixel"}
         onClose={() => setDialog(null)}
-        icon="code"
         title={pixelOn ? `Usar o Pixel ${pixel} nesta oferta?` : "Voltar a usar o Pixel da loja?"}
         footer={
           <>

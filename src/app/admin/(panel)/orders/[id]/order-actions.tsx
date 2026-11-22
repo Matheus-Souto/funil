@@ -74,7 +74,6 @@ export function OrderActions(p: OrderActionsProps) {
       <Dialog
         open={open === "release"}
         onClose={close}
-        icon="landmark"
         title={`Liberar o pedido #${p.code}?`}
         footer={
           <>
@@ -141,7 +140,6 @@ export function OrderActions(p: OrderActionsProps) {
       <Dialog
         open={open === "refund"}
         onClose={close}
-        icon="rotate-ccw"
         tone="danger"
         title={`Reembolsar ${brl(p.totalCents)} para ${p.buyerName}?`}
         footer={
@@ -195,7 +193,6 @@ export function OrderActions(p: OrderActionsProps) {
       <Dialog
         open={open === "resend"}
         onClose={close}
-        icon="send"
         title="Reenviar o acesso?"
         footer={
           <>

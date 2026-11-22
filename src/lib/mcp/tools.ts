@@ -22,6 +22,7 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "orders.export": "CSV com dados do comprador",
   "products.create": "recebe o arquivo; use products_createUploadLink",
   "products.completeUpload": "chamada pela URL de upload",
+  "products.file": "devolve o PDF inteiro; só para a miniatura e o visualizador do painel",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
 };
 
@@ -101,7 +102,8 @@ interface Override {
 
 const OVERRIDES: Record<string, Override> = {
   "orders.list": {
-    description: "Lista pedidos (50 por página, mais recentes primeiro) com filtros de status e método. Nome e e-mail do comprador mascarados.",
+    description:
+      "Lista pedidos (mais recentes primeiro; pageSize 10, 25, 50 ou 100, padrão 50) com filtros de status e método: um valor (status, method) ou vários (statuses, methods). Nome e e-mail do comprador mascarados.",
     // Sem busca por e-mail ou nome: seria um jeito de confirmar se uma pessoa comprou.
     inputSchema: (s) => withoutProperty(s, "q"),
     input: (raw) => (raw === null || typeof raw !== "object" || Array.isArray(raw) ? raw : without(raw, "q")),

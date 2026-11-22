@@ -15,13 +15,13 @@ export type BrandVars = {
   "--color-brand-strong": string;
 };
 
-/** Padrão da plataforma (tokens `--color-primary*`). */
+/** Padrão da plataforma (o lima do painel; tokens `--color-primary*`). Igual a brandVars("#9BE86A"). */
 export const DEFAULT_BRAND: BrandVars = {
-  "--color-brand": "#0B6E4F",
-  "--color-brand-hover": "#085A40",
-  "--color-brand-soft": "#E3F1EA",
-  "--color-on-brand": "#FFFFFF",
-  "--color-brand-strong": "#0B6E4F",
+  "--color-brand": "#9BE86A",
+  "--color-brand-hover": "#B3ED8D",
+  "--color-brand-soft": "#F3FCED",
+  "--color-on-brand": "#15201B",
+  "--color-brand-strong": "#3E8114",
 };
 
 const WHITE = "#FFFFFF";

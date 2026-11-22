@@ -1,56 +1,41 @@
 "use client";
 
-// Navegação do painel (sidebar no desktop, abas no celular). Só mostra o que o papel pode abrir.
+// Navegação do painel: ícones e itens (a sidebar do desktop fica em sidebar.tsx; aqui, as abas do celular).
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { PIcon, type PanelIconName } from "../icons";
+import { Bot, ClipboardCheck, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Package, Plug, ReceiptText, Settings, Tag, Users, type LucideIcon } from "lucide-react";
 import s from "../panel.module.css";
+
+const ICONS = {
+  "layout-dashboard": LayoutDashboard,
+  receipt: ReceiptText,
+  tag: Tag,
+  package: Package,
+  mail: Mail,
+  plug: Plug,
+  settings: Settings,
+  "circle-check": ClipboardCheck,
+  code: Bot,
+  users: Users,
+} satisfies Record<string, LucideIcon>;
+
+export type NavIconName = keyof typeof ICONS;
+
+export function NavIcon({ name, size = 18 }: { name: NavIconName; size?: number }) {
+  const Icon = ICONS[name];
+  return <Icon size={size} strokeWidth={1.75} aria-hidden="true" />;
+}
 
 export interface NavEntry {
   href: string;
   label: string;
-  icon: PanelIconName;
+  icon: NavIconName;
   badge?: number;
   section?: "loja";
 }
 
-const isActive = (path: string, href: string) => (href === "/admin" ? path === "/admin" : path === href || path.startsWith(`${href}/`));
-
-export function SideNav({ items }: { items: NavEntry[] }) {
-  const path = usePathname();
-  const main = items.filter((i) => !i.section);
-  const store = items.filter((i) => i.section === "loja");
-  const link = (i: NavEntry) => (
-    <li key={i.href}>
-      <Link className={s.navItem} href={i.href} aria-current={isActive(path, i.href) ? "page" : undefined}>
-        <PIcon name={i.icon} />
-        {i.label}
-        {i.badge ? (
-          <span className={s.navBadge} aria-label={`${i.badge} aguardando`}>
-            {i.badge}
-          </span>
-        ) : null}
-      </Link>
-    </li>
-  );
-  return (
-    <ul className={s.nav}>
-      {main.map(link)}
-      <li className={s.navSep} aria-hidden="true">
-        Loja
-      </li>
-      {store.map(link)}
-      <li>
-        <span className={s.navItem} aria-disabled="true" title="Convites para a equipe chegam na próxima fase">
-          <PIcon name="users" />
-          Equipe
-          <span className={s.navTag}>em breve</span>
-        </span>
-      </li>
-    </ul>
-  );
-}
+export const isActive = (path: string, href: string) => (href === "/admin" ? path === "/admin" : path === href || path.startsWith(`${href}/`));
 
 export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Promise<void> }) {
   const path = usePathname();
@@ -61,7 +46,7 @@ export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Pro
     <nav className={s.tabs} aria-label="Navegação do painel">
       {tabs.map((i) => (
         <Link key={i.href} className={s.tab} href={i.href} aria-current={isActive(path, i.href) ? "page" : undefined}>
-          <PIcon name={i.icon} size={22} />
+          <NavIcon name={i.icon} size={22} />
           {i.badge ? <span className={s.tabBadge}>{i.badge}</span> : null}
           {i.label}
         </Link>
@@ -74,24 +59,24 @@ export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Pro
         aria-current={more.some((i) => isActive(path, i.href)) ? "page" : undefined}
         onClick={() => setOpen((v) => !v)}
       >
-        <PIcon name="menu" size={22} />
+        <Menu size={22} strokeWidth={1.75} aria-hidden="true" />
         Mais
       </button>
       {open ? (
         <div id="mais-menu" className={s.moreSheet} onKeyDown={(e) => e.key === "Escape" && setOpen(false)}>
           {more.map((i) => (
             <Link key={i.href} className={s.navItem} href={i.href} aria-current={isActive(path, i.href) ? "page" : undefined} onClick={() => setOpen(false)}>
-              <PIcon name={i.icon} />
+              <NavIcon name={i.icon} />
               {i.label}
             </Link>
           ))}
           <Link className={s.navItem} href="/admin/senha" onClick={() => setOpen(false)}>
-            <PIcon name="lock" />
+            <KeyRound size={18} strokeWidth={1.75} aria-hidden="true" />
             Trocar senha
           </Link>
           <form action={logout}>
             <button type="submit" className={s.navItem} style={{ width: "100%", border: 0, background: "none", font: "inherit", cursor: "pointer" }}>
-              <PIcon name="log-out" />
+              <LogOut size={18} strokeWidth={1.75} aria-hidden="true" />
               Sair
             </button>
           </form>

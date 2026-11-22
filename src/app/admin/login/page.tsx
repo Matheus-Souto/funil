@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { needsSetup } from "@/lib/stores";
 import { loginAction } from "../actions";
 import { PIcon } from "../icons";
+import { Art } from "../blocks";
 import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +20,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         </span>
       </header>
       <main className={s.authBody}>
+        <Art name="funil" size={120} className={s.authArt} />
         <h1>Entrar no painel</h1>
         <p className={s.authLead}>Acompanhe vendas, libere Pix e configure sua loja.</p>
         <div className={s.authCard}>

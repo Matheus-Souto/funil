@@ -69,7 +69,7 @@ describe("classificação", () => {
       expect(names.has(name)).toBe(true);
       expect(reason.length).toBeGreaterThan(5);
     }
-    expect(Object.keys(MCP_EXCLUDED).sort()).toEqual(["approvals.request", "orders.export", "products.completeUpload", "products.create"]);
+    expect(Object.keys(MCP_EXCLUDED).sort()).toEqual(["approvals.request", "orders.export", "products.completeUpload", "products.create", "products.file"]);
   });
 
   // Escritas diretas (não sensíveis) que o MCP expõe; qualquer outra escrita nova precisa ser decidida aqui.

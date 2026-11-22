@@ -223,7 +223,8 @@ describe("metrics.breakdown", () => {
     expect(b.byDay.at(-1)!.revenueCents).toBe(3690);
     expect(b.byDay.slice(0, 6).every((d) => d.revenueCents === 0)).toBe(true);
     expect(b.bumpPaid).toBe(1);
-    expect(b.byOffer).toEqual([{ offerId: s.offerId, views: 4, orders: 3, paid: 2, bumpPaid: 1, revenueCents: 3690 }]);
+    expect(b.byOffer).toEqual([{ offerId: s.offerId, views: 4, orders: 3, paid: 2, bumpPaid: 1, revenueCents: 3690 }]);    // Vendas pagas por oferta e dia (mini gráfico da lista de ofertas): só o dia com venda, no mesmo dia do byDay.
+    expect(b.byOfferDay).toEqual([{ offerId: s.offerId, day: b.byDay.at(-1)!.day, paid: 2, revenueCents: 3690 }]);
   });
 });
 

@@ -157,14 +157,15 @@ export const completeUpload = defineAction({
     );
     if (!link) throw gone();
     if (link.attempts > MAX_ATTEMPTS) throw tooManyAttempts();
+    let pages: number;
     try {
-      await assertProductPdf(input.file);
+      ({ pages } = await assertProductPdf(input.file));
     } catch (e) {
       // O único rate_limited de assertProductPdf é a fila do Worker cheia (PdfBusyError).
       if (e instanceof ActionError && e.code === "rate_limited") await releaseUploadAttempt(call.storeId, input.linkId);
       throw e;
     }
-    return { name: link.name, fileName: link.fileName };
+    return { name: link.name, fileName: link.fileName, pages };
   },
   async run(ctx, input, link) {
     const tokenId = tokenIdOf(ctx.actor);
@@ -175,7 +176,7 @@ export const completeUpload = defineAction({
       .where(usable(input.linkId, tokenId))
       .returning({ id: uploadLink.id });
     if (!claimed) throw gone();
-    const row = await insertProductRow(ctx, { name: link.name, fileName: link.fileName, bytes: input.file });
+    const row = await insertProductRow(ctx, { name: link.name, fileName: link.fileName, bytes: input.file, pages: link.pages });
     await ctx.tx.update(uploadLink).set({ productId: row.id }).where(eq(uploadLink.id, input.linkId));
     // Último passo: se a gravação falhar, a exceção desfaz a transação (e o link volta a valer).
     await putProductFile(ctx.storeId, row.id, input.file);

@@ -3,51 +3,75 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
-import { brl, shortWhenSP as shortWhen } from "@/lib/format";
+import { brl, dateTimeShortSP } from "@/lib/format";
 import { METHOD_LABEL, ORDER_METHODS, STATUS_FILTER_LABEL, type OrderMethod, type OrderStatus } from "@/lib/orders/labels";
 import { listDeliveryFailures } from "@/lib/alerts";
 import { listOrders } from "@/lib/orders/panel";
-import { parseOrderFilters, type Param } from "@/lib/panel-params";
+import { parseOrderMultiFilters, type Param } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
-import { FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
+import { Art, FailedDeliveries, PageHead, StatusBadge } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyButton } from "../../ui";
+import { ColumnFilter, TableShell } from "../../table-controls";
+import { TablePager } from "../../table-pager";
+import { ORDERS_PER_PAGE, parsePerPage } from "../../per-page";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Pedidos" };
 
-type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param };
+type Search = { status?: Param; method?: Param; q?: Param; pagina?: Param; por?: Param };
 
 export default async function OrdersPage({ searchParams }: { searchParams: Promise<Search> }) {
   const panel = await requirePanelActor();
   const call = { ...panel, origin: "panel" as const };
-  const { status, method, q, page } = parseOrderFilters(await searchParams);
-  const data = await runAction(listOrders, call, { status, method, q, page });
+  const sp = await searchParams;
+  const { statuses, methods, q, page: requested } = parseOrderMultiFilters(sp);
+  const perPage = parsePerPage(sp.por, ORDERS_PER_PAGE);
+  let page = requested;
+  let data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
+  // ?pagina= além do fim (link antigo, pedidos que sumiram do filtro): mostra a última página em vez de "nenhum pedido".
+  const last = Math.max(1, Math.ceil(data.total / perPage));
+  if (data.items.length === 0 && page > last) {
+    page = last;
+    data = await runAction(listOrders, call, { statuses, methods, q, page, pageSize: perPage });
+  }
   const canExport = hasPermission(panel.actor.role, "orders.export");
 
   const failed = await runAction(listDeliveryFailures, call, {});
-  const qs = (over: Partial<Record<keyof Search, string | undefined>>) => {
+  /** Query string com os filtros atuais (status e método podem repetir) e a página pedida. */
+  const qs = (over: { pagina?: string } = {}) => {
     const p = new URLSearchParams();
-    const merged = { status, method, q, ...over };
-    for (const [k, v] of Object.entries(merged)) if (v) p.set(k, v);
+    for (const v of statuses) p.append("status", v);
+    for (const v of methods) p.append("method", v);
+    if (q) p.set("q", q);
+    if (over.pagina) p.set("pagina", over.pagina);
     const str = p.toString();
     return str ? `?${str}` : "";
   };
-  const filtered = Boolean(status || method || q);
+  const filtered = Boolean(statuses.length || methods.length || q);
+  const methodFilter = <ColumnFilter title="Método" param="method" values={methods} options={ORDER_METHODS.map((m) => ({ value: m, label: METHOD_LABEL[m], icon: m }))} />;
+  const statusFilter = (
+    <ColumnFilter
+      title="Status"
+      param="status"
+      values={statuses}
+      options={(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
+        .filter((k) => k !== "disputed" || data.counts.disputed > 0)
+        .map((k) => ({ value: k, label: STATUS_FILTER_LABEL[k], count: data.counts[k], icon: k }))}
+    />
+  );
 
-  if (data.counts.all === 0 && !method && !q) {
+  if (data.counts.all === 0 && !methods.length && !q) {
     const offers = hasPermission(panel.actor.role, "offers.read") ? await runAction(listOffers, call, {}) : [];
     const first = offers.find((o) => o.active);
     const base = hasPermission(panel.actor.role, "connections.read") ? (await runAction(getStoreSettings, call, {})).checkoutBaseUrl : null;
     const link = first && base ? `${base}/c/${first.slug}` : null;
     return (
       <>
-        <PageHead title="Pedidos" sub="Nenhum pedido ainda" />
+        <PageHead title="Pedidos" />
         <section className={`${s.card} ${s.empty}`}>
-          <div className={s.emptyIcon}>
-            <PIcon name="inbox" size={26} />
-          </div>
+          <Art name="pedidos" />
           <h2>Os pedidos aparecem aqui</h2>
           <p>Cada pessoa que preencher o checkout vira um pedido, mesmo antes de pagar. Assim você vê quem desistiu e quem pagou.</p>
           <ol className={s.steps} style={{ width: "min(460px, 100%)", textAlign: "left", marginTop: 12 }}>
@@ -80,13 +104,10 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
     );
   }
 
-  const from = data.total === 0 ? 0 : (page - 1) * data.pageSize + 1;
-  const to = Math.min(data.total, page * data.pageSize);
   return (
     <>
       <PageHead
         title="Pedidos"
-        sub={`${data.counts.all} ${data.counts.all === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
         actions={
           canExport ? (
             <a className={s.btn} href={`/admin/orders.csv${qs({ pagina: undefined })}`} download>
@@ -97,48 +118,37 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
         }
       />
       {failed.length > 0 ? (
-        <div className={s.alerts}>
+        <div className={s.noticeStrip}>
           <FailedDeliveries items={failed} />
         </div>
       ) : null}
-      <form className={s.filters} method="get" role="search">
-        {status ? <input type="hidden" name="status" value={status} /> : null}
-        <label className={s.search}>
-          <PIcon name="search" size={16} />
-          <span className={s.srOnly}>Buscar pedidos</span>
-          <input name="q" defaultValue={q} placeholder="Buscar por nome ou e-mail" maxLength={100} />
-        </label>
-        <label className={s.selectBox}>
-          Método:
-          <select name="method" defaultValue={method ?? ""}>
-            <option value="">Todos</option>
-            {ORDER_METHODS.map((m) => (
-              <option key={m} value={m}>
-                {METHOD_LABEL[m]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" className={s.btn}>
-          Filtrar
-        </button>
-      </form>
-      <nav className={s.pills} aria-label="Filtrar por status">
-        <Link className={s.pill} href={`/admin/orders${qs({ status: undefined, pagina: undefined })}`} aria-current={!status ? "page" : undefined}>
-          Todos <b>{data.counts.all}</b>
-        </Link>
-        {(["pending", "paid", "expired", "declined", "refunded", "disputed"] as OrderStatus[])
-          .filter((k) => k !== "disputed" || data.counts.disputed > 0)
-          .map((k) => (
-            <Link key={k} className={s.pill} href={`/admin/orders${qs({ status: k, pagina: undefined })}`} aria-current={status === k ? "page" : undefined}>
-              {STATUS_FILTER_LABEL[k]} <b>{data.counts[k]}</b>
-            </Link>
-          ))}
-      </nav>
-
-      <section className={`${s.card} ${s.cardFlush}`}>
+      <TableShell
+        q={q}
+        keep={{ status: statuses, method: methods, por: perPage === ORDERS_PER_PAGE ? [] : [String(perPage)] }}
+        placeholder="Buscar por nome ou e-mail"
+        searchLabel="Buscar pedidos"
+        count={`${data.total} ${data.total === 1 ? "pedido" : "pedidos"}${filtered ? " com estes filtros" : ""}`}
+        filters={
+          <>
+            {statusFilter}
+            {methodFilter}
+            {statuses.length || methods.length ? (
+              <Link className={s.linkBtn} href={`/admin/orders${q ? `?q=${encodeURIComponent(q)}` : ""}`}>
+                Limpar filtros
+              </Link>
+            ) : null}
+          </>
+        }
+      >
         {data.items.length === 0 ? (
-          <p className={s.empty}>Nenhum pedido com estes filtros.</p>
+          <div className={s.empty}>
+            <Art name="pedidos" size={96} />
+            <h2>Nenhum pedido com estes filtros</h2>
+            <p>Tente outra busca ou tire algum filtro das colunas.</p>
+            <Link className={`${s.btn} ${s.btnSm}`} href="/admin/orders">
+              Limpar filtros
+            </Link>
+          </div>
         ) : (
           <>
             <table className={`${s.table} ${s.orderTable}`}>
@@ -147,11 +157,11 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                   <th scope="col">Pedido</th>
                   <th scope="col">Cliente</th>
                   <th scope="col">Oferta</th>
-                  <th scope="col">Método</th>
+                  <th scope="col">{methodFilter}</th>
                   <th scope="col" className={s.num}>
                     Valor
                   </th>
-                  <th scope="col">Status</th>
+                  <th scope="col">{statusFilter}</th>
                   <th scope="col">Data</th>
                 </tr>
               </thead>
@@ -176,7 +186,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                     <td>
                       <StatusBadge status={o.status} method={o.method} label={o.refundRequestedAt && o.status === "paid" ? "Estorno solicitado" : undefined} />
                     </td>
-                    <td className={`${s.muted} ${s.nowrap}`}>{shortWhen(o.createdAt)}</td>
+                    <td className={`${s.muted} ${s.nowrap}`}>{dateTimeShortSP(o.createdAt)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -188,7 +198,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
                     <b>{o.buyerName}</b>
                     <b className={s.money}>{brl(o.manualAmountCents ?? o.totalCents)}</b>
                     <small>
-                      #{o.code} · {METHOD_LABEL[o.method as OrderMethod] ?? o.method} · {shortWhen(o.createdAt)}
+                      #{o.code} · {METHOD_LABEL[o.method as OrderMethod] ?? o.method} · {dateTimeShortSP(o.createdAt)}
                     </small>
                     <StatusBadge status={o.status} method={o.method} />
                   </Link>
@@ -197,32 +207,8 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
             </ul>
           </>
         )}
-        <div className={s.tableFoot}>
-          <span>
-            Mostrando {from}–{to} de {data.total}
-          </span>
-          <div>
-            {page > 1 ? (
-              <Link className={s.btn} href={`/admin/orders${qs({ pagina: String(page - 1) })}`}>
-                Anterior
-              </Link>
-            ) : (
-              <span className={s.btn} aria-disabled="true">
-                Anterior
-              </span>
-            )}
-            {to < data.total ? (
-              <Link className={s.btn} href={`/admin/orders${qs({ pagina: String(page + 1) })}`}>
-                Próxima
-              </Link>
-            ) : (
-              <span className={s.btn} aria-disabled="true">
-                Próxima
-              </span>
-            )}
-          </div>
-        </div>
-      </section>
+        <TablePager page={page} perPage={perPage} total={data.total} defaultPerPage={ORDERS_PER_PAGE} />
+      </TableShell>
     </>
   );
 }

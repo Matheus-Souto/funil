@@ -1,10 +1,14 @@
 "use client";
 
-// Cartões de Conexões (P14). Salvar qualquer conexão é sensível: sempre passa por um diálogo de confirmação.
-// Segredos nunca chegam aqui (só "configurado"); o token do webhook do Asaas aparece para quem pode alterar conexões.
+// Conexões (P14): cada integração é uma linha (logo, nome, status) e o botão abre um modal com o formulário. Salvar
+// qualquer conexão é sensível: sempre passa por um diálogo de confirmação. Segredos nunca chegam aqui (só
+// "configurado"); o token do webhook do Asaas aparece para quem pode alterar conexões.
 import { useState, type ReactNode } from "react";
+import { Mail } from "lucide-react";
+import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
 import { Badge } from "../../blocks";
-import { PIcon, type PanelIconName } from "../../icons";
+import { CONNECTION_BRANDS } from "../../brand-icons";
+import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyField, Dialog, Live, SecretField, useActionRunner } from "../../ui";
 import {
@@ -24,17 +28,78 @@ import {
 
 type Runner = ReturnType<typeof useActionRunner>;
 
-function Head({ icon, title, sub, on, onLabel, warn = false }: { icon: PanelIconName; title: string; sub: string; on: boolean; onLabel?: string; warn?: boolean }) {
-  return (
-    <div className={s.connHead}>
-      <span className={s.connIcon}>
-        <PIcon name={icon} size={20} />
+type Logo = keyof typeof CONNECTION_BRANDS | "smtp";
+
+/** Logo da integração (Simple Icons; SMTP é genérico). */
+function ConnLogo({ name }: { name: Logo }) {
+  if (name === "smtp")
+    return (
+      <span className={s.connLogo}>
+        <Mail size={18} strokeWidth={1.75} aria-hidden="true" />
       </span>
-      <div>
-        <h2>{title}</h2>
-        <p>{sub}</p>
+    );
+  const b = CONNECTION_BRANDS[name];
+  // Logo preto (Resend) segue a cor do texto, para aparecer no tema escuro; o Asaas usa o ícone deles (A branco no azul).
+  const color = b.hex === "#000000" ? "var(--color-text)" : b.hex;
+  const style = name === "asaas" ? { color: "#fff", background: b.hex } : { color, background: `color-mix(in srgb, ${color} 12%, transparent)` };
+  return (
+    <span className={s.connLogo} style={style}>
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d={b.path} />
+      </svg>
+    </span>
+  );
+}
+
+/**
+ * Linha de uma conexão: logo, nome, resumo, status e o botão que abre o modal com o formulário (`children`). O `id`
+ * fica no modal, para os testes acharem os campos de cada conexão.
+ */
+function ConnItem({
+  id,
+  logo,
+  name,
+  title,
+  sub,
+  summary,
+  on,
+  onLabel,
+  warn = false,
+  canWrite,
+  children,
+}: {
+  id: string;
+  logo: Logo;
+  name: string;
+  title: string;
+  sub: string;
+  summary?: string | null;
+  on: boolean;
+  onLabel?: string;
+  warn?: boolean;
+  canWrite: boolean;
+  children: ReactNode;
+}) {
+  // Link direto (ex.: /admin/connections#meta, dos Primeiros passos) já abre o modal dessa conexão. O portal do modal
+  // só monta no cliente, então abrir no primeiro render não muda o HTML do servidor.
+  const [open, setOpen] = useState(() => typeof window !== "undefined" && window.location.hash === `#${id}`);
+  const action = canWrite ? (on ? "Configurar" : "Conectar") : "Ver";
+  return (
+    <div className={s.connRow}>
+      <ConnLogo name={logo} />
+      <div className={s.connRowText}>
+        <b>{name}</b>
+        <small>{on && summary ? summary : sub}</small>
       </div>
       <Badge tone={on ? (warn ? "warning" : "success") : "neutral"}>{on ? (onLabel ?? "Conectado") : "Não conectado"}</Badge>
+      <button type="button" className={`${s.btn} ${s.btnSm} ${canWrite && !on ? s.btnPrimary : ""}`} onClick={() => setOpen(true)} aria-label={`${action} ${name}`}>
+        {action}
+      </button>
+      <ArcDialog open={open} onOpenChange={setOpen}>
+        <DialogContent id={id} title={title} description={sub} className={`${s.themeVars} ${s.connDialog}`}>
+          {children}
+        </DialogContent>
+      </ArcDialog>
     </div>
   );
 }
@@ -61,7 +126,6 @@ function ConfirmSave({ open, onClose, title, children, run, onConfirm, label = "
     <Dialog
       open={open}
       onClose={onClose}
-      icon="plug"
       title={title}
       footer={
         <>
@@ -126,15 +190,10 @@ export function PixManualCard({ data, canWrite }: { data: { key: string; name: s
   const [confirm, setConfirm] = useState(false);
   const run = useActionRunner();
   return (
-    <section className={s.card} aria-labelledby="pix-manual" id="pix-manual-card">
-      <Head icon="landmark" title="Pix manual" sub="Pix direto na sua chave, liberado por você" on={Boolean(data)} />
-      <span id="pix-manual" className={s.srOnly}>
-        Pix manual
-      </span>
+    <ConnItem id="pix-manual-card" logo="pix" name="Pix manual" title="Pix manual" sub="Pix direto na sua chave, liberado por você" summary={data?.key} on={Boolean(data)} canWrite={canWrite}>
       {editing && canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             setConfirm(true);
@@ -179,7 +238,7 @@ export function PixManualCard({ data, canWrite }: { data: { key: string; name: s
           </div>
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Chave Pix">{data.key}</Row>
           <Row k="Nome do recebedor">{data.name}</Row>
           <Row k="Cidade">{data.city}</Row>
@@ -216,7 +275,7 @@ export function PixManualCard({ data, canWrite }: { data: { key: string; name: s
           Todo Pix manual novo vai para <b>{f.key}</b> ({f.name}). Confira a chave: um erro aqui manda o dinheiro dos compradores para outra conta.
         </p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }
 
@@ -252,12 +311,10 @@ export function AsaasCard({
   const run = useActionRunner();
   const envLabel = (e: string) => (e === "production" ? "produção" : "sandbox");
   return (
-    <section className={s.card} aria-label="Asaas" id="asaas">
-      <Head icon="credit-card" title="Asaas" sub="Pix automático e cartão de crédito" on={Boolean(data)} onLabel={data ? `Conectado · ${envLabel(data.env)}` : undefined} />
+    <ConnItem id="asaas" logo="asaas" name="Asaas" title="Asaas" sub="Pix automático e cartão de crédito" on={Boolean(data)} onLabel={data ? `Conectado · ${envLabel(data.env)}` : undefined} canWrite={canWrite}>
       {canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             if (apiKey.trim().length < 8) {
@@ -315,7 +372,7 @@ export function AsaasCard({
           ) : null}
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Ambiente">{envLabel(data.env)}</Row>
           <Row k="Chave de API">{unreadable ? UNREADABLE_KEY : data.apiKey ? <Configured /> : "—"}</Row>
         </div>
@@ -380,7 +437,7 @@ export function AsaasCard({
           são descartadas.{rotate ? " O token do webhook muda: atualize-o no Asaas." : ""}
         </p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }
 
@@ -407,12 +464,10 @@ export function SmtpCard({
   const run = useActionRunner();
   const test = useActionRunner();
   return (
-    <section className={s.card} aria-label="E-mail (SMTP)" id="smtp">
-      <Head icon="mail" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" on={Boolean(data)} {...providerBadge(active, usable)} />
+    <ConnItem id="smtp" logo="smtp" name="SMTP" title="E-mail (SMTP)" sub="Envia o acesso ao comprador e o aviso de venda" summary={data?.from} on={Boolean(data)} {...providerBadge(active, usable)} canWrite={canWrite}>
       {editing && canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             setConfirm(true);
@@ -465,7 +520,7 @@ export function SmtpCard({
           </div>
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Servidor">
             <span className={s.mono}>
               {data.host}:{data.port}
@@ -535,7 +590,7 @@ export function SmtpCard({
           Os e-mails de acesso e os avisos de venda passam a sair por <b>{f.host}</b> com o remetente <b>{f.from}</b>. A conexão é testada antes de salvar.
         </p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }
 
@@ -580,12 +635,10 @@ export function ResendCard({
   const needsKey = !data || data.apiKey === null || data.apiKey === "unreadable";
   const keep = (last4: string | null) => (last4 ? `configurado (final ${last4}): deixe em branco para manter` : "");
   return (
-    <section className={s.card} aria-label="E-mail (Resend)" id="resend">
-      <Head icon="mail" title="E-mail (Resend)" sub="Envia o acesso ao comprador e o aviso de venda pela sua conta do Resend" on={Boolean(data)} {...providerBadge(active, usable)} />
+    <ConnItem id="resend" logo="resend" name="Resend" title="E-mail (Resend)" sub="Envia o acesso ao comprador e o aviso de venda pela sua conta do Resend" summary={data?.fromEmail} on={Boolean(data)} {...providerBadge(active, usable)} canWrite={canWrite}>
       {editing && canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             setConfirm(true);
@@ -639,7 +692,7 @@ export function ResendCard({
           </div>
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Remetente">{data.fromName ? `${data.fromName} <${data.fromEmail}>` : data.fromEmail}</Row>
           <Row k="Chave">
             {data.apiKey === "unreadable" ? "ilegível: cole a chave de novo" : data.apiKey === "configured" ? <Configured /> : data.apiKey ? `final ${data.apiKey.last4}` : "—"}
@@ -722,7 +775,7 @@ export function ResendCard({
           Salvar não troca o provedor ativo: use <b>Usar este provedor</b> para isso.
         </p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }
 
@@ -768,12 +821,10 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
   const needsToken = !data || data.token === "unreadable";
   const enabled = data ? TELEGRAM_EVENT_OPTIONS.filter((o) => data.events[o.key]).map((o) => o.label) : [];
   return (
-    <section className={s.card} aria-label="Avisos no Telegram" id="telegram">
-      <Head icon="send" title="Avisos no Telegram" sub="Envia os avisos da loja ao grupo da equipe pelo seu próprio bot" on={Boolean(data)} />
+    <ConnItem id="telegram" logo="telegram" name="Telegram" title="Avisos no Telegram" sub="Envia os avisos da loja ao grupo da equipe pelo seu próprio bot" summary={enabled.length ? `Avisa: ${enabled.join(", ").toLowerCase()}` : null} on={Boolean(data)} canWrite={canWrite}>
       {editing && canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             setConfirm(true);
@@ -842,7 +893,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
           </div>
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Bot">{data.botUsername ? `@${data.botUsername}` : "—"}</Row>
           <Row k="Chat">{data.chatId}</Row>
           <Row k="Token">
@@ -920,7 +971,7 @@ export function TelegramCard({ data, canWrite }: { data: TelegramData | null; ca
       >
         <p>Você pode conectar de novo quando quiser, com o mesmo bot ou outro.</p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }
 
@@ -941,12 +992,10 @@ export function MetaCard({
   const run = useActionRunner();
   const test = useActionRunner();
   return (
-    <section className={s.card} aria-label="Meta" id="meta">
-      <Head icon="code" title="Meta (Pixel e API de Conversões)" sub="Envia InitiateCheckout e Purchase com o mesmo event_id" on={Boolean(data)} />
+    <ConnItem id="meta" logo="meta" name="Meta" title="Meta (Pixel e API de Conversões)" sub="Envia InitiateCheckout e Purchase com o mesmo event_id" summary={data ? `Pixel ${data.pixelId}` : null} on={Boolean(data)} canWrite={canWrite}>
       {canWrite ? (
         <form
           className={s.stack}
-          style={{ marginTop: 16 }}
           onSubmit={(e) => {
             e.preventDefault();
             if (!/^\d{5,20}$/.test(f.pixelId.trim())) {
@@ -999,7 +1048,7 @@ export function MetaCard({
           </div>
         </form>
       ) : data ? (
-        <div className={s.rows} style={{ marginTop: 12 }}>
+        <div className={s.rows}>
           <Row k="Pixel ID">
             <span className={s.mono}>{data.pixelId}</span>
           </Row>
@@ -1040,6 +1089,6 @@ export function MetaCard({
           {f.token || data?.accessToken ? " (o token é conferido no Meta antes de salvar)" : ""}.
         </p>
       </ConfirmSave>
-    </section>
+    </ConnItem>
   );
 }

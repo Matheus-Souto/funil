@@ -53,6 +53,8 @@ export function startWorker(): () => void {
     );
   };
   schedule(true);
+  // Uma vez por subida: número de páginas dos produtos anteriores à coluna page_count (idempotente; sem nulos, só lê).
+  void scheduleOnce("backfill_page_count").catch((e: unknown) => log.error("falha ao agendar backfill_page_count", { error: e }));
   const a = setInterval(() => void tick(), WORKER_INTERVAL_MS);
   const b = setInterval(() => void schedule(), EXPIRE_EVERY_MS);
   a.unref();

@@ -1,0 +1,177 @@
+/*
+ * Tema do painel (claro e escuro), carregado só nas telas de /admin depois do foundation.css do Arc.
+ * Paleta "abacate": verde petróleo + lima no claro; preto absoluto + lima no escuro.
+ * O tema vem do cookie `funil-theme` como data-theme no <html> (light | dark); sem o atributo, segue o sistema.
+ * As páginas do comprador (/c, /o) não usam estas variáveis: o checkout continua com tokens.css e a cor da loja.
+ */
+:root {
+  color-scheme: light;
+  --background: #f4f6f6;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-muted: #eef2f2;
+  --foreground: #173a3b;
+  --text-secondary: #5a7071;
+  --text-muted: #7f9192;
+  --border: #e1e7e7;
+  --border-subtle: #edf1f1;
+  --border-strong: #c5d0d0;
+  --accent: #9be86a;
+  --accent-hover: #8ad957;
+  --accent-strong: #3a7d1c;
+  --accent-subtle: #ebf9df;
+  --accent-foreground: #173a33;
+  --control-on: #5fbf2c;
+  --control-fill: #5fbf2c;
+  --control-glyph: #ffffff;
+  --success: #157347;
+  --success-subtle: #e4f3ea;
+  --warning: #8a5a00;
+  --warning-subtle: #fbf0d9;
+  --danger: #b42318;
+  --danger-subtle: #fdecea;
+  --info: #1d5fa8;
+  --info-subtle: #e6effa;
+  /* Séries dos gráficos (ECharts lê estas variáveis). */
+  --series-1: #7bd44a;
+  --series-2: #1f4647;
+  --series-3: #2bb3a6;
+  --series-4: #e6a23c;
+  --series-5: #4a90d9;
+  --chart-grid: #e8eded;
+  --sidebar: #ffffff;
+  --tooltip-bg: #173a3b;
+  --tooltip-fg: #ffffff;
+  --tooltip-border: transparent;
+
+  --font-display: var(--font-inter), system-ui, sans-serif;
+  --font-body: var(--font-inter), system-ui, sans-serif;
+  --font-sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Escala de tamanhos do painel: 12 legenda, 13 auxiliar, 14 padrão, 16 título de card, 20 subtítulo,
+     24 título da página, 30 número grande. */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #000000;
+  --surface: #0a0a0a;
+  --surface-raised: #111111;
+  --surface-muted: #141414;
+  --foreground: #f2f5f4;
+  --text-secondary: #a3adab;
+  --text-muted: #737d7b;
+  --border: #1f1f1f;
+  --border-subtle: #161616;
+  --border-strong: #2e2e2e;
+  --accent: #a6ec78;
+  --accent-hover: #b8f28f;
+  --accent-strong: #b8f28f;
+  --accent-subtle: rgb(166 236 120 / 0.12);
+  --accent-foreground: #0f2a24;
+  --control-on: #8fd65f;
+  --control-fill: #8fd65f;
+  --control-glyph: #0f2a24;
+  --success: #4cc38a;
+  --success-subtle: rgb(76 195 138 / 0.14);
+  --warning: #e9b95a;
+  --warning-subtle: rgb(233 185 90 / 0.14);
+  --danger: #f2867b;
+  --danger-subtle: rgb(242 134 123 / 0.14);
+  --info: #7fb2ee;
+  --info-subtle: rgb(127 178 238 / 0.14);
+  --series-1: #a6ec78;
+  --series-2: #5fd6c9;
+  --series-3: #7fb2ee;
+  --series-4: #e9b95a;
+  --series-5: #c4a7ff;
+  --chart-grid: #1a1a1a;
+  --sidebar: #000000;
+  --tooltip-bg: #1c1c1c;
+  --tooltip-fg: #f2f5f4;
+  --tooltip-border: #2c2c2c;
+  --shadow-resting: none;
+  --shadow-raised: 0 6px 18px rgb(0 0 0 / 0.6);
+  --shadow-floating: 0 20px 48px rgb(0 0 0 / 0.7);
+}
+
+/* Sem escolha salva: segue o sistema (mesmos valores do bloco escuro acima). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --background: #000000;
+    --surface: #0a0a0a;
+    --surface-raised: #111111;
+    --surface-muted: #141414;
+    --foreground: #f2f5f4;
+    --text-secondary: #a3adab;
+    --text-muted: #737d7b;
+    --border: #1f1f1f;
+    --border-subtle: #161616;
+    --border-strong: #2e2e2e;
+    --accent: #a6ec78;
+    --accent-hover: #b8f28f;
+    --accent-strong: #b8f28f;
+    --accent-subtle: rgb(166 236 120 / 0.12);
+    --accent-foreground: #0f2a24;
+    --control-on: #8fd65f;
+    --control-fill: #8fd65f;
+    --control-glyph: #0f2a24;
+    --success: #4cc38a;
+    --success-subtle: rgb(76 195 138 / 0.14);
+    --warning: #e9b95a;
+    --warning-subtle: rgb(233 185 90 / 0.14);
+    --danger: #f2867b;
+    --danger-subtle: rgb(242 134 123 / 0.14);
+    --info: #7fb2ee;
+    --info-subtle: rgb(127 178 238 / 0.14);
+    --series-1: #a6ec78;
+    --series-2: #5fd6c9;
+    --series-3: #7fb2ee;
+    --series-4: #e9b95a;
+    --series-5: #c4a7ff;
+    --chart-grid: #1a1a1a;
+    --sidebar: #000000;
+    --tooltip-bg: #1c1c1c;
+    --tooltip-fg: #f2f5f4;
+    --tooltip-border: #2c2c2c;
+    --shadow-resting: none;
+    --shadow-raised: 0 6px 18px rgb(0 0 0 / 0.6);
+    --shadow-floating: 0 20px 48px rgb(0 0 0 / 0.7);
+  }
+}
+
+html,
+body {
+  background: var(--background);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* Troca de tema: a nova aparência se abre em círculo a partir do botão (View Transitions). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-new(root) {
+  animation: theme-reveal 520ms var(--ease-enter);
+}
+@keyframes theme-reveal {
+  from {
+    clip-path: circle(0 at var(--x, 50%) var(--y, 50%));
+  }
+  to {
+    clip-path: circle(150vmax at var(--x, 50%) var(--y, 50%));
+  }
+}

@@ -13,6 +13,7 @@ import { sweepMcpJob } from "@/lib/mcp/approvals";
 import { recoveryScanJob } from "@/lib/recovery/scan";
 import { recoverySendJob } from "@/lib/recovery/send";
 import { metaEventJob } from "@/lib/tracking/meta";
+import { backfillPageCountJob } from "@/lib/catalog/page-count";
 import type { JobHandler, JobHandlers, JobType } from "@/lib/jobs";
 
 /**
@@ -73,6 +74,7 @@ const registry: JobHandlers = {
   sweep_leads: sweepLeadsJob,
   recovery_scan: recoveryScanJob,
   recovery_send: recoverySendJob,
+  backfill_page_count: backfillPageCountJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {

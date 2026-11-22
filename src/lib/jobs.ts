@@ -22,7 +22,8 @@ export type JobType =
   | "sweep_mcp"
   | "sweep_leads"
   | "recovery_scan"
-  | "recovery_send";
+  | "recovery_send"
+  | "backfill_page_count";
 export type Job = typeof job.$inferSelect;
 /** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
 export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;
