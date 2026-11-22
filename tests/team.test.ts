@@ -5,6 +5,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { listTeam } from "@/lib/auth/account";
+import { hashPassword } from "@/lib/auth/password";
 import { withStore } from "@/lib/db/client";
 import { auditLog, emailLog, integration, membership, rateLimit, teamInvite, users } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
@@ -14,8 +15,12 @@ import { TEAM, inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
+/** Senha de todo usuário do teste (convidar como Administrador pede a senha de quem convida). */
+const PASSWORD = "senha-do-teste-123";
+let passwordHash = "";
 beforeAll(async () => {
   t = await createTestDb();
+  passwordHash = await hashPassword(PASSWORD);
 });
 afterAll(async () => {
   await t.drop();
@@ -152,7 +157,7 @@ describe("convites por e-mail", () => {
 
   async function newUser(storeId: string, role: "owner" | "admin" | "support" | "traffic"): Promise<{ userId: string; email: string; actor: UserActor }> {
     const email = `membro${++n}-${randomBytes(3).toString("hex")}@example.com`;
-    const [u] = await t.ownerDb.insert(users).values({ email, name: `Pessoa ${n}`, passwordHash: "x" }).returning({ id: users.id });
+    const [u] = await t.ownerDb.insert(users).values({ email, name: `Pessoa ${n}`, passwordHash }).returning({ id: users.id });
     await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
     return { userId: u!.id, email, actor: { kind: "user", userId: u!.id, role } };
   }
@@ -251,7 +256,7 @@ describe("convites por e-mail", () => {
   test("email_log com team_invite e to_hash (sem o e-mail)", async () => {
     const { storeId, call } = await shop();
     const email = newEmail();
-    await runAction(inviteMember, call, { email, role: "admin" });
+    await runAction(inviteMember, call, { email, role: "admin", password: PASSWORD });
     const logs = await t.ownerDb.select().from(emailLog).where(eq(emailLog.storeId, storeId));
     expect(logs).toHaveLength(1);
     expect(logs[0]).toMatchObject({ kind: "team_invite", status: "sent", toHash: sha256(email), error: null, provider: "smtp" });
@@ -270,9 +275,9 @@ describe("convites por e-mail", () => {
   test("já é membro: conflict (sem diferenciar maiúsculas); convite pendente: conflict", async () => {
     const { storeId, call, owner } = await shop();
     const m = await newUser(storeId, "support");
-    const member = await failure(runAction(inviteMember, call, { email: ` ${m.email.toUpperCase()} `, role: "admin" }));
+    const member = await failure(runAction(inviteMember, call, { email: ` ${m.email.toUpperCase()} `, role: "admin", password: PASSWORD }));
     expect([member.code, member.message]).toEqual(["conflict", "Essa pessoa já faz parte da equipe"]);
-    const self = await failure(runAction(inviteMember, call, { email: owner.email, role: "admin" }));
+    const self = await failure(runAction(inviteMember, call, { email: owner.email, role: "admin", password: PASSWORD }));
     expect(self.code).toBe("conflict");
 
     const email = newEmail();
@@ -524,6 +529,37 @@ describe("convites por e-mail", () => {
     expect(await rowsOf(storeId)).toHaveLength(0);
   });
 
+  test("convidar como Administrador pede a senha de quem convida; Atendimento e Tráfego não", async () => {
+    const { storeId, call, owner } = await shop();
+    const missing = await failure(runAction(inviteMember, call, { email: newEmail(), role: "admin" }));
+    expect([missing.code, missing.message]).toEqual(["forbidden", "Digite a sua senha para convidar como Administrador"]);
+    const wrong = await failure(runAction(inviteMember, call, { email: newEmail(), role: "admin", password: "senha-errada-123" }));
+    expect([wrong.code, wrong.message]).toEqual(["forbidden", "A sua senha não confere"]);
+    expect(await rowsOf(storeId)).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
+
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "admin", password: PASSWORD });
+    await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await runAction(inviteMember, call, { email: newEmail(), role: "traffic" });
+    expect(await rowsOf(storeId)).toHaveLength(3);
+    // A senha nunca vai para a auditoria (nem a certa, nem a errada).
+    const audits = await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId));
+    expect(audits.length).toBeGreaterThanOrEqual(5);
+    expect(JSON.stringify(audits)).not.toContain(PASSWORD);
+    expect(JSON.stringify(audits)).not.toContain("senha-errada-123");
+    expect((await rowOf(inviteId)).invitedBy).toBe(owner.userId);
+  });
+
+  test("senha errada 5 vezes em 15 min: rate_limited, mesmo com a senha certa depois", async () => {
+    const { storeId, call } = await shop();
+    for (let i = 0; i < 5; i++) {
+      expect((await failure(runAction(inviteMember, call, { email: newEmail(), role: "admin", password: `errada-${i}-123456` }))).code).toBe("forbidden");
+    }
+    const e = await failure(runAction(inviteMember, call, { email: newEmail(), role: "admin", password: PASSWORD }));
+    expect(e.code).toBe("rate_limited");
+    expect(await rowsOf(storeId)).toHaveLength(0);
+  });
+
   test("papel admin chamando: forbidden em todas as ações", async () => {
     const { storeId, call } = await shop();
     const admin = await newUser(storeId, "admin");
@@ -561,7 +597,7 @@ describe("convites por e-mail", () => {
     const live = newEmail();
     const stale = newEmail();
     const gone = newEmail();
-    await runAction(inviteMember, call, { email: live, role: "admin" });
+    await runAction(inviteMember, call, { email: live, role: "admin", password: PASSWORD });
     await t.ownerDb.insert(teamInvite).values(invite(storeId, { email: stale, expiresAt: ago(MINUTE_MS) }));
     const { inviteId: revoked } = await runAction(inviteMember, call, { email: gone, role: "traffic" });
     await runAction(revokeInvite, call, { inviteId: revoked });

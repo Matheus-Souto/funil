@@ -7,7 +7,7 @@ import { ROLE_PERMISSIONS, type Role } from "@/lib/actions/permissions";
 import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { approvalRequest, membership, mcpToken, teamInvite, users } from "@/lib/db/schema";
-import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, lockTeam, ownerCount, revokeTokensCreatedBy, seatsUsed } from "@/lib/team/rules";
+import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, needsPassword, lockTeam, ownerCount, revokeTokensCreatedBy, seatsUsed } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -71,6 +71,20 @@ describe("canGrant", () => {
 
   test("é exatamente a contenção de permissões", () => {
     for (const a of ROLES) for (const b of ROLES) expect(canGrant(a, b)).toBe(ROLE_PERMISSIONS[b].every((p) => ROLE_PERMISSIONS[a].includes(p)));
+  });
+});
+
+describe("needsPassword", () => {
+  test("promover a Dono ou Administrador (ou convidar como Administrador) pede; o resto não", () => {
+    const MEMBER: Role[] = ["owner", "admin", "support", "traffic"];
+    const asks: string[] = [];
+    for (const to of MEMBER) {
+      if (needsPassword(null, to)) asks.push(`convite->${to}`);
+      for (const from of MEMBER) if (needsPassword(from, to)) asks.push(`${from}->${to}`);
+    }
+    expect(asks.sort()).toEqual(
+      ["admin->owner", "convite->admin", "convite->owner", "support->admin", "support->owner", "traffic->admin", "traffic->owner"].sort(),
+    );
   });
 });
 

@@ -2,7 +2,6 @@
 // de quem deixa de ser dono (spec "Equipe e convites", seção 4). Só lógica e consultas: as ações usam estas funções
 // dentro da própria transação.
 import { and, eq, gt, isNull, sql } from "drizzle-orm";
-import { ROLE_PERMISSIONS, type Role } from "@/lib/actions/permissions";
 import { sha256 } from "@/lib/crypto";
 import type { Tx } from "@/lib/db/client";
 import { mcpToken, membership, teamInvite } from "@/lib/db/schema";
@@ -35,11 +34,7 @@ export const TEAM = {
 /** Papéis que um convite pode dar: nunca `owner` (vira dono por promoção de quem já é membro). */
 export const INVITE_ROLES = ["admin", "support", "traffic"] as const;
 
-/** O papel-alvo só tem permissões que o ator também tem. Vale ao convidar, trocar papel e remover. */
-export function canGrant(actor: Role, target: Role): boolean {
-  const has = new Set<string>(ROLE_PERMISSIONS[actor]);
-  return ROLE_PERMISSIONS[target].every((p) => has.has(p));
-}
+export { canGrant, needsPassword } from "./grant";
 
 export { lockTeam } from "./lock";
 

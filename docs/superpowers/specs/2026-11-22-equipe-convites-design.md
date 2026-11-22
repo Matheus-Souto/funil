@@ -74,6 +74,11 @@ um dono.
   Isso impede que um sócio expulse o outro, ou que uma sessão roubada promova um cúmplice e depois tire o dono
   original. Transferir a loja fica assim: promover B a dono, depois "Deixar de ser dono" (ou "Sair da loja"). Se um
   dono sumir, o operador da instalação resolve pela CLI.
+- **Senha para dar muito poder** (decidido pelo dono depois do PR #22). Promover alguém a Dono ou a Administrador, e
+  convidar como Administrador, pede a senha de quem dá o papel. Sem isso, uma sessão roubada bastaria para convidar um
+  cúmplice como Administrador e promovê-lo a dono, que nenhum outro dono consegue remover. A senha é conferida fora da
+  transação e conta no mesmo limite da troca de senha (5 tentativas por usuário em 15 minutos); nunca vai para a
+  auditoria. Rebaixar (inclusive deixar de ser dono) e trocar entre Atendimento e Tráfego não pedem senha.
 - **Tokens MCP de quem deixa de ser dono.** Só o dono cria tokens, e o token pode ter papel `owner`. Quando um dono é
   rebaixado, sai ou é removido, os tokens que ele criou **nesta loja** são revogados
   (`mcp_token.created_by = user`), e também os convites pendentes que ele mandou aqui (`team_invite.invited_by = user`). A revogação já cancela os pedidos pendentes desses tokens na fila. Custo: o agente
@@ -267,7 +272,8 @@ Seguem `docs/padrao-de-paginas.md`. Podem ser esboçadas no Doop antes de implem
 
 ## 12. Fora desta entrega
 
-- Verificação em duas etapas (2FA) e sessão com reconfirmação de senha para ações de equipe.
+- Verificação em duas etapas (2FA). Reconfirmação de senha para as outras ações de equipe (remover, encerrar sessões,
+  revogar convite): só dar o papel de Dono ou Administrador pede a senha (seção 4).
 - Recuperar a senha por e-mail, e trocar o e-mail ou o nome da conta.
 - Login único entre lojas (seção 8).
 - Apagar a própria conta global (LGPD). Por enquanto, quem sai de todas as lojas mantém a conta, que fica sem acesso

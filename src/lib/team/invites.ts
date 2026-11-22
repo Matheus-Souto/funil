@@ -5,6 +5,7 @@
 import { and, eq, isNotNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
+import { confirmOwnPassword, MAX_PASSWORD } from "@/lib/auth/confirm";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
 import { membership, store, teamInvite, users } from "@/lib/db/schema";
@@ -17,7 +18,7 @@ import { ROLE_LABEL } from "@/lib/orders/labels";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { emailProviderReady } from "@/lib/recovery/settings";
 import { lockTeam, requireCurrentManager } from "./lock";
-import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, seatsUsed } from "./rules";
+import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, needsPassword, seatsUsed } from "./rules";
 
 const DAY_MS = 86_400_000;
 const DAY_SEC = 86_400;
@@ -160,8 +161,9 @@ const preparedFor = (call: { actor: { kind: string; userId?: string } }): Prepar
 
 export const inviteMember = defineAction({
   name: "team.invite",
-  description: "Convida uma pessoa para a equipe da loja por e-mail (Administrador, Atendimento ou Tráfego). O link vale 7 dias.",
-  input: z.object({ email: EMAIL, role: z.enum(INVITE_ROLES) }),
+  description:
+    "Convida uma pessoa para a equipe da loja por e-mail (Administrador, Atendimento ou Tráfego). Convidar como Administrador pede a senha de quem convida. O link vale 7 dias.",
+  input: z.object({ email: EMAIL, role: z.enum(INVITE_ROLES), password: z.string().max(MAX_PASSWORD).optional() }),
   permission: "team.manage",
   // `team.manage` está em TOKEN_DENIED: nenhum token MCP chega aqui, então não há o que aprovar.
   sensitive: false,
@@ -170,6 +172,13 @@ export const inviteMember = defineAction({
   async prepare(call, input) {
     const role = call.actor.kind === "user" || call.actor.kind === "token" ? call.actor.role : null;
     if (!role || !canGrant(role, input.role)) throw new ActionError("forbidden", "Você não pode dar um papel acima do seu");
+    // Senha conferida fora da transação (scrypt e limite de tentativas); nunca vai para a auditoria.
+    if (needsPassword(null, input.role)) {
+      if (input.password === undefined) throw new ActionError("forbidden", "Digite a sua senha para convidar como Administrador");
+      const me = userIdOf(call.actor);
+      if (me === null) throw new ActionError("forbidden", "Só usuários do painel");
+      await confirmOwnPassword(me, input.password);
+    }
     await requireEmailProvider(call.storeId, NOT_CONNECTED);
     return preparedFor(call);
   },
