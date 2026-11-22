@@ -83,7 +83,8 @@ test("modo single: /admin leva ao setup, cria a loja, sai e entra de novo", asyn
 
   // No celular, "Sair" fica no menu "Mais" das abas.
   await page.getByRole("button", { name: "Mais" }).click();
-  await page.getByRole("button", { name: "Sair" }).click();
+  // `exact`: o menu também pode ter "Sair da loja" (quem não é o único dono).
+  await page.getByRole("button", { name: "Sair", exact: true }).click();
   await expect(page).toHaveURL(/\/admin\/login$/);
   await page.goto("/admin");
   await expect(page).toHaveURL(/\/admin\/login$/);
@@ -998,6 +999,126 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await sp.getByRole("button", { name: "Entrar" }).click();
     await expect(sp).toHaveURL(/\/admin\/orders$/);
     await ctx.close();
+  });
+
+  /** Caminho do link do convite no e-mail mais recente para `to` no Mailpit (o token só existe no e-mail). */
+  async function inviteLinkPath(request: APIRequestContext, to: string): Promise<string> {
+    const MAILPIT = "http://127.0.0.1:8025/api/v1";
+    type Found = { messages: { ID: string }[] };
+    const search = async () => ((await (await request.get(`${MAILPIT}/search?query=${encodeURIComponent(`to:"${to}"`)}`)).json()) as Found).messages;
+    await expect.poll(async () => (await search()).length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const [found] = await search();
+    const msg = (await (await request.get(`${MAILPIT}/message/${found!.ID}`)).json()) as { Text: string };
+    const link = /https?:\/\/\S+\/admin\/convite\/[A-Za-z0-9_-]+/.exec(msg.Text)?.[0];
+    expect(link, "link do convite no e-mail").toBeTruthy();
+    return new URL(link!).pathname;
+  }
+
+  /** Abre o Dialog "Convidar pessoa" na página Equipe do dono, escolhe o papel e envia. */
+  async function invite(email: string, role: string) {
+    await owner.goto("/admin/equipe");
+    await owner.getByRole("button", { name: "Convidar pessoa" }).click();
+    const dialog = owner.getByRole("dialog", { name: "Convidar pessoa" });
+    await dialog.getByLabel("E-mail").fill(email);
+    await pickOption(owner, "Papel", role);
+    await dialog.getByRole("button", { name: "Enviar convite" }).click();
+    await expect(dialog.getByText(`Convite enviado para ${email}`)).toBeVisible();
+    await dialog.getByRole("button", { name: "Pronto" }).click();
+  }
+
+  // Spec "Equipe e convites", seção 11 (E2E): convite pelo e-mail da loja (Mailpit), aceite com conta nova, link de uso
+  // único, troca de papel sem novo login, senha para dar Administrador, remoção, convite revogado e Equipe no celular.
+  test("equipe: convite por e-mail, aceite, troca de papel, remoção e convite revogado", async ({ browser, request }) => {
+    const GONE = "Este convite não vale mais. Peça um novo a quem convidou você.";
+    const guest = { email: `convidado.${stamp}@exemplo.com`, name: "Bruno Convidado", password: "senha-convidado-123" };
+
+    // Convidar como Administrador pede a senha do dono; Atendimento não.
+    await owner.goto("/admin/equipe");
+    await owner.getByRole("button", { name: "Convidar pessoa" }).click();
+    const inviteDialog = owner.getByRole("dialog", { name: "Convidar pessoa" });
+    await inviteDialog.getByLabel("E-mail").fill(guest.email);
+    await pickOption(owner, "Papel", "Administrador");
+    await expect(inviteDialog.getByLabel("Sua senha")).toBeVisible();
+    await expect(inviteDialog.getByRole("button", { name: "Enviar convite" })).toBeDisabled();
+    await pickOption(owner, "Papel", "Atendimento");
+    await expect(inviteDialog.getByLabel("Sua senha")).toHaveCount(0);
+    await inviteDialog.getByRole("button", { name: "Cancelar" }).click();
+
+    // 1. O dono convida como Atendimento e o e-mail chega no Mailpit.
+    await invite(guest.email, "Atendimento");
+    const path = await inviteLinkPath(request, guest.email);
+
+    // 2. O convidado abre o link, cria a conta, cai em Pedidos e não vê Conexões.
+    const ctx = await browser.newContext({ viewport: DESKTOP });
+    const g = await ctx.newPage();
+    await g.goto(path);
+    await expect(g.getByLabel("E-mail")).toHaveValue(guest.email);
+    await g.getByLabel("Seu nome").fill(guest.name);
+    await g.getByLabel("Crie uma senha").fill(guest.password);
+    await g.getByLabel("Repita a senha").fill(guest.password);
+    await g.getByRole("button", { name: "Criar conta e aceitar" }).click();
+    await expect(g).toHaveURL(/\/admin\/orders$/);
+    await expect(g.getByRole("link", { name: "Conexões" })).toHaveCount(0);
+    await expect(g.getByRole("link", { name: "Equipe" })).toHaveCount(0);
+
+    // 3. O mesmo link, aberto de novo, não vale mais.
+    const anon = await browser.newContext({ viewport: DESKTOP });
+    const a = await anon.newPage();
+    await a.goto(path);
+    await expect(a.getByText(GONE)).toBeVisible();
+
+    // 4. O dono troca o papel para Tráfego (Administrador pediria a senha) e o membro vê o Dashboard sem entrar de novo.
+    await owner.goto("/admin/equipe");
+    await owner.getByRole("button", { name: `Mais ações de ${guest.name}` }).click();
+    await owner.getByRole("menuitem", { name: "Trocar papel" }).click();
+    const roleDialog = owner.getByRole("dialog", { name: `Trocar o papel de ${guest.name}` });
+    await pickOption(owner, "Papel", "Administrador");
+    await expect(roleDialog.getByLabel("Sua senha")).toBeVisible();
+    await expect(roleDialog.getByRole("button", { name: "Trocar papel" })).toBeDisabled();
+    await roleDialog.getByLabel("Sua senha").fill("senha-errada-000");
+    await roleDialog.getByRole("button", { name: "Trocar papel" }).click();
+    await expect(roleDialog.getByText("A sua senha não confere.")).toBeVisible();
+    await pickOption(owner, "Papel", "Tráfego");
+    await expect(roleDialog.getByLabel("Sua senha")).toHaveCount(0);
+    await roleDialog.getByRole("button", { name: "Trocar papel" }).click();
+    await expect(roleDialog).toBeHidden();
+    await expect(owner.getByText("Papel trocado.")).toBeVisible();
+    await g.goto("/admin");
+    await expect(g.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+
+    // 5. O dono remove o membro e o próximo clique dele leva ao login.
+    await owner.getByRole("button", { name: `Mais ações de ${guest.name}` }).click();
+    await owner.getByRole("menuitem", { name: "Remover da equipe" }).click();
+    await owner.getByRole("dialog", { name: `Remover ${guest.name} da equipe?` }).getByRole("button", { name: "Remover da equipe" }).click();
+    await expect(owner.getByText("Pessoa removida da equipe.")).toBeVisible();
+    await g.goto("/admin/orders");
+    await expect(g).toHaveURL(/\/admin\/login$/);
+    await ctx.close();
+
+    // 6. Um convite revogado não vale mais.
+    const revoked = `revogado.${stamp}@exemplo.com`;
+    await invite(revoked, "Tráfego");
+    const revokedPath = await inviteLinkPath(request, revoked);
+    await owner.getByRole("button", { name: `Revogar o convite de ${revoked}` }).click();
+    await owner.getByRole("dialog", { name: "Revogar o convite?" }).getByRole("button", { name: "Revogar" }).click();
+    await expect(owner.getByText("Convite revogado. O link deixou de valer.")).toBeVisible();
+    await a.goto(revokedPath);
+    await expect(a.getByText(GONE)).toBeVisible();
+    await anon.close();
+
+    // 7. No celular (390), Equipe aparece no menu "Mais".
+    const phone = await browser.newContext({ viewport: MOBILE, storageState: await owner.context().storageState() });
+    const m = await phone.newPage();
+    await m.goto("/admin");
+    await m.getByRole("button", { name: "Mais" }).click();
+    await m.getByRole("link", { name: "Equipe" }).click();
+    await expect(m).toHaveURL(/\/admin\/equipe$/);
+    await expect(m.getByRole("heading", { name: "Membros" })).toBeVisible();
+    await expect(m.getByText(SUPPORT.email)).toBeVisible();
+    const box = await m.evaluate(() => ({ scroll: document.documentElement.scrollWidth, width: window.innerWidth }));
+    expect(box.scroll).toBeLessThanOrEqual(box.width);
+    await shot(m, "p16b-equipe-390");
+    await phone.close();
   });
 
   test("painel: telas no desktop (1280) e no celular (390, tema escuro)", async ({ browser }) => {
