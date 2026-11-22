@@ -379,12 +379,17 @@ export const sweepMcpJob: JobHandler = async (_job, signal) => {
           log.info("varredura do MCP", { storeId, expired: expired.length, canceled: canceled.length, uploadLinks: removed.length });
         }
       });
-      // Retenção dos convites da equipe (a mesma varredura horária): vencido vira expired, encerrado há 30 dias some.
+    } catch (e) {
+      failed++;
+      log.error("falha na varredura do MCP da loja", { storeId, error: e });
+    }
+    // Retenção dos convites da equipe, em passo próprio: falha aqui não pula a varredura do MCP, nem o contrário.
+    try {
       const invites = await sweepInvites(storeId, new Date());
       if (invites.expired > 0 || invites.removed > 0) log.info("varredura dos convites", { storeId, ...invites });
     } catch (e) {
       failed++;
-      log.error("falha na varredura do MCP da loja", { storeId, error: e });
+      log.error("falha na varredura dos convites da loja", { storeId, error: e });
     }
   }
   if (failed > 0) throw new Error(`sweep_mcp falhou em ${failed} loja(s)`);

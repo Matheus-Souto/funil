@@ -172,6 +172,9 @@ describe("classificação", () => {
       "team.acceptInvite",
       "account.stores",
     ];
+    for (const name of names) {
+      expect([name, ["team.manage", "account.self", "public"].includes(registry.get(name)?.permission ?? "ausente")]).toEqual([name, true]);
+    }
     for (const role of ROLES) {
       const exposed = mcpTools(role).map((x) => x.action);
       for (const name of names) expect([role, name, exposed.includes(name)]).toEqual([role, name, false]);

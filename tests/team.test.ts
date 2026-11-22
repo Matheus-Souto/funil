@@ -597,7 +597,7 @@ describe("convites por e-mail", () => {
       .values(invite(storeId, { email: null, status: "revoked", endedAt: new Date(now.getTime() - 29 * DAY) }))
       .returning({ id: teamInvite.id });
 
-    await sweepInvites(storeId, now);
+    expect(await sweepInvites(storeId, now)).toEqual({ expired: 1, removed: 1 });
 
     const rows = await rowsOf(storeId);
     expect(rows.some((r) => r.id === old!.id)).toBe(false);
