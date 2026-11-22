@@ -17,10 +17,27 @@ function loadPdfJs(): Promise<PdfJs> {
 
 export type PdfDoc = PDFDocumentProxy;
 
-/** Abre um PDF a partir da URL do painel ou dos bytes do arquivo escolhido. Senha ou estrutura inválida rejeitam. */
-export async function openPdf(source: string | ArrayBuffer): Promise<PdfDoc> {
-  const pdfjs = await loadPdfJs();
-  return pdfjs.getDocument(typeof source === "string" ? { url: source } : { data: new Uint8Array(source) }).promise;
+/**
+ * Abre um PDF a partir da URL do painel ou dos bytes do arquivo escolhido. Senha ou estrutura inválida rejeitam.
+ * `destroy` vale desde já: chamado antes de o PDF abrir (ex.: o visualizador fechou durante o download), cancela o
+ * download e o worker, e a promessa rejeita; depois, libera o documento.
+ */
+export function openPdf(source: string | ArrayBuffer): { promise: Promise<PdfDoc>; destroy: () => void } {
+  let task: { destroy: () => Promise<void> } | null = null;
+  let destroyed = false;
+  const promise = loadPdfJs().then((pdfjs) => {
+    if (destroyed) throw new Error("cancelado");
+    const t = pdfjs.getDocument(typeof source === "string" ? { url: source } : { data: new Uint8Array(source) });
+    task = t;
+    return t.promise;
+  });
+  return {
+    promise,
+    destroy: () => {
+      destroyed = true;
+      void task?.destroy();
+    },
+  };
 }
 
 /**
@@ -64,5 +81,5 @@ export async function pageAspect(doc: PdfDoc, n: number): Promise<number> {
 /** PDF com senha (o servidor também recusa; aqui só para avisar antes de enviar). */
 export const isPasswordError = (e: unknown) => (e as { name?: string } | null)?.name === "PasswordException";
 
-/** URL do PDF de um produto salvo (rota do painel, sessão + products.read). */
+/** URL do PDF de um produto salvo (rota do painel, sessão + products.write: só dono e admin). */
 export const productPdfUrl = (id: string) => `/admin/api/products/${id}/file`;

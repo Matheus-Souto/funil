@@ -226,6 +226,34 @@ describe("metrics.breakdown", () => {
     expect(b.byOffer).toEqual([{ offerId: s.offerId, views: 4, orders: 3, paid: 2, bumpPaid: 1, revenueCents: 3690 }]);    // Vendas pagas por oferta e dia (mini gráfico da lista de ofertas): só o dia com venda, no mesmo dia do byDay.
     expect(b.byOfferDay).toEqual([{ offerId: s.offerId, day: b.byDay.at(-1)!.day, paid: 2, revenueCents: 3690 }]);
   });
+
+  test("byOfferDay: dia de São Paulo (02:00 UTC ainda é o dia anterior), mais de uma oferta, sem outra loja", async () => {
+    const s = await seedPanelStore();
+    const [o2] = await t.ownerDb
+      .insert(offer)
+      .values({ storeId: s.storeId, slug: `outra-${randomUUID().slice(0, 8)}`, name: "Outra", priceCents: 1990, methods: ["pix"], pixMode: "manual" })
+      .returning({ id: offer.id });
+    // Três dias atrás (em UTC): 02:00 UTC = 23:00 do dia anterior em São Paulo; 03:30 UTC = 00:30 do próprio dia.
+    const utcDay = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+    const prevSp = new Date(Date.parse(`${utcDay}T12:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    await seedOrder(s, { status: "paid", totalCents: 990, paidAt: new Date(`${utcDay}T02:00:00Z`) });
+    await seedOrder(s, { status: "paid", totalCents: 990, paidAt: new Date(`${utcDay}T03:30:00Z`) });
+    await seedOrder({ ...s, offerId: o2!.id }, { status: "paid", totalCents: 1990, paidAt: new Date(`${utcDay}T03:30:00Z`) });
+    // Outra loja, mesmo dia: não aparece.
+    const other = await seedPanelStore("Outra loja");
+    await seedOrder(other, { status: "paid", totalCents: 5000, paidAt: new Date(`${utcDay}T03:30:00Z`) });
+
+    const b = await runAction(metricsBreakdown, panelCall(s.storeId), periodRange("7d", new Date(Date.now() + 1)));
+    const key = (r: { offerId: string; day: string }) => `${r.offerId}|${r.day}`;
+    expect([...b.byOfferDay].sort((x, y) => key(x).localeCompare(key(y)))).toEqual(
+      [
+        { offerId: s.offerId, day: prevSp, paid: 1, revenueCents: 990 },
+        { offerId: s.offerId, day: utcDay, paid: 1, revenueCents: 990 },
+        { offerId: o2!.id, day: utcDay, paid: 1, revenueCents: 1990 },
+      ].sort((x, y) => key(x).localeCompare(key(y))),
+    );
+    expect(b.byOfferDay.some((r) => r.offerId === other.offerId)).toBe(false);
+  });
 });
 
 describe("teto de período para tokens MCP", () => {

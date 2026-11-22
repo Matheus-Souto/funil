@@ -29,6 +29,7 @@ export default async function ApprovalsPage() {
     hiddenSummary: r.summary === null ? HIDDEN_SUMMARY : null,
     status: r.status,
     createdAt: dateTimeSP(r.createdAt),
+    createdTs: r.createdAt.getTime(),
     expiresAt: dateTimeSP(r.expiresAt),
     decidedAt: r.decidedAt ? dateTimeSP(r.decidedAt) : null,
     decidedBy: r.decidedBy,

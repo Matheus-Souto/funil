@@ -1,37 +1,118 @@
 "use client";
 
-// Loja (P15): nome, e-mail de aviso de venda e cor do checkout com prévia ao vivo do contraste (a mesma regra AA do
-// checkout: src/lib/brand.ts).
-import { useMemo, useState, type CSSProperties } from "react";
-import { brandVars, contrastRatio, DEFAULT_BRAND } from "@/lib/brand";
-import { PIcon } from "../../icons";
+// Configurações em abas (as do Arc): Loja, Checkout, Contatos e recuperação (um formulário só, salvo de uma vez), Página
+// de vendas, Equipe e Entrega (conteúdo do servidor). Cada ajuste é uma linha: título e explicação à esquerda, controle à
+// direita. Trocar de aba não perde o que foi digitado (o estado vive aqui); a barra de salvar aparece quando há alteração.
+// A aba fica no endereço (?aba=), para links diretos (ex.: o aviso de Contatos abre ?aba=contatos).
+// A cor do checkout usa o seletor de cores do Arc, com prévia ao vivo e o contraste do texto do botão (a mesma regra AA
+// do checkout: src/lib/brand.ts).
+import { useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { ColorPicker } from "@/components/arc/color-picker/color-picker";
+import { Switch } from "@/components/arc/switch/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/arc/tabs/tabs";
+import { brandVars, DEFAULT_BRAND } from "@/lib/brand";
 import s from "../../panel.module.css";
 import { Live, useActionRunner } from "../../ui";
 import { updateSettingsAction } from "../actions";
+import { SETTINGS_TABS, type SettingsTab } from "./tabs";
 
 const HEX = /^#[0-9a-f]{6}$/i;
-const ratio = (n: number) => `${n.toFixed(1).replace(".", ",")}:1`;
-const TEXT_NAME: Record<string, string> = { "#FFFFFF": "Texto branco", "#15201B": "Texto escuro", "#000000": "Texto preto" };
+const DEFAULT_COLOR = DEFAULT_BRAND["--color-brand"];
+const SWATCHES = [DEFAULT_COLOR, "#3E8114", "#2F6BFF", "#7C3AED", "#E11D48", "#F59E0B"].map((color) => ({ id: color, color }));
 
-export function SettingsForm({ initial, canWrite }: { initial: { name: string; notifyEmail: string; brandColor: string | null; leadCapture: boolean; privacyEmail: string; recovery: { on: boolean; lead: boolean; pix: boolean; card: boolean } }; canWrite: boolean }) {
-  const [f, setF] = useState({ name: initial.name, notifyEmail: initial.notifyEmail, color: initial.brandColor ?? "", leadCapture: initial.leadCapture, privacyEmail: initial.privacyEmail, recovery: initial.recovery });
+interface Initial {
+  name: string;
+  notifyEmail: string;
+  brandColor: string | null;
+  leadCapture: boolean;
+  privacyEmail: string;
+  recovery: { on: boolean; lead: boolean; pix: boolean; card: boolean };
+}
+
+const formOf = (i: Initial) => ({ name: i.name, notifyEmail: i.notifyEmail, color: i.brandColor ?? "", leadCapture: i.leadCapture, privacyEmail: i.privacyEmail, recovery: i.recovery });
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Primeiro problema do formulário e a aba onde ele está (a mesma regra que o servidor confere). */
+function problemOf(f: ReturnType<typeof formOf>, colorOk: boolean): { tab: SettingsTab; text: string } | null {
+  if (!f.name.trim()) return { tab: "loja", text: "Informe o nome da loja." };
+  if (f.notifyEmail.trim() && !EMAIL.test(f.notifyEmail.trim())) return { tab: "loja", text: "O e-mail para aviso de venda parece inválido." };
+  if (!colorOk) return { tab: "checkout", text: "Use uma cor no formato #RRGGBB." };
+  if (f.leadCapture && !f.privacyEmail.trim()) return { tab: "contatos", text: "Com a captura ligada, informe o e-mail para pedidos de privacidade." };
+  if (f.privacyEmail.trim() && !EMAIL.test(f.privacyEmail.trim())) return { tab: "contatos", text: "O e-mail para pedidos de privacidade parece inválido." };
+  return null;
+}
+
+/** Título e explicação de uma linha de ajuste; os ids ligam o texto ao controle (leitor de tela). */
+function SetText({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <div className={s.setText}>
+      <h3 id={`${id}-t`}>{title}</h3>
+      <p id={`${id}-d`}>{children}</p>
+    </div>
+  );
+}
+
+export function SettingsPanel({
+  initial,
+  canWrite,
+  initialTab,
+  script,
+  team,
+  delivery,
+}: {
+  initial: Initial;
+  canWrite: boolean;
+  initialTab: SettingsTab;
+  script: ReactNode;
+  /** Só para quem gerencia a equipe; sem isso a aba não aparece. */
+  team: ReactNode | null;
+  delivery: ReactNode;
+}) {
+  const id = useId();
+  const tabs = SETTINGS_TABS.filter(([k]) => k !== "equipe" || team);
+  const [tab, setTab] = useState<SettingsTab>(tabs.some(([k]) => k === initialTab) ? initialTab : "loja");
+  const [f, setF] = useState(() => formOf(initial));
+  // Depois de salvar, a página volta do servidor com os valores novos: o formulário passa a compará-los com eles.
+  const [saved, setSaved] = useState(() => formOf(initial));
+  const [seen, setSeen] = useState(initial);
+  // O que foi enviado: se a pessoa não mexeu depois de salvar, o formulário passa a mostrar o que o servidor gravou (ele
+  // normaliza, ex.: e-mail em minúsculas), senão a barra de "alterações não salvas" ficaria presa.
+  const [submitted, setSubmitted] = useState<string | null>(null);
+  if (initial !== seen) {
+    setSeen(initial);
+    setSaved(formOf(initial));
+    if (submitted !== null && submitted === JSON.stringify(f)) setF(formOf(initial));
+    setSubmitted(null);
+  }
+  const dirty = JSON.stringify({ ...f, name: f.name.trim(), notifyEmail: f.notifyEmail.trim(), privacyEmail: f.privacyEmail.trim() }) !== JSON.stringify(saved);
   const run = useActionRunner();
   const valid = f.color === "" || HEX.test(f.color);
   const vars = useMemo(() => brandVars(valid && f.color ? f.color : null), [f.color, valid]);
-  const on = vars["--color-on-brand"];
-  const r = contrastRatio(on, vars["--color-brand"]);
   const strongChanged = vars["--color-brand-strong"] !== vars["--color-brand"];
+  const setRecovery = (patch: Partial<Initial["recovery"]>) => setF({ ...f, recovery: { ...f.recovery, ...patch } });
+
+  const go = (k: string) => {
+    if (!tabs.some(([t]) => t === k)) return;
+    setTab(k as SettingsTab);
+    const url = new URL(window.location.href);
+    url.searchParams.set("aba", k);
+    window.history.replaceState(null, "", url);
+  };
 
   return (
     <form
-      className={s.settingsRow}
-      style={{ borderTop: 0 }}
+      id="settings-form"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!valid) {
-          run.setMsg({ tone: "error", text: "Use uma cor no formato #RRGGBB." });
+        // Só a aba aberta fica montada, então a validação do navegador não alcança as outras: confere aqui e leva à aba.
+        const problem = problemOf(f, valid);
+        if (problem) {
+          go(problem.tab);
+          run.setMsg({ tone: "error", text: problem.text });
           return;
         }
+        setSubmitted(JSON.stringify(f));
         void run.run(() =>
           updateSettingsAction({
             name: f.name.trim(),
@@ -44,161 +125,145 @@ export function SettingsForm({ initial, canWrite }: { initial: { name: string; n
         );
       }}
     >
-      <div>
-        <h2 className={s.sectionTitle}>Loja</h2>
-        <p>Aparece no checkout, na página de obrigado e nos e-mails.</p>
-      </div>
-      <fieldset className={s.card} disabled={!canWrite} style={{ margin: 0 }}>
-        <legend className={s.srOnly}>Dados da loja</legend>
-        <div className={s.stack}>
-          <div className={s.grid2}>
-            <label className={s.field}>
-              <span className={s.label}>Nome da loja</span>
-              <input className={s.input} value={f.name} required maxLength={100} onChange={(e) => setF({ ...f, name: e.target.value })} />
-            </label>
-            <div className={s.field}>
-              <label className={s.field}>
-              <span className={s.label}>E-mail para aviso de venda</span>
-              <input className={s.input} type="email" value={f.notifyEmail} maxLength={254} onChange={(e) => setF({ ...f, notifyEmail: e.target.value })} />
-              </label>
-              <span className={s.hint}>Recebe um aviso a cada venda paga e os alertas da loja.</span>
+      <Tabs value={tab} onValueChange={go}>
+        <TabsList aria-label="Seções das configurações">
+          {tabs.map(([k, label]) => (
+            <TabsTrigger key={k} value={k}>
+              {label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+
+        <TabsContent value="loja">
+          <fieldset disabled={!canWrite} className={`${s.settingsFieldset} ${s.setCard}`}>
+            <div className={s.setRow}>
+              <SetText id={`${id}-nome`} title="Nome da loja">
+                Aparece no checkout, na página de obrigado e nos e-mails.
+              </SetText>
+              <input className={s.input} value={f.name} required maxLength={100} aria-labelledby={`${id}-nome-t`} aria-describedby={`${id}-nome-d`} onChange={(e) => setF({ ...f, name: e.target.value })} />
             </div>
-          </div>
-          <div className={s.grid2}>
-            <div className={s.field}>
-              <label className={s.label} htmlFor="brand-hex">
-                Cor da loja
-              </label>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input
-                  type="color"
-                  aria-label="Escolher a cor"
-                  value={valid && f.color ? f.color.toLowerCase() : DEFAULT_BRAND["--color-brand"].toLowerCase()}
-                  onChange={(e) => setF({ ...f, color: e.target.value.toUpperCase() })}
-                  style={{ width: 44, height: 42, padding: 2, border: "1px solid var(--color-border-strong)", borderRadius: 10, background: "var(--color-surface)" }}
-                />
-                <input
-                  id="brand-hex"
-                  className={`${s.input} ${s.mono}`}
-                  value={f.color}
-                  placeholder={`${DEFAULT_BRAND["--color-brand"]} (padrão)`}
-                  maxLength={7}
-                  aria-invalid={!valid}
-                  aria-describedby="brand-contrast"
-                  onChange={(e) => setF({ ...f, color: e.target.value.trim() })}
-                />
-              </div>
-              <span id="brand-contrast" className={valid ? s.hint : s.fieldError} aria-live="polite" style={valid ? { color: "var(--color-success)" } : undefined}>
-                {valid ? (
-                  <>
-                    <PIcon name="circle-check" size={14} /> {TEXT_NAME[on] ?? "Texto"} legível ({ratio(r)}, AA)
-                  </>
-                ) : (
-                  "Use o formato #RRGGBB."
-                )}
-              </span>
+            <div className={s.setRow}>
+              <SetText id={`${id}-aviso`} title="E-mail para aviso de venda">
+                Recebe um aviso a cada venda paga e os alertas da loja.
+              </SetText>
+              <input
+                className={s.input}
+                type="email"
+                value={f.notifyEmail}
+                maxLength={254}
+                placeholder="voce@sualoja.com.br"
+                aria-labelledby={`${id}-aviso-t`} aria-describedby={`${id}-aviso-d`}
+                onChange={(e) => setF({ ...f, notifyEmail: e.target.value })}
+              />
+            </div>
+          </fieldset>
+        </TabsContent>
+
+        <TabsContent value="checkout">
+          <fieldset disabled={!canWrite} className={`${s.settingsFieldset} ${s.setCard} ${s.setCheckout}`}>
+            <div className={s.setColor}>
+              <SetText id={`${id}-cor`} title="Cor da loja">
+                Botões e destaques do checkout. Se a cor tiver pouco contraste (ex.: amarelo), o texto do botão escurece sozinho e os links usam uma
+                versão mais escura{strongChanged ? ` (aqui: ${vars["--color-brand-strong"]})` : ""}.
+              </SetText>
+              <ColorPicker
+                value={valid && f.color ? f.color : DEFAULT_COLOR}
+                onValueChange={(hex) => setF({ ...f, color: hex.slice(0, 7).toUpperCase() })}
+                label="Cor da loja"
+                background={vars["--color-on-brand"]}
+                alpha={false}
+                contrastLabel="com o texto do botão"
+                defaultSwatches={SWATCHES}
+              />
               {f.color ? (
-                <button type="button" className={s.linkBtn} style={{ alignSelf: "flex-start", fontSize: 13 }} onClick={() => setF({ ...f, color: "" })}>
+                <button type="button" className={s.linkBtn} style={{ fontSize: 13 }} onClick={() => setF({ ...f, color: "" })}>
                   Voltar à cor padrão
                 </button>
               ) : null}
             </div>
-            <div className={s.field}>
-              <span className={s.label}>Prévia do botão</span>
-              <div style={{ ...(vars as CSSProperties), display: "flex", flexDirection: "column", gap: 8 }} aria-hidden="true">
-                <span className={s.previewBtn} style={{ marginTop: 0 }}>
-                  Gerar Pix de R$ 9,90
-                </span>
-                <span style={{ color: "var(--color-brand-strong)", fontWeight: 600, fontSize: 13 }}>Link e destaque na cor da loja</span>
-              </div>
+            <div className={s.setMock} style={vars as CSSProperties} aria-label="Prévia do checkout" role="img">
+              <b>{f.name.trim() || "Sua loja"}</b>
+              <span>Produto de exemplo · Pix</span>
+              <span className={s.setMockBtn}>Gerar Pix de R$ 9,90</span>
+              <span className={s.setMockLink}>Link e destaque na cor da loja</span>
             </div>
-          </div>
-          <div className={s.grid2}>
-            <div className={s.field}>
-              <label className={s.switch}>
-                <input type="checkbox" checked={f.leadCapture} onChange={(e) => setF({ ...f, leadCapture: e.target.checked })} aria-describedby="lead-capture-hint" />
-                Guardar o contato de quem não finaliza a compra
-              </label>
-              <span id="lead-capture-hint" className={s.hint}>
+          </fieldset>
+        </TabsContent>
+
+        <TabsContent value="contatos">
+          <fieldset disabled={!canWrite} className={`${s.settingsFieldset} ${s.setCard}`}>
+            <div className={s.setRowSwitch}>
+              <SetText id={`${id}-captura`} title="Guardar o contato de quem não finaliza a compra">
                 E-mail e celular ficam por até 30 dias, com aviso no checkout. Exige o e-mail para pedidos de privacidade.
-              </span>
-            </div>
-            <div className={s.field}>
-              <label className={s.field}>
-                <span className={s.label}>E-mail para pedidos de privacidade</span>
-                <input
-                  className={s.input}
-                  type="email"
-                  value={f.privacyEmail}
-                  maxLength={254}
-                  required={f.leadCapture}
-                  onChange={(e) => setF({ ...f, privacyEmail: e.target.value })}
-                />
-              </label>
-              <span className={s.hint}>Aparece no aviso de privacidade do checkout.</span>
-            </div>
-          </div>
-          <div className={s.field}>
-            <span className={s.label}>Recuperação de vendas por e-mail</span>
-            <label className={s.switch}>
-              <input
-                type="checkbox"
-                checked={f.recovery.on}
-                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, on: e.target.checked } })}
-                aria-describedby="recovery-hint"
+              </SetText>
+              <Switch
+                checked={f.leadCapture}
+                onCheckedChange={(v) => setF({ ...f, leadCapture: v })}
+                aria-labelledby={`${id}-captura-t`}
+                aria-describedby={`${id}-captura-d`}
               />
-              Mandar um lembrete por e-mail para quem não concluiu a compra
-            </label>
-            <span id="recovery-hint" className={s.hint}>
-              Sai pelo e-mail da loja (Conexões). Um lembrete por compra, com link para a pessoa não receber mais.
-            </span>
-            <label className={s.switch}>
-              <input
-                type="checkbox"
-                checked={f.recovery.lead}
-                disabled={!f.recovery.on}
-                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, lead: e.target.checked } })}
-              />
-              Digitou o e-mail e saiu antes do pedido (precisa da captura de contato ligada)
-            </label>
-            <label className={s.switch}>
-              <input
-                type="checkbox"
-                checked={f.recovery.pix}
-                disabled={!f.recovery.on}
-                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, pix: e.target.checked } })}
-              />
-              Pix gerado e não pago
-            </label>
-            <label className={s.switch}>
-              <input
-                type="checkbox"
-                checked={f.recovery.card}
-                disabled={!f.recovery.on}
-                onChange={(e) => setF({ ...f, recovery: { ...f.recovery, card: e.target.checked } })}
-              />
-              Cartão recusado
-            </label>
-          </div>
-          <div className={s.banner} data-tone="neutral">
-            <PIcon name="palette" />
-            <div>
-              Se a cor tiver pouco contraste (ex.: amarelo), o texto do botão vira escuro automaticamente e links usam uma versão mais escura da cor
-              {strongChanged ? ` (aqui: ${vars["--color-brand-strong"]})` : ""}.
             </div>
-          </div>
-          {canWrite ? (
-            <div className={s.formActions}>
-              <button type="submit" className={`${s.btn} ${s.btnPrimary}`} disabled={run.pending}>
-                {run.pending ? "Salvando…" : "Salvar alterações"}
-              </button>
+            <div className={s.setRow}>
+              <SetText id={`${id}-priv`} title="E-mail para pedidos de privacidade">
+                {f.leadCapture ? "Obrigatório com a captura ligada. " : ""}Aparece no aviso de privacidade do checkout.
+              </SetText>
+              <input
+                className={s.input}
+                type="email"
+                value={f.privacyEmail}
+                maxLength={254}
+                required={f.leadCapture}
+                placeholder="privacidade@sualoja.com.br"
+                aria-labelledby={`${id}-priv-t`} aria-describedby={`${id}-priv-d`}
+                onChange={(e) => setF({ ...f, privacyEmail: e.target.value })}
+              />
             </div>
-          ) : (
-            <p className={s.hint}>Só o dono da loja altera estes dados.</p>
-          )}
-          <Live msg={run.msg} />
+            <div className={s.setRowSwitch}>
+              <SetText id={`${id}-rec`} title="Recuperação de vendas por e-mail">
+                Um lembrete por compra, pelo e-mail da loja (Conexões), com link para a pessoa não receber mais.
+              </SetText>
+              <Switch checked={f.recovery.on} onCheckedChange={(v) => setRecovery({ on: v })} aria-labelledby={`${id}-rec-t`} aria-describedby={`${id}-rec-d`} />
+            </div>
+            {f.recovery.on ? (
+              <div className={s.setSub} role="group" aria-label="Quando mandar o lembrete">
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rl`}>
+                    Digitou o e-mail e saiu antes do pedido
+                    <small>Precisa da captura de contato ligada.</small>
+                  </span>
+                  <Switch checked={f.recovery.lead} onCheckedChange={(v) => setRecovery({ lead: v })} aria-labelledby={`${id}-rl`} />
+                </div>
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rp`}>Pix gerado e não pago</span>
+                  <Switch checked={f.recovery.pix} onCheckedChange={(v) => setRecovery({ pix: v })} aria-labelledby={`${id}-rp`} />
+                </div>
+                <div className={s.setSubRow}>
+                  <span id={`${id}-rc`}>Cartão recusado</span>
+                  <Switch checked={f.recovery.card} onCheckedChange={(v) => setRecovery({ card: v })} aria-labelledby={`${id}-rc`} />
+                </div>
+              </div>
+            ) : null}
+          </fieldset>
+        </TabsContent>
+
+        <TabsContent value="pagina">{script}</TabsContent>
+        {team ? <TabsContent value="equipe">{team}</TabsContent> : null}
+        <TabsContent value="entrega">{delivery}</TabsContent>
+      </Tabs>
+
+      {!canWrite && (tab === "loja" || tab === "checkout" || tab === "contatos") ? <p className={s.hint}>Só o dono da loja altera estes dados.</p> : null}
+      {canWrite && dirty ? (
+        <div className={`${s.saveBar} ${s.saveBarSimple}`} role="region" aria-label="Alterações não salvas">
+          <span>Alterações não salvas</span>
+          <button type="button" className={s.btn} onClick={() => setF(saved)} disabled={run.pending}>
+            Descartar
+          </button>
+          <button type="submit" className={`${s.btn} ${s.btnPrimary}`} disabled={run.pending}>
+            {run.pending ? "Salvando…" : "Salvar alterações"}
+          </button>
         </div>
-      </fieldset>
+      ) : null}
+      <Live msg={run.msg} />
     </form>
   );
 }

@@ -50,7 +50,7 @@ export function deltaOf(cur: number, prev: number): { pct: number | null; tone: 
 }
 
 /** Ilustrações 3D do painel (public/admin/art/<nome>.webp, 240×240, fundo transparente). */
-export type ArtName = "receita" | "pedidos" | "pagos" | "ticket" | "produto" | "aprovacoes" | "agentes" | "funil" | "pdf" | "origem" | "indicacao" | "carteira" | "email" | "avisos";
+export type ArtName = "receita" | "pedidos" | "pagos" | "ticket" | "produto" | "aprovacoes" | "agentes" | "funil" | "pdf" | "origem" | "indicacao" | "carteira" | "email" | "avisos" | "pingaia" | "cadeado";
 
 /** Ilustração decorativa (estados vazios, login): escondida dos leitores de tela. */
 export function Art({ name, size = 112, className }: { name: ArtName; size?: number; className?: string }) {
@@ -67,6 +67,7 @@ export function Kpi({
   empty,
   art,
   layout = "card",
+  note,
 }: {
   label: string;
   value: string;
@@ -80,6 +81,8 @@ export function Kpi({
   art?: ArtName;
   /** "cell": um dos números dentro de `.kpiStrip` (vários KPIs num cartão só, ícone à esquerda). */
   layout?: "card" | "cell";
+  /** Observação curta abaixo do número (ex.: o período passa do que o dado cobre). */
+  note?: string;
 }) {
   if (layout === "cell") {
     return (
@@ -111,6 +114,7 @@ export function Kpi({
           <span className={s.deltaCompare}> vs. {compare}</span>
         </div>
       ) : null}
+      {note ? <div className={s.kpiNote}>{note}</div> : null}
     </div>
   );
 }

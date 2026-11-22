@@ -1,5 +1,5 @@
 // Contatos de quem não finalizou a compra, no painel (dono, admin e suporte; nada disso sai pelo MCP).
-// - `leads.list` (leitura, sem auditoria como `orders.list`): 50 por página, mais novos primeiro. `q` é o código do contato
+// - `leads.list` (leitura, sem auditoria como `orders.list`): 50 por página por padrão, mais novos primeiro. `q` é o código do contato
 //   (6 hex, qualquer caixa) ou o e-mail exato (normalizado, comparado pelo `email_hash`: nunca busca parcial em e-mail).
 //   O contato convertido mostra o código do pedido como o painel já o mostra e não tem e-mail nem celular.
 //   `remindedAt`: quando saiu o lembrete de recuperação por e-mail do contato (`recovery_email` `sent`; um por contato).
@@ -8,7 +8,7 @@
 //   contato vencido já não aparece na lista nem pode ser marcado como contatado. Na mesma passada, apaga os lembretes de
 //   recuperação vencidos (`recovery_email`, 90 dias); `email_optout` nunca vence.
 import { createHash } from "node:crypto";
-import { and, count, desc, eq, gt, lt, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { db, withStore } from "@/lib/db/client";
@@ -31,9 +31,10 @@ const notExpired = () => gt(checkoutLead.expiresAt, sql`now()`);
 /** Mesmo cálculo de `leadCode`, no banco: 6 primeiros hex do UUID sem hífen, minúsculos. */
 const codeSql = sql`left(replace(${checkoutLead.id}::text, '-', ''), 6)`;
 
-function where(input: { status?: z.infer<typeof leadStatus>; q?: string }): SQL | undefined {
+function where(input: { status?: z.infer<typeof leadStatus>; statuses?: z.infer<typeof leadStatus>[]; q?: string }): SQL | undefined {
   const parts: (SQL | undefined)[] = [notExpired()];
   if (input.status) parts.push(eq(checkoutLead.status, input.status));
+  if (input.statuses?.length) parts.push(inArray(checkoutLead.status, input.statuses));
   if (input.q) {
     parts.push(CODE_FORMAT.test(input.q) ? sql`${codeSql} = ${input.q.toLowerCase()}` : eq(checkoutLead.emailHash, sha256(input.q.toLowerCase())));
   }
@@ -42,11 +43,15 @@ function where(input: { status?: z.infer<typeof leadStatus>; q?: string }): SQL 
 
 export const listLeads = defineAction({
   name: "leads.list",
-  description: "Lista os contatos de quem não finalizou a compra (50 por página, mais novos primeiro), com filtro de status e busca pelo código ou pelo e-mail exato.",
+  description:
+    "Lista os contatos de quem não finalizou a compra (mais novos primeiro; pageSize 10, 25, 50 ou 100, padrão 50), com filtro de um status (status) ou vários (statuses) e busca pelo código ou pelo e-mail exato.",
   input: z.object({
     status: leadStatus.optional(),
+    // Vários status de uma vez (o filtro do cabeçalho da tabela no painel).
+    statuses: z.array(leadStatus).max(3).optional(),
     q: z.string().trim().max(254).optional(),
     page: z.number().int().min(1).max(10_000).default(1),
+    pageSize: z.union([z.literal(10), z.literal(25), z.literal(50), z.literal(100)]).default(PAGE_SIZE),
   }),
   permission: "leads.read",
   audit: false,
@@ -71,8 +76,8 @@ export const listLeads = defineAction({
       .leftJoin(recoveryEmail, and(eq(recoveryEmail.leadId, checkoutLead.id), eq(recoveryEmail.status, "sent")))
       .where(where(input))
       .orderBy(desc(checkoutLead.createdAt), desc(checkoutLead.id))
-      .limit(PAGE_SIZE)
-      .offset((input.page - 1) * PAGE_SIZE);
+      .limit(input.pageSize)
+      .offset((input.page - 1) * input.pageSize);
     return {
       items: rows.map(({ orderPublicId, ...r }) => ({
         ...r,
@@ -82,7 +87,7 @@ export const listLeads = defineAction({
       })),
       total: total?.n ?? 0,
       page: input.page,
-      pageSize: PAGE_SIZE,
+      pageSize: input.pageSize,
     };
   },
 });

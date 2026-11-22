@@ -3,6 +3,7 @@ import { getPanelIdentity, requirePanelActor } from "@/lib/auth/session";
 import { changePasswordFormAction, logoutAction } from "../(panel)/actions";
 import { PIcon } from "../icons";
 import { Art } from "../blocks";
+import { BrandLogo } from "../brand";
 import s from "../panel.module.css";
 
 export const dynamic = "force-dynamic";
@@ -24,8 +25,8 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
   return (
     <div className={`${s.root} ${s.auth}`}>
       <header className={s.authTop}>
-        <span className={s.brand} style={{ padding: 0 }}>
-          funil
+        <span className={s.brand} aria-label="PingaPay">
+          <BrandLogo />
         </span>
         {forced ? (
           <form action={logoutAction}>
@@ -40,7 +41,7 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
         )}
       </header>
       <main className={s.authBody}>
-        <Art name="funil" size={120} className={s.authArt} />
+        <Art name="cadeado" size={120} className={s.authArt} />
         <h1>Trocar senha</h1>
         <p className={s.authLead}>
           {id.userEmail} · {id.storeName}
@@ -91,7 +92,7 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
         </div>
       </main>
       <footer className={s.authFoot}>
-        <span>Funil · plataforma de vendas de código aberto</span>
+        <span>PingaPay · plataforma de vendas de código aberto</span>
       </footer>
     </div>
   );

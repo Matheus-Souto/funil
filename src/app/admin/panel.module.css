@@ -136,19 +136,6 @@
   color: var(--color-text);
   text-decoration: none;
 }
-.brandMark {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-  font-size: 15px;
-  font-weight: 700;
-}
-.brandText,
 .navLabel {
   white-space: nowrap;
   transition: opacity 180ms var(--ease-standard);
@@ -204,37 +191,44 @@
   font-size: 11px;
   color: var(--color-text-muted);
 }
+/* Botão da PingaIA: destacado com um tom suave de lima (é a porta de entrada da assistente). */
 .ai {
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 34px;
-  margin-top: 4px;
-  padding: 0 10px;
-  border-radius: 8px;
+  height: 40px;
+  margin-top: 6px;
+  padding: 0 8px;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 35%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
   color: var(--color-text-muted);
   font: inherit;
   font-size: 13px;
-  border: 0;
-  background: none;
   white-space: nowrap;
   cursor: not-allowed;
   text-align: left;
+  transition: background-color 150ms var(--ease-standard);
 }
-.ai svg {
+.ai:hover {
+  background: color-mix(in srgb, var(--color-primary) 16%, transparent);
+}
+.aiArt {
   flex: none;
-  color: var(--color-primary-ink);
+  width: 26px;
+  height: 26px;
+  margin: -4px 0 -4px -4px;
+  pointer-events: none;
 }
-.ai .navLabel:first-of-type {
+.ai b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.aiLabel {
   flex: 1;
-}
-.ai kbd {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 1px 5px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .navWrap {
   flex: 1;
@@ -355,11 +349,40 @@
 }
 .userFoot {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 2px 0;
+  border-top: 1px solid var(--color-border);
+}
+/* Linha do usuário: avatar, nome e e-mail (abaixo da fileira de ícones). */
+.userRow {
+  display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 4px 0;
-  border-top: 1px solid var(--color-border);
+  min-width: 0;
+  padding: 4px 4px 2px;
+}
+/* Botões pequenos e sem borda da fileira de ícones (tema, configurações, senha, sair). */
+.footBtn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background-color 120ms var(--ease-standard), color 120ms var(--ease-standard);
+}
+.footBtn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+.footBtn:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: 1px;
 }
 .avatar {
   display: grid;
@@ -392,12 +415,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* Ícones pequenos espalhados por igual na largura da sidebar. */
 .userActions {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 2px;
-  width: 100%;
+  padding: 0 4px;
 }
 .iconBtn {
   display: grid;
@@ -420,7 +443,6 @@
 
 /* Recolhida: só ícones, centralizados; os textos somem e voltam com a largura. */
 .shell[data-collapsed="true"] .navLabel,
-.shell[data-collapsed="true"] .brandText,
 .shell[data-collapsed="true"] .storeText,
 .shell[data-collapsed="true"] .userText,
 .shell[data-collapsed="true"] .navBadge {
@@ -440,6 +462,11 @@
 .shell[data-collapsed="true"] .ai {
   justify-content: center;
   padding: 0;
+  border-color: transparent;
+  background: none;
+}
+.shell[data-collapsed="true"] .aiArt {
+  margin: 0;
 }
 .shell[data-collapsed="true"] .navSep {
   height: 1px;
@@ -454,11 +481,17 @@
   background: none;
 }
 .shell[data-collapsed="true"] .userFoot {
-  flex-direction: column;
-  padding: 12px 0 0;
+  align-items: center;
+  padding: 10px 0 0;
 }
 .shell[data-collapsed="true"] .userActions {
   flex-direction: column;
+  gap: 4px;
+  padding: 0;
+}
+.shell[data-collapsed="true"] .userRow {
+  justify-content: center;
+  padding: 6px 0 2px;
 }
 
 .mobileTop,
@@ -1115,57 +1148,6 @@
   background: var(--color-primary);
 }
 
-.funnel {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr auto 1fr;
-  align-items: end;
-  gap: 12px;
-}
-.funnel > div > span {
-  color: var(--color-text-muted);
-  font-size: 13px;
-}
-.funnel > div > b {
-  display: block;
-  margin: 2px 0 10px;
-  font-family: var(--font-display);
-  font-size: 30px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-.funnelStep {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-bottom: 14px;
-  font-weight: 600;
-  font-size: 13px;
-}
-.funnelFoot {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border);
-  color: var(--color-text-muted);
-  font-size: 13px;
-}
-.funnelFoot b {
-  color: var(--color-text);
-}
-@media (max-width: 700px) {
-  .funnel {
-    grid-template-columns: 1fr;
-  }
-  .funnelStep {
-    display: none;
-  }
-  .funnelFoot {
-    grid-template-columns: 1fr;
-  }
-}
-
 .chart {
   display: flex;
   align-items: flex-end;
@@ -1525,18 +1507,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.codeBlock {
-  margin: 0;
-  padding: 16px;
-  border-radius: var(--radius-md);
-  background: #15201b;
-  color: #d9e6de;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 .live {
   margin: 0;
   min-height: 20px;
@@ -1560,26 +1530,6 @@
   margin: 0 0 4px;
   font-size: 16px;
   font-weight: 700;
-}
-
-/* configurações em 2 colunas (título à esquerda) */
-.settingsRow {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 32px;
-  padding: 24px 0;
-  border-top: 1px solid var(--color-border);
-}
-.settingsRow > div:first-child p {
-  margin: 6px 0 0;
-  color: var(--color-text-muted);
-  line-height: 1.5;
-}
-@media (max-width: 900px) {
-  .settingsRow {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
-  }
 }
 
 /* ---------- Pedido ---------- */
@@ -1801,18 +1751,6 @@
   height: 100%;
   background: var(--color-primary);
   transition: width 0.15s;
-}
-
-/* ---------- Botão de exemplo na cor da loja (Configurações) ---------- */
-.previewBtn {
-  display: block;
-  margin-top: 10px;
-  padding: 12px;
-  border-radius: var(--radius-md);
-  background: var(--color-brand);
-  color: var(--color-on-brand);
-  text-align: center;
-  font-weight: 700;
 }
 
 /* Linhas de produto do editor de oferta: select + subir/descer/remover. */
@@ -2113,10 +2051,7 @@
   }
 }
 
-/* ---------- Gráficos (ECharts) ---------- */
-.echart {
-  width: 100%;
-}
+/* ---------- Gráficos (Arc + SVG próprio) ---------- */
 .legend {
   list-style: none;
   margin: 12px 0 0;
@@ -2311,7 +2246,6 @@
 }
 
 /* Links em texto corrido do painel na cor de destaque legível */
-.settingsRow p a,
 .hint a {
   color: var(--color-primary-ink);
   font-weight: 600;
@@ -2358,6 +2292,33 @@
   color: var(--color-text);
   font: inherit;
   font-size: 14px;
+}
+.filterChips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  width: 100%;
+  font-size: 13px;
+}
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 6px 0 10px;
+  border-radius: 999px;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-ink);
+  font-weight: 500;
+  text-decoration: none;
+}
+.filterChip:hover {
+  background: color-mix(in srgb, var(--color-primary-soft) 70%, var(--color-primary-ink) 12%);
+}
+.filterChip:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: 2px;
 }
 .tableCount {
   flex: 1;
@@ -2571,12 +2532,21 @@
 
 /* Botões de ícone da sidebar menores (tema, senha, sair, recolher) */
 .sidebar .iconBtn,
+/* O botão de tema (Arc) com a mesma cara dos outros ícones da fileira: sem borda nem fundo. */
 .userActions :global(button) {
-  width: 30px;
-  height: 30px;
-  min-height: 30px;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
   padding: 0;
+  border: 0;
   border-radius: 8px;
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+}
+.userActions :global(button):hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
 }
 
 .thPending {
@@ -3218,24 +3188,694 @@
   }
 }
 
-/* Filtros das colunas na barra da tabela: só quando o cabeçalho some (tabela de pedidos vira lista abaixo de 900 px). */
-.barFilters {
+/* A tabela do Arc dentro do cartão: sem a própria borda (o cartão já tem). */
+.arcTable > div {
+  border: 0;
+  border-radius: 0;
+}
+/* E-mail e textos secundários das células: uma linha, cortada com "…" (sem quebrar no meio da palavra). */
+.arcTable td small {
+  display: block;
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+/* Erro no histórico de Aprovações: o texto inteiro, quebrando linha (cortado com reticências, só aparecia no title,
+   que não abre no toque nem no leitor de tela). */
+.arcTable td small.cellError {
+  max-width: 40ch;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--color-danger);
+}
+
+/* ---------- Contatos ---------- */
+.leadCell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.leadCell small {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.leadEmail {
+  overflow-wrap: anywhere;
+}
+.leadNote {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+/* Ações de uma linha da tabela em ícones (WhatsApp, copiar, menu "⋯"), alinhadas à direita. */
+.rowActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+/* Linha de rodapé de uma página (abaixo da tabela): nota curta e link de ação. */
+.pageFoot {
+  margin: 12px 2px 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+@media (max-width: 700px) {
+  .hideSm {
+    display: none;
+  }
+  .leadTable th:nth-child(2),
+  .leadTable td:nth-child(2),
+  .leadTable th:nth-child(4),
+  .leadTable td:nth-child(4) {
+    display: none;
+  }
+}
+
+/* ---------- Agentes (MCP) ---------- */
+.tokenWarn {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-weight: 600;
+}
+.roleList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.roleOption {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 120ms var(--ease-out, ease), background-color 120ms var(--ease-out, ease);
+}
+.roleOption input {
+  margin-top: 3px;
+  accent-color: var(--color-brand-strong, #3e8114);
+}
+.roleOption span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 14px;
+}
+.roleOption small {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.roleOption:has(input:checked) {
+  border-color: var(--color-primary-ink, #3e8114);
+  background: var(--color-primary-soft);
+}
+.tokenTable tr[data-revoked="true"] td {
+  opacity: 0.65;
+}
+@media (max-width: 700px) {
+  .tokenTable th:nth-child(3),
+  .tokenTable td:nth-child(3),
+  .tokenTable th:nth-child(4),
+  .tokenTable td:nth-child(4) {
+    display: none;
+  }
+}
+
+/* Funil do checkout: três faixas de formato fixo à esquerda, números e taxas ao lado. */
+.funnel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 16px;
+  min-height: 230px;
+  margin-bottom: 14px;
+}
+.funnelShape {
+  width: 100%;
+  height: 100%;
+  min-height: 210px;
+}
+.funnelShape path {
+  fill: var(--color-primary);
+  transform-origin: 50% 0;
+  animation: funnel-in 520ms var(--ease-enter, cubic-bezier(0.16, 1, 0.3, 1)) both;
+}
+.funnelShape path[data-step="0"] {
+  opacity: 0.38;
+}
+.funnelShape path[data-step="1"] {
+  opacity: 0.66;
+  animation-delay: 70ms;
+}
+.funnelShape path[data-step="2"] {
+  animation-delay: 140ms;
+}
+@keyframes funnel-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0.85);
+  }
+}
+.funnelSteps {
+  display: grid;
+  grid-template-rows: repeat(3, 1fr);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.funnelSteps li {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 1px dashed var(--color-border);
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.funnelSteps b {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+.funnelSteps small {
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .funnelShape path {
+    animation: none;
+  }
+}
+
+/* Rankings (origem e indicação): logo ou avatar, nome, barra e valor. */
+.rank {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.rank li {
+  display: grid;
+  grid-template-columns: minmax(0, 7.5rem) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.rankName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--color-text);
+}
+.rankName svg {
+  flex: none;
+}
+.rankLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rankAvatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--color-primary-soft);
+  color: var(--color-primary-ink);
+  font-size: 10px;
+  font-weight: 600;
+}
+.rankBar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+}
+.rankBar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-primary);
+  animation: rank-in 600ms var(--ease-enter, cubic-bezier(0.16, 1, 0.3, 1)) both;
+  transform-origin: left;
+}
+@keyframes rank-in {
+  from {
+    transform: scaleX(0);
+  }
+}
+.rankValue {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rankValue small {
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rankBar i {
+    animation: none;
+  }
+}
+
+/* ---------- Marca (PingaPay) ---------- */
+.brandLogo {
+  display: block;
+  width: auto;
+  height: 24px;
+}
+.brandIcon {
+  display: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+.shell[data-collapsed="true"] .brandLogo {
   display: none;
 }
-@media (max-width: 900px) {
-  .barFilters {
-    display: flex;
-    order: 3;
-    flex-basis: 100%;
+.shell[data-collapsed="true"] .brandIcon {
+  display: block;
+}
+/* Uma versão por tema: escolha salva (data-theme) ou, sem escolha, o tema do sistema. As regras de exibição acima
+   valem dentro de cada tema; aqui só se esconde a versão do outro tema. */
+:global(:root[data-theme="dark"]) .onlyLight,
+:global(:root[data-theme="light"]) .onlyDark {
+  display: none !important;
+}
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme])) .onlyLight {
+    display: none !important;
+  }
+}
+@media not (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme])) .onlyDark {
+    display: none !important;
+  }
+}
+.mobileTop .brandLogo {
+  height: 22px;
+}
+
+/* Origem e indicação lado a lado (cartões estreitos): nome e valor em cima, a barra embaixo, na largura toda. */
+.rankPair .rank li {
+  grid-template-columns: minmax(0, 1fr) auto;
+  row-gap: 6px;
+}
+.rankPair .rankBar {
+  grid-column: 1 / -1;
+  order: 3;
+}
+@media (max-width: 700px) {
+  .rankPair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- Configurações em abas (abas do Arc; cada ajuste numa linha: texto à esquerda, controle à direita) ---------- */
+.settingsFieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.setCard {
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-surface);
+}
+.setRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: 24px;
+  padding: 18px 20px;
+}
+.setRowSwitch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 20px;
+}
+.setCard > :is(.setRow, .setRowSwitch, .setMember) + :is(.setRow, .setRowSwitch, .setMember) {
+  border-top: 1px solid var(--color-border);
+}
+/* Aviso de resultado dentro do cartão: só ocupa espaço quando tem texto. */
+.setCard > .live {
+  min-height: 0;
+}
+.setCard > .live:not(:empty) {
+  padding: 0 20px 14px;
+}
+.setText h3 {
+  margin: 0 0 3px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.setText p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+.setSub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 20px 18px;
+  padding: 0 0 0 16px;
+  border-left: 2px solid var(--color-border);
+}
+.setSubRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  font-size: 14px;
+  color: var(--color-text);
+}
+.setSubRow small {
+  display: block;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.setCheckout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  align-items: start;
+  gap: 20px;
+  padding: 20px;
+}
+.setColor {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+/* O checkout é sempre claro: a prévia também, nos dois temas do painel. */
+.setMock {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: #ffffff;
+  color: #15201b;
+  font-size: 13px;
+}
+.setMock > span:first-of-type {
+  color: #5f6f69;
+}
+.setMockBtn {
+  display: grid;
+  place-items: center;
+  height: 42px;
+  border-radius: 999px;
+  background: var(--color-brand);
+  color: var(--color-on-brand);
+  font-weight: 700;
+}
+.setMockLink {
+  color: var(--color-brand-strong);
+  font-weight: 600;
+}
+.setBody {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+.setCode {
+  position: relative;
+  margin: 0;
+  padding: 16px 52px 16px 16px;
+  border-radius: 12px;
+  background: #11181a;
+  color: #e6efe9;
+  font: 13px/1.6 var(--font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.setCodeCopy {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: #e6efe9;
+}
+.setSteps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-muted);
+}
+.setSteps li + li {
+  margin-top: 6px;
+}
+.setMember {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+}
+.setMemberText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 14px;
+}
+.setMemberText b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.setMemberText small {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.setStats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.setStat {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  background: var(--color-surface);
+}
+.setStat small {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.setStat b {
+  display: block;
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+.setNote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 2px 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.setIntro {
+  margin: 0 0 12px;
+  font-size: 13.5px;
+  color: var(--color-text-muted);
+}
+.setIntro a {
+  color: var(--color-primary-ink);
+  font-weight: 600;
+}
+@media (max-width: 760px) {
+  .setRow,
+  .setCheckout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .setStats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .setMember {
     flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
   }
-  .barFilters .thFilter {
-    margin: 0;
-    padding: 5px 10px;
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    font-size: 13px;
+}
+.saveBarSimple {
+  margin-top: 16px;
+}
+.saveBarSimple > span:first-child {
+  margin-right: auto;
+  color: var(--color-warning);
+  font-size: 13px;
+  font-weight: 600;
+}
+@media (max-width: 520px) {
+  .saveBarSimple {
+    flex-wrap: wrap;
   }
+  .saveBarSimple > span:first-child {
+    flex-basis: 100%;
+  }
+  .saveBarSimple > button {
+    flex: 1;
+  }
+}
+
+/* Observação curta abaixo do número de um KPI. */
+.kpiNote {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+
+/* ---------- Aprovações (abas do Arc; cada pedido numa linha, ações à direita) ---------- */
+.apCount {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.apRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  padding: 18px 20px;
+}
+.apRow + .apRow {
+  border-top: 1px solid var(--color-border);
+}
+.apMain {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.apHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 14px;
+  color: var(--color-text);
+}
+.apHead b {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.apTool {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font: 12px/1.5 var(--font-mono, ui-monospace, monospace);
+}
+.apMeta {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+.apFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px 20px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg);
+}
+.apFields dt {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.apFields dd {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.apNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-warning);
+}
+.apNote svg {
+  flex: none;
+  margin-top: 2px;
+}
+.apActions {
+  display: flex;
+  gap: 8px;
+}
+@media (max-width: 760px) {
+  .apRow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .apActions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+/* Filtro da coluna só com o ícone (ao lado do título na tabela do Arc). */
+.thFilterCompact {
+  gap: 4px;
+  margin: 0;
+  padding: 4px;
+  color: var(--color-text-muted);
+}
+
+/* Uma linha só (valores, códigos, datas), em qualquer tabela. */
+.nowrap {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+/* Avatar do Arc no rodapé da sidebar, na cor do sistema. */
+.userAvatar {
+  flex: none;
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary-ink) !important;
 }

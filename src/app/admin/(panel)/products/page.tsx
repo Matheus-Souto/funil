@@ -4,15 +4,15 @@ import { requirePanelActor } from "@/lib/auth/session";
 import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { fileSize } from "@/lib/format";
-import { Art, Badge, PageHead } from "../../blocks";
+import { Art, PageHead } from "../../blocks";
 import s from "../../panel.module.css";
 import Link from "next/link";
 import { NewProductButton } from "./upload";
-import { PdfViewerButton, ProductCell } from "./pdf-view";
 import { TablePager } from "../../table-pager";
 import { PER_PAGE_OPTIONS, parsePage, parsePerPage } from "../../per-page";
 import { firstParam, type Param } from "@/lib/panel-params";
 import { ColumnFilter, TableShell } from "../../table-controls";
+import { ProductsTable } from "./products-table";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Produtos" };
@@ -52,73 +52,44 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
           <TableShell
             q={q}
             keep={{ status: statuses, por: perPage === PER_PAGE_OPTIONS[0] ? [] : [String(perPage)] }}
+            active={statuses.map((v) => ({ param: "status", value: v, label: `Status: ${USES[v]}` }))}
             placeholder="Buscar produto"
             searchLabel="Buscar produtos"
             count={`${products.length} ${products.length === 1 ? "produto" : "produtos"}${filtered ? " com estes filtros" : ""}`}
           >
             {products.length > 0 ? (
-              <table className={`${s.table} ${s.productTable}`}>
-                <thead>
-                  <tr>
-                    <th scope="col">Produto</th>
-                    <th scope="col">Arquivo</th>
-                    <th scope="col">
-                      <ColumnFilter
-                        title="Status"
-                        param="status"
-                        values={statuses}
-                        options={(Object.keys(USES) as Use[]).map((k) => ({ value: k, label: USES[k], count: searched.filter((p) => usageOf(p.id) === k).length, icon: k }))}
-                      />
-                    </th>
-                    <th scope="col">Usado em</th>
-                    <th scope="col">Enviado</th>
-                    <th scope="col">
-                      <span className={s.srOnly}>Ações</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {shown.map((p) => {
-                    const used = usedIn(p.id);
-                    return (
-                      <tr key={p.id}>
-                        <td>
-                          <ProductCell name={p.name} pages={p.pageCount} />
-                        </td>
-                        <td className={s.muted}>
-                          {p.fileName} <span className={s.nowrap}>· {fileSize(p.fileSize)}</span>
-                        </td>
-                        <td>
-                          <Badge tone={used.length ? "success" : "neutral"}>{used.length ? USES["em-uso"] : USES["sem-oferta"]}</Badge>
-                        </td>
-                        <td>
-                          {used.length ? (
-                            <span className={s.chips}>
-                              {used.map((u) => (
-                                <span key={u} className={s.chip} data-tone="primary">
-                                  {u}
-                                </span>
-                              ))}
-                            </span>
-                          ) : (
-                            <span className={s.muted}>—</span>
-                          )}
-                        </td>
-                        <td className={`${s.muted} ${s.nowrap}`}>{DAY.format(p.createdAt)}</td>
-                        <td className={s.num}>
-                          {/* PDF original (sem carimbo): só dono e admin (products.file exige products.write). */}
-                          {canWrite ? <PdfViewerButton id={p.id} name={p.name} /> : null}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <ProductsTable
+                paged={products.length > perPage}
+                canView={canWrite}
+                statusFilter={
+                  <ColumnFilter
+                    compact
+                    title="Status"
+                    param="status"
+                    values={statuses}
+                    options={(Object.keys(USES) as Use[]).map((k) => ({ value: k, label: USES[k], count: searched.filter((p) => usageOf(p.id) === k).length, icon: k }))}
+                  />
+                }
+                rows={shown.map((p) => {
+                  const used = usedIn(p.id);
+                  return {
+                    id: p.id,
+                    name: p.name,
+                    pages: p.pageCount,
+                    file: `${p.fileName} · ${fileSize(p.fileSize)}`,
+                    inUse: used.length > 0,
+                    usageLabel: used.length ? USES["em-uso"] : USES["sem-oferta"],
+                    usedIn: used,
+                    createdText: DAY.format(p.createdAt),
+                    createdTs: p.createdAt.getTime(),
+                  };
+                })}
+              />
             ) : (
               <div className={s.empty}>
                 <Art name="produto" size={96} />
                 <h2>Nenhum produto com estes filtros</h2>
-                <Link className={`${s.btn} ${s.btnSm}`} href="/admin/products">
+                <Link className={`${s.btn} ${s.btnSm}`} href={perPage === PER_PAGE_OPTIONS[0] ? "/admin/products" : `/admin/products?por=${perPage}`}>
                   Limpar filtros
                 </Link>
               </div>

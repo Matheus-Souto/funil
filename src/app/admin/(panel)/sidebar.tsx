@@ -3,9 +3,12 @@
 // Moldura do painel no desktop: sidebar que expande e recolhe (lembrada no cookie `funil-sidebar`), ícones Lucide,
 // dicas com o nome do item quando recolhida e a troca de tema (claro/escuro, lembrada no cookie `funil-theme`).
 import Link from "next/link";
+import { Art } from "../blocks";
+import { BrandLogo } from "../brand";
+import { Avatar } from "@/components/arc/avatar/avatar";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Sparkles } from "lucide-react";
+import { KeyRound, LogOut, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { ThemeSwitch, type Theme } from "@/components/arc/theme-switch/theme-switch";
 import { Tooltip } from "@/components/arc/tooltip/tooltip";
@@ -54,9 +57,9 @@ function useTheme(initial: Theme | undefined) {
 }
 
 /** Mostra a dica só com a sidebar recolhida (aberta, o texto já está visível). */
-function Tip({ show, label, children }: { show: boolean; label: string; children: React.ReactElement }) {
+function Tip({ show, label, side = "right", children }: { show: boolean; label: string; side?: "top" | "right"; children: React.ReactElement }) {
   return show ? (
-    <Tooltip content={label} side="right">
+    <Tooltip content={label} side={side}>
       {children}
     </Tooltip>
   ) : (
@@ -66,7 +69,6 @@ function Tip({ show, label, children }: { show: boolean; label: string; children
 
 export interface ShellIdentity {
   storeName: string;
-  roleLabel: string;
   userName: string;
   userEmail: string;
 }
@@ -117,12 +119,6 @@ export function PanelShell({
 
   const main = items.filter((i) => !i.section);
   const store = items.filter((i) => i.section === "loja");
-  const initials = id.userName
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase())
-    .join("");
 
   const link = (i: NavEntry) => {
     const active = isActive(path, i.href);
@@ -158,11 +154,8 @@ export function PanelShell({
     <div className={s.shell} data-collapsed={collapsed ? "true" : undefined}>
       <aside className={s.sidebar} aria-label="Menu do painel">
         <div className={s.sideTop}>
-          <Link href="/admin" className={s.brand} aria-label="funil, dashboard">
-            <span className={s.brandMark} aria-hidden="true">
-              f
-            </span>
-            <span className={s.brandText}>funil</span>
+          <Link href="/admin" className={s.brand} aria-label="PingaPay, dashboard">
+            <BrandLogo />
           </Link>
           <Tip show={collapsed} label="Expandir menu (Ctrl B)">
             <button
@@ -178,23 +171,23 @@ export function PanelShell({
           </Tip>
         </div>
 
-        <Tip show={collapsed} label={`${id.storeName} · ${id.roleLabel}`}>
-          <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados e foto da loja em Configurações"}>
+        <Tip show={collapsed} label={id.storeName}>
+          <Link href="/admin/settings" className={s.storeBox} title={collapsed ? undefined : "Dados da loja em Configurações"}>
             <span className={s.storeMark} aria-hidden="true">
               {id.storeName.slice(0, 1).toUpperCase()}
             </span>
             <span className={s.storeText}>
               <b>{id.storeName}</b>
-              <small>{id.roleLabel}</small>
             </span>
           </Link>
         </Tip>
 
-        <Tip show={collapsed} label="Pergunte à IA (em breve)">
-          <button type="button" className={s.ai} aria-disabled="true" title={collapsed ? undefined : "Pergunte à IA chega na próxima fase"}>
-            <Sparkles size={16} strokeWidth={1.75} />
-            <span className={s.navLabel}>Pergunte à IA</span>
-            <kbd className={s.navLabel}>Ctrl K</kbd>
+        <Tip show={collapsed} label="PingaIA (em breve)">
+          <button type="button" className={s.ai} aria-disabled="true" aria-label="Pergunte à PingaIA (em breve)" title={collapsed ? undefined : "A PingaIA chega na próxima fase"}>
+            <Art name="pingaia" size={26} className={s.aiArt} />
+            <span className={`${s.navLabel} ${s.aiLabel}`}>
+              Pergunte à <b>PingaIA</b>
+            </span>
           </button>
         </Tip>
 
@@ -220,13 +213,6 @@ export function PanelShell({
         </nav>
 
         <div className={s.userFoot}>
-          <span className={s.avatar} aria-hidden="true">
-            {initials || "?"}
-          </span>
-          <span className={s.userText}>
-            <b>{id.userName}</b>
-            <small>{id.userEmail}</small>
-          </span>
           <div className={s.userActions}>
             <ThemeSwitch
               theme={theme}
@@ -234,19 +220,33 @@ export function PanelShell({
               label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
               onThemeChange={(next, trigger) => changeTheme(next, trigger)}
             />
-            <Tip show={collapsed} label="Trocar senha">
-              <Link href="/admin/senha" className={s.iconBtn} aria-label="Trocar senha" title={collapsed ? undefined : "Trocar senha"}>
+            <Tip show label="Configurações" side={collapsed ? "right" : "top"}>
+              <Link href="/admin/settings" className={s.footBtn} aria-label="Configurações">
+                <Settings size={15} strokeWidth={1.75} />
+              </Link>
+            </Tip>
+            <Tip show label="Trocar senha" side={collapsed ? "right" : "top"}>
+              <Link href="/admin/senha" className={s.footBtn} aria-label="Trocar senha">
                 <KeyRound size={15} strokeWidth={1.75} />
               </Link>
             </Tip>
             <form action={logout}>
-              <Tip show={collapsed} label="Sair">
-                <button type="submit" className={s.iconBtn} aria-label="Sair" title={collapsed ? undefined : "Sair"}>
+              <Tip show label="Sair" side={collapsed ? "right" : "top"}>
+                <button type="submit" className={s.footBtn} aria-label="Sair">
                   <LogOut size={15} strokeWidth={1.75} />
                 </button>
               </Tip>
             </form>
           </div>
+          <Tip show={collapsed} label={`${id.userName} · ${id.userEmail}`}>
+            <div className={s.userRow}>
+              <Avatar name={id.userName || "?"} size="sm" className={s.userAvatar} />
+              <span className={s.userText}>
+                <b>{id.userName}</b>
+                <small>{id.userEmail}</small>
+              </span>
+            </div>
+          </Tip>
         </div>
       </aside>
       <main id="conteudo" className={s.main}>

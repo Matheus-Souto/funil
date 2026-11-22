@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useLeaveGuard } from "../../../leave-guard";
 import {
   MAX_PRODUCTS_PER_GROUP,
   changeDialog,
@@ -141,13 +142,9 @@ export function OfferEditor(props: {
   const changed = JSON.stringify(comparable(f)) !== JSON.stringify(comparable(initialForm(offer, products)));
   const dirty = !offer || changed;
   const discard = () => offer && setF(initialForm(offer, products));
-  // Sair da página (fechar a aba, recarregar, link externo) com alterações não salvas pede confirmação do navegador.
-  useEffect(() => {
-    if (!changed || !canWrite) return;
-    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [changed, canWrite]);
+  // Sair da tela com alterações não salvas pede confirmação: o aviso do navegador ao fechar ou recarregar, e um diálogo
+  // nos links do próprio painel (sidebar, "Voltar").
+  const leaveGuard = useLeaveGuard(changed && canWrite, "As alterações desta oferta ainda não foram salvas.");
   const [slugTouched, setSlugTouched] = useState(Boolean(offer));
   const [pixelOn, setPixelOn] = useState(Boolean(offer?.pixelId));
   const [pixel, setPixel] = useState(offer?.pixelId ?? "");
@@ -700,6 +697,7 @@ export function OfferEditor(props: {
         </div>
       </div>
 
+      {leaveGuard}
       <Dialog
         open={dialog === "price"}
         onClose={() => setDialog(null)}

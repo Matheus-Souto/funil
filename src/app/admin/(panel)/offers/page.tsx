@@ -11,7 +11,7 @@ import { Sparkline } from "../../charts";
 import { Art, Badge, PageHead } from "../../blocks";
 import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
-import { CopyButton } from "../../ui";
+import { CopyButton } from "@/components/arc/copy-button/copy-button";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Ofertas" };
@@ -99,7 +99,7 @@ export default async function OffersPage() {
                     </div>
                     <div className={s.offerLink}>
                       <code>{link.replace(/^https?:\/\//, "")}</code>
-                      <CopyButton text={link} label="Copiar link" small />
+                      <CopyButton value={link} label="Copiar link" iconOnly variant="plain" />
                     </div>
                   </div>
                   {stats ? (

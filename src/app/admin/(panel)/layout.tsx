@@ -6,13 +6,13 @@ import { runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { pendingApprovalsCount } from "@/lib/mcp/approvals";
-import { ROLE_LABEL } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
 import { PIcon } from "../icons";
 import s from "../panel.module.css";
 import { logoutAction } from "./actions";
 import { TabBar, type NavEntry } from "./nav";
+import { BrandLogo } from "../brand";
 import { PanelShell } from "./sidebar";
 
 export const dynamic = "force-dynamic";
@@ -64,8 +64,8 @@ export default async function PanelLayout({ children }: { children: ReactNode })
         Pular para o conteúdo
       </a>
       <header className={s.mobileTop}>
-        <Link href="/admin" className={s.brand}>
-          funil
+        <Link href="/admin" className={s.brand} aria-label="PingaPay, dashboard">
+          <BrandLogo />
         </Link>
         <span className={s.storeName}>· {id.storeName}</span>
         <button type="button" className={s.iconBtn} disabled aria-label="Pergunte à IA (em breve)" title="Pergunte à IA chega na próxima fase">
@@ -74,7 +74,7 @@ export default async function PanelLayout({ children }: { children: ReactNode })
       </header>
       <PanelShell
         items={items}
-        id={{ storeName: id.storeName, roleLabel: ROLE_LABEL[role], userName: id.userName, userEmail: id.userEmail }}
+        id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail }}
         logout={logoutAction}
         initialCollapsed={jar.get("funil-sidebar")?.value === "collapsed"}
         initialTheme={theme === "light" || theme === "dark" ? theme : undefined}

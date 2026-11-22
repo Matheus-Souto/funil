@@ -4,6 +4,8 @@
 import { useState } from "react";
 import { ROLE_LABEL } from "@/lib/orders/labels";
 import type { Role } from "@/lib/actions/permissions";
+import { Avatar } from "@/components/arc/avatar/avatar";
+import { Badge } from "../../blocks";
 import s from "../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../ui";
 import { revokeMemberSessionsAction } from "../actions";
@@ -18,31 +20,34 @@ export interface TeamMember {
   isYou: boolean;
 }
 
+const ROLE_TONE: Record<string, "success" | "info" | "warning" | "neutral"> = { owner: "success", admin: "info", support: "info", traffic: "warning", reader: "neutral" };
+
 export function TeamList({ members }: { members: TeamMember[] }) {
   const [target, setTarget] = useState<TeamMember | null>(null);
   const { pending, msg, run } = useActionRunner();
   return (
-    <section className={s.card} aria-label="Equipe">
-      <div className={s.rows}>
-        {members.map((m) => (
-          <div className={s.row} key={m.userId}>
-            <span className={s.rowMain}>
-              <b>{m.name}</b> <span className={s.muted}>{m.email}</span>
-              <br />
-              <small className={s.muted}>
-                {ROLE_LABEL[m.role as Role] ?? m.role}
-                {m.isYou ? " · você" : ""} · {m.activeSessions === 1 ? "1 sessão ativa" : `${m.activeSessions} sessões ativas`}
-                {m.mustChangePassword ? " · ainda com a senha temporária" : ""}
-              </small>
-            </span>
-            {m.isYou || m.activeSessions === 0 ? null : (
-              <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => setTarget(m)}>
-                Encerrar sessões
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+    <section className={s.setCard} aria-label="Equipe">
+      {members.map((m) => (
+        <div className={s.setMember} key={m.userId}>
+          <Avatar name={m.name} size="md" />
+          <span className={s.setMemberText}>
+            <b>
+              {m.name}
+              {m.isYou ? <span className={s.muted}> (você)</span> : null}
+            </b>
+            <small>
+              {m.email} · {m.activeSessions === 1 ? "1 sessão ativa" : `${m.activeSessions} sessões ativas`}
+              {m.mustChangePassword ? " · ainda com a senha temporária" : ""}
+            </small>
+          </span>
+          <Badge tone={ROLE_TONE[m.role] ?? "neutral"}>{m.role === "owner" ? "Dono" : (ROLE_LABEL[m.role as Role] ?? m.role)}</Badge>
+          {m.isYou || m.activeSessions === 0 ? null : (
+            <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => setTarget(m)}>
+              Encerrar sessões
+            </button>
+          )}
+        </div>
+      ))}
       <Live msg={target ? null : msg} />
       <Dialog
         open={target !== null}

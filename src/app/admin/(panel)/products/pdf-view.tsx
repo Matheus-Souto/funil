@@ -66,18 +66,15 @@ export function PdfViewerButton({ id, name }: { id: string; name: string }) {
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    let opened: PdfDoc | null = null;
-    openPdf(productPdfUrl(id)).then(
-      (d) => {
-        opened = d;
-        if (alive) setDoc(d);
-        else void d.loadingTask.destroy();
-      },
+    const pdf = openPdf(productPdfUrl(id));
+    pdf.promise.then(
+      (d) => alive && setDoc(d),
       () => alive && setFailed(true),
     );
     return () => {
       alive = false;
-      void opened?.loadingTask.destroy();
+      // Fechar no meio do download também cancela (o pdf.js para a requisição e o worker).
+      pdf.destroy();
       setDoc(null);
       setFailed(false);
       setPage(1);

@@ -14,7 +14,8 @@ export const product = pgTable("product", {
   fileSize: integer("file_size").notNull(),
   /** sha256 do PDF enviado: entra na versão das cópias carimbadas (nulo em produtos anteriores à coluna). */
   fileSha256: text("file_sha256"),
-  /** Páginas do PDF, contadas na validação do envio (nulo em produtos anteriores à coluna). */
+  /** Páginas do PDF, contadas na validação do envio (nulo até o backfill contar os produtos anteriores à coluna; 0 quando
+   *  o backfill não conseguiu contar: as leituras devolvem nulo). */
   pageCount: integer("page_count"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),

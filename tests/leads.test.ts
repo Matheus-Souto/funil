@@ -504,6 +504,18 @@ describe("leads.list", () => {
     expect([contacted.total, contacted.items.length]).toEqual([1, 1]);
   });
 
+  test("vários status (statuses) e pageSize 10/25/50/100; outro tamanho é recusado", async () => {
+    const s = await seedCapture();
+    const base = Date.now() - 3_600_000;
+    for (let i = 0; i < 12; i++) await insertLead(s, { createdAt: new Date(base + i * 1000), status: i < 2 ? "contacted" : "open" });
+    const both = await runAction(listLeads, panelCall(s.storeId), { statuses: ["open", "contacted"], pageSize: 10 });
+    expect([both.total, both.items.length, both.pageSize]).toEqual([12, 10, 10]);
+    expect((await runAction(listLeads, panelCall(s.storeId), { statuses: ["open", "contacted"], pageSize: 10, page: 2 })).items).toHaveLength(2);
+    expect((await runAction(listLeads, panelCall(s.storeId), { statuses: ["contacted"] })).total).toBe(2);
+    expect((await runAction(listLeads, panelCall(s.storeId), { statuses: ["converted"] })).total).toBe(0);
+    expect(await code(runAction(listLeads, panelCall(s.storeId), { pageSize: 20 } as never))).toBe("invalid_input");
+  });
+
   test("convertido mostra o código do pedido (como o painel) e nenhum contato", async () => {
     const p = await seedPanelStore();
     const order = await seedOrder(p, {});

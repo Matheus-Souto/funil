@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { offer, offerProduct, product } from "@/lib/db/schema";
@@ -68,7 +68,8 @@ const view = {
   name: product.name,
   fileName: product.fileName,
   fileSize: product.fileSize,
-  pageCount: product.pageCount,
+  // 0 marca o PDF que o backfill não conseguiu contar (src/lib/catalog/page-count.ts): para quem lê, é desconhecido.
+  pageCount: sql<number | null>`nullif(${product.pageCount}, 0)`,
   createdAt: product.createdAt,
 };
 

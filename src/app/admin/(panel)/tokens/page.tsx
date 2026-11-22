@@ -5,10 +5,10 @@ import { requirePanelActor } from "@/lib/auth/session";
 import { dateTimeSP } from "@/lib/format";
 import { listMcpTokens } from "@/lib/mcp/tokens";
 import { getStoreSettings } from "@/lib/store-settings";
-import { PageHead } from "../../blocks";
-import { PIcon } from "../../icons";
+import Link from "next/link";
+import { Notice, PageHead } from "../../blocks";
 import s from "../../panel.module.css";
-import { TokensPanel, type TokenRow } from "./tokens-panel";
+import { NewTokenButton, TokensTable, type TokenRow } from "./tokens-panel";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Agentes (MCP)" };
@@ -25,24 +25,23 @@ export default async function TokensPage() {
     role: t.role,
     last4: t.last4,
     createdAt: dateTimeSP(t.createdAt),
+    createdTs: t.createdAt.getTime(),
     createdBy: t.createdBy,
     lastUsedAt: t.lastUsedAt ? dateTimeSP(t.lastUsedAt) : null,
+    // Ordenação de "Último uso": revogados e nunca usados vão para o fim (0).
+    lastUsedTs: t.revokedAt ? 0 : (t.lastUsedAt?.getTime() ?? 0),
     revokedAt: t.revokedAt ? dateTimeSP(t.revokedAt) : null,
   }));
+  const mcpUrl = `${st.checkoutBaseUrl.replace(/\/+$/, "")}/api/mcp`;
   return (
     <>
-      <PageHead title="Agentes (MCP)" />
-      <div className={s.alerts}>
-        <div className={s.banner} data-tone="info" role="note">
-          <PIcon name="shield-check" />
-          <div>
-            <p>
-              O agente nunca recebe nome, e-mail, telefone ou CPF de comprador. Ações sensíveis pedidas pelo agente esperam aprovação em Aprovações.
-            </p>
-          </div>
-        </div>
+      <PageHead title="Agentes (MCP)" actions={<NewTokenButton mcpUrl={mcpUrl} />} />
+      <div className={s.noticeStrip}>
+        <Notice tone="info" action={<Link href="/admin/aprovacoes">Aprovações</Link>}>
+          O agente nunca recebe nome, e-mail, telefone ou CPF de comprador. Ações sensíveis pedidas por ele esperam a sua aprovação.
+        </Notice>
       </div>
-      <TokensPanel tokens={tokens} mcpUrl={`${st.checkoutBaseUrl.replace(/\/+$/, "")}/api/mcp`} />
+      <TokensTable tokens={tokens} />
     </>
   );
 }
