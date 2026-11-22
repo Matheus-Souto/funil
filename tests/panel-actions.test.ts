@@ -1,10 +1,14 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
+import { createSession, lookupSession, SESSION_COOKIE } from "@/lib/auth/session";
 import { connectionsStatus } from "@/lib/connections";
+import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, integration, job, offer, offerProduct, orderItem, payment, product, rateLimit, store, storeAlert } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, integration, job, membership, offer, offerProduct, orderItem, payment, product, rateLimit, session, store, storeAlert, teamInvite, users } from "@/lib/db/schema";
+import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { createIntegrationSecrets, getIntegration, saveIntegration } from "@/lib/integrations";
 import { enqueue } from "@/lib/jobs";
@@ -16,9 +20,23 @@ import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { alertAsaasKeyRejected } from "@/lib/payments/asaas/webhook";
 import { releaseOrder } from "@/lib/payments/manual";
 import { getStoreSettings, updateStoreSettings } from "@/lib/store-settings";
-import { createTestDb, type TestDb } from "./db";
+import { resolveStore } from "@/lib/stores";
+import { inviteTokenHash } from "@/lib/team/rules";
+import { createTestDb, seedStore, type TestDb } from "./db";
 import { createFakeAsaas } from "./fakes/asaas";
 import { panelCall, seedManyOrders, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
+
+// Cookies e cabeçalhos controláveis no lugar dos do Next (que só existem dentro de uma requisição): as server actions da
+// Equipe e do aceite do convite leem a sessão e gravam o cookie.
+const jar = new Map<string, string>();
+mock.module("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => (jar.has(name) ? { name, value: jar.get(name)! } : undefined),
+    set: (name: string, value: string) => void jar.set(name, value),
+    delete: (name: string) => void jar.delete(name),
+  }),
+  headers: async () => new Headers({ host: "localhost:3000" }),
+}));
 
 let t: TestDb;
 beforeAll(async () => {
@@ -674,5 +692,114 @@ describe("avisos da loja (store_alert)", () => {
     expect(rows).toEqual([]);
     const count = await t.ownerDb.execute(sql`select relforcerowsecurity as f from pg_class where relname = 'store_alert'`);
     expect((count as unknown as { f: boolean }[])[0]!.f).toBe(true);
+  });
+});
+
+describe("Equipe e convites: server actions", () => {
+  let outbox: SentMail[] = [];
+  let sendError: Error | null = null;
+  const fakeSmtp = () =>
+    setMailTransportForTests(() => ({
+      async verify() {
+        return true;
+      },
+      async sendMail(m) {
+        if (sendError) throw sendError;
+        outbox.push(m);
+        return {};
+      },
+      close() {},
+    }));
+  beforeAll(fakeSmtp);
+  afterEach(() => {
+    outbox = [];
+    sendError = null;
+    jar.clear();
+    fakeSmtp();
+  });
+  afterAll(() => setMailTransportForTests());
+
+  const SMTP = { host: "smtp.exemplo.com", port: 587, secure: false, user: "loja@exemplo.com", password: "senha-smtp-de-teste", from: "contato@loja.com" };
+  const newEmail = () => `convidado-${randomBytes(4).toString("hex")}@example.com`;
+
+  /** Usuário com o papel na loja; com `login`, a sessão dele vai para o cookie. */
+  async function member(storeId: string, role: "owner" | "admin" | "support" | "traffic", login = true) {
+    const [u] = await t.ownerDb.insert(users).values({ email: newEmail(), name: `Pessoa ${role}`, passwordHash: "x" }).returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role });
+    const token = await createSession(u!.id, storeId);
+    if (login) jar.set(SESSION_COOKIE, token);
+    return { userId: u!.id, token };
+  }
+
+  test("inviteAction: 'Convite enviado para {e-mail}' quando o e-mail sai; a mensagem de falha quando não sai", async () => {
+    const { inviteAction } = await import("@/app/admin/(panel)/actions");
+    const { storeId } = await seedStore("Maná Kids");
+    const owner = await member(storeId, "owner");
+    await runAction(saveSmtp, { storeId, actor: { kind: "user", userId: owner.userId, role: "owner" }, origin: "panel" }, SMTP);
+
+    const ok = newEmail();
+    const sent = await inviteAction({ email: ok, role: "support" });
+    expect(sent).toMatchObject({ ok: true, data: { sent: true }, message: `Convite enviado para ${ok}` });
+    expect(outbox).toHaveLength(1);
+
+    sendError = new Error("connect ECONNREFUSED");
+    const bad = await inviteAction({ email: newEmail(), role: "traffic" });
+    expect(bad.ok).toBe(true);
+    if (!bad.ok) return;
+    expect(bad.data.sent).toBe(false);
+    expect(bad.message).toMatch(/^Convite criado, mas o e-mail não saiu: .+\. Confira Conexões e clique em Reenviar\.$/);
+    // A resposta não traz o token nem o link do convite.
+    expect(JSON.stringify(bad)).not.toContain("/admin/convite/");
+  });
+
+  test("acceptInviteAction: apaga a sessão anterior, grava o cookie da conta nova e leva ao painel", async () => {
+    const { acceptInviteAction } = await import("@/app/admin/actions");
+    // O aceite usa a loja do host (no MODE=single, a primeira loja da instalação).
+    const found = await resolveStore("localhost:3000");
+    const storeId = found ? found.id : (await seedStore()).storeId;
+    const before = await member(storeId, "support");
+
+    const token = "inv" + "_" + randomBytes(32).toString("base64url");
+    const email = newEmail();
+    await t.ownerDb.insert(teamInvite).values({ storeId, email, emailHash: sha256(email), role: "traffic", tokenHash: inviteTokenHash(token), expiresAt: new Date(Date.now() + 86_400_000) });
+
+    const form = new FormData();
+    form.set("token", token);
+    form.set("mode", "new");
+    form.set("name", "Pessoa Convidada");
+    form.set("password", "senha-do-convidado-123");
+    form.set("confirmPassword", "senha-do-convidado-123");
+    let target: string | null = null;
+    try {
+      await acceptInviteAction(null, form);
+    } catch (e) {
+      const digest = (e as { digest?: unknown }).digest;
+      if (typeof digest !== "string" || !digest.startsWith("NEXT_REDIRECT")) throw e;
+      target = digest.split(";")[2] ?? null;
+    }
+    expect(target).toBe("/admin");
+
+    const cookie = jar.get(SESSION_COOKIE);
+    expect(cookie).toBeTruthy();
+    expect(cookie).not.toBe(before.token);
+    // A sessão anterior (de outra pessoa neste navegador) foi apagada.
+    expect(await t.ownerDb.select().from(session).where(eq(session.idHash, sha256(before.token)))).toHaveLength(0);
+    const now = await lookupSession(cookie!);
+    const [u] = await t.ownerDb.select({ id: users.id }).from(users).where(eq(users.email, email));
+    expect(now).toMatchObject({ storeId, actor: { kind: "user", userId: u!.id, role: "traffic" } });
+  });
+
+  test("acceptInviteAction: convite inválido e senhas diferentes voltam como estado da página, sem cookie", async () => {
+    const { acceptInviteAction } = await import("@/app/admin/actions");
+    const form = new FormData();
+    form.set("token", "x");
+    form.set("mode", "new");
+    form.set("name", "Pessoa");
+    form.set("password", "senha-do-convidado-123");
+    form.set("confirmPassword", "senha-do-convidado-123");
+    expect(await acceptInviteAction(null, form)).toMatchObject({ gone: true });
+    form.set("confirmPassword", "outra-senha-qualquer");
+    expect(await acceptInviteAction(null, form)).toMatchObject({ error: "As senhas não conferem." });
+    expect(jar.has(SESSION_COOKIE)).toBe(false);
   });
 });

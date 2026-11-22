@@ -51,7 +51,7 @@ Os componentes ficam em `src/components/arc/` (Arc UI, parte grátis, MIT). Use 
 | Confirmação | `Dialog` de `../../ui` (com `tone="danger"` para ações destrutivas) | `tokens/tokens-panel.tsx` |
 | Formulário em modal | `Dialog` + `DialogContent` do Arc | `connections/cards.tsx` |
 | Copiar | `CopyButton` do Arc com `iconOnly variant="plain"` (só o ícone) | `offers/page.tsx`, `settings/page.tsx` |
-| Pessoa ou agente | `Avatar` do Arc | `settings/team.tsx`, `aprovacoes/approvals-panel.tsx` |
+| Pessoa ou agente | `Avatar` do Arc | `equipe/team-panel.tsx`, `aprovacoes/approvals-panel.tsx` |
 | Escolher cor | `ColorPicker` do Arc (`alpha={false}` para cor sólida) | `settings/form.tsx` |
 | Período | `RangePicker` (calendário do Arc com atalhos em português) | `(panel)/range-picker.tsx` |
 | Gráficos e números | `RevenueChart`, `DonutChart`, `FunnelChart`, `RankChart`, `Sparkline`, `KpiNumber` de `../charts` e `Kpi` de `../blocks` | `(panel)/page.tsx` (Dashboard) |

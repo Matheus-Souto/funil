@@ -3257,6 +3257,47 @@
   }
 }
 
+/* ---------- Equipe ---------- */
+.teamCard + .teamCard {
+  margin-top: 16px;
+}
+.teamHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px 8px;
+}
+.teamHead h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.teamHead small {
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+.teamFoot {
+  margin: 0;
+  padding: 12px 20px 16px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.teamLive {
+  padding: 0 20px;
+}
+.teamLive > .live:empty {
+  min-height: 0;
+}
+.teamForm {
+  display: grid;
+  gap: 16px;
+}
+.teamCard > .setMember {
+  border-top: 1px solid var(--color-border);
+}
+
 /* ---------- Agentes (MCP) ---------- */
 .tokenWarn {
   margin: 0;

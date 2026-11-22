@@ -20,6 +20,15 @@ const config: NextConfig = {
           { key: "X-Frame-Options", value: "DENY" },
         ],
       },
+      // Página do convite da equipe: o token vai no caminho. Sem Referer (um link ou recurso externo não leva a URL
+      // adiante) e sem cache (nem do navegador nem de proxy). O proxy e a CDN também não podem registrar /admin/convite/.
+      {
+        source: "/admin/convite/:token",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
       // PDF original de um produto (visualizador do painel). Vem depois da regra de /admin porque o Next aplica as duas e a
       // última vence na mesma chave; o cabeçalho que a rota devolve não substitui o daqui. `sandbox`: o navegador nunca
       // executa o PDF enviado pela loja (ou por um agente, pelo link de upload) na origem do painel.

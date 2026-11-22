@@ -375,7 +375,7 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
 
    No primeiro login, o painel exige que o dono troque a senha temporária (ela passou pelo terminal do operador).
    Depois, qualquer pessoa troca a própria senha em "Trocar senha" (ícone de cadeado), o que encerra as outras sessões
-   dela; o dono encerra as sessões de um membro em Configurações → Equipe.
+   dela; o dono encerra as sessões de um membro em **Loja → Equipe**.
 
 3. HTTPS dos subdomínios e domínios próprios. Duas opções:
    - **Lista fixa (sem plugin):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (fora do git), ponha
@@ -678,9 +678,9 @@ próprio: fica na auditoria e no limite geral de 120 requisições por minuto do
 **Revogar.** Em **Agentes (MCP)**, clique em **Revogar** ao lado do token e confirme. O agente perde o acesso na hora.
 O token revogado continua na lista, marcado como revogado, para o histórico. Os pedidos pendentes dele são cancelados.
 
-**Quem sai da equipe.** O token não pertence a quem o criou: ele continua válido mesmo que essa pessoa saia da equipe
-ou perca o acesso ao painel. Ao tirar alguém da equipe, revogue os tokens que ela criou (a lista mostra quem criou cada
-um) e crie outros, se ainda forem necessários.
+**Quem sai da equipe.** Remover alguém da equipe, a pessoa sair da loja ou um dono deixar de ser dono revoga na hora
+os tokens que ela criou nesta loja (o painel avisa quantos antes de confirmar). Crie outros, se ainda forem
+necessários.
 
 **Em produção, confira o `TRUST_PROXY`** (seção 2). O MCP limita as requisições por IP (300 por minuto) e as
 tentativas com token inválido por IP (30 por minuto). Com `TRUST_PROXY` errado, todo mundo parece ter o mesmo IP: o
@@ -688,6 +688,48 @@ limite bloqueia agentes legítimos junto com quem erra. Com `TRUST_PROXY=0`, o I
 vale e as falhas de autenticação caem num balde único para o servidor todo. Além disso, cada token tem o limite próprio
 de 120 requisições por minuto e de 2 requisições ao mesmo tempo (a terceira simultânea recebe 429 e pode tentar de novo
 em 5 segundos); uma consulta que passe de 5 segundos no banco é cortada e volta como erro.
+
+## Equipe e convites
+
+No painel, **Loja → Equipe** mostra quem acessa o painel da loja e os convites pendentes. Só o dono gere a equipe.
+
+**Exige o e-mail da loja.** O convite sai pelo e-mail conectado em **Conexões** (SMTP ou Resend, seção 7). Sem ele, o
+botão "Convidar pessoa" fica desabilitado, com um aviso e o link para Conexões. Não existe "copiar link": o link só vai
+para o e-mail convidado, assim ninguém aceita no lugar da pessoa.
+
+**Papéis.** Um convite dá um destes papéis (nunca o de dono):
+
+| Papel | Pode | Não pode |
+|---|---|---|
+| Administrador | Tudo, menos equipe e conexões | Convidar, trocar papel, remover, tokens MCP |
+| Atendimento | Pedidos (ver e reenviar), contatos, catálogo só leitura, aprovar pela fila | Métricas, reembolso, liberar Pix, exportar, conexões |
+| Tráfego | Métricas, relatório de vendas sem comprador, Pixel das ofertas, catálogo só leitura | Pedidos com dados do comprador, contatos, conexões |
+
+**Validade e limites.** O link vale 7 dias e só uma vez. "Reenviar" manda um link novo e o anterior deixa de valer na
+hora; espere 2 minutos entre um reenvio e outro, e cada convite sai no máximo 5 vezes. "Revogar" mata o link. Por loja:
+30 e-mails de convite por dia, 20 convites pendentes e 50 pessoas (membros mais convites pendentes). Se o e-mail não
+sair, o convite aparece como "Não enviado", com o motivo: confira Conexões e clique em Reenviar.
+
+**Aceitar.** O link abre `/admin/convite/<token>` no endereço da loja. Quem ainda não tem conta escolhe nome e senha (o
+e-mail é o do convite e não muda). Quem já tem conta na plataforma (outra loja, no `MODE=multi`) entra com a própria
+senha. Não há recuperação de senha: quem esqueceu fala com quem convidou. Depois de 10 tentativas em 15 minutos (por IP
+ou por convite), o aceite espera alguns minutos; a senha errada conta também no bloqueio do login.
+
+**Gerir.** Em cada pessoa: "Trocar papel", "Encerrar sessões" e "Remover da equipe". A troca de papel vale no próximo
+clique, sem derrubar a sessão. Remover apaga o acesso e as sessões da pessoa nesta loja e revoga os tokens MCP que ela
+criou aqui; a conta continua existindo. Na sua linha ficam "Deixar de ser dono" e "Sair da loja". Um dono não muda o
+papel nem remove outro dono, e a loja nunca fica sem dono.
+
+**Transferir a loja.** Troque o papel de quem vai assumir para **Dono** e depois, na sua linha, clique em "Deixar de ser
+dono" (ou "Sair da loja"). Os tokens MCP que você criou são revogados nesse passo.
+
+**Várias lojas.** No `MODE=multi`, quem está em mais de uma loja vê "Suas lojas" no rodapé do menu (e no "Mais", no
+celular). Cada loja tem a própria sessão: o link abre o painel da outra loja, que pede a senha (a mesma conta).
+
+**Proxy e CDN: não registre a URL de `/admin/convite/`.** O token do convite vai no caminho da URL, como em `/sair/` e
+`/api/mcp/upload/`: desligue o log de URL para `/admin/convite/` no proxy ou CDN. A página já manda
+`Referrer-Policy: no-referrer` e `Cache-Control: no-store`, e o app nunca grava o token, o link nem o e-mail convidado
+no log ou na auditoria.
 
 ## Abandono antes de comprar
 

@@ -2,9 +2,12 @@
 
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
-import { ActionError } from "@/lib/actions/core";
-import { createSession, login, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
+import { ActionError, runAction } from "@/lib/actions/core";
+import { createSession, destroySession, login, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
+import { clientIpFrom } from "@/lib/client-ip";
+import { env } from "@/lib/env";
 import { resolveStore, setupFirstRun } from "@/lib/stores";
+import { acceptInvite } from "@/lib/team/accept";
 
 const field = (f: FormData, k: string) => (typeof f.get(k) === "string" ? (f.get(k) as string) : "");
 
@@ -53,4 +56,52 @@ export async function setupAction(form: FormData): Promise<void> {
     target = e.code === "invalid_input" ? "/admin/setup?erro=dados" : e.code === "forbidden" ? "/admin/setup?erro=codigo" : "/admin/login";
   }
   redirect(target);
+}
+
+/**
+ * Estado do formulário de aceite do convite (`useActionState`): os erros voltam para a própria página, sem ir para a URL
+ * (nome e senha nunca aparecem no endereço). `gone`: o convite não vale mais; `hasAccount`: o e-mail já tem conta, e a
+ * página passa ao formulário de senha.
+ */
+export type AcceptState = { error?: string; gone?: boolean; hasAccount?: boolean } | null;
+
+const ACCEPT_ERROR: Record<string, string> = {
+  forbidden: "Senha incorreta. Depois de 5 tentativas erradas, o acesso fica bloqueado por 15 minutos.",
+  rate_limited: "Muitas tentativas. Espere alguns minutos e tente de novo.",
+  invalid_input: "Confira os dados: nome de 1 a 100 caracteres e senha de 10 a 256.",
+};
+
+/**
+ * POST da página /admin/convite/<token>. A regra fica toda em `team.acceptInvite`; aqui só a sessão, como no login: a
+ * sessão anterior deste navegador (de quem quer que seja) é apagada e a nova pertence a quem aceitou.
+ */
+export async function acceptInviteAction(_prev: AcceptState, form: FormData): Promise<AcceptState> {
+  const token = field(form, "token");
+  const mode = field(form, "mode") === "existing" ? "existing" : "new";
+  const password = field(form, "password");
+  const name = field(form, "name");
+  // Limites de tamanho antes de qualquer consulta ou hash.
+  if (token.length > 200 || password.length > MAX_PASSWORD_LENGTH || name.length > 100) return { error: ACCEPT_ERROR.invalid_input };
+  if (mode === "new" && password !== field(form, "confirmPassword")) return { error: "As senhas não conferem." };
+  const h = await headers();
+  const found = await resolveStore(h.get("host") ?? "");
+  if (!found) return { gone: true };
+  let out: { userId: string; storeId: string };
+  try {
+    out = await runAction(
+      acceptInvite,
+      { storeId: found.id, actor: { kind: "public" }, origin: "public", server: { ip: clientIpFrom(h, env.TRUST_PROXY) } },
+      mode === "new" ? { token, mode, name, password } : { token, mode, password },
+    );
+  } catch (e) {
+    if (!(e instanceof ActionError)) throw e;
+    if (e.code === "not_found") return { gone: true };
+    if (e.code === "conflict" && (e.details as { hasAccount?: boolean } | undefined)?.hasAccount) {
+      return { hasAccount: true, error: "Você já tem conta na plataforma. Entre com a sua senha para aceitar." };
+    }
+    return { error: ACCEPT_ERROR[e.code] ?? e.message, ...(mode === "existing" ? { hasAccount: true } : {}) };
+  }
+  await destroySession();
+  await setSessionCookie(await createSession(out.userId, out.storeId));
+  redirect("/admin");
 }

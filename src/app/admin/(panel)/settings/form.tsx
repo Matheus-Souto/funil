@@ -1,7 +1,7 @@
 "use client";
 
 // Configurações em abas (as do Arc): Loja, Checkout, Contatos e recuperação (um formulário só, salvo de uma vez), Página
-// de vendas, Equipe e Entrega (conteúdo do servidor). Cada ajuste é uma linha: título e explicação à esquerda, controle à
+// de vendas e Entrega (conteúdo do servidor). Cada ajuste é uma linha: título e explicação à esquerda, controle à
 // direita. Trocar de aba não perde o que foi digitado (o estado vive aqui); a barra de salvar aparece quando há alteração.
 // A aba fica no endereço (?aba=), para links diretos (ex.: o aviso de Contatos abre ?aba=contatos).
 // A cor do checkout usa o seletor de cores do Arc, com prévia ao vivo e o contraste do texto do botão (a mesma regra AA
@@ -58,19 +58,16 @@ export function SettingsPanel({
   canWrite,
   initialTab,
   script,
-  team,
   delivery,
 }: {
   initial: Initial;
   canWrite: boolean;
   initialTab: SettingsTab;
   script: ReactNode;
-  /** Só para quem gerencia a equipe; sem isso a aba não aparece. */
-  team: ReactNode | null;
   delivery: ReactNode;
 }) {
   const id = useId();
-  const tabs = SETTINGS_TABS.filter(([k]) => k !== "equipe" || team);
+  const tabs = SETTINGS_TABS;
   const [tab, setTab] = useState<SettingsTab>(tabs.some(([k]) => k === initialTab) ? initialTab : "loja");
   const [f, setF] = useState(() => formOf(initial));
   // Depois de salvar, a página volta do servidor com os valores novos: o formulário passa a compará-los com eles.
@@ -247,7 +244,6 @@ export function SettingsPanel({
         </TabsContent>
 
         <TabsContent value="pagina">{script}</TabsContent>
-        {team ? <TabsContent value="equipe">{team}</TabsContent> : null}
         <TabsContent value="entrega">{delivery}</TabsContent>
       </Tabs>
 

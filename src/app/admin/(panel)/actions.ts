@@ -19,6 +19,8 @@ import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
 import { updateStoreSettings } from "@/lib/store-settings";
+import { inviteMember, inviteStatus, resendInvite, revokeInvite } from "@/lib/team/invites";
+import { changeRole, leaveStore, removeMember } from "@/lib/team/members";
 import { saveMeta, testMeta } from "@/lib/tracking/meta";
 import type { ActionResult } from "../result";
 
@@ -75,6 +77,60 @@ export async function changePasswordFormAction(form: FormData): Promise<void> {
 export async function revokeMemberSessionsAction(userId: string) {
   const panel = await requirePanelActor();
   return call(panel, revokeMemberSessions, { userId }, (o) => (o.revoked === 1 ? "1 sessão encerrada." : `${o.revoked} sessões encerradas.`));
+}
+
+// ---- página Equipe: convites, papéis e saída (spec "Equipe e convites", seções 5 e 7) ------------------------------
+
+/** O e-mail sai no `afterCommit`, que já terminou quando `runAction` volta: o resultado do envio vem de `team.inviteStatus`. */
+async function sendResult(panel: PanelActor, inviteId: string): Promise<{ sent: boolean; reason: string }> {
+  const st = await runAction(inviteStatus, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, { inviteId });
+  return { sent: st.sendStatus === "sent", reason: st.sendError ?? "o provedor não respondeu" };
+}
+
+const notSent = (prefix: string, reason: string) => `${prefix}, mas o e-mail não saiu: ${reason.replace(/[.\s]+$/, "")}. Confira Conexões e clique em Reenviar.`;
+
+/** O e-mail do convidado só volta na mensagem para quem convidou (ele mesmo digitou); nunca o token nem o link. */
+export async function inviteAction(input: { email: string; role: string }) {
+  const panel = await requirePanelActor();
+  const r = await call(panel, inviteMember, input);
+  if (!r.ok) return r;
+  const { sent, reason } = await sendResult(panel, r.data.inviteId);
+  const email = typeof input?.email === "string" ? input.email.trim().toLowerCase() : "";
+  return { ok: true as const, data: { inviteId: r.data.inviteId, sent }, message: sent ? `Convite enviado para ${email}` : notSent("Convite criado", reason) };
+}
+
+export async function resendInviteAction(inviteId: string) {
+  const panel = await requirePanelActor();
+  const r = await call(panel, resendInvite, { inviteId });
+  if (!r.ok) return r;
+  const { sent, reason } = await sendResult(panel, inviteId);
+  return { ok: true as const, data: { inviteId, sent }, message: sent ? "Convite reenviado com um link novo." : notSent("Link novo criado", reason) };
+}
+
+export async function revokeInviteAction(inviteId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, revokeInvite, { inviteId }, () => "Convite revogado. O link deixou de valer.");
+}
+
+const tokensText = (n: number) => (n === 0 ? "" : n === 1 ? " 1 token MCP revogado." : ` ${n} tokens MCP revogados.`);
+
+export async function changeRoleAction(userId: string, role: string) {
+  const panel = await requirePanelActor();
+  return call(panel, changeRole, { userId, role }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
+}
+
+export async function removeMemberAction(userId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, removeMember, { userId }, (o) => `Pessoa removida da equipe.${tokensText(o.tokensRevoked)}`);
+}
+
+/** Sair da loja: a ação apaga o vínculo e as sessões desta loja; aqui só o cookie e a ida para o login. */
+export async function leaveStoreAction() {
+  const panel = await requirePanelActor();
+  const r = await call(panel, leaveStore, {});
+  if (!r.ok) return r;
+  await destroySession();
+  redirect("/admin/login");
 }
 
 export async function logoutAction(): Promise<void> {

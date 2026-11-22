@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { Bot, ClipboardCheck, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Package, Plug, ReceiptText, Settings, Tag, Users, type LucideIcon } from "lucide-react";
+import { Bot, ClipboardCheck, KeyRound, LayoutDashboard, LogOut, Mail, Menu, Package, Plug, ReceiptText, Settings, Store, Tag, Users, type LucideIcon } from "lucide-react";
 import s from "../panel.module.css";
 
 const ICONS = {
@@ -35,9 +35,16 @@ export interface NavEntry {
   section?: "loja";
 }
 
+/** Uma loja da conta no menu "Suas lojas" (MODE=multi): o link abre o painel dela. */
+export interface StoreLink {
+  name: string;
+  url: string;
+  current: boolean;
+}
+
 export const isActive = (path: string, href: string) => (href === "/admin" ? path === "/admin" : path === href || path.startsWith(`${href}/`));
 
-export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Promise<void> }) {
+export function TabBar({ items, stores = [], logout }: { items: NavEntry[]; stores?: StoreLink[]; logout: () => Promise<void> }) {
   const path = usePathname();
   const [open, setOpen] = useState(false);
   const tabs = items.filter((i) => !i.section).slice(0, 3);
@@ -70,6 +77,15 @@ export function TabBar({ items, logout }: { items: NavEntry[]; logout: () => Pro
               {i.label}
             </Link>
           ))}
+          {/* Suas lojas (MODE=multi): cada loja tem a própria sessão; o link abre o painel dela, que pede a senha. */}
+          {stores
+            .filter((st) => !st.current)
+            .map((st) => (
+              <a key={st.url} className={s.navItem} href={st.url}>
+                <Store size={18} strokeWidth={1.75} aria-hidden="true" />
+                {st.name}
+              </a>
+            ))}
           <Link className={s.navItem} href="/admin/senha" onClick={() => setOpen(false)}>
             <KeyRound size={18} strokeWidth={1.75} aria-hidden="true" />
             Trocar senha

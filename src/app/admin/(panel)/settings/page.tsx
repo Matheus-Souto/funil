@@ -1,6 +1,6 @@
 import { runAction } from "@/lib/actions/core";
+import { redirect } from "next/navigation";
 import { hasPermission } from "@/lib/actions/permissions";
-import { listTeam } from "@/lib/auth/account";
 import { requirePanelActor } from "@/lib/auth/session";
 import { getStoreSettings } from "@/lib/store-settings";
 import { Accordion } from "@/components/arc/accordion/accordion";
@@ -11,7 +11,6 @@ import { firstParam, type Param } from "@/lib/panel-params";
 import s from "../../panel.module.css";
 import { SettingsPanel } from "./form";
 import { SETTINGS_TABS, type SettingsTab } from "./tabs";
-import { TeamList } from "./team";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Configurações" };
@@ -19,10 +18,11 @@ export const metadata = { title: "Configurações" };
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ aba?: Param }> }) {
   const panel = await requirePanelActor();
   const aba = firstParam((await searchParams).aba);
+  // A aba "equipe" virou a página Equipe: links antigos (e favoritos) continuam funcionando.
+  if (aba === "equipe") redirect("/admin/equipe");
   const initialTab: SettingsTab = SETTINGS_TABS.find(([k]) => k === aba)?.[0] ?? "loja";
   const st = await runAction(getStoreSettings, { ...panel, origin: "panel" }, {});
   const canWrite = hasPermission(panel.actor.role, "connections.write");
-  const team = hasPermission(panel.actor.role, "team.manage") ? await runAction(listTeam, { ...panel, origin: "panel" }, {}) : null;
   const host = new URL(st.checkoutBaseUrl).host;
   return (
     <>
@@ -87,17 +87,6 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               />
             </div>
           </section>
-        }
-        team={
-          team ? (
-            <div id="equipe">
-              <p className={s.setIntro}>
-                Quem acessa o painel da loja. Encerrar as sessões tira a pessoa do painel em todos os aparelhos. Para trocar a sua senha, use{" "}
-                <a href="/admin/senha">Trocar senha</a>.
-              </p>
-              <TeamList members={team.members} />
-            </div>
-          ) : null
         }
         delivery={
           <div>

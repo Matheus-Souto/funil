@@ -21,3 +21,24 @@ describe("next.config.ts headers()", () => {
     for (const r of rules.slice(pdf + 1)) expect(r.source.startsWith("/admin")).toBe(false);
   });
 });
+
+/** Casa um caminho com o `source` do Next (só os formatos usados aqui: `:param` e `:param*`). */
+const matches = (source: string, path: string) =>
+  new RegExp(`^${source.replace(/\/:\w+\*/g, "(?:/.*)?").replace(/:\w+/g, "[^/]+")}$`).test(path);
+
+describe("página do convite da equipe", () => {
+  test("/admin/convite/<token>: no-referrer e no-store (o token vai no caminho), sem perder a proteção contra frame", async () => {
+    const rules = (await config.headers!()) as Rule[];
+    // O Next aplica todas as regras que casam; na mesma chave, a última vence.
+    const merged = new Map<string, string>();
+    for (const r of rules.filter((x) => matches(x.source, "/admin/convite/abc"))) for (const h of r.headers) merged.set(h.key, h.value);
+    expect(merged.get("Referrer-Policy")).toBe("no-referrer");
+    expect(merged.get("Cache-Control")).toBe("no-store");
+    expect(merged.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
+    expect(merged.get("X-Frame-Options")).toBe("DENY");
+    // Só a página do convite: o resto do painel não ganha esses cabeçalhos.
+    const login = new Map<string, string>();
+    for (const r of rules.filter((x) => matches(x.source, "/admin/login"))) for (const h of r.headers) login.set(h.key, h.value);
+    expect(login.has("Referrer-Policy")).toBe(false);
+  });
+});
