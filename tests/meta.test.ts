@@ -462,9 +462,11 @@ describe("pixel nas páginas do comprador", () => {
   }, HEAVY_TEST_MS);
 });
 
-test("META_GRAPH_BASE_URL só com BASE_URL e destino em loopback", () => {
+test("META_GRAPH_BASE_URL, RESEND_BASE_URL e TELEGRAM_BASE_URL só com BASE_URL e destino em loopback", () => {
   const base = { BASE_URL: "http://127.0.0.1:3000", DATABASE_URL: "x", OWNER_DATABASE_URL: "x", SECRET: "s".repeat(40) };
-  expect(parseEnv({ ...base, META_GRAPH_BASE_URL: "http://127.0.0.1:4010/meta" }).META_GRAPH_BASE_URL).toBe("http://127.0.0.1:4010/meta");
-  expect(() => parseEnv({ ...base, META_GRAPH_BASE_URL: "https://evil.example" })).toThrow(/META_GRAPH_BASE_URL/);
-  expect(() => parseEnv({ ...base, BASE_URL: "https://loja.example.com", META_GRAPH_BASE_URL: "http://127.0.0.1:4010" })).toThrow(/META_GRAPH_BASE_URL/);
+  for (const key of ["META_GRAPH_BASE_URL", "RESEND_BASE_URL", "TELEGRAM_BASE_URL"] as const) {
+    expect(parseEnv({ ...base, [key]: "http://127.0.0.1:4010/fake" })[key]).toBe("http://127.0.0.1:4010/fake");
+    expect(() => parseEnv({ ...base, [key]: "https://evil.example" })).toThrow(new RegExp(key));
+    expect(() => parseEnv({ ...base, BASE_URL: "https://loja.example.com", [key]: "http://127.0.0.1:4010" })).toThrow(new RegExp(key));
+  }
 });
