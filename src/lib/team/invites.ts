@@ -2,7 +2,7 @@
 // resultado do envio. O token (`inv_` + 32 bytes) nasce no `prepare`, vai para o `afterCommit` pelo 3º argumento e
 // existe só na memória do processo e no e-mail: no banco fica o sha256. Nunca e-mail, token nem link em log, auditoria
 // ou resposta de ação.
-import { and, eq, lte, sql } from "drizzle-orm";
+import { and, eq, isNotNull, lt, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { randomToken, sha256 } from "@/lib/crypto";
@@ -42,6 +42,23 @@ export async function expireStaleInvites(tx: Tx, storeId: string): Promise<numbe
     .where(and(eq(teamInvite.storeId, storeId), eq(teamInvite.status, "pending"), lte(teamInvite.expiresAt, sql`now()`)))
     .returning({ id: teamInvite.id });
   return rows.length;
+}
+
+/**
+ * Retenção dos convites de uma loja: pendente vencido vira `expired` (sem e-mail) e convite encerrado há mais de
+ * `TEAM.retentionDays` dias, contados a partir de `now`, é apagado.
+ */
+export async function sweepInvites(storeId: string, now: Date): Promise<{ expired: number; removed: number }> {
+  const cutoff = new Date(now.getTime() - TEAM.retentionDays * DAY_MS);
+  return withStore(storeId, async (tx) => {
+    await lockTeam(tx, storeId);
+    const expired = await expireStaleInvites(tx, storeId);
+    const gone = await tx
+      .delete(teamInvite)
+      .where(and(eq(teamInvite.storeId, storeId), isNotNull(teamInvite.endedAt), lt(teamInvite.endedAt, cutoff)))
+      .returning({ id: teamInvite.id });
+    return { expired, removed: gone.length };
+  });
 }
 
 /**

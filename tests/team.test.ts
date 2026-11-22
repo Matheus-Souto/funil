@@ -9,7 +9,7 @@ import { withStore } from "@/lib/db/client";
 import { auditLog, emailLog, integration, membership, rateLimit, teamInvite, users } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
 import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
-import { inviteMember, inviteStatus, resendInvite, revokeInvite } from "@/lib/team/invites";
+import { inviteMember, inviteStatus, resendInvite, revokeInvite, sweepInvites } from "@/lib/team/invites";
 import { TEAM, inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -580,5 +580,30 @@ describe("convites por e-mail", () => {
     });
     const [expired] = await t.ownerDb.select().from(teamInvite).where(and(eq(teamInvite.storeId, storeId), eq(teamInvite.emailHash, sha256(stale))));
     expect(expired).toMatchObject({ status: "expired", email: null });
+  });
+
+  test("sweepInvites: pendente vencido vira expired sem e-mail; encerrado há 31 dias some e há 29 dias fica", async () => {
+    const { storeId } = await shop();
+    const DAY = 24 * 60 * MINUTE_MS;
+    const now = new Date();
+    const stale = newEmail();
+    await t.ownerDb.insert(teamInvite).values(invite(storeId, { email: stale, expiresAt: ago(MINUTE_MS) }));
+    const [old] = await t.ownerDb
+      .insert(teamInvite)
+      .values(invite(storeId, { email: null, status: "revoked", endedAt: new Date(now.getTime() - 31 * DAY) }))
+      .returning({ id: teamInvite.id });
+    const [recent] = await t.ownerDb
+      .insert(teamInvite)
+      .values(invite(storeId, { email: null, status: "revoked", endedAt: new Date(now.getTime() - 29 * DAY) }))
+      .returning({ id: teamInvite.id });
+
+    await sweepInvites(storeId, now);
+
+    const rows = await rowsOf(storeId);
+    expect(rows.some((r) => r.id === old!.id)).toBe(false);
+    expect(rows.some((r) => r.id === recent!.id)).toBe(true);
+    const expired = rows.find((r) => r.emailHash === sha256(stale));
+    expect(expired).toMatchObject({ status: "expired", email: null });
+    expect(expired!.endedAt).toBeInstanceOf(Date);
   });
 });
