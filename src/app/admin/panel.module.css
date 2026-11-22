@@ -3258,6 +3258,12 @@
 }
 
 /* ---------- Equipe ---------- */
+/* Linha de ajuda embaixo do cartão das telas de entrada (aceite do convite). */
+.authHint {
+  max-width: 400px;
+  margin-top: 18px;
+  text-align: center;
+}
 .teamCard + .teamCard {
   margin-top: 16px;
 }

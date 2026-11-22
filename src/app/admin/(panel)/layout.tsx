@@ -2,10 +2,11 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { runAction } from "@/lib/actions/core";
+import { ActionError, runAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
 import { CHANGE_PASSWORD_PATH, getPanelActor, getPanelIdentity } from "@/lib/auth/session";
 import { env } from "@/lib/env";
+import { errorFields, log } from "@/lib/log";
 import { pendingApprovalsCount } from "@/lib/mcp/approvals";
 import { orderCounts } from "@/lib/orders/panel";
 import { needsSetup } from "@/lib/stores";
@@ -65,12 +66,16 @@ export default async function PanelLayout({ children }: { children: ReactNode })
       : []),
   ];
 
-  // "Suas lojas" (só no MODE=multi e só com mais de uma loja). Se a consulta falhar, o menu aparece sem a lista.
+  // "Suas lojas" (só no MODE=multi e só com mais de uma loja). Se a consulta falhar, o menu aparece sem a lista: recusa
+  // da ação (ActionError) é esperada; qualquer outro erro vai para o log, só com ids e códigos (sem dado pessoal).
   const stores =
     env.MODE === "multi"
       ? await runAction(accountStores, { ...panel, origin: "panel" }, {}).then(
           (r) => (r.length > 1 ? r.map((x) => ({ name: x.name, url: x.panelUrl, current: x.current })) : []),
-          () => [],
+          (e: unknown) => {
+            if (!(e instanceof ActionError)) log.error("painel: falha ao listar as lojas da conta", { storeId: panel.storeId, ...errorFields(e) });
+            return [];
+          },
         )
       : [];
 

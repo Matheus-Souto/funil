@@ -63,13 +63,14 @@ export async function setupAction(form: FormData): Promise<void> {
  * (nome e senha nunca aparecem no endereço). `gone`: o convite não vale mais; `hasAccount`: o e-mail já tem conta, e a
  * página passa ao formulário de senha.
  */
-export type AcceptState = { error?: string; gone?: boolean; hasAccount?: boolean } | null;
+export type AcceptState = { error?: string; gone?: boolean; hasAccount?: boolean; name?: string } | null;
 
 const ACCEPT_ERROR: Record<string, string> = {
   forbidden: "Senha incorreta. Depois de 5 tentativas erradas, o acesso fica bloqueado por 15 minutos.",
   rate_limited: "Muitas tentativas. Espere alguns minutos e tente de novo.",
   invalid_input: "Confira os dados: nome de 1 a 100 caracteres e senha de 10 a 256.",
 };
+const ACCEPT_FAILED = "Não foi possível aceitar o convite agora. Tente de novo em alguns minutos.";
 
 /**
  * POST da página /admin/convite/<token>. A regra fica toda em `team.acceptInvite`; aqui só a sessão, como no login: a
@@ -81,8 +82,10 @@ export async function acceptInviteAction(_prev: AcceptState, form: FormData): Pr
   const password = field(form, "password");
   const name = field(form, "name");
   // Limites de tamanho antes de qualquer consulta ou hash.
-  if (token.length > 200 || password.length > MAX_PASSWORD_LENGTH || name.length > 100) return { error: ACCEPT_ERROR.invalid_input };
-  if (mode === "new" && password !== field(form, "confirmPassword")) return { error: "As senhas não conferem." };
+  // O nome volta para o formulário depois de um erro (as senhas, nunca).
+  const keep = mode === "new" && name.length <= 100 ? { name } : {};
+  if (token.length > 200 || password.length > MAX_PASSWORD_LENGTH || name.length > 100) return { error: ACCEPT_ERROR.invalid_input, ...keep };
+  if (mode === "new" && password !== field(form, "confirmPassword")) return { error: "As senhas não conferem.", ...keep };
   const h = await headers();
   const found = await resolveStore(h.get("host") ?? "");
   if (!found) return { gone: true };
@@ -99,7 +102,7 @@ export async function acceptInviteAction(_prev: AcceptState, form: FormData): Pr
     if (e.code === "conflict" && (e.details as { hasAccount?: boolean } | undefined)?.hasAccount) {
       return { hasAccount: true, error: "Você já tem conta na plataforma. Entre com a sua senha para aceitar." };
     }
-    return { error: ACCEPT_ERROR[e.code] ?? e.message, ...(mode === "existing" ? { hasAccount: true } : {}) };
+    return { error: ACCEPT_ERROR[e.code] ?? ACCEPT_FAILED, ...(mode === "existing" ? { hasAccount: true } : keep) };
   }
   await destroySession();
   await setSessionCookie(await createSession(out.userId, out.storeId));

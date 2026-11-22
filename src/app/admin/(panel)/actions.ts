@@ -81,30 +81,38 @@ export async function revokeMemberSessionsAction(userId: string) {
 
 // ---- página Equipe: convites, papéis e saída (spec "Equipe e convites", seções 5 e 7) ------------------------------
 
-/** O e-mail sai no `afterCommit`, que já terminou quando `runAction` volta: o resultado do envio vem de `team.inviteStatus`. */
-async function sendResult(panel: PanelActor, inviteId: string): Promise<{ sent: boolean; reason: string }> {
-  const st = await runAction(inviteStatus, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, { inviteId });
-  return { sent: st.sendStatus === "sent", reason: st.sendError ?? "o provedor não respondeu" };
+/**
+ * O e-mail sai no `afterCommit`, que já terminou quando `runAction` volta: o resultado do envio vem de `team.inviteStatus`.
+ * O convite já existe nesse ponto: uma recusa dessa leitura vira "não enviado" com o motivo padrão, nunca um erro 500.
+ */
+async function sendResult(panel: PanelActor, inviteId: string): Promise<{ sent: boolean; reason?: string }> {
+  try {
+    const st = await runAction(inviteStatus, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, { inviteId });
+    return st.sendStatus === "sent" ? { sent: true } : { sent: false, reason: st.sendError ?? NO_REASON };
+  } catch (e) {
+    if (!(e instanceof ActionError)) throw e;
+    return { sent: false, reason: NO_REASON };
+  }
 }
 
-const notSent = (prefix: string, reason: string) => `${prefix}, mas o e-mail não saiu: ${reason.replace(/[.\s]+$/, "")}. Confira Conexões e clique em Reenviar.`;
+const NO_REASON = "o provedor não respondeu";
 
-/** O e-mail do convidado só volta na mensagem para quem convidou (ele mesmo digitou); nunca o token nem o link. */
+/**
+ * Convida por e-mail. A resposta traz só se o e-mail saiu e o motivo curto da falha: nem o e-mail do convidado, nem o
+ * token, nem o link (a tela monta a mensagem com o e-mail que já está no formulário).
+ */
 export async function inviteAction(input: { email: string; role: string }) {
   const panel = await requirePanelActor();
   const r = await call(panel, inviteMember, input);
   if (!r.ok) return r;
-  const { sent, reason } = await sendResult(panel, r.data.inviteId);
-  const email = typeof input?.email === "string" ? input.email.trim().toLowerCase() : "";
-  return { ok: true as const, data: { inviteId: r.data.inviteId, sent }, message: sent ? `Convite enviado para ${email}` : notSent("Convite criado", reason) };
+  return { ok: true as const, data: await sendResult(panel, r.data.inviteId) };
 }
 
 export async function resendInviteAction(inviteId: string) {
   const panel = await requirePanelActor();
   const r = await call(panel, resendInvite, { inviteId });
   if (!r.ok) return r;
-  const { sent, reason } = await sendResult(panel, inviteId);
-  return { ok: true as const, data: { inviteId, sent }, message: sent ? "Convite reenviado com um link novo." : notSent("Link novo criado", reason) };
+  return { ok: true as const, data: await sendResult(panel, inviteId) };
 }
 
 export async function revokeInviteAction(inviteId: string) {
@@ -116,7 +124,10 @@ const tokensText = (n: number) => (n === 0 ? "" : n === 1 ? " 1 token MCP revoga
 
 export async function changeRoleAction(userId: string, role: string) {
   const panel = await requirePanelActor();
-  return call(panel, changeRole, { userId, role }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
+  const r = await call(panel, changeRole, { userId, role }, (o) => `Papel trocado.${tokensText(o.tokensRevoked)}`);
+  // Deixar de ser dono: a página Equipe deixa de existir para esta pessoa (404 no refresh); vai para o início do painel.
+  if (r.ok && userId === panel.actor.userId && role !== "owner") redirect("/admin");
+  return r;
 }
 
 export async function removeMemberAction(userId: string) {

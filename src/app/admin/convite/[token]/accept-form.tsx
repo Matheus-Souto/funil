@@ -53,7 +53,7 @@ export function AcceptForm({ token, email, hasAccount }: { token: string; email:
             <>
               <label className={s.field}>
                 <span className={s.label}>Seu nome</span>
-                <input className={s.input} name="name" type="text" autoComplete="name" required maxLength={100} autoFocus />
+                <input key={state?.name ?? ""} className={s.input} name="name" type="text" autoComplete="name" required maxLength={100} defaultValue={state?.name ?? ""} autoFocus />
               </label>
               <label className={s.field}>
                 <span className={s.label}>Crie uma senha</span>
@@ -72,7 +72,7 @@ export function AcceptForm({ token, email, hasAccount }: { token: string; email:
         </form>
       </div>
       {existing ? (
-        <p className={s.hint} style={{ marginTop: 18, textAlign: "center", maxWidth: 400 }}>
+        <p className={`${s.hint} ${s.authHint}`}>
           Esqueceu a senha? Fale com quem convidou você.
         </p>
       ) : null}

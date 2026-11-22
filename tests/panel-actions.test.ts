@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { ackAlert, alertSeller, listAlerts, listDeliveryFailures } from "@/lib/alerts";
+import { hashPassword } from "@/lib/auth/password";
 import { createSession, lookupSession, SESSION_COOKIE } from "@/lib/auth/session";
 import { connectionsStatus } from "@/lib/connections";
 import { sha256 } from "@/lib/crypto";
@@ -731,7 +732,19 @@ describe("Equipe e convites: server actions", () => {
     return { userId: u!.id, token };
   }
 
-  test("inviteAction: 'Convite enviado para {e-mail}' quando o e-mail sai; a mensagem de falha quando não sai", async () => {
+  /** Chama `fn` e devolve o destino do redirect do Next (ou null se não redirecionou). */
+  async function redirectOf(fn: () => unknown): Promise<string | null> {
+    try {
+      await fn();
+      return null;
+    } catch (e) {
+      const digest = (e as { digest?: unknown }).digest;
+      if (typeof digest !== "string" || !digest.startsWith("NEXT_REDIRECT")) throw e;
+      return digest.split(";")[2] ?? null;
+    }
+  }
+
+  test("inviteAction: diz se o e-mail saiu (e o motivo da falha), sem devolver o e-mail, o token nem o link", async () => {
     const { inviteAction } = await import("@/app/admin/(panel)/actions");
     const { storeId } = await seedStore("Maná Kids");
     const owner = await member(storeId, "owner");
@@ -739,17 +752,43 @@ describe("Equipe e convites: server actions", () => {
 
     const ok = newEmail();
     const sent = await inviteAction({ email: ok, role: "support" });
-    expect(sent).toMatchObject({ ok: true, data: { sent: true }, message: `Convite enviado para ${ok}` });
+    expect(sent).toEqual({ ok: true, data: { sent: true } });
     expect(outbox).toHaveLength(1);
 
     sendError = new Error("connect ECONNREFUSED");
-    const bad = await inviteAction({ email: newEmail(), role: "traffic" });
+    const badEmail = newEmail();
+    const bad = await inviteAction({ email: badEmail, role: "traffic" });
     expect(bad.ok).toBe(true);
     if (!bad.ok) return;
     expect(bad.data.sent).toBe(false);
-    expect(bad.message).toMatch(/^Convite criado, mas o e-mail não saiu: .+\. Confira Conexões e clique em Reenviar\.$/);
-    // A resposta não traz o token nem o link do convite.
-    expect(JSON.stringify(bad)).not.toContain("/admin/convite/");
+    expect(bad.data.reason).toBeTruthy();
+    for (const r of [sent, bad]) {
+      expect(JSON.stringify(r)).not.toContain("/admin/convite/");
+      expect(JSON.stringify(r)).not.toContain("@");
+    }
+  });
+
+  test("mensagens do envio montadas na tela: enviado e falha com o caminho para resolver", async () => {
+    const { inviteSentText, notSentText } = await import("@/app/admin/(panel)/equipe/messages");
+    expect(inviteSentText("pessoa@example.com")).toBe("Convite enviado para pessoa@example.com");
+    expect(notSentText("Convite criado", "Não foi possível enviar o e-mail.")).toBe(
+      "Convite criado, mas o e-mail não saiu: Não foi possível enviar o e-mail. Confira Conexões e clique em Reenviar.",
+    );
+    expect(notSentText("Convite criado", undefined)).toMatch(/^Convite criado, mas o e-mail não saiu: .+\. Confira Conexões e clique em Reenviar\.$/);
+  });
+
+  test("changeRoleAction: deixar de ser dono leva ao início do painel (sem recarregar a Equipe, que daria 404)", async () => {
+    const { changeRoleAction } = await import("@/app/admin/(panel)/actions");
+    const { storeId } = await seedStore();
+    const other = await member(storeId, "support", false);
+    await member(storeId, "owner", false);
+    const me = await member(storeId, "owner");
+    // Trocar o papel de outra pessoa: só a mensagem, sem redirect.
+    expect(await changeRoleAction(other.userId, "traffic")).toMatchObject({ ok: true, message: "Papel trocado." });
+    // Rebaixar a si mesmo: redirect para /admin.
+    expect(await redirectOf(() => changeRoleAction(me.userId, "admin"))).toBe("/admin");
+    const [row] = await t.ownerDb.select({ role: membership.role }).from(membership).where(and(eq(membership.storeId, storeId), eq(membership.userId, me.userId)));
+    expect(row!.role).toBe("admin");
   });
 
   test("acceptInviteAction: apaga a sessão anterior, grava o cookie da conta nova e leva ao painel", async () => {
@@ -801,5 +840,40 @@ describe("Equipe e convites: server actions", () => {
     form.set("confirmPassword", "outra-senha-qualquer");
     expect(await acceptInviteAction(null, form)).toMatchObject({ error: "As senhas não conferem." });
     expect(jar.has(SESSION_COOKIE)).toBe(false);
+  });
+
+  test("acceptInviteAction: senha errada (conta que já existe) mantém o cookie e a sessão anterior", async () => {
+    const { acceptInviteAction } = await import("@/app/admin/actions");
+    const found = await resolveStore("localhost:3000");
+    const storeId = found ? found.id : (await seedStore()).storeId;
+    const before = await member(storeId, "support");
+
+    const email = newEmail();
+    await t.ownerDb.insert(users).values({ email, name: "Conta Antiga", passwordHash: await hashPassword("senha-certa-da-conta-123") });
+    const token = "inv" + "_" + randomBytes(32).toString("base64url");
+    await t.ownerDb.insert(teamInvite).values({ storeId, email, emailHash: sha256(email), role: "support", tokenHash: inviteTokenHash(token), expiresAt: new Date(Date.now() + 86_400_000) });
+
+    const form = new FormData();
+    form.set("token", token);
+    form.set("mode", "existing");
+    form.set("password", "senha-errada-qualquer-1");
+    const state = await acceptInviteAction(null, form);
+    expect(state).toMatchObject({ hasAccount: true });
+    expect(state?.error).toMatch(/^Senha incorreta/);
+    expect(jar.get(SESSION_COOKIE)).toBe(before.token);
+    expect(await t.ownerDb.select().from(session).where(eq(session.idHash, sha256(before.token)))).toHaveLength(1);
+  });
+
+  test("acceptInviteAction: depois de um erro o nome volta para o formulário; as senhas, nunca", async () => {
+    const { acceptInviteAction } = await import("@/app/admin/actions");
+    const form = new FormData();
+    form.set("token", "x");
+    form.set("mode", "new");
+    form.set("name", "Pessoa Convidada");
+    form.set("password", "senha-do-convidado-123");
+    form.set("confirmPassword", "outra-senha-qualquer");
+    const state = await acceptInviteAction(null, form);
+    expect(state).toEqual({ error: "As senhas não conferem.", name: "Pessoa Convidada" });
+    expect(JSON.stringify(state)).not.toContain("senha-do-convidado");
   });
 });

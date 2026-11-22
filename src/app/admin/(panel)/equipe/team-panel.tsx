@@ -14,6 +14,7 @@ import type { ActionResult } from "../../result";
 import s from "../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../ui";
 import { changeRoleAction, inviteAction, leaveStoreAction, removeMemberAction, resendInviteAction, revokeInviteAction, revokeMemberSessionsAction } from "../actions";
+import { inviteSentText, notSentText } from "./messages";
 import { ROLE_INFO, roleLabel, type MemberRole } from "./roles";
 
 export interface MemberRow {
@@ -129,11 +130,12 @@ export function InviteButton({ roles, disabled }: { roles: MemberRole[]; disable
             className={s.teamForm}
             onSubmit={async (e) => {
               e.preventDefault();
-              const r = await invite.run(() => inviteAction({ email: email.trim(), role }));
+              const to = email.trim().toLowerCase();
+              const r = await invite.run(() => inviteAction({ email: to, role }), { ok: (d) => (d.sent ? inviteSentText(to) : notSentText("Convite criado", d.reason)) });
               if (r.ok) {
                 setDone(true);
                 // Convite gravado, mas o e-mail não saiu: a mensagem é de erro (com o caminho para resolver).
-                if (!r.data.sent && r.message) invite.setMsg({ tone: "error", text: r.message });
+                if (!r.data.sent) invite.setMsg({ tone: "error", text: notSentText("Convite criado", r.data.reason) });
               }
             }}
           >
@@ -316,13 +318,14 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
       <Dialog
         open={open?.kind === "sessions"}
         onClose={close}
+        tone="danger"
         title={`Encerrar as sessões de ${m?.name ?? ""}?`}
         footer={
           <>
             <button type="button" className={s.btn} onClick={close} data-autofocus>
               Cancelar
             </button>
-            <button type="button" className={`${s.btn} ${s.btnPrimary}`} disabled={act.pending} onClick={() => m && confirm(() => revokeMemberSessionsAction(m.userId))}>
+            <button type="button" className={`${s.btn} ${s.btnDanger}`} disabled={act.pending} onClick={() => m && confirm(() => revokeMemberSessionsAction(m.userId))}>
               {act.pending ? "Encerrando…" : "Encerrar sessões"}
             </button>
           </>
@@ -370,7 +373,15 @@ export function MembersTable({ members, roles, owners }: { members: MemberRow[];
             <button type="button" className={s.btn} onClick={close} data-autofocus>
               Cancelar
             </button>
-            <button type="button" className={`${s.btn} ${s.btnDanger}`} disabled={act.pending} onClick={() => m && confirm(() => changeRoleAction(m.userId, nextRole))}>
+            <button
+              type="button"
+              className={`${s.btn} ${s.btnDanger}`}
+              disabled={act.pending}
+              onClick={() =>
+                // Sem refresh: sem team.manage, recarregar /admin/equipe daria 404. A action leva ao início do painel.
+                m && act.run(() => changeRoleAction(m.userId, nextRole), { refresh: false })
+              }
+            >
               {act.pending ? "Salvando…" : "Deixar de ser dono"}
             </button>
           </>
@@ -426,8 +437,8 @@ export function InvitesTable({ invites }: { invites: InviteRow[] }) {
     setRevoking(null);
   };
   const resend = async (inv: InviteRow) => {
-    const r = await act.run(() => resendInviteAction(inv.id));
-    if (r.ok && !r.data.sent && r.message) act.setMsg({ tone: "error", text: r.message });
+    const r = await act.run(() => resendInviteAction(inv.id), { ok: (d) => (d.sent ? "Convite reenviado com um link novo." : notSentText("Link novo criado", d.reason)) });
+    if (r.ok && !r.data.sent) act.setMsg({ tone: "error", text: notSentText("Link novo criado", r.data.reason) });
   };
 
   return (
