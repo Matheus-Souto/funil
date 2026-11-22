@@ -6,10 +6,9 @@ import { and, eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import { listTeam } from "@/lib/auth/account";
 import { withStore } from "@/lib/db/client";
-import { auditLog, emailLog, integration, membership, teamInvite, users } from "@/lib/db/schema";
+import { auditLog, emailLog, integration, membership, rateLimit, teamInvite, users } from "@/lib/db/schema";
 import { sha256 } from "@/lib/crypto";
 import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
-import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { inviteMember, inviteStatus, resendInvite, revokeInvite } from "@/lib/team/invites";
 import { TEAM, inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -184,14 +183,19 @@ describe("convites por e-mail", () => {
     () => runAction(inviteStatus, c, { inviteId }),
   ];
   /**
-   * Enche o limite diário da loja na janela de agora e na seguinte (a janela é fixa, alinhada ao UTC): o resultado é o mesmo
-   * de qualquer lado da meia-noite, mesmo que o teste a cruze.
+   * Fixa o contador diário da loja no máximo na janela de agora e na seguinte (janela fixa de 24 h alinhada ao UTC, como
+   * `windowStart` em ratelimit.ts): o resultado é o mesmo de qualquer lado da meia-noite. Grava direto na tabela: passar uma
+   * data futura a `checkRateLimit` dispararia a limpeza aleatória, que apaga a janela de hoje.
    */
   async function fillDailyLimit(storeId: string): Promise<void> {
     const key = `team:invite:${storeId}`;
-    for (const at of [new Date(), new Date(Date.now() + 86_400_000)]) {
-      // Pode já haver envios na janela de agora: passar de 30 só deixa o contador mais cheio.
-      for (let i = 0; i < TEAM.invitesPerDay; i++) await checkRateLimit(key, TEAM.invitesPerDay, 86_400, at);
+    const windowMs = 86_400_000;
+    const current = Math.floor(Date.now() / windowMs) * windowMs;
+    for (const start of [current, current + windowMs]) {
+      await t.ownerDb
+        .insert(rateLimit)
+        .values({ key, windowStart: new Date(start), count: TEAM.invitesPerDay })
+        .onConflictDoUpdate({ target: [rateLimit.key, rateLimit.windowStart], set: { count: TEAM.invitesPerDay } });
     }
   }
   const ago = (ms: number) => new Date(Date.now() - ms);
