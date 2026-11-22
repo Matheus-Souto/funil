@@ -2,14 +2,14 @@
 // conta e a corrida entre criar token MCP e deixar de ser dono.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
-import { listTeam } from "@/lib/auth/account";
+import { listTeam, revokeMemberSessions } from "@/lib/auth/account";
 import { createSession, lookupSession } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
 import { approvalRequest, auditLog, mcpToken, membership, session, store, users } from "@/lib/db/schema";
-import { createMcpToken } from "@/lib/mcp/tokens";
+import { createMcpToken, revokeMcpToken } from "@/lib/mcp/tokens";
 import { accountStores, changeRole, leaveStore, removeMember } from "@/lib/team/members";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
@@ -68,6 +68,18 @@ async function pendingOf(storeId: string, tokenId: string) {
     .returning({ id: approvalRequest.id });
   return row!.id;
 }
+/** Sessões do banco de teste esperando um lock do tipo dado (`advisory`, `transactionid`...). */
+async function lockWaiters(locktype: string): Promise<number> {
+  const rows = await t.ownerDb.execute(
+    sql`select 1 from pg_locks l join pg_stat_activity a on a.pid = l.pid where l.locktype = ${locktype} and not l.granted and a.datname = current_database()`,
+  );
+  return rows.length;
+}
+async function waitUntil(cond: () => Promise<boolean>): Promise<void> {
+  while (!(await cond())) await new Promise<void>((r) => setImmediate(r));
+}
+const waitForLockWaiter = (locktype: string) => waitUntil(async () => (await lockWaiters(locktype)) > 0);
+
 const tokenRow = async (id: string) => (await t.ownerDb.select().from(mcpToken).where(eq(mcpToken.id, id)))[0]!;
 const requestRow = async (id: string) => (await t.ownerDb.select().from(approvalRequest).where(eq(approvalRequest.id, id)))[0]!;
 const auditsOf = (storeId: string, action: string) =>
@@ -313,12 +325,63 @@ describe("mcpTokens.create x deixar de ser dono", () => {
     expect(await t.ownerDb.select().from(mcpToken).where(eq(mcpToken.storeId, storeId))).toHaveLength(0);
   });
 
+  test("em paralelo: o dono se rebaixa enquanto cria um token com o mesmo ator; não sobra token ativo dele", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    await seedUser(storeId, "owner");
+    // Ordem forçada da pior corrida: a criação lê o papel (ainda dono) e para no insert, porque a FK de `created_by`
+    // precisa de `for key share` na linha do usuário, travada aqui com `for update`. O rebaixamento corre nesse meio
+    // tempo. Com o lock da equipe na criação, o rebaixamento espera o token nascer e o revoga; sem ele, o rebaixamento
+    // termina antes e o token nasce depois, ativo.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const holder = t.ownerDb.transaction(async (tx) => {
+      await tx.execute(sql`select 1 from users where id = ${a.userId} for update`);
+      locked();
+      await held;
+    });
+    await isLocked;
+    const create = code(runAction(createMcpToken, panel(storeId, a.actor), { name: "corrida", role: "owner" }));
+    await waitForLockWaiter("transactionid");
+    let demoteDone = false;
+    const demote = code(runAction(changeRole, panel(storeId, a.actor), { userId: a.userId, role: "admin" })).finally(() => (demoteDone = true));
+    // Espera o rebaixamento terminar (sem o lock na criação) ou parar no lock da equipe (com ele).
+    await waitUntil(async () => demoteDone || (await lockWaiters("advisory")) > 0);
+    release();
+    await holder;
+    expect(await demote).toBe("ok");
+    expect(["ok", "forbidden"]).toContain(await create);
+    const active = await t.ownerDb
+      .select()
+      .from(mcpToken)
+      .where(and(eq(mcpToken.storeId, storeId), eq(mcpToken.createdBy, a.userId), isNull(mcpToken.revokedAt)));
+    expect(active).toHaveLength(0);
+  });
+
   test("quem saiu da loja também não cria token", async () => {
     const { storeId } = await seedStore();
     const a = await seedUser(storeId, "owner");
     await seedUser(storeId, "owner");
     await runAction(leaveStore, panel(storeId, a.actor), {});
     expect(await code(runAction(createMcpToken, panel(storeId, a.actor), { name: "tardio", role: "reader" }))).toBe("forbidden");
+  });
+});
+
+describe("papel relido sob o lock nas outras mutações de equipe", () => {
+  test("dono já rebaixado: forbidden em team.revokeSessions e mcpTokens.revoke", async () => {
+    const { storeId } = await seedStore();
+    const a = await seedUser(storeId, "owner");
+    const b = await seedUser(storeId, "owner");
+    const sup = await seedUser(storeId, "support");
+    await createSession(sup.userId, storeId);
+    const tok = await tokenOf(storeId, b.userId);
+    await runAction(changeRole, panel(storeId, a.actor), { userId: a.userId, role: "admin" });
+    expect(await code(runAction(revokeMemberSessions, panel(storeId, a.actor), { userId: sup.userId }))).toBe("forbidden");
+    expect(await code(runAction(revokeMcpToken, panel(storeId, a.actor), { id: tok }))).toBe("forbidden");
+    expect(await sessionsOf(sup.userId)).toHaveLength(1);
+    expect((await tokenRow(tok)).revokedAt).toBeNull();
   });
 });
 

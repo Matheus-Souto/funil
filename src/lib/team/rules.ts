@@ -39,10 +39,7 @@ export function canGrant(actor: Role, target: Role): boolean {
   return ROLE_PERMISSIONS[target].every((p) => has.has(p));
 }
 
-/** Lock da transação por loja: toda mutação de equipe passa por aqui antes de conferir donos e assentos. */
-export async function lockTeam(tx: Tx, storeId: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${"team:" + storeId}))`);
-}
+export { lockTeam } from "./lock";
 
 export async function ownerCount(tx: Tx, storeId: string): Promise<number> {
   const [row] = await tx

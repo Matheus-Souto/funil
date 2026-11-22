@@ -5,11 +5,11 @@
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
-import { hasPermission, type Role } from "@/lib/actions/permissions";
+import type { Role } from "@/lib/actions/permissions";
 import { randomToken, sha256 } from "@/lib/crypto";
 import { withStore, type Tx } from "@/lib/db/client";
-import { approvalRequest, mcpToken, membership, users } from "@/lib/db/schema";
-import { lockTeam } from "@/lib/team/rules";
+import { approvalRequest, mcpToken, users } from "@/lib/db/schema";
+import { requireCurrentManager } from "@/lib/team/lock";
 
 /** Papéis que um token pode ter (o `reader` só existe para tokens). */
 export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader"] as const satisfies readonly Role[];
@@ -64,15 +64,7 @@ export const createMcpToken = defineAction({
   async run(ctx, input) {
     // Sob o lock da equipe e com o papel ATUAL de quem cria: um dono rebaixado (ou que saiu) ao mesmo tempo não deixa um
     // token novo para trás, que `revokeTokensCreatedBy` não pegaria.
-    await lockTeam(ctx.tx, ctx.storeId);
-    if (ctx.actor.kind === "user") {
-      const [m] = await ctx.tx
-        .select({ role: membership.role })
-        .from(membership)
-        .where(and(eq(membership.storeId, ctx.storeId), eq(membership.userId, ctx.actor.userId)))
-        .limit(1);
-      if (!m || !hasPermission(m.role as Role, "team.manage")) throw new ActionError("forbidden", "Sem permissão: team.manage");
-    }
+    const me = await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
     const { token, hash, last4 } = mintMcpToken(ctx.storeId);
     const [row] = await ctx.tx
       .insert(mcpToken)
@@ -82,7 +74,7 @@ export const createMcpToken = defineAction({
         role: input.role,
         tokenHash: hash,
         last4,
-        createdBy: ctx.actor.kind === "user" ? ctx.actor.userId : null,
+        createdBy: me.userId,
       })
       .returning({ id: mcpToken.id });
     return { id: row!.id, token, name: input.name, role: input.role, last4 };
@@ -139,6 +131,7 @@ export const revokeMcpToken = defineAction({
   permission: "team.manage",
   sensitive: true,
   async run(ctx, { id }) {
+    await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
     if (await revokeToken(ctx.tx, id)) return { revoked: true };
     const [found] = await ctx.tx.select({ id: mcpToken.id }).from(mcpToken).where(eq(mcpToken.id, id));
     if (!found) throw new ActionError("not_found", "Token não encontrado");

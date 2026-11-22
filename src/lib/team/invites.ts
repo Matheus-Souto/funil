@@ -16,7 +16,8 @@ import { errorFields, log } from "@/lib/log";
 import { ROLE_LABEL } from "@/lib/orders/labels";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { emailProviderReady } from "@/lib/recovery/settings";
-import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, lockTeam, seatsUsed } from "./rules";
+import { lockTeam, requireCurrentManager } from "./lock";
+import { INVITE_ROLES, TEAM, canGrant, inviteTokenHash, seatsUsed } from "./rules";
 
 const DAY_MS = 86_400_000;
 const DAY_SEC = 86_400;
@@ -143,7 +144,9 @@ export const inviteMember = defineAction({
   },
   async run(ctx, input, prepared): Promise<{ inviteId: string }> {
     const { storeId, tx } = ctx;
-    await lockTeam(tx, storeId);
+    // O `prepare` já recusou pelo papel da sessão; aqui vale o papel relido sob o lock.
+    const me = await requireCurrentManager(tx, storeId, ctx.actor);
+    if (!canGrant(me.role, input.role)) throw new ActionError("forbidden", "Você não pode dar um papel acima do seu");
     await expireStaleInvites(tx, storeId);
     const hash = emailHashOf(input.email);
     const [member] = await tx
@@ -211,7 +214,7 @@ export const resendInvite = defineAction({
   },
   async run(ctx, { inviteId }, prepared): Promise<{ inviteId: string }> {
     const { storeId, tx } = ctx;
-    await lockTeam(tx, storeId);
+    await requireCurrentManager(tx, storeId, ctx.actor);
     const inv = await load(tx, storeId, inviteId);
     if (inv.status === "expired" || (inv.status === "pending" && inv.expiresAt.getTime() <= Date.now())) {
       throw new ActionError("conflict", "Este convite venceu. Convide de novo");
@@ -251,7 +254,7 @@ export const revokeInvite = defineAction({
   permission: "team.manage",
   sensitive: false,
   async run(ctx, { inviteId }) {
-    await lockTeam(ctx.tx, ctx.storeId);
+    await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
     const [row] = await ctx.tx
       .update(teamInvite)
       .set({ status: "revoked", email: null, endedAt: sql`now()` })

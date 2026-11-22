@@ -1,16 +1,16 @@
 // Gerir a equipe (spec "Equipe e convites", seções 4.1, 4.2, 7 e 8): trocar papel, remover, sair da loja e as lojas da
-// própria conta. Toda mutação pega `lockTeam` e relê, sob o lock, o papel ATUAL de quem age (o ator chega com o papel
-// lido no início da requisição): uma sessão rebaixada ou removida no meio do caminho não gere mais a equipe.
+// própria conta. Toda mutação pega `lockTeam` e relê, sob o lock, o papel ATUAL de quem age (`requireCurrentManager`).
 // `users`, `membership`, `session` e `store` são globais (sem RLS): toda consulta filtra pela loja e pelo usuário.
 import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Actor } from "@/lib/actions/core";
-import { hasPermission, type Role } from "@/lib/actions/permissions";
+import type { Role } from "@/lib/actions/permissions";
 import type { Tx } from "@/lib/db/client";
 import { membership, session, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { env } from "@/lib/env";
-import { canGrant, lockTeam, ownerCount, revokeTokensCreatedBy } from "./rules";
+import { lockTeam, memberRole, requireCurrentManager } from "./lock";
+import { canGrant, ownerCount, revokeTokensCreatedBy } from "./rules";
 
 /** Papéis de uma pessoa na loja (o `reader` só existe para tokens: `membership_role_check`). */
 export const MEMBER_ROLES = ["owner", "admin", "support", "traffic"] as const;
@@ -22,23 +22,6 @@ const userIdOf = (actor: Actor): string => {
   if (actor.kind !== "user") throw new ActionError("forbidden", "Só usuários do painel");
   return actor.userId;
 };
-
-async function roleIn(tx: Tx, storeId: string, userId: string): Promise<Role | null> {
-  const [m] = await tx
-    .select({ role: membership.role })
-    .from(membership)
-    .where(and(eq(membership.storeId, storeId), eq(membership.userId, userId)))
-    .limit(1);
-  return (m?.role as Role | undefined) ?? null;
-}
-
-/** Sob o lock: o papel atual de quem age, que ainda precisa ter `team.manage`. */
-async function managerRole(tx: Tx, storeId: string, actor: Actor): Promise<{ userId: string; role: Role }> {
-  const userId = userIdOf(actor);
-  const role = await roleIn(tx, storeId, userId);
-  if (!role || !hasPermission(role, "team.manage")) throw new ActionError("forbidden", "Sem permissão: team.manage");
-  return { userId, role };
-}
 
 /** Apaga o vínculo e as sessões da pessoa NESTA loja e revoga os tokens MCP que ela criou aqui. */
 async function dropMember(tx: Tx, storeId: string, userId: string): Promise<{ sessionsEnded: number; tokensRevoked: number }> {
@@ -72,9 +55,8 @@ export const changeRole = defineAction({
   auditResult: (o: { tokensRevoked: number }) => ({ tokensRevoked: o.tokensRevoked }),
   async run(ctx, input, audit): Promise<{ tokensRevoked: number }> {
     const { tx, storeId } = ctx;
-    await lockTeam(tx, storeId);
-    const me = await managerRole(tx, storeId, ctx.actor);
-    const from = await roleIn(tx, storeId, input.userId);
+    const me = await requireCurrentManager(tx, storeId, ctx.actor);
+    const from = await memberRole(tx, storeId, input.userId);
     if (!from) throw new ActionError("not_found", "Membro não encontrado");
     audit.from = from;
     if (!canGrant(me.role, from) || !canGrant(me.role, input.role)) throw new ActionError("forbidden", ABOVE_YOURS);
@@ -103,10 +85,9 @@ export const removeMember = defineAction({
   auditResult: removedResult,
   async run(ctx, input, audit): Promise<Removed> {
     const { tx, storeId } = ctx;
-    await lockTeam(tx, storeId);
-    const me = await managerRole(tx, storeId, ctx.actor);
+    const me = await requireCurrentManager(tx, storeId, ctx.actor);
     if (input.userId === me.userId) throw new ActionError("conflict", "Use Sair da loja");
-    const role = await roleIn(tx, storeId, input.userId);
+    const role = await memberRole(tx, storeId, input.userId);
     if (!role) throw new ActionError("not_found", "Membro não encontrado");
     audit.from = role;
     if (!canGrant(me.role, role)) throw new ActionError("forbidden", ABOVE_YOURS);
@@ -130,7 +111,7 @@ export const leaveStore = defineAction({
     const userId = userIdOf(ctx.actor);
     audit.userId = userId;
     await lockTeam(tx, storeId);
-    const role = await roleIn(tx, storeId, userId);
+    const role = await memberRole(tx, storeId, userId);
     if (!role) throw new ActionError("not_found", "Você não faz parte desta loja");
     audit.from = role;
     if (role === "owner" && (await ownerCount(tx, storeId)) <= 1) throw new ActionError("conflict", LAST_OWNER);

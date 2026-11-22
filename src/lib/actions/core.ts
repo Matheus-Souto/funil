@@ -49,7 +49,10 @@ export interface ActionDef<I, O, P = undefined, S = undefined> {
   /**
    * Projeção da entrada gravada na auditoria (em vez da entrada validada); ainda passa por redact e pelo limite de 8 KB.
    * `prepared` (o resultado de `prepare`, quando já rodou) serve para auditar um id que a ação achou sozinha (ex.: o
-   * convite achado pelo hash do token): nunca devolva dele segredo nem dado pessoal.
+   * convite achado pelo hash do token): nunca devolva dele segredo nem dado pessoal. A auditoria é montada depois de
+   * `run` (no sucesso e na falha), então `prepared` pode ter campos preenchidos pelo próprio `run` (ex.: o papel lido sob
+   * o lock em `team.changeRole`). Projete só campos explícitos, nunca o objeto inteiro: o `prepared` de `team.invite`
+   * carrega o token do convite.
    */
   auditInput?: (input: I, prepared?: P) => unknown;
   /**

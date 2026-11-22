@@ -8,7 +8,7 @@ import { db } from "@/lib/db/client";
 import { mcpToken, membership, session, teamInvite, users } from "@/lib/db/schema";
 import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { expireStaleInvites } from "@/lib/team/invites";
-import { lockTeam } from "@/lib/team/rules";
+import { lockTeam, requireCurrentManager } from "@/lib/team/lock";
 import { hashPassword, verifyPassword } from "./password";
 
 const MAX_PASSWORD = 256;
@@ -124,9 +124,8 @@ export const revokeMemberSessions = defineAction({
   permission: "team.manage",
   sensitive: true,
   async run(ctx, { userId }) {
-    if (ctx.actor.kind === "user" && ctx.actor.userId === userId) {
-      throw new ActionError("conflict", "Para encerrar as suas outras sessões, troque a sua senha");
-    }
+    const me = await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
+    if (me.userId === userId) throw new ActionError("conflict", "Para encerrar as suas outras sessões, troque a sua senha");
     const [m] = await ctx.tx
       .select({ userId: membership.userId })
       .from(membership)

@@ -534,6 +534,19 @@ describe("convites por e-mail", () => {
     expect((await rowOf(inviteId)).status).toBe("pending");
   });
 
+  test("dono já rebaixado (o ator ainda diz owner): forbidden em convidar, reenviar e revogar", async () => {
+    const { storeId, call, owner } = await shop();
+    const { inviteId } = await runAction(inviteMember, call, { email: newEmail(), role: "support" });
+    await newUser(storeId, "owner");
+    // Rebaixado por fora (a sessão foi lida antes): o papel relido sob o lock é que vale.
+    await t.ownerDb.update(membership).set({ role: "admin" }).where(and(eq(membership.storeId, storeId), eq(membership.userId, owner.userId)));
+    expect((await failure(runAction(inviteMember, call, { email: newEmail(), role: "support" }))).code).toBe("forbidden");
+    expect((await failure(runAction(resendInvite, call, { inviteId }))).code).toBe("forbidden");
+    expect((await failure(runAction(revokeInvite, call, { inviteId }))).code).toBe("forbidden");
+    expect(await rowsOf(storeId)).toHaveLength(1);
+    expect((await rowOf(inviteId)).status).toBe("pending");
+  });
+
   test("token MCP (mesmo com papel owner) chamando: forbidden", async () => {
     const { storeId, call } = await shop();
     const tokenCall = { storeId, actor: { kind: "token", tokenId: crypto.randomUUID(), role: "owner" } as Actor, origin: "mcp" as const };
