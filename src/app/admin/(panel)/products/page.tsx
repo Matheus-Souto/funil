@@ -58,6 +58,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
           >
             {products.length > 0 ? (
               <ProductsTable
+                paged={products.length > perPage}
                 canView={canWrite}
                 statusFilter={
                   <ColumnFilter

@@ -19,7 +19,7 @@ export interface ProductRow extends Record<string, unknown> {
   createdTs: number;
 }
 
-export function ProductsTable({ rows, canView, statusFilter }: { rows: ProductRow[]; canView: boolean; statusFilter?: ReactNode }) {
+export function ProductsTable({ rows, paged = false, canView, statusFilter }: { rows: ProductRow[]; paged?: boolean; canView: boolean; statusFilter?: ReactNode }) {
   return (
     <div className={s.arcTable}>
       <SortableDataTable<ProductRow>
@@ -29,6 +29,7 @@ export function ProductsTable({ rows, canView, statusFilter }: { rows: ProductRo
         itemName={{ one: "produto", other: "produtos" }}
         emptyMessage="Nenhum produto com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
+        sorting={!paged}
         columns={[
           { key: "name", label: "Produto", render: (_, p) => <ProductCell name={p.name} pages={p.pages} /> },
           { key: "file", label: "Arquivo", render: (_, p) => <span className={s.muted}>{p.file}</span> },

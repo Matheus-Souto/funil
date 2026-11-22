@@ -137,6 +137,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: Promi
           </div>
         ) : (
           <OrdersTable
+            paged={data.total > perPage}
             filters={columnFilters}
             rows={data.items.map((o) => ({
               id: o.id,

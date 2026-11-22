@@ -32,6 +32,8 @@ export type SortableDataTableProps<T extends Record<string, unknown>> = {
   /** Sort applied on the first render. */
   defaultSort?: SortState;
   onSortChange?: (sort: SortState) => void;
+  /** Painel: false desliga a ordenação de todas as colunas. Use quando as linhas são só uma página de uma lista paginada no servidor: ordenar no navegador reordenaria só a página aberta. */
+  sorting?: boolean;
   /** Adds a checkbox column, row click selection, and a count line with a clear action. */
   selectable?: boolean;
   selectedKeys?: string[];
@@ -125,12 +127,13 @@ function SelectBox({ checked, mixed = false, label, nav, reduced, onToggle, inpu
   </label>;
 }
 
-export function SortableDataTable<T extends Record<string, unknown>>({ rows, columns, rowKey, caption = "Tabela", emptyMessage = "Nada para mostrar", defaultSort, onSortChange, selectable = false, selectedKeys, defaultSelectedKeys, onSelectionChange, itemName = { one: "linha", other: "linhas" } }: SortableDataTableProps<T>) {
+export function SortableDataTable<T extends Record<string, unknown>>({ rows, columns, rowKey, caption = "Tabela", emptyMessage = "Nada para mostrar", defaultSort, onSortChange, sorting = true, selectable = false, selectedKeys, defaultSelectedKeys, onSelectionChange, itemName = { one: "linha", other: "linhas" } }: SortableDataTableProps<T>) {
   const reduced = useReducedMotion() ?? false;
   const tableRef = useRef<HTMLTableElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
   const anchor = useRef<string | null>(null);
-  const [sort, setSort] = useState<SortState | null>(defaultSort ?? null);
+  const [chosenSort, setSort] = useState<SortState | null>(defaultSort ?? null);
+  const sort = sorting ? chosenSort : null;
   const [announcement, setAnnouncement] = useState("");
   const [internalSelection, setInternalSelection] = useState<string[]>(defaultSelectedKeys ?? []);
   const selection = useMemo(() => new Set(selectedKeys ?? internalSelection), [internalSelection, selectedKeys]);
@@ -281,7 +284,7 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
           {selectable ? <th scope="col" role="columnheader" className={styles.selectCell}><SelectBox inputRef={selectAllRef} checked={allSelected} mixed={selectedCount > 0 && !allSelected} label="Selecionar todas as linhas" nav="head" reduced={reduced} onToggle={() => commit(allSelected ? new Set() : new Set(keys))} /></th> : null}
           {columns.map((column, index) => {
             const active = sort?.key === column.key;
-            const sortable = column.sortable !== false;
+            const sortable = sorting && column.sortable !== false;
             return <th key={column.key} scope="col" role="columnheader" data-key={column.key} data-primary={index === 0 || undefined} data-sorted={active || undefined} data-numeric={numeric.has(column.key) || undefined} data-sortable={sortable || undefined} aria-sort={!sortable ? undefined : active ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
               <span className={column.filter ? styles.headWithFilter : styles.headPlain}>
               {sortable ? <button className={styles.sortButton} type="button" data-nav="head" onClick={() => sortBy(column)} aria-label={`Ordenar por ${column.label}${active ? `, agora ${sort.direction === "asc" ? "crescente" : "decrescente"}` : ""}`}>

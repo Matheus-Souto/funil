@@ -1,7 +1,8 @@
 "use client";
 
-// Tabela de pedidos com a sortable-data-table do Arc: clique no título ordena (os pedidos da página aberta; a lista vem
-// do servidor já filtrada e paginada, mais recentes primeiro). No celular o próprio Arc vira lista.
+// Tabela de pedidos com a sortable-data-table do Arc. A lista vem do servidor já filtrada e paginada, mais recentes
+// primeiro: com mais de uma página (paged), a ordenação por coluna fica desligada, porque reordenaria só a página aberta
+// (o "maior valor" seria o maior entre os 50 mais recentes, não o da loja). No celular o próprio Arc vira lista.
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { SortableDataTable } from "@/components/arc/sortable-data-table/sortable-data-table";
@@ -26,7 +27,7 @@ export interface OrderRow extends Record<string, unknown> {
   createdTs: number;
 }
 
-export function OrdersTable({ rows, filters = {} }: { rows: OrderRow[]; filters?: { status?: ReactNode; method?: ReactNode } }) {
+export function OrdersTable({ rows, paged = false, filters = {} }: { rows: OrderRow[]; paged?: boolean; filters?: { status?: ReactNode; method?: ReactNode } }) {
   return (
     <div className={s.arcTable}>
       <SortableDataTable<OrderRow>
@@ -36,6 +37,7 @@ export function OrdersTable({ rows, filters = {} }: { rows: OrderRow[]; filters?
         itemName={{ one: "pedido", other: "pedidos" }}
         emptyMessage="Nenhum pedido com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
+        sorting={!paged}
         columns={[
           {
             key: "code",

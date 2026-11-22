@@ -94,6 +94,7 @@ export default async function ContactsPage({ searchParams }: { searchParams: Pro
           </div>
         ) : (
           <LeadsTable
+            paged={data.total > perPage}
             statusFilter={
               <ColumnFilter
                 compact

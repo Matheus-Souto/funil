@@ -25,7 +25,7 @@ export interface LeadRow extends Record<string, unknown> {
   createdTs: number;
 }
 
-export function LeadsTable({ rows, canWrite, canOpenOrders, statusFilter }: { rows: LeadRow[]; canWrite: boolean; canOpenOrders: boolean; statusFilter?: ReactNode }) {
+export function LeadsTable({ rows, paged = false, canWrite, canOpenOrders, statusFilter }: { rows: LeadRow[]; paged?: boolean; canWrite: boolean; canOpenOrders: boolean; statusFilter?: ReactNode }) {
   return (
     <div className={s.arcTable}>
       <SortableDataTable<LeadRow>
@@ -35,6 +35,7 @@ export function LeadsTable({ rows, canWrite, canOpenOrders, statusFilter }: { ro
         itemName={{ one: "contato", other: "contatos" }}
         emptyMessage="Nenhum contato com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
+        sorting={!paged}
         columns={[
           {
             key: "code",
