@@ -394,7 +394,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await page.goto("/admin/offers");
     await expect(page.getByText("Bump: Maná bíblico · versão completa + R$ 17,10")).toBeVisible();
     await shot(page, "p11-ofertas-1280");
-    await page.goto("/admin/settings");
+    // Configurações em abas: o script da página de vendas fica na aba "Página de vendas" (?aba=pagina).
+    await page.goto("/admin/settings?aba=pagina");
     await expect(page.getByText("data-checkout=")).toBeVisible();
     await shot(page, "p15-configuracoes-1280");
   });
@@ -983,7 +984,7 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await sp.goto("/admin/orders");
     await expect(sp).toHaveURL(/\/admin\/orders$/); // esta sessão foi renovada e segue valendo
 
-    await owner.goto("/admin/settings");
+    await owner.goto("/admin/settings?aba=equipe");
     const team = owner.getByRole("region", { name: "Equipe" });
     const member = team.locator("div", { hasText: SUPPORT.email }).last();
     await expect(member.getByText("1 sessão ativa")).toBeVisible();
