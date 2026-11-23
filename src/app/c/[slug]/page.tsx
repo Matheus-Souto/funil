@@ -5,11 +5,13 @@ import { ActionError, runAction } from "@/lib/actions/core";
 import { checkoutOffer } from "@/lib/catalog/checkout-offer";
 import { getPublicOffer } from "@/lib/catalog/offers";
 import { checkoutMethods } from "@/lib/checkout";
+import { clientIpFrom } from "@/lib/client-ip";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import { parseTouch } from "@/lib/tracking/touch";
 import { BuyerShell } from "../../(design)/shell";
 import { CheckoutForm } from "./checkout-form";
+import { initialCoupon } from "./initial-coupon";
 import { CheckoutPixel } from "./pixel";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +33,8 @@ function urlOf(slug: string, sp: Search): URL {
 export default async function CheckoutPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<Search> }) {
   const { slug } = await params;
   const sp = await searchParams;
-  const store = await resolveStore((await headers()).get("host") ?? "");
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
   if (!store) notFound();
   let offer: Awaited<ReturnType<typeof getPublicOffer.run>>;
   try {
@@ -53,6 +56,8 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
   if (methods.length === 0) notFound();
   const wantsCard = sp.metodo === "cartao" && methods.includes("card");
   const brandColor = await getStoreBrandColor(store.id);
+  // `?cupom=`: prévia no servidor (uma vez por carregamento); cupom ruim só abre o campo com a mensagem neutra.
+  const coupon = await initialCoupon(store.id, slug, sp.cupom, clientIpFrom(h, env.TRUST_PROXY));
 
   return (
     <BuyerShell storeName={store.name} brandColor={brandColor}>
@@ -62,6 +67,7 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
         offer={checkoutOffer(offer, methods)}
         initialMethod={wantsCard ? "card" : methods.includes("pix") ? "pix" : "card"}
         touch={touch}
+        initialCoupon={coupon}
         refCode={ref}
         eventId={eventId}
         lead={lead}

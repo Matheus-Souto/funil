@@ -4,8 +4,8 @@
 // Sem dependências de servidor: usado pela página do checkout e pelos testes.
 import { z } from "zod";
 
-/** Parâmetros do toque (último toque = os desta URL). `ref` vai à parte (coluna `orders.ref`). */
-export const TOUCH_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid"] as const;
+/** Parâmetros do toque (último toque = os desta URL). `ref` vai à parte (coluna `orders.ref`). `cupom`: código do `?cupom=` (não é dado pessoal). */
+export const TOUCH_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "cupom"] as const;
 /** Chaves aceitas no primeiro toque vindo do t.js (`ft`): as do toque mais `ref`. */
 const FIRST_TOUCH_KEYS: readonly string[] = [...TOUCH_KEYS, "ref"];
 export const TOUCH_VALUE_MAX = 500;

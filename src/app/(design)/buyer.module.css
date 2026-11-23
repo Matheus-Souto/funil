@@ -513,6 +513,42 @@ select.input {
   color: var(--color-on-brand);
 }
 
+/* ---- Cupom (resumo do pedido) ---- */
+.coupon {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+.couponRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.couponRow > .field {
+  flex: 1;
+}
+.couponApply {
+  flex: none;
+  height: 48px;
+  margin-top: 24px; /* alinha com o campo, abaixo do rótulo (a mensagem de erro cresce para baixo) */
+}
+.couponApplied {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  font-weight: 600;
+}
+.lineCoupon > span:last-child {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
 /* ---- Total ---- */
 .totals {
   padding: 18px 16px 20px;

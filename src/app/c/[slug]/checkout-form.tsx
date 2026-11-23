@@ -8,7 +8,7 @@
 // Os dados do cartão nunca passam por este componente.
 // Envio nativo (sem JS, ou antes de hidratar) não vaza nada: nenhum campo tem `name` (só o rádio do método), o form é
 // `method="post"` para a própria página sem query, e o botão fica desabilitado até o componente hidratar.
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { fieldsMessage } from "@/lib/card-frame/protocol";
 import type { CheckoutMethod as Method, CheckoutOffer } from "@/lib/catalog/checkout-offer";
@@ -17,7 +17,7 @@ import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/valid
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
 import { TrustSeals } from "../../(design)/shell";
-import { forgetLeadAction, recordCheckoutViewAction, renewCardTicketAction, saveLeadAction, startCheckoutAction, type StartResult } from "./actions";
+import { forgetLeadAction, previewCouponAction, recordCheckoutViewAction, renewCardTicketAction, saveLeadAction, startCheckoutAction, type StartResult } from "./actions";
 import {
   FRAME_UNAVAILABLE_MESSAGE,
   createCardFrameController,
@@ -30,6 +30,19 @@ import {
   type FrameConfig,
   type FrameStatus,
 } from "./card-frame";
+import {
+  afterStartFailure,
+  applyCoupon,
+  closeCoupon,
+  couponLine,
+  displayTotal,
+  initialCouponState,
+  openCoupon,
+  refreshCoupon,
+  submitCoupon,
+  type CouponState,
+  type PreviewFn,
+} from "./coupon-logic";
 import { forgetLeadInput, nextLeadSend, readLeadOptOut, writeLeadOptOut } from "./lead-capture";
 import { checkoutTracking } from "./tracking";
 
@@ -68,6 +81,7 @@ function Field(props: {
   value: string;
   onChange: (v: string) => void;
   onBlur?: () => void;
+  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
   error?: string;
   hint?: string;
   inputMode?: "text" | "email" | "tel" | "numeric";
@@ -76,7 +90,7 @@ function Field(props: {
   mono?: boolean;
   maxLength?: number;
 }) {
-  const { id, label, value, onChange, onBlur, error, hint, inputMode, autoComplete, placeholder, maxLength } = props;
+  const { id, label, value, onChange, onBlur, onKeyDown, error, hint, inputMode, autoComplete, placeholder, maxLength } = props;
   const msg = error ?? hint;
   return (
     <div className={s.field} data-invalid={error ? "true" : undefined}>
@@ -90,6 +104,7 @@ function Field(props: {
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onBlur={onBlur}
+          onKeyDown={onKeyDown}
           inputMode={inputMode}
           autoComplete={autoComplete}
           placeholder={placeholder}
@@ -164,6 +179,8 @@ export function CheckoutForm(props: {
   offer: CheckoutOffer;
   initialMethod: Method;
   touch: Touch;
+  /** Cupom da URL (`?cupom=`) já conferido no servidor; `null` = recolhido. */
+  initialCoupon: CouponState | null;
   refCode?: string;
   eventId: string;
   /** Captura do contato ligada na loja: chave desta visita e e-mail de privacidade do aviso; `null` = desligada. */
@@ -179,6 +196,12 @@ export function CheckoutForm(props: {
   const hydrated = useHydrated();
   const [method, setMethod] = useState<Method>(props.initialMethod);
   const [withBump, setWithBump] = useState(false);
+  // Cupom (D7): estado e regras em coupon-logic.ts. `couponBusy` trava o envio enquanto a prévia está no ar; `couponSeq`
+  // descarta resposta de prévia que chegou depois de outra mais nova (bump marcado e desmarcado em sequência).
+  const [coupon, setCoupon] = useState<CouponState>(() => initialCouponState(props.initialCoupon));
+  const [couponText, setCouponText] = useState(() => (props.initialCoupon && props.initialCoupon.kind !== "closed" ? props.initialCoupon.code : ""));
+  const [couponBusy, setCouponBusy] = useState(false);
+  const couponSeq = useRef(0);
   const [v, setV] = useState({ name: "", email: "", phone: "", cpf: "" });
   const [errors, setErrors] = useState<Partial<Record<FieldKey, string>>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -238,7 +261,35 @@ export function CheckoutForm(props: {
     leadQueue.current = leadQueue.current.then(() => forgetLeadAction(input)).catch(() => {});
   }
 
-  const total = offer.priceCents + (withBump && offer.bump ? offer.bump.priceCents : 0);
+  const bumpCents = offer.bump?.priceCents ?? null;
+  const total = displayTotal({ priceCents: offer.priceCents, bumpCents }, coupon, withBump);
+  const line = couponLine(coupon);
+  const preview: PreviewFn = (code, wb) => previewCouponAction({ slug: offer.slug, code, withBump: wb });
+
+  /** Roda uma troca de estado do cupom; só a mais recente vale. */
+  function runCoupon(next: Promise<CouponState>) {
+    const id = ++couponSeq.current;
+    setCouponBusy(true);
+    void next.then((st) => {
+      if (id !== couponSeq.current) return;
+      setCoupon(st);
+      if (st.kind === "open") setCouponText(st.code);
+      setCouponBusy(false);
+    });
+  }
+  function onApplyCoupon() {
+    runCoupon(applyCoupon(preview, couponText, withBump));
+  }
+  function onRemoveCoupon() {
+    couponSeq.current++;
+    setCouponBusy(false);
+    setCouponText("");
+    setCoupon(closeCoupon());
+  }
+  function onToggleBump(checked: boolean) {
+    setWithBump(checked);
+    if (coupon.kind === "applied") runCoupon(refreshCoupon(preview, coupon, checked));
+  }
   const brandColor = props.brandColor ?? undefined;
   const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments: offer.maxInstallments, brandColor });
   useEffect(() => {
@@ -321,7 +372,7 @@ export function CheckoutForm(props: {
   }
 
   /** Assinatura dos dados pessoais e do bump: muda -> pedido novo (nova tentativa de cartão reaproveita o pedido). */
-  const orderSig = () => JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump]);
+  const orderSig = () => JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump, coupon.kind === "applied" ? coupon.code : null, total]);
 
   const customerPayload = (m: Method) => ({
     name: v.name.trim(),
@@ -331,6 +382,19 @@ export function CheckoutForm(props: {
   });
 
   function handleStartError(r: Extract<StartResult, { ok: false }>) {
+    if (r.priceChanged || r.fields?.couponCode !== undefined) {
+      // Valor ou cupom divergente: refaz a prévia e mostra o resumo novo. Nunca reenvia sozinho.
+      const id = ++couponSeq.current;
+      setCouponBusy(true);
+      void afterStartFailure(preview, coupon, withBump, r).then((out) => {
+        if (id !== couponSeq.current) return;
+        setCoupon(out.coupon);
+        if (out.coupon.kind === "open") setCouponText(out.coupon.code);
+        setFormError(out.message);
+        setCouponBusy(false);
+      });
+      if (r.priceChanged || Object.keys(r.fields ?? {}).every((k) => k === "couponCode")) return;
+    }
     if (r.needsCpf) {
       setNeedsCpf(true);
       setErrors({ cpf: "Informe o CPF para continuar." });
@@ -348,7 +412,7 @@ export function CheckoutForm(props: {
 
   async function payPix() {
     checkoutTracking.onAddPaymentInfo("pix", total);
-    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
+    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
     if (r.ok) {
       router.push(`/o/${r.publicId}`);
       return;
@@ -375,7 +439,7 @@ export function CheckoutForm(props: {
       sig,
       ...(sentToken ? { turnstileToken: sentToken } : {}),
       now: () => Date.now(),
-      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
+      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
       renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });
@@ -414,7 +478,7 @@ export function CheckoutForm(props: {
 
   /** O "Pagar" (botão, Enter num campo do checkout ou Enter num campo do iframe do cartão). */
   async function submit() {
-    if (busy) return;
+    if (busy || couponBusy) return;
     const e = validate(method);
     if (method === "card") {
       const ctrl = frameCtrl.current;
@@ -632,7 +696,7 @@ export function CheckoutForm(props: {
             <div className={s.productInAside}>{productRow(true)}</div>
             {offer.bump ? (
               <label className={s.bump} data-checked={withBump ? "true" : undefined}>
-                <input type="checkbox" className={s.srOnly} checked={withBump} onChange={(e) => setWithBump(e.target.checked)} />
+                <input type="checkbox" className={s.srOnly} checked={withBump} onChange={(e) => onToggleBump(e.target.checked)} />
                 <span className={s.bumpTop}>
                   <span className={s.bumpBox} aria-hidden="true">
                     <Icon name="check" size={16} />
@@ -645,6 +709,46 @@ export function CheckoutForm(props: {
                 </span>
               </label>
             ) : null}
+            <div className={s.coupon}>
+              {coupon.kind === "closed" ? (
+                <button type="button" className={s.leadLink} style={{ alignSelf: "flex-start" }} onClick={() => setCoupon(openCoupon(coupon))}>
+                  Tenho um cupom
+                </button>
+              ) : null}
+              {coupon.kind === "open" ? (
+                <div className={s.couponRow}>
+                  <Field
+                    id="coupon"
+                    label="Cupom"
+                    value={couponText}
+                    onChange={(x) => {
+                      setCouponText(x);
+                      if (coupon.message) setCoupon({ ...coupon, message: null });
+                    }}
+                    onKeyDown={(e) => {
+                      // Enter no cupom aplica o cupom; nunca envia o pedido.
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      if (!couponBusy) onApplyCoupon();
+                    }}
+                    error={coupon.message ?? undefined}
+                    autoComplete="off"
+                    maxLength={64}
+                  />
+                  <button type="button" className={`${s.btn} ${s.btnSecondary} ${s.couponApply}`} onClick={onApplyCoupon} disabled={couponBusy || !hydrated}>
+                    {couponBusy ? "Conferindo…" : "Aplicar"}
+                  </button>
+                </div>
+              ) : null}
+              {coupon.kind === "applied" ? (
+                <div className={s.couponApplied} role="status">
+                  <span>Cupom {coupon.code} aplicado</span>
+                  <button type="button" className={s.leadLink} onClick={onRemoveCoupon} disabled={couponBusy}>
+                    Remover
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <section className={s.totals} aria-label="Total">
               <div className={s.line}>
                 <span>{offer.productName}</span>
@@ -656,6 +760,12 @@ export function CheckoutForm(props: {
                   <span className={s.money}>{brl(offer.bump.priceCents)}</span>
                 </div>
               ) : null}
+              {line ? (
+                <div className={`${s.line} ${s.lineCoupon}`}>
+                  <span>Cupom {line.code}</span>
+                  <span className={s.money}>−{brl(line.discountCents)}</span>
+                </div>
+              ) : null}
               <div className={s.divider} />
               <div className={s.totalRow}>
                 <span className={s.totalLabel}>Total</span>
@@ -663,7 +773,7 @@ export function CheckoutForm(props: {
                   {brl(total)}
                 </span>
               </div>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || !hydrated || (method === "card" && frameState !== "ready")}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || couponBusy || !hydrated || (method === "card" && frameState !== "ready")}>
                 <Icon name={method === "pix" ? "pix" : "lock"} size={20} />
                 {buttonLabel}
               </button>
