@@ -924,6 +924,62 @@ balanceamento (o modelo da seção anterior serve). Casos Pix e cartão: a pesso
 pedido cabe em **procedimentos preliminares do contrato a pedido do titular** (art. 7º, V) ou em legítimo interesse.
 Em todos: link de saída de um clique e nenhum uso além do lembrete.
 
+## Cupons
+
+Cupom é um código de desconto aplicado no checkout. Sem item novo no menu.
+
+**Onde criar.** Em **Ofertas**, aba **Cupons**: lista, criar, editar e arquivar. Cada cupom tem:
+
+- **Código:** de 3 a 32 caracteres (letras, números, `-` e `_`). Guardado em maiúsculas e único por loja.
+- **Tipo:** percentual (de 0,01% a 90%) ou valor fixo em reais.
+- **Ofertas:** as marcadas. Nenhuma marcada vale para todas as ofertas da loja.
+- **Vale para:** por padrão, **só o produto principal**; o bump fica com preço fixo. Há a opção de estender o
+  desconto ao bump (aí o desconto se divide entre os dois, na proporção).
+- **Validade:** começa e termina em datas do horário de São Paulo; o cupom vale até o fim do último dia. Vazio: sem
+  início ou sem fim.
+- **Limite de usos:** total do cupom. Vazio: sem limite.
+- **Limite por pessoa:** padrão **1**. Conta por **caixa de entrada**: `ana+promo@exemplo.com` e, no Gmail,
+  `a.na@gmail.com` e `ana@gmail.com` são a mesma pessoa.
+
+**O que conta como uso.** Pedido **pago** ou **contestado**, mais os que ainda podem ser pagos: Pix pendente que não
+venceu e cartão pendente criado há menos de 2 horas. Reembolsado, expirado e recusado não contam. A conferência roda
+dentro do `checkout.start`, travada por cupom. Um cartão pendente há mais de 2 horas que seja aprovado depois pode
+passar do limite por poucos usos.
+
+**Piso de R$ 5,00.** O total com desconto nunca fica abaixo de R$ 5,00. Se o desconto passar disso, ele é cortado e o
+checkout mostra o desconto real. Se não sobrar desconto (total já no piso), o cupom é recusado. As **parcelas** do
+cartão também são limitadas para nenhuma ficar abaixo de R$ 5,00. O mínimo de cobrança do Asaas para Pix e cartão
+**ainda precisa ser confirmado no sandbox**; até lá vale o piso de R$ 5,00.
+
+**No checkout.** "Tenho um cupom" fica recolhido; **Aplicar** mostra o desconto e o total. Cupom que não existe, venceu,
+estourou o limite ou não vale para a oferta mostra sempre a mesma mensagem, **"Cupom inválido ou vencido"**, sem dizer
+qual regra falhou. O valor mostrado é o valor cobrado: se o total mudar entre a prévia e o envio (cupom que venceu, preço
+alterado), o checkout avisa "O valor mudou: confira o resumo" e **não** cria o pedido.
+
+**Link com cupom.** `/c/<slug>?cupom=CODIGO` abre o checkout com o cupom já aplicado (para anúncio e e-mail). O código
+também entra na origem da venda como `cupom`.
+
+**Contra adivinhação de códigos.** A prévia aceita **20 por IP por hora** e **300 por loja por hora**; o envio do
+checkout com cupom inválido conta no limite do IP. Passou do limite, a pessoa fica sem cupom por 1 hora. Confira o
+`TRUST_PROXY` (seção 2), senão todo mundo parece ter o mesmo IP.
+
+**Arquivar.** O cupom para de valer na hora e **não se apaga, nem se edita, nem se religa**. O código continua ocupado,
+então não dá para reaproveitá-lo. Para um desconto novo, crie outro cupom.
+
+**Onde ver os resultados.**
+
+- **Pedido:** mostra o cupom e o desconto.
+- **CSV de pedidos:** ganha as colunas `cupom` e `desconto`.
+- **Métricas:** por cupom, pedidos, desconto total e receita.
+- **Telegram:** o aviso de venda traz "Cupom: CODIGO (−R$ X)". O código não é dado pessoal.
+- **Meta:** o `value` continua sendo o valor pago (já com desconto). Nenhum parâmetro novo.
+- **Recuperação:** o lembrete de Pix e de cartão usa o valor com desconto; o lembrete de contato não leva o cupom.
+
+**Agentes de IA (MCP).** Consultar (`coupons.list`, `coupons.get`) usa `offers.read`. Criar, editar e arquivar
+(`coupons.create`, `coupons.update`, `coupons.archive`) usam `offers.write` e **passam pela fila de aprovação**, porque
+mudam preço. `metrics.summary` traz `coupons` com código, pedidos, desconto e receita em centavos; nunca dado de
+comprador.
+
 ## 14. Problemas comuns
 
 - **O checkout não mostra o cartão e o painel avisa "falta configurar o serviço de cartão"**: a instalação está sem
