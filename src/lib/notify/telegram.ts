@@ -152,13 +152,13 @@ export const leadCode = (id: string): string => id.replace(/-/g, "").slice(0, 6)
 
 /**
  * Texto do aviso: só dados da venda (produto, valor, forma e código do pedido). Nunca nome, e-mail, CPF ou telefone do
- * comprador, nem link. Texto puro: nomes em uma linha, até 100 caracteres cada, mensagem até 1.000.
+ * comprador, nem link. Venda com cupom ganha a linha `Cupom: CODIGO (−R$ X)`. Texto puro: nomes em uma linha, até 100 caracteres cada, mensagem até 1.000.
  * `lead_abandoned` (contato que não chegou a criar pedido): `orderCode` leva o `leadCode` e a forma de pagamento não existe
  * (`method` é ignorado e pode faltar); nos demais eventos `method` é obrigatório.
  */
 export function telegramMessage(
   event: TelegramEvent,
-  s: { productName: string; bumpName: string | null; totalCents: number; method?: OrderMethod; orderCode: string; abandonAfterMinutes?: number },
+  s: { productName: string; bumpName: string | null; totalCents: number; method?: OrderMethod; orderCode: string; abandonAfterMinutes?: number; coupon?: { code: string; discountCents: number } },
 ): string {
   const items = s.bumpName ? `${name(s.productName)} + ${name(s.bumpName)}` : name(s.productName);
   const value = brl(s.totalCents);
@@ -171,6 +171,8 @@ export function telegramMessage(
   switch (event) {
     case "sale":
       text = `Venda: ${items} — ${value} — ${how()} — ${order}`;
+      // O código do cupom não é dado pessoal. Só o aviso de venda leva a linha.
+      if (s.coupon) text += `\nCupom: ${name(s.coupon.code)} (−${brl(s.coupon.discountCents)})`;
       break;
     case "pix_generated":
       text = `Pix gerado: ${items} — ${value} — ${order}`;

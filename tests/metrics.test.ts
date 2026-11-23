@@ -45,6 +45,23 @@ describe("metrics.summary", () => {
     });
   });
 
+  test("coupons: pagos do período por código, com desconto e receita; pendente, reembolsado e sem cupom ficam fora", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { status: "paid", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(s, { status: "paid", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(s, { status: "paid", totalCents: 500, coupon: { code: "AMIGO", discountCents: 490 } });
+    await seedOrder(s, { status: "pending", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(s, { status: "refunded", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(s, { status: "paid", totalCents: 990 });
+    const old = new Date(Date.now() - 10 * 24 * HOUR);
+    await seedOrder(s, { status: "paid", totalCents: 891, paidAt: old, createdAt: old, coupon: { code: "KIDS10", discountCents: 99 } });
+    const m = await runAction(metricsSummary, panelCall(s.storeId), window());
+    expect(m.coupons).toEqual([
+      { code: "KIDS10", orders: 2, discountCents: 198, revenueCents: 1782 },
+      { code: "AMIGO", orders: 1, discountCents: 490, revenueCents: 500 },
+    ]);
+  });
+
   test("período: pago fora do intervalo não conta; pedido criado antes mas pago dentro conta na receita", async () => {
     const s = await seedPanelStore();
     const old = new Date(Date.now() - 10 * 24 * HOUR);
@@ -72,6 +89,7 @@ describe("metrics.summary", () => {
       },
       bySource: [],
       byRef: [],
+      coupons: [],
       recovery: {
         sent: 0,
         recovered: 0,

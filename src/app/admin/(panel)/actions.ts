@@ -8,6 +8,7 @@ import { ackAlert } from "@/lib/alerts";
 import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { PASSWORD_REFUSALS } from "@/lib/auth/confirm";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
+import { archiveCoupon, createCoupon, updateCoupon } from "@/lib/coupons/actions";
 import { createOffer, setOfferPixel, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import { saveSmtp, testSmtp } from "@/lib/delivery/mailer";
 import { deleteLead, forgetLeadEmail, markLeadContacted } from "@/lib/leads/panel";
@@ -187,6 +188,23 @@ export async function resendOrderAction(orderId: string, renew: boolean) {
 export async function ackAlertAction(id: string) {
   const panel = await requirePanelActor();
   return call(panel, ackAlert, { id });
+}
+
+// ---- cupons (aba Cupons de Ofertas) ----------------------------------------------------------------------------
+
+export async function createCouponAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, createCoupon, input, () => "Cupom criado.");
+}
+
+export async function updateCouponAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, updateCoupon, input, () => "Cupom salvo.");
+}
+
+export async function archiveCouponAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, archiveCoupon, { id }, () => "Cupom arquivado.");
 }
 
 // ---- ofertas ---------------------------------------------------------------------------------------------------

@@ -219,6 +219,8 @@ const OVERRIDES: Record<string, Override> = {
           ref: label,
           ...r,
         })),
+        // Cupons: só o código (não é dado pessoal) e números, campo a campo.
+        coupons: d.coupons.map((c) => ({ code: c.code, orders: c.orders, discountCents: c.discountCents, revenueCents: c.revenueCents })),
         // Recuperação por e-mail: só números, campo a campo (quem recebeu o lembrete nunca sai).
         recovery: {
           sent: d.recovery.sent,

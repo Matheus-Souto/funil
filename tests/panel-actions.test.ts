@@ -294,15 +294,40 @@ describe("exportação CSV", () => {
     const rows = await runAction(exportOrders, panelCall(s.storeId, "admin"), {});
     const csv = ordersCsv(rows);
     const [header, line] = csv.trim().split("\r\n");
-    expect(header).toBe('"data";"status";"método";"produto(s)";"valor";"nome";"e-mail";"telefone";"utm_source";"utm_campaign";"ref"');
+    expect(header).toBe('"data";"status";"método";"produto(s)";"valor";"nome";"e-mail";"telefone";"utm_source";"utm_campaign";"ref";"cupom";"desconto"');
     expect(csv).not.toContain("52998224725");
     expect(csv).not.toMatch(/cpf/i);
     expect(line).toContain("Maná básica + Maná completa");
     expect(line).toContain("27,00");
-    expect(line).toContain(';"ig";"stories";"joao"');
+    expect(line).toContain(';"ig";"stories";"joao";"";"0,00"');
     expect(line).toContain("\"'=HYPERLINK(\"\"x\"\")\"");
     // Todo campo entre aspas: nenhuma vírgula ou ponto e vírgula vira separador em nenhuma configuração do Excel.
     expect(line!.split(";").every((f) => f.startsWith('"') && f.endsWith('"'))).toBe(true);
+  });
+});
+
+describe("cupom no pedido e na planilha", () => {
+  test("CSV: colunas cupom e desconto no mesmo formato do valor; pedido sem cupom fica com cupom vazio e desconto 0,00", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { status: "paid", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 }, name: "Com cupom" });
+    await seedOrder(s, { status: "paid", totalCents: 990, name: "Sem cupom" });
+    const csv = ordersCsv(await runAction(exportOrders, panelCall(s.storeId), {}));
+    const lines = csv.trim().split("\r\n").slice(1);
+    const com = lines.find((l) => l.includes("Com cupom"))!;
+    const sem = lines.find((l) => l.includes("Sem cupom"))!;
+    expect(com).toContain('"8,91"');
+    expect(com.endsWith(';"KIDS10";"0,99"')).toBe(true);
+    expect(sem.endsWith(';"";"0,00"')).toBe(true);
+  });
+
+  test("detalhe do pedido traz o cupom (código) e o desconto; sem cupom vem nulo", async () => {
+    const s = await seedPanelStore();
+    const o = await seedOrder(s, { status: "paid", totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    const d = await runAction(getOrderDetail, panelCall(s.storeId), { id: o.id });
+    expect(d).toMatchObject({ subtotalCents: 990, totalCents: 891, discountCents: 99, coupon: { code: "KIDS10" } });
+    const plain = await seedOrder(s, { status: "paid" });
+    const p = await runAction(getOrderDetail, panelCall(s.storeId), { id: plain.id });
+    expect(p).toMatchObject({ discountCents: 0, coupon: null });
   });
 });
 

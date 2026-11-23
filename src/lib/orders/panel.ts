@@ -4,7 +4,7 @@ import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql, type SQ
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
-import { auditLog, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
+import { auditLog, coupon, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
 import { maskCpf, maskCpfStrict } from "@/lib/privacy";
@@ -176,6 +176,7 @@ export const getOrderDetail = defineAction({
       .where(eq(orders.id, id));
     if (!row) throw new ActionError("not_found", "Pedido não encontrado");
     const { o, c } = row;
+    const [cp] = o.couponId ? await ctx.tx.select({ code: coupon.code }).from(coupon).where(eq(coupon.id, o.couponId)) : [];
 
     const items = await ctx.tx
       .select({ name: product.name, kind: orderItem.kind, priceCents: orderItem.priceCents })
@@ -266,6 +267,8 @@ export const getOrderDetail = defineAction({
       paidAt: o.paidAt,
       expiresAt: o.expiresAt,
       subtotalCents: o.subtotalCents,
+      discountCents: o.discountCents,
+      coupon: cp ? { code: cp.code } : null,
       totalCents: o.totalCents,
       manualAmountCents: o.manualAmountCents,
       hasBump: o.hasBump,
@@ -301,7 +304,7 @@ export type OrderDetail = Awaited<ReturnType<typeof getOrderDetail.run>>;
 
 export const exportOrders = defineAction({
   name: "orders.export",
-  description: "Pedidos para a planilha CSV (sem CPF): data, status, método, produtos, valor, comprador e origem.",
+  description: "Pedidos para a planilha CSV (sem CPF): data, status, método, produtos, valor, comprador, origem, cupom e desconto.",
   input: z.object(filters),
   permission: "orders.export",
   async run(ctx, input) {
@@ -312,6 +315,8 @@ export const exportOrders = defineAction({
         status: orders.status,
         method: orders.method,
         totalCents: orders.totalCents,
+        discountCents: orders.discountCents,
+        couponCode: coupon.code,
         name: buyerName,
         email: customer.email,
         phone: sql<string>`coalesce(${orders.buyerPhone}, ${customer.phone})`,
@@ -320,6 +325,7 @@ export const exportOrders = defineAction({
       })
       .from(orders)
       .innerJoin(customer, eq(customer.id, orders.customerId))
+      .leftJoin(coupon, eq(coupon.id, orders.couponId))
       .where(where(input, true))
       .orderBy(desc(orders.createdAt), desc(orders.id))
       .limit(EXPORT_MAX);
@@ -363,7 +369,7 @@ export function csvCell(v: string): string {
 
 /** CSV (separador `;`, CRLF, BOM fica na rota) no formato do Excel em português. */
 export function ordersCsv(rows: Awaited<ReturnType<typeof exportOrders.run>>): string {
-  const header = ["data", "status", "método", "produto(s)", "valor", "nome", "e-mail", "telefone", "utm_source", "utm_campaign", "ref"];
+  const header = ["data", "status", "método", "produto(s)", "valor", "nome", "e-mail", "telefone", "utm_source", "utm_campaign", "ref", "cupom", "desconto"];
   const lines = rows.map((r) =>
     [
       SP.format(r.createdAt).replace(",", ""),
@@ -377,6 +383,8 @@ export function ordersCsv(rows: Awaited<ReturnType<typeof exportOrders.run>>): s
       r.utmSource,
       r.utmCampaign,
       r.ref,
+      r.couponCode ?? "",
+      brl(r.discountCents).replace("R$ ", ""),
     ]
       .map((v) => csvCell(String(v)))
       .join(";"),

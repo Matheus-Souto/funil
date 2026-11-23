@@ -10,7 +10,7 @@ import { z } from "zod";
 import { alertSeller } from "@/lib/alerts";
 import { withStore } from "@/lib/db/client";
 import { loadOfferProducts } from "@/lib/catalog/offer-products";
-import { cardAttempt, checkoutLead, offer, orderItem, orders, product, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { cardAttempt, checkoutLead, coupon, offer, orderItem, orders, product, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import type { JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
@@ -74,6 +74,8 @@ async function prepareOrder(storeId: string, event: OrderEvent, orderId: string,
         status: orders.status,
         method: orders.method,
         totalCents: orders.totalCents,
+        discountCents: orders.discountCents,
+        couponId: orders.couponId,
         customerId: orders.customerId,
         offerId: orders.offerId,
         createdAt: orders.createdAt,
@@ -152,9 +154,12 @@ async function prepareOrder(storeId: string, event: OrderEvent, orderId: string,
     const bumps = items.filter((i) => i.kind === "bump");
     const productName = mains.length > 1 ? (of?.name ?? "pedido") : (mains[0]?.name ?? items[0]?.name ?? of?.name ?? "pedido");
     const bumpName = bumps.length === 0 ? null : (of?.bumpLabel?.trim() || bumps.map((b) => b.name).join(" + "));
+    // Só o aviso de venda leva o cupom: o código e o desconto (nada do comprador).
+    const [cp] = event === "sale" && o.couponId ? await tx.select({ code: coupon.code }).from(coupon).where(eq(coupon.id, o.couponId)) : [];
     const text = telegramMessage(event, {
       productName,
       bumpName,
+      ...(cp ? { coupon: { code: cp.code, discountCents: o.discountCents } } : {}),
       totalCents: o.totalCents,
       method: o.method as OrderMethod,
       orderCode: orderCode(o.publicId),

@@ -273,6 +273,7 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: { ...zero, extra: "x" }, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      coupons: [{ code: "KIDS10", orders: 1, discountCents: 99, revenueCents: 891, extra: "x", email: "zuleica@exemplo.com" }],
       recovery: {
         sent: 3,
         recovered: 1,
@@ -293,6 +294,7 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: zero, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      coupons: [{ code: "KIDS10", orders: 1, discountCents: 99, revenueCents: 891 }],
       recovery: {
         sent: 3,
         recovered: 1,
@@ -469,7 +471,22 @@ describe("callMcpTool", () => {
       { ref: "amigo", paid: 1, revenueCents: 990 },
     ]);
     // Projeção explícita: só as chaves conhecidas.
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "coupons", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+  });
+
+  test("metrics_summary pelo MCP traz coupons só com código e números (nenhuma string com @)", async () => {
+    const m = await seedPanelStore("Cupons MCP");
+    await seedOrder(m, { totalCents: 891, email: "comprador.sigiloso@exemplo.com", coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(m, { totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    for (const role of ["reader", "owner"] as const) {
+      const out = (await callMcpTool(tool(role, "metrics_summary"), call(m.storeId, role), range)) as { coupons: unknown };
+      expect(out.coupons).toEqual([{ code: "KIDS10", orders: 2, discountCents: 198, revenueCents: 1782 }]);
+      const text = JSON.stringify(out);
+      expect(text).not.toContain("@");
+      expect(text).not.toContain("sigiloso");
+      expect(Object.keys((out.coupons as object[])[0]!).sort()).toEqual(["code", "discountCents", "orders", "revenueCents"]);
+    }
   });
 
   test("metrics_summary pelo MCP traz leads e leadsConverted como números e nada mais de contato", async () => {
@@ -496,7 +513,7 @@ describe("callMcpTool", () => {
     expect(typeof out.leadsConverted).toBe("number");
     const text = JSON.stringify(out);
     for (const secret of [email, phone, sha(email), "contato.sigiloso"]) expect(text).not.toContain(secret);
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "coupons", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
   });
 
   test("metrics_summary pelo MCP traz recovery só com números (nenhuma string com @)", async () => {
