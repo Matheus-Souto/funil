@@ -3,6 +3,7 @@
 // do checkout `utm_*`, `fbclid`, `ref` e `ft` (primeiro toque em base64url JSON). Aqui só se lê a URL e os cookies.
 // Sem dependências de servidor: usado pela página do checkout e pelos testes.
 import { z } from "zod";
+import { normalizeCode } from "@/lib/coupons/rules";
 
 /** Parâmetros do toque (último toque = os desta URL). `ref` vai à parte (coluna `orders.ref`). `cupom`: código do `?cupom=` (não é dado pessoal). */
 export const TOUCH_KEYS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term", "fbclid", "cupom"] as const;
@@ -39,6 +40,12 @@ export function fbcFromFbclid(fbclid: string | undefined, nowMs: number = Date.n
   return id ? `fb.1.${nowMs}.${id}` : undefined;
 }
 
+/** Valor de uma chave do toque: o `cupom` segue a regra do código (maiúsculas, A–Z 0–9 - _, 3 a 32); fora dela, descarta. */
+function touchValue(k: string, v: string | null | undefined, max: number): string | undefined {
+  const s = clean(v, max);
+  return s !== undefined && k === "cupom" ? (normalizeCode(s) ?? undefined) : s;
+}
+
 function decodeFirstTouch(ft: string | undefined): TouchRecord | null {
   if (!ft || ft.length > Math.ceil((FIRST_TOUCH_MAX_BYTES * 4) / 3) + 4) return null;
   try {
@@ -49,7 +56,7 @@ function decodeFirstTouch(ft: string | undefined): TouchRecord | null {
     const out: TouchRecord = {};
     for (const k of FIRST_TOUCH_KEYS) {
       const v = (raw as Record<string, unknown>)[k];
-      const s = typeof v === "string" ? clean(v, TOUCH_VALUE_MAX) : undefined;
+      const s = typeof v === "string" ? touchValue(k, v, TOUCH_VALUE_MAX) : undefined;
       if (s) out[k] = s;
     }
     return Object.keys(out).length > 0 ? out : null;
@@ -66,7 +73,7 @@ export function parseTouch(url: URL, cookies: { _fbc?: string; _fbp?: string }, 
   const q = url.searchParams;
   const last: TouchRecord = {};
   for (const k of TOUCH_KEYS) {
-    const v = clean(q.get(k), TOUCH_VALUE_MAX);
+    const v = touchValue(k, q.get(k), TOUCH_VALUE_MAX);
     if (v) last[k] = v;
   }
   const out: ParsedTouch = { first: decodeFirstTouch(q.get("ft") ?? undefined), last: Object.keys(last).length > 0 ? last : null };

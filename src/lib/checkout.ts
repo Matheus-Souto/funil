@@ -6,8 +6,8 @@
 // - Limites (contam pedidos CRIADOS, não tentativas: lidos no `prepare`, somados no `afterCommit`):
 //   Pix manual 5 por IP/hora e 3 pendentes (ou reservados: expirados há < 48 h) por e-mail na loja;
 //   Asaas (Pix do Asaas e cartão) 10 por IP/hora e 5 por e-mail/hora na loja.
-// - Cupom (D7/D8): `checkout.previewCoupon` devolve desconto e total (ou a mensagem neutra) com limite de 20 por IP e
-//   300 por loja por hora (cada prévia conta, válida ou não). `checkout.start` com `couponCode` exige
+// - Cupom (D7/D8): `checkout.previewCoupon` devolve desconto e total (ou a mensagem neutra) com limite de 20 por IP por
+//   hora (toda prévia conta) e 300 por loja por hora (só as recusadas contam). `checkout.start` com `couponCode` exige
 //   `expectedTotalCents`, conta no mesmo limite por IP (todo envio com cupom conta, não só o inválido: o limite precisa
 //   valer antes de saber a resposta, e o envio inválido não deixa pedido para contar depois) e confere o cupom sob o
 //   lock dele. Total recalculado diferente do que o comprador viu -> `conflict` PRICE_CHANGED e nenhum pedido; isso vale
@@ -33,6 +33,7 @@ import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { issueCardTicket, verifyCardTicketForRenewal } from "@/lib/payments/card-ticket";
 import { MANUAL_RESERVE_AFTER_EXPIRY_MS, manualPixBrCode } from "@/lib/payments/manual";
+import { MIN_INSTALLMENT_CENTS, installmentsFor } from "@/lib/payments/installments";
 import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
 import { enqueueInitiateCheckout, pixelIdFor } from "@/lib/tracking/meta";
@@ -52,16 +53,7 @@ export const VIEW_LIMIT_PER_HOUR = 30;
 /** `conflict` quando o total recalculado difere do que o comprador viu (`details.code === "PRICE_CHANGED"`). */
 export const PRICE_CHANGED_MESSAGE = "O valor mudou: confira o resumo";
 export const COUPON_LIMIT_MESSAGE = "Muitas tentativas de cupom. Aguarde alguns minutos e tente de novo.";
-/** Parcela mínima do Asaas no cartão: R$ 5,00 (o editor da oferta avisa o mesmo valor). */
-export const MIN_INSTALLMENT_CENTS = 500;
-
-/**
- * Parcelas que o pedido aceita: o máximo da oferta, limitado para nenhuma parcela ficar abaixo de R$ 5,00 sobre o
- * total do PEDIDO (com desconto). Ex.: R$ 22,00 numa oferta de até 5x -> 4x.
- */
-export function installmentsFor(offerMax: number, totalCents: number): number {
-  return Math.min(offerMax, Math.max(1, Math.floor(totalCents / MIN_INSTALLMENT_CENTS)));
-}
+export { MIN_INSTALLMENT_CENTS, installmentsFor };
 
 /** Dados do servidor (fora da entrada) das ações do checkout: a hora, injetável nos testes (limites e validade). */
 type CheckoutServer = { now?: Date };
@@ -368,17 +360,22 @@ export const checkoutPreviewCoupon = defineAction({
   permission: "public",
   // Anônima e repetível: sem linha de auditoria (como checkout.view).
   audit: false,
-  /** D8: 20 por IP e 300 por loja por hora; toda prévia conta (código inválido também). */
+  /**
+   * D8: 20 por IP por hora (toda prévia conta); 300 por loja por hora, contando SÓ as recusadas (código inválido). Assim
+   * o tráfego legítimo de uma campanha não trava a loja, e quem testa códigos esgota o balde. Aqui só se confere o
+   * balde da loja; a contagem fica no `afterCommit`.
+   */
   async prepare(call: { storeId: string; server?: CheckoutServer }, input) {
     const now = call.server?.now ?? new Date();
     if (!(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR, now))) {
       throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
     }
-    if (!(await checkRateLimit(couponStoreKey(call.storeId), COUPON.previewPerStorePerHour, HOUR, now))) {
+    if (!(await peekRateLimit(couponStoreKey(call.storeId), COUPON.previewPerStorePerHour, HOUR, now))) {
       throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
     }
+    return { now };
   },
-  async run(ctx, input, _prepared: void, server?: CheckoutServer): Promise<PreviewOutput> {
+  async run(ctx, input, _prepared: { now: Date }, server?: CheckoutServer): Promise<PreviewOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     // Mesmo cálculo do pedido: mesmas partes (e recusas) e o mesmo `computeDiscount`.
@@ -390,6 +387,10 @@ export const checkoutPreviewCoupon = defineAction({
     const d = computeDiscount(r.coupon, { mainCents: o.priceCents, bumpCents });
     if (d.discountCents === 0) return invalid;
     return { ok: true, code: r.coupon.code, discountCents: d.discountCents, totalCents: o.priceCents + bumpCents - d.discountCents };
+  },
+  /** Prévia recusada (inválida) conta no balde da loja; a válida não. Melhor esforço, com o mesmo relógio do `prepare`. */
+  async afterCommit(call, _input, out, prepared) {
+    if (!out.ok) await hitRateLimit(couponStoreKey(call.storeId), HOUR, prepared.now);
   },
 });
 

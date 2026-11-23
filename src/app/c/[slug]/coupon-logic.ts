@@ -49,6 +49,19 @@ export function refreshCoupon(preview: PreviewFn, st: CouponState, withBump: boo
   return st.kind === "applied" ? applyCoupon(preview, st.code, withBump) : Promise.resolve(st);
 }
 
+/**
+ * Resposta de prévia que chega com o bump já em outro estado (marcado durante o "Aplicar" ou a prévia anterior) não vale:
+ * refaz até a prévia bater com o checkbox de AGORA (`currentBump` lê o valor atual). Termina quando bate ou o cupom cai.
+ */
+export async function reconcileCoupon(preview: PreviewFn, st: CouponState, currentBump: () => boolean): Promise<CouponState> {
+  let cur = st;
+  while (cur.kind === "applied" && cur.withBump !== currentBump()) cur = await refreshCoupon(preview, cur, currentBump());
+  return cur;
+}
+
+/** `true`: o cupom aplicado foi conferido para outro estado do bump; o "Pagar" espera a prévia nova. */
+export const couponIsStale = (st: CouponState, withBump: boolean): boolean => st.kind === "applied" && st.withBump !== withBump;
+
 /** Linha do resumo ("Cupom KIDS10 −R$ 0,99"); `null` sem cupom aplicado. */
 export function couponLine(st: CouponState): { code: string; discountCents: number } | null {
   return st.kind === "applied" ? { code: st.code, discountCents: st.discountCents } : null;

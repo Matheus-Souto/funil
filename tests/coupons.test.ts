@@ -16,7 +16,7 @@ import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { savePixManual } from "@/lib/payments/manual";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
-import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import type { FakeAsaas } from "./fakes/asaas";
 import { newAsaasOrder, createFakeAsaas, seedAsaasStore } from "./asaas-helpers";
 import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
@@ -646,14 +646,46 @@ describe("cupom no checkout", () => {
     expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }, nextHour)).ok).toBe(true);
   });
 
-  test("300 prévias da loja na hora → rate_limited para qualquer IP", async () => {
+  test("300 prévias RECUSADAS da loja na hora → rate_limited para qualquer IP (o balde só conta as inválidas)", async () => {
     const s = await shop();
     await newCoupon(s.storeId);
     const hour = 3_600_000;
     const windowStart = new Date(Math.floor(NOW.getTime() / hour) * hour);
-    await ownerDb.insert(rateLimit).values({ key: `coupon:preview:store:${s.storeId}`, windowStart, count: 300 });
+    const key = `coupon:preview:store:${s.storeId}`;
+    await ownerDb.insert(rateLimit).values({ key, windowStart, count: 299 });
+    const counter = async () => (await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, key)))[0]?.count;
+    // A 300ª recusada ainda passa (devolve ok:false) e enche o balde; a próxima, de qualquer IP, já é barrada.
+    expect(await preview(s.storeId, { slug: s.slug, code: "ERRADO", withBump: false, clientIp: nextIp() }, NOW)).toEqual({ ok: false, message: INVALID });
+    expect(await counter()).toBe(300);
     const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW));
     expect(e.code).toBe("rate_limited");
+    // Janela seguinte: libera.
+    const nextHour = new Date(NOW.getTime() + hour);
+    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, nextHour)).ok).toBe(true);
+  });
+
+  test("300+ prévias VÁLIDAS de IPs diferentes não travam a loja (e não contam no balde dela)", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const key = `coupon:preview:store:${s.storeId}`;
+    for (let i = 0; i < 310; i++) {
+      const r = await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW);
+      expect(r.ok).toBe(true);
+    }
+    expect(await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, key))).toEqual([]);
+    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW)).ok).toBe(true);
+  }, HEAVY_TEST_MS);
+
+  test("prévia recusada conta no balde da loja; a válida não", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const key = `coupon:preview:store:${s.storeId}`;
+    const counter = async () => (await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, key)))[0]?.count ?? 0;
+    await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW);
+    expect(await counter()).toBe(0);
+    await preview(s.storeId, { slug: s.slug, code: "NAO", withBump: false, clientIp: nextIp() }, NOW);
+    await preview(s.storeId, { slug: s.slug, code: "NAO2", withBump: false, clientIp: nextIp() }, NOW);
+    expect(await counter()).toBe(2);
   });
 
   test("checkout.start com cupom inválido conta no limite de cupom do IP; esgotado, o envio com cupom é recusado", async () => {

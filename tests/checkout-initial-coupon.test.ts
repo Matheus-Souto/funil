@@ -3,6 +3,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import "@/lib/actions/all";
 import { initialCoupon } from "@/app/c/[slug]/initial-coupon";
+import { eq } from "drizzle-orm";
+import { ownerDb } from "@/lib/db/client";
+import { rateLimit } from "@/lib/db/schema";
+import { ipRateKey } from "@/lib/payments/ratelimit";
 import { createOffer } from "@/lib/catalog/offers";
 import { runAction } from "@/lib/actions/core";
 import { createCoupon } from "@/lib/coupons/actions";
@@ -17,6 +21,9 @@ beforeAll(async () => {
 afterAll(async () => {
   await t.drop();
 });
+
+// Quantas prévias o IP já gastou na hora (`rate_limit`).
+const ipCount = async (ip: string) => (await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, `coupon:ip:${ipRateKey(ip)}`)))[0]?.count ?? 0;
 
 let ipSeq = 0;
 const nextIp = () => `198.19.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
@@ -48,10 +55,15 @@ describe("initialCoupon (?cupom=)", () => {
     expect(await initialCoupon(s.storeId, s.slug, "NAOEXISTE", nextIp())).toEqual({ kind: "open", code: "NAOEXISTE", message: "Cupom inválido ou vencido" });
   });
 
-  test("sem ?cupom=, vazio ou espaços: nada (recolhido), sem consumir o limite", async () => {
+  test("sem ?cupom=, vazio ou espaços: nada (recolhido), sem consumir o limite do IP", async () => {
     const s = await shop();
-    expect(await initialCoupon(s.storeId, s.slug, undefined, nextIp())).toBeNull();
-    expect(await initialCoupon(s.storeId, s.slug, "   ", nextIp())).toBeNull();
+    const ip = nextIp();
+    expect(await initialCoupon(s.storeId, s.slug, undefined, ip)).toBeNull();
+    expect(await initialCoupon(s.storeId, s.slug, "   ", ip)).toBeNull();
+    expect(await ipCount(ip)).toBe(0);
+    // Com código a prévia conta 1 no IP (para contrastar).
+    await initialCoupon(s.storeId, s.slug, "KIDS10", ip);
+    expect(await ipCount(ip)).toBe(1);
   });
 
   test("valor repetido na URL (?cupom=a&cupom=b): usa o primeiro", async () => {
@@ -59,7 +71,7 @@ describe("initialCoupon (?cupom=)", () => {
     expect(await initialCoupon(s.storeId, s.slug, ["kids10", "outro"], nextIp())).toMatchObject({ kind: "applied", code: "KIDS10" });
   });
 
-  test("código longo demais: campo aberto cortado, sem chamar a ação e sem erro", async () => {
+  test("código longo demais: campo aberto cortado em 64, a prévia recusa com a mensagem neutra e a página não erra", async () => {
     const s = await shop();
     const r = await initialCoupon(s.storeId, s.slug, "A".repeat(200), nextIp());
     expect(r).toMatchObject({ kind: "open", message: "Cupom inválido ou vencido" });

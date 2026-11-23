@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { fieldsMessage } from "@/lib/card-frame/protocol";
 import type { CheckoutMethod as Method, CheckoutOffer } from "@/lib/catalog/checkout-offer";
 import { brl } from "@/lib/format";
+import { installmentsFor } from "@/lib/payments/installments";
 import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
@@ -34,10 +35,12 @@ import {
   afterStartFailure,
   applyCoupon,
   closeCoupon,
+  couponIsStale,
   couponLine,
   displayTotal,
   initialCouponState,
   openCoupon,
+  reconcileCoupon,
   refreshCoupon,
   submitCoupon,
   type CouponState,
@@ -202,6 +205,10 @@ export function CheckoutForm(props: {
   const [couponText, setCouponText] = useState(() => (props.initialCoupon && props.initialCoupon.kind !== "closed" ? props.initialCoupon.code : ""));
   const [couponBusy, setCouponBusy] = useState(false);
   const couponSeq = useRef(0);
+  // Bump de AGORA (o `await` de uma prévia não enxerga o checkbox novo): a resposta que não bate com ele é refeita.
+  const bumpNow = useRef(false);
+  // Foco depois de abrir, aplicar ou remover: o id do elemento (ou "settle" = o que existir depois da prévia).
+  const couponFocus = useRef<string | null>(null);
   const [v, setV] = useState({ name: "", email: "", phone: "", cpf: "" });
   const [errors, setErrors] = useState<Partial<Record<FieldKey, string>>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -270,7 +277,7 @@ export function CheckoutForm(props: {
   function runCoupon(next: Promise<CouponState>) {
     const id = ++couponSeq.current;
     setCouponBusy(true);
-    void next.then((st) => {
+    void next.then((st) => reconcileCoupon(preview, st, () => bumpNow.current)).then((st) => {
       if (id !== couponSeq.current) return;
       setCoupon(st);
       if (st.kind === "open") setCouponText(st.code);
@@ -278,25 +285,39 @@ export function CheckoutForm(props: {
     });
   }
   function onApplyCoupon() {
+    couponFocus.current = "settle";
     runCoupon(applyCoupon(preview, couponText, withBump));
   }
   function onRemoveCoupon() {
     couponSeq.current++;
+    couponFocus.current = "coupon-open";
     setCouponBusy(false);
     setCouponText("");
     setCoupon(closeCoupon());
   }
   function onToggleBump(checked: boolean) {
     setWithBump(checked);
+    bumpNow.current = checked;
     if (coupon.kind === "applied") runCoupon(refreshCoupon(preview, coupon, checked));
   }
   const brandColor = props.brandColor ?? undefined;
-  const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments: offer.maxInstallments, brandColor });
+  // Parcelas pelo total mostrado (com desconto): a mesma conta do servidor (`installmentsFor`).
+  const maxInstallments = installmentsFor(offer.maxInstallments, total);
+  const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments, brandColor });
   useEffect(() => {
     // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.
-    frameConfig.current = { totalCents: total, maxInstallments: offer.maxInstallments, brandColor };
+    frameConfig.current = { totalCents: total, maxInstallments, brandColor };
     frameCtrl.current?.setConfig(frameConfig.current);
-  }, [total, offer.maxInstallments, brandColor]);
+  }, [total, maxInstallments, brandColor]);
+
+  useEffect(() => {
+    const want = couponFocus.current;
+    if (!want) return;
+    const id = want === "settle" ? (coupon.kind === "applied" ? "coupon-remove" : coupon.kind === "open" ? "coupon" : null) : want;
+    if (!id || couponBusy) return;
+    couponFocus.current = null;
+    document.getElementById(id)?.focus();
+  }, [coupon, couponBusy]);
 
   // O iframe é criado aqui (não no JSX) para o listener existir ANTES de ele carregar: o `ready` sai assim que carrega.
   // Ref com limpeza (React 19): desmontar o bloco (ou trocar `frameKey`) tira o listener e o iframe.
@@ -386,13 +407,15 @@ export function CheckoutForm(props: {
       // Valor ou cupom divergente: refaz a prévia e mostra o resumo novo. Nunca reenvia sozinho.
       const id = ++couponSeq.current;
       setCouponBusy(true);
-      void afterStartFailure(preview, coupon, withBump, r).then((out) => {
-        if (id !== couponSeq.current) return;
-        setCoupon(out.coupon);
-        if (out.coupon.kind === "open") setCouponText(out.coupon.code);
-        setFormError(out.message);
-        setCouponBusy(false);
-      });
+      void afterStartFailure(preview, coupon, withBump, r)
+        .then(async (out) => ({ ...out, coupon: await reconcileCoupon(preview, out.coupon, () => bumpNow.current) }))
+        .then((out) => {
+          if (id !== couponSeq.current) return;
+          setCoupon(out.coupon);
+          if (out.coupon.kind === "open") setCouponText(out.coupon.code);
+          setFormError(out.message);
+          setCouponBusy(false);
+        });
       if (r.priceChanged || Object.keys(r.fields ?? {}).every((k) => k === "couponCode")) return;
     }
     if (r.needsCpf) {
@@ -478,7 +501,7 @@ export function CheckoutForm(props: {
 
   /** O "Pagar" (botão, Enter num campo do checkout ou Enter num campo do iframe do cartão). */
   async function submit() {
-    if (busy || couponBusy) return;
+    if (busy || couponBusy || couponIsStale(coupon, withBump)) return;
     const e = validate(method);
     if (method === "card") {
       const ctrl = frameCtrl.current;
@@ -538,7 +561,7 @@ export function CheckoutForm(props: {
   }
 
   const pixSub = asaasPix ? "Liberado na hora" : "Direto para a loja";
-  const cardSub = offer.maxInstallments > 1 ? `Em até ${offer.maxInstallments}x` : "Crédito";
+  const cardSub = maxInstallments > 1 ? `Em até ${maxInstallments}x` : "Crédito";
   const buttonLabel = busy ? (method === "pix" ? "Gerando Pix…" : "Processando pagamento…") : method === "pix" ? `Gerar Pix de ${brl(total)}` : `Pagar ${brl(total)}`;
 
   const productRow = (small?: boolean): ReactNode => (
@@ -710,8 +733,21 @@ export function CheckoutForm(props: {
               </label>
             ) : null}
             <div className={s.coupon}>
+              {/* Região viva presente desde o início: o leitor de tela anuncia o resultado da prévia quando o texto muda. */}
+              <p className={s.srOnly} role="status" aria-live="polite">
+                {coupon.kind === "applied" ? `Cupom ${coupon.code} aplicado. Desconto de ${brl(coupon.discountCents)}.` : coupon.kind === "open" ? (coupon.message ?? "") : ""}
+              </p>
               {coupon.kind === "closed" ? (
-                <button type="button" className={s.leadLink} style={{ alignSelf: "flex-start" }} onClick={() => setCoupon(openCoupon(coupon))}>
+                <button
+                  id="coupon-open"
+                  type="button"
+                  className={s.leadLink}
+                  style={{ alignSelf: "flex-start" }}
+                  onClick={() => {
+                    couponFocus.current = "coupon";
+                    setCoupon(openCoupon(coupon));
+                  }}
+                >
                   Tenho um cupom
                 </button>
               ) : null}
@@ -741,9 +777,9 @@ export function CheckoutForm(props: {
                 </div>
               ) : null}
               {coupon.kind === "applied" ? (
-                <div className={s.couponApplied} role="status">
+                <div className={s.couponApplied}>
                   <span>Cupom {coupon.code} aplicado</span>
-                  <button type="button" className={s.leadLink} onClick={onRemoveCoupon} disabled={couponBusy}>
+                  <button id="coupon-remove" type="button" className={s.leadLink} aria-label={`Remover cupom ${coupon.code}`} onClick={onRemoveCoupon} disabled={couponBusy}>
                     Remover
                   </button>
                 </div>
@@ -773,7 +809,7 @@ export function CheckoutForm(props: {
                   {brl(total)}
                 </span>
               </div>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || couponBusy || !hydrated || (method === "card" && frameState !== "ready")}>
+              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull}`} disabled={busy || couponBusy || couponIsStale(coupon, withBump) || !hydrated || (method === "card" && frameState !== "ready")}>
                 <Icon name={method === "pix" ? "pix" : "lock"} size={20} />
                 {buttonLabel}
               </button>

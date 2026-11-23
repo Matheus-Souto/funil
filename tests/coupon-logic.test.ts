@@ -12,7 +12,9 @@ import {
   couponLine,
   displayTotal,
   initialCouponState,
+  couponIsStale,
   openCoupon,
+  reconcileCoupon,
   refreshCoupon,
   submitCoupon,
   type CouponState,
@@ -126,6 +128,54 @@ describe("bump e cupom", () => {
     expect(displayTotal({ priceCents: PRICE, bumpCents: BUMP }, applied("KIDS10", false), true)).toBe(2601);
     // Sem bump na oferta, o bump marcado não existe.
     expect(displayTotal({ priceCents: PRICE, bumpCents: null }, applied("KIDS10", false), false)).toBe(891);
+  });
+});
+
+describe("bump marcado com a prévia em voo", () => {
+  test("Aplicar começou sem bump, o bump foi marcado antes da resposta: refaz com o bump e o total bate", async () => {
+    const { preview, calls } = fakePreview();
+    let bump = false; // o checkbox de agora
+    // A resposta do "Aplicar" chega depois de o comprador marcar o bump.
+    const inFlight = applyCoupon(preview, "TUDO10", false);
+    bump = true;
+    const st = await reconcileCoupon(preview, await inFlight, () => bump);
+    expect(calls).toEqual([
+      { code: "TUDO10", withBump: false },
+      { code: "TUDO10", withBump: true },
+    ]);
+    expect(st).toEqual({ kind: "applied", code: "TUDO10", discountCents: 270, totalCents: 2430, withBump: true });
+    expect(couponIsStale(st, true)).toBe(false);
+    expect(displayTotal({ priceCents: PRICE, bumpCents: BUMP }, st, true)).toBe(2430);
+  });
+
+  test("o bump vira e desvira durante a prévia: termina na prévia do estado final", async () => {
+    const { preview, calls } = fakePreview();
+    const seq = [true, false];
+    let bump = false;
+    const flip: PreviewFn = async (c, w) => {
+      const r = await preview(c, w);
+      bump = seq.shift() ?? bump; // o comprador mexe no checkbox enquanto cada prévia está no ar
+      return r;
+    };
+    const first = await applyCoupon(flip, "KIDS10", false);
+    bump = true;
+    const st = await reconcileCoupon(flip, first, () => bump);
+    expect(st).toMatchObject({ kind: "applied", withBump: false, totalCents: 891 });
+    expect(calls.at(-1)).toEqual({ code: "KIDS10", withBump: false });
+  });
+
+  test("o cupom aplicado conferido para outro bump é velho: o Pagar espera", () => {
+    expect(couponIsStale(applied("KIDS10", false), true)).toBe(true);
+    expect(couponIsStale(applied("KIDS10", true), true)).toBe(false);
+    expect(couponIsStale({ kind: "closed" }, true)).toBe(false);
+    expect(couponIsStale({ kind: "open", code: "X", message: null }, true)).toBe(false);
+  });
+
+  test("sem divergência não chama o servidor de novo", async () => {
+    const { preview, calls } = fakePreview();
+    const st = applied("KIDS10", true);
+    expect(await reconcileCoupon(preview, st, () => true)).toBe(st);
+    expect(calls).toEqual([]);
   });
 });
 

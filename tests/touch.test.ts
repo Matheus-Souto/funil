@@ -44,6 +44,16 @@ describe("parseTouch (entrada do checkout)", () => {
     expect(fbcFromFbclid("abc", 5)).toBe("fb.1.5.abc");
     expect(fbcFromFbclid(undefined, 5)).toBeUndefined();
   });
+  test("cupom: entra em maiúsculas pela regra do código; valor fora da regra é descartado (URL e primeiro toque)", () => {
+    expect(parseTouch(new URL("https://loja.example/c/x?cupom=kids_10-a"), {}).last).toEqual({ cupom: "KIDS_10-A" });
+    for (const bad of ["ab", "KIDS%2010", "%3Cscript%3E", "A".repeat(33)]) {
+      expect(parseTouch(new URL(`https://loja.example/c/x?cupom=${bad}`), {}).last).toBeNull();
+    }
+    const ft = Buffer.from(JSON.stringify({ cupom: "kids10", utm_source: "ig" })).toString("base64url");
+    expect(parseTouch(new URL(`https://loja.example/c/x?ft=${ft}`), {}).first).toEqual({ cupom: "KIDS10", utm_source: "ig" });
+    const bad = Buffer.from(JSON.stringify({ cupom: "a b" })).toString("base64url");
+    expect(parseTouch(new URL(`https://loja.example/c/x?ft=${bad}`), {}).first).toBeNull();
+  });
 });
 
 test("event id do Meta: UUID ou 16-64 caracteres url-safe", () => {
@@ -57,4 +67,5 @@ test("event id do Meta: UUID ou 16-64 caracteres url-safe", () => {
 test("trackingSnippet: script do t.js com o host do checkout", () => {
   expect(trackingSnippet("https://pay.loja.com.br")).toBe('<script src="https://pay.loja.com.br/t.js" data-checkout="pay.loja.com.br" defer></script>');
   expect(trackingSnippet("http://127.0.0.1:3000/")).toBe('<script src="http://127.0.0.1:3000/t.js" data-checkout="127.0.0.1:3000" defer></script>');
+
 });
