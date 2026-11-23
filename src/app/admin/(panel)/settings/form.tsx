@@ -7,10 +7,12 @@
 // A cor do checkout usa o seletor de cores do Arc, com prévia ao vivo e o contraste do texto do botão (a mesma regra AA
 // do checkout: src/lib/brand.ts).
 import { useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { z } from "zod";
 import { ColorPicker } from "@/components/arc/color-picker/color-picker";
 import { Switch } from "@/components/arc/switch/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/arc/tabs/tabs";
 import { brandVars, DEFAULT_BRAND } from "@/lib/brand";
+import { useLeaveGuard } from "../../leave-guard";
 import s from "../../panel.module.css";
 import { Live, useActionRunner } from "../../ui";
 import { updateSettingsAction } from "../actions";
@@ -31,15 +33,27 @@ interface Initial {
 
 const formOf = (i: Initial) => ({ name: i.name, notifyEmail: i.notifyEmail, color: i.brandColor ?? "", leadCapture: i.leadCapture, privacyEmail: i.privacyEmail, recovery: i.recovery });
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// A mesma regra do servidor (src/lib/store-settings.ts: trim, minúsculas e z.email): o que passa aqui não volta recusado.
+const EMAIL = z.email();
+const emailOk = (v: string) => EMAIL.safeParse(v.trim().toLowerCase()).success;
+
+/** Aba de cada campo de updateStoreSettings, para levar até o erro que vem do servidor. */
+const TAB_OF_FIELD: Record<string, SettingsTab> = {
+  name: "loja",
+  notifyEmail: "loja",
+  brandColor: "checkout",
+  leadCapture: "contatos",
+  privacyEmail: "contatos",
+  recovery: "contatos",
+};
 
 /** Primeiro problema do formulário e a aba onde ele está (a mesma regra que o servidor confere). */
 function problemOf(f: ReturnType<typeof formOf>, colorOk: boolean): { tab: SettingsTab; text: string } | null {
   if (!f.name.trim()) return { tab: "loja", text: "Informe o nome da loja." };
-  if (f.notifyEmail.trim() && !EMAIL.test(f.notifyEmail.trim())) return { tab: "loja", text: "O e-mail para aviso de venda parece inválido." };
+  if (f.notifyEmail.trim() && !emailOk(f.notifyEmail)) return { tab: "loja", text: "O e-mail para aviso de venda parece inválido." };
   if (!colorOk) return { tab: "checkout", text: "Use uma cor no formato #RRGGBB." };
   if (f.leadCapture && !f.privacyEmail.trim()) return { tab: "contatos", text: "Com a captura ligada, informe o e-mail para pedidos de privacidade." };
-  if (f.privacyEmail.trim() && !EMAIL.test(f.privacyEmail.trim())) return { tab: "contatos", text: "O e-mail para pedidos de privacidade parece inválido." };
+  if (f.privacyEmail.trim() && !emailOk(f.privacyEmail)) return { tab: "contatos", text: "O e-mail para pedidos de privacidade parece inválido." };
   return null;
 }
 
@@ -84,6 +98,7 @@ export function SettingsPanel({
   }
   const dirty = JSON.stringify({ ...f, name: f.name.trim(), notifyEmail: f.notifyEmail.trim(), privacyEmail: f.privacyEmail.trim() }) !== JSON.stringify(saved);
   const run = useActionRunner();
+  const leaveGuard = useLeaveGuard(canWrite && dirty, "As alterações das configurações ainda não foram salvas.");
   const valid = f.color === "" || HEX.test(f.color);
   const vars = useMemo(() => brandVars(valid && f.color ? f.color : null), [f.color, valid]);
   const strongChanged = vars["--color-brand-strong"] !== vars["--color-brand"];
@@ -110,16 +125,23 @@ export function SettingsPanel({
           return;
         }
         setSubmitted(JSON.stringify(f));
-        void run.run(() =>
-          updateSettingsAction({
-            name: f.name.trim(),
-            notifyEmail: f.notifyEmail.trim() || null,
-            brandColor: f.color ? f.color.toUpperCase() : null,
-            leadCapture: f.leadCapture,
-            privacyEmail: f.privacyEmail.trim() || null,
-            recovery: f.recovery,
-          }),
-        );
+        void run
+          .run(() =>
+            updateSettingsAction({
+              name: f.name.trim(),
+              notifyEmail: f.notifyEmail.trim() || null,
+              brandColor: f.color ? f.color.toUpperCase() : null,
+              leadCapture: f.leadCapture,
+              privacyEmail: f.privacyEmail.trim() || null,
+              recovery: f.recovery,
+            }),
+          )
+          .then((r) => {
+            // Erro do servidor num campo de outra aba (ex.: "Conecte o e-mail da loja em Conexões" salvando da aba Loja):
+            // leva à aba do campo, onde a mensagem faz sentido.
+            const to = !r.ok && r.field ? TAB_OF_FIELD[r.field.split(".")[0]!] : undefined;
+            if (to) go(to);
+          });
       }}
     >
       <Tabs value={tab} onValueChange={go}>
@@ -251,7 +273,16 @@ export function SettingsPanel({
       {canWrite && dirty ? (
         <div className={`${s.saveBar} ${s.saveBarSimple}`} role="region" aria-label="Alterações não salvas">
           <span>Alterações não salvas</span>
-          <button type="button" className={s.btn} onClick={() => setF(saved)} disabled={run.pending}>
+          <button
+            type="button"
+            className={s.btn}
+            onClick={() => {
+              setF(saved);
+              // A mensagem era sobre o que foi descartado: sai junto.
+              run.setMsg(null);
+            }}
+            disabled={run.pending}
+          >
             Descartar
           </button>
           <button type="submit" className={`${s.btn} ${s.btnPrimary}`} disabled={run.pending}>
@@ -260,6 +291,7 @@ export function SettingsPanel({
         </div>
       ) : null}
       <Live msg={run.msg} />
+      {leaveGuard}
     </form>
   );
 }

@@ -51,9 +51,20 @@ async function call<I, O>(panel: PanelActor, action: Action<I, O>, input: unknow
     const data = await runAction(action, { storeId: panel.storeId, actor: panel.actor, origin: "panel" }, input);
     return { ok: true, data, ...(message ? { message: message(data) } : {}) };
   } catch (e) {
-    if (e instanceof ActionError) return { ok: false, error: describe(e), code: e.code };
+    if (e instanceof ActionError) {
+      const field = fieldOf(e);
+      return { ok: false, error: describe(e), code: e.code, ...(field ? { field } : {}) };
+    }
     throw e;
   }
+}
+
+/** Caminho do primeiro campo recusado (só nomes de campo do schema; nunca o valor digitado). */
+function fieldOf(e: ActionError): string | undefined {
+  if (e.code !== "invalid_input" || !Array.isArray(e.details)) return undefined;
+  const path = (e.details[0] as { path?: unknown[] } | undefined)?.path;
+  if (!Array.isArray(path) || path.length === 0) return undefined;
+  return path.every((k) => typeof k === "string" || typeof k === "number") ? path.join(".") : undefined;
 }
 
 // ---- conta e equipe --------------------------------------------------------------------------------------------
