@@ -5,6 +5,7 @@ import "@/lib/auth/account";
 import "@/lib/catalog/offers";
 import "@/lib/catalog/products";
 import "@/lib/checkout";
+import "@/lib/coupons/actions";
 import "@/lib/connections";
 import "@/lib/delivery/download";
 import "@/lib/delivery/jobs";

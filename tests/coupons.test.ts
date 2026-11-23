@@ -3,11 +3,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { withStore } from "@/lib/db/client";
+import { ActionError, runAction } from "@/lib/actions/core";
+import { archiveCoupon, createCoupon, getCoupon, listCoupons, updateCoupon } from "@/lib/coupons/actions";
+import { ownerDb, withStore } from "@/lib/db/client";
 import { coupon, couponOffer, orders } from "@/lib/db/schema";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
 import { newAsaasOrder, createFakeAsaas, seedAsaasStore } from "./asaas-helpers";
+import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
 beforeAll(async () => {
@@ -204,5 +207,143 @@ describe("pedido com desconto", () => {
     await expect(
       withStore(shop.storeId, (tx) => tx.update(orders).set({ couponId: c!.id, discountCents: 99, totalCents: 891 }).where(eq(orders.id, order.id))),
     ).rejects.toThrow();
+  });
+});
+
+describe("ações do painel (coupons.*)", () => {
+  const code = (p: Promise<unknown>) => p.then(() => "ok", (e: unknown) => (e instanceof ActionError ? e.code : String(e)));
+  const fail = (p: Promise<unknown>) => p.then(() => null, (e: unknown) => e as ActionError);
+  const base = { kind: "percent" as const, percentBp: 1000 };
+
+  test("cria, lista, busca, edita e arquiva; o código fica em maiúsculas e os padrões valem", async () => {
+    const s = await seedPanelStore("Cupons painel");
+    const call = panelCall(s.storeId);
+    const created = await runAction(createCoupon, call, { code: " kids10 ", ...base });
+    expect(created).toMatchObject({ code: "KIDS10", kind: "percent", percentBp: 1000, amountCents: null, appliesTo: "main", maxPerEmail: 1, maxUses: null, active: true, offerIds: [], uses: 0, archivedAt: null });
+
+    const listed = await runAction(listCoupons, call, {});
+    expect(listed.map((c) => c.id)).toEqual([created.id]);
+    expect((await runAction(getCoupon, call, { id: created.id })).code).toBe("KIDS10");
+
+    const edited = await runAction(updateCoupon, call, { id: created.id, kind: "fixed", amountCents: 300, maxUses: 5, offerIds: [s.offerId] });
+    expect(edited).toMatchObject({ kind: "fixed", percentBp: null, amountCents: 300, maxUses: 5, offerIds: [s.offerId] });
+    const cleared = await runAction(updateCoupon, call, { id: created.id, offerIds: [] });
+    expect(cleared.offerIds).toEqual([]);
+
+    const archived = await runAction(archiveCoupon, call, { id: created.id });
+    expect(archived.active).toBe(false);
+    expect(archived.archivedAt).toBeInstanceOf(Date);
+    expect(await runAction(listCoupons, call, {})).toEqual([]);
+    expect((await runAction(listCoupons, call, { includeArchived: true })).map((c) => c.id)).toEqual([created.id]);
+    // O cupom continua existindo (nunca apaga) e arquivado não é editado.
+    expect((await runAction(getCoupon, call, { id: created.id })).archivedAt).not.toBeNull();
+    expect(await code(runAction(updateCoupon, call, { id: created.id, active: true }))).toBe("conflict");
+  });
+
+  test("código repetido (kids10 x KIDS10) é conflito, na criação e na edição; em outra loja é permitido", async () => {
+    const s = await seedPanelStore("Cupons dup");
+    const call = panelCall(s.storeId);
+    await runAction(createCoupon, call, { code: "KIDS10", ...base });
+    const err = await fail(runAction(createCoupon, call, { code: "kids10", ...base }));
+    expect([err?.code, err?.message]).toEqual(["conflict", "Já existe um cupom com este código"]);
+    const other = await runAction(createCoupon, call, { code: "OUTRO", ...base });
+    expect(await code(runAction(updateCoupon, call, { id: other.id, code: "kids10" }))).toBe("conflict");
+    const s2 = await seedPanelStore("Cupons dup 2");
+    expect((await runAction(createCoupon, panelCall(s2.storeId), { code: "KIDS10", ...base })).code).toBe("KIDS10");
+  });
+
+  test("validação: código, tipo x valor, janela, limites e campos desconhecidos", async () => {
+    const s = await seedPanelStore("Cupons val");
+    const call = panelCall(s.storeId);
+    const issuePath = async (input: unknown) => {
+      const e = await fail(runAction(createCoupon, call, input));
+      expect(e?.code).toBe("invalid_input");
+      return (e!.details as { path: string[] }[]).map((i) => i.path.join("."));
+    };
+    expect(await issuePath({ code: "a b", ...base })).toContain("code");
+    expect(await issuePath({ code: "AB", ...base })).toContain("code");
+    expect(await issuePath({ code: "A".repeat(33), ...base })).toContain("code");
+    expect(await issuePath({ code: "VAL1", kind: "percent" })).toContain("percentBp");
+    expect(await issuePath({ code: "VAL2", kind: "percent", percentBp: 9001 })).toContain("percentBp");
+    expect(await issuePath({ code: "VAL3", kind: "percent", percentBp: 0 })).toContain("percentBp");
+    expect(await issuePath({ code: "VAL4", kind: "percent", percentBp: 1000, amountCents: 100 })).toContain("amountCents");
+    expect(await issuePath({ code: "VAL5", kind: "fixed" })).toContain("amountCents");
+    expect(await issuePath({ code: "VAL6", kind: "fixed", amountCents: 0 })).toContain("amountCents");
+    expect(await issuePath({ code: "VAL7", kind: "fixed", amountCents: 1.5 })).toContain("amountCents");
+    expect(await issuePath({ code: "VAL8", kind: "fixed", amountCents: 100, percentBp: 1000 })).toContain("percentBp");
+    const t0 = "2026-12-01T00:00:00Z";
+    expect(await issuePath({ code: "VAL9", ...base, startsAt: t0, endsAt: t0 })).toContain("endsAt");
+    expect(await issuePath({ code: "VALA", ...base, maxUses: 0 })).toContain("maxUses");
+    expect(await issuePath({ code: "VALB", ...base, maxPerEmail: -1 })).toContain("maxPerEmail");
+    expect(await issuePath({ code: "VALC", ...base, desconto: 1 })).toEqual([""]);
+    // null é aceito nos limites; a data vira Date.
+    const ok = await runAction(createCoupon, call, { code: "VALD", ...base, maxUses: null, maxPerEmail: null, startsAt: t0, endsAt: "2026-12-31T00:00:00Z" });
+    expect(ok).toMatchObject({ maxUses: null, maxPerEmail: null });
+    expect(ok.startsAt?.toISOString()).toBe("2026-12-01T00:00:00.000Z");
+    // Edição: o estado resultante é validado (tipo novo sem valor; fim antes do início).
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, kind: "fixed" }))).toBe("invalid_input");
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, endsAt: "2026-11-01T00:00:00Z" }))).toBe("invalid_input");
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, percentBp: 9500 }))).toBe("invalid_input");
+  });
+
+  test("ofertas: de outra loja ou inexistente → not_found; nada é gravado", async () => {
+    const s = await seedPanelStore("Cupons of");
+    const o = await seedPanelStore("Cupons of outra");
+    const call = panelCall(s.storeId);
+    expect(await code(runAction(createCoupon, call, { code: "OFR1", ...base, offerIds: [o.offerId] }))).toBe("not_found");
+    expect(await code(runAction(createCoupon, call, { code: "OFR2", ...base, offerIds: [randomUUID()] }))).toBe("not_found");
+    expect(await runAction(listCoupons, call, { includeArchived: true })).toEqual([]);
+    const fine = await runAction(createCoupon, call, { code: "OFR4", ...base });
+    expect(await code(runAction(updateCoupon, call, { id: fine.id, offerIds: [o.offerId] }))).toBe("not_found");
+  });
+
+  test("cupom de outra loja é invisível (RLS): get e archive → not_found", async () => {
+    const a = await seedPanelStore("Cupons rls a");
+    const b = await seedPanelStore("Cupons rls b");
+    const mine = await runAction(createCoupon, panelCall(a.storeId), { code: "RLS1", ...base });
+    expect(await code(runAction(getCoupon, panelCall(b.storeId), { id: mine.id }))).toBe("not_found");
+    expect(await code(runAction(archiveCoupon, panelCall(b.storeId), { id: mine.id }))).toBe("not_found");
+    expect(await runAction(listCoupons, panelCall(b.storeId), {})).toEqual([]);
+  });
+
+  test("papéis: traffic, support e reader leem e não escrevem; admin escreve", async () => {
+    const s = await seedPanelStore("Cupons papéis");
+    const owner = await runAction(createCoupon, panelCall(s.storeId), { code: "ROLE1", ...base });
+    for (const role of ["traffic", "support", "reader"] as const) {
+      const c = panelCall(s.storeId, role);
+      expect((await runAction(listCoupons, c, {})).length).toBe(1);
+      expect((await runAction(getCoupon, c, { id: owner.id })).code).toBe("ROLE1");
+      expect(await code(runAction(createCoupon, c, { code: "ROLE2", ...base }))).toBe("forbidden");
+      expect(await code(runAction(updateCoupon, c, { id: owner.id, active: false }))).toBe("forbidden");
+      expect(await code(runAction(archiveCoupon, c, { id: owner.id }))).toBe("forbidden");
+    }
+    expect((await runAction(createCoupon, panelCall(s.storeId, "admin"), { code: "ROLE3", ...base })).code).toBe("ROLE3");
+  });
+
+  test("uses segue a regra D5: paid/disputed, Pix pendente não vencido e cartão pendente há menos de 2 h", async () => {
+    const s = await seedPanelStore("Cupons uses");
+    const call = panelCall(s.storeId);
+    const c = await runAction(createCoupon, call, { code: "USOS", ...base });
+    const old = new Date(Date.now() - 3 * 3_600_000);
+    const recent = new Date(Date.now() - 30 * 60_000);
+    const counted = [
+      await seedOrder(s, { status: "paid" }),
+      await seedOrder(s, { status: "disputed" }),
+      await seedOrder(s, { status: "pending", method: "pix_asaas" }),
+      await seedOrder(s, { status: "pending", method: "pix_manual" }),
+      await seedOrder(s, { status: "pending", method: "card_asaas", createdAt: recent }),
+    ];
+    const ignored = [
+      await seedOrder(s, { status: "refunded" }),
+      await seedOrder(s, { status: "expired" }),
+      await seedOrder(s, { status: "declined" }),
+      await seedOrder(s, { status: "pending", method: "card_asaas", createdAt: old }),
+      await seedOrder(s, { status: "pending", method: "pix_asaas" }),
+    ];
+    // Pix pendente vencido: muda a data no banco (sem esperar).
+    await ownerDb.update(orders).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(orders.id, ignored[4]!.id));
+    for (const o of [...counted, ...ignored]) await ownerDb.update(orders).set({ couponId: c.id, discountCents: 99, totalCents: o.subtotalCents - 99 }).where(eq(orders.id, o.id));
+    expect((await runAction(getCoupon, call, { id: c.id })).uses).toBe(counted.length);
+    expect((await runAction(listCoupons, call, {}))[0]!.uses).toBe(counted.length);
   });
 });

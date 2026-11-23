@@ -192,12 +192,37 @@ describe("classificação", () => {
     }
   });
 
+  test("cupons: leitura para quem tem offers.read; as três de escrita com aprovação; traffic só lê", () => {
+    for (const role of ["owner", "admin", "reader", "traffic", "support"] as const) {
+      const names = mcpTools(role).map((x) => x.name);
+      expect([role, names.includes("coupons_list"), names.includes("coupons_get")]).toEqual([role, true, true]);
+      expect([role, names.some((n) => ["coupons_create", "coupons_update", "coupons_archive"].includes(n))]).toEqual([role, hasPermission(role, "offers.write")]);
+    }
+    for (const n of ["coupons_create", "coupons_update", "coupons_archive"]) {
+      const x = tool("owner", n);
+      expect([n, x.approval, x.description.startsWith(APPROVAL_PREFIX)]).toEqual([n, true, true]);
+    }
+    for (const n of ["coupons_list", "coupons_get"]) expect(tool("reader", n).approval).toBe(false);
+  });
+
+  test("coupons_list e coupons_get: a projeção é a lista branca (campo novo não sai)", () => {
+    const row = {
+      id: "i", code: "KIDS10", kind: "percent", percentBp: 1000, amountCents: null, appliesTo: "main", startsAt: null, endsAt: null,
+      maxUses: 5, maxPerEmail: 1, active: true, archivedAt: null, offerIds: ["o1"], uses: 2, campoNovo: "zuleica@exemplo.com", storeId: "s",
+    };
+    const keys = ["active", "amountCents", "appliesTo", "archivedAt", "code", "endsAt", "id", "kind", "maxPerEmail", "maxUses", "offerIds", "percentBp", "startsAt", "uses"];
+    const list = tool("reader", "coupons_list").project([row]) as object[];
+    expect(Object.keys(list[0]!).sort()).toEqual(keys);
+    expect(Object.keys(tool("reader", "coupons_get").project(row) as object).sort()).toEqual(keys);
+    expect(JSON.stringify(list)).not.toMatch(/campoNovo|zuleica|storeId/);
+  });
+
   test("reader vê só catálogo, métricas e o relatório de vendas pagas", () => {
     expect(
       mcpTools("reader")
         .map((x) => x.name)
         .sort(),
-    ).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    ).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
   });
 
   test("traffic não lista pedidos nem ações de connections.write", () => {

@@ -9,7 +9,7 @@ import { z } from "zod";
 import { ActionError, defineAction, runAction, type Action } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
-import { approvalRequest, auditLog, customer, emailLog, mcpToken, membership, orders, rateLimit, storeAlert, teamInvite, users } from "@/lib/db/schema";
+import { approvalRequest, auditLog, coupon, customer, emailLog, mcpToken, membership, orders, rateLimit, storeAlert, teamInvite, users } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { setMailTransportForTests } from "@/lib/delivery/mailer";
 import { setResendFetchForTests } from "@/lib/delivery/resend";
@@ -183,7 +183,7 @@ describe("tools/list e tools/call", () => {
     }
 
     const tools = await listTools(reader.token);
-    expect(tools.map((x) => x.name).sort()).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    expect(tools.map((x) => x.name).sort()).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
     for (const x of tools) {
       expect(x.description.length).toBeGreaterThan(0);
       expect(x.inputSchema).toMatchObject({ type: "object" });
@@ -668,6 +668,11 @@ describe("PII", () => {
     connections_testResend: {},
     connections_testSmtp: {},
     connections_testTelegram: {},
+    coupons_archive: { id: randomUUID() },
+    coupons_create: { code: "PII11", kind: "percent", percentBp: 1000 },
+    coupons_get: { id: randomUUID() },
+    coupons_list: {},
+    coupons_update: { id: randomUUID(), active: false },
     metrics_breakdown: range,
     metrics_summary: range,
     offers_create: { slug: `o-${randomBytes(4).toString("hex")}`, name: "Nova", productIds: [s.mainId], priceCents: 1990, methods: ["pix"], pixMode: "manual" },
@@ -713,6 +718,9 @@ describe("PII", () => {
     const owner = await mkToken(s.storeId, "owner");
     const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
     const table = minimal(s, order.id, alert!.id, range);
+    // coupons_get precisa de um cupom que exista (as de escrita só criam o pedido na fila).
+    const [cp] = await t.ownerDb.insert(coupon).values({ storeId: s.storeId, code: "PII10", kind: "percent", percentBp: 1000 }).returning({ id: coupon.id });
+    table.coupons_get = { id: cp!.id };
     const names = (await listTools(owner.token)).map((x) => x.name);
     expect(names.filter((n) => !(n in table))).toEqual([]);
 
