@@ -2,7 +2,9 @@
 
 > **Para agentes:** sub-skill obrigatória: superpowers:subagent-driven-development (recomendada) ou
 > superpowers:executing-plans, tarefa por tarefa. Os passos usam checkbox (`- [ ]`).
-> **Não comece sem a aprovação do dono** e sem as respostas da seção 6 do spec. Cada parte (A, B1, B2, C) é **um PR
+> **Não comece sem o ok final do dono.** As perguntas foram respondidas em 23/11/2026 (seção 6 do spec: cupom só no
+> principal, 1 por pessoa, `?cupom=` + KIDS10, ordem A → B1 → B2 → C, upsell R$ 17,10, downsell R$ 12,90, cartão
+> fase 1, sequência D+1/D+3/D+5, descadastro único, Resend gratuito, jurídico junto com o PR #14). Cada parte (A, B1, B2, C) é **um PR
 > separado**, em branch próprio a partir da `main` atualizada, e cada uma tem um PR de verificação (E2E) depois.
 
 **Objetivo:** aumentar o ticket da loja com (A) cupom de desconto no checkout, (B) upsell e downsell na página de
@@ -464,7 +466,7 @@ dois e-mails de entrega" e "outro navegador com o link do obrigado não vê a of
 - Produces:
   - `email_sequence_step`: `id`, `store_id`, `offer_id` (FK composta, cascade), `position` (1–5, único por oferta),
     `delay_hours` (1–720), `subject` (≤ 120), `body` (≤ 4000), `button_label` (≤ 60), `button_url` (≤ 500, `https://`),
-    `skip_if_bought_offer_id` (FK composta, set null), `active boolean default false`, `activated_at timestamptz`
+    `skip_if_has_offer_id` (FK composta, set null: pula a caixa que já tem todos os produtos dessa oferta em pedidos pagos), `active boolean default false`, `activated_at timestamptz`
     (gravado toda vez que o passo é ligado), `updated_at`.
   - `sequence_email`: como `recovery_email` (`email_hash`, `mailbox_hash`, `status` `queued|sending|sent|failed|skipped`,
     `skip_reason`, `unsub_hash` único, `job_id`, `due_at`, `sent_at`, `created_at`, `expires_at` = criação + 90 d),
@@ -517,7 +519,10 @@ dois e-mails de entrega" e "outro navegador com o link do obrigado não vê a of
 ### Task C4: varredura (`sequence_scan`)
 
 **Files:**
-- Create: `src/lib/sequence/rules.ts` (`SEQUENCE = { lookbackHours: 24, mailboxGapHours: 20, storePerHour: 100, sendGraceMin: 120, retentionDays: 90 }`), `src/lib/sequence/scan.ts`
+- Create: `src/lib/sequence/rules.ts` (`SEQUENCE = { lookbackHours: 24, mailboxGapHours: 20, sendGraceMin: 120, retentionDays: 90, defaultPerDay: 30, defaultPerHour: 10, storeMailReserve24h: 60 }`), `src/lib/sequence/scan.ts`
+- Modify: `src/lib/db/schema/core.ts` + a migração da C1 (`store.sequence_per_day integer not null default 30`,
+  `store.sequence_per_hour integer not null default 10`, editáveis em Configurações pelo `store.updateSettings`, que já é
+  sensível no MCP)
 - Modify: `src/lib/jobs.ts` (`"sequence_scan"`, `"sequence_send"`), `src/lib/jobs/handlers.ts`, `src/lib/jobs/worker.ts`
   (`scheduleOnce("sequence_scan")` junto da `recovery_scan`)
 - Test: `tests/sequence.test.ts`
@@ -526,18 +531,21 @@ dois e-mails de entrega" e "outro navegador com o link do obrigado não vê a of
 - Produces: por loja, sob `pg_advisory_xact_lock(hashtext('sequence:' || storeId))`, para cada passo ativo:
   candidatos = pedidos `paid` da oferta com `paid_at >= activated_at`, `paid_at + delay <= now` e
   `paid_at + delay > now − 24 h`, sem linha `sequence_email` para `(order, step)`. Pula **com linha `skipped`**
-  (motivo): `optout`, `endereco_invalido`, `ja_comprou` (`skip_if_bought_offer_id` pago pela mesma caixa), `repetido`
-  (o mesmo passo já saiu para a caixa por outro pedido). Pula **sem linha** (próxima varredura): a caixa recebeu e-mail
-  de sequência nas últimas 20 h, ou o teto da loja (100 por hora). Senão insere `queued` e enfileira
+  (motivo): `optout`, `endereco_invalido`, `ja_tem` (a caixa já tem todos os produtos da oferta de
+  `skip_if_has_offer_id` em pedidos pagos: conta o bump), `repetido` (o mesmo passo já saiu para a caixa por outro
+  pedido), `cota` (devido há mais de 24 h sem vaga). Pula **sem linha** (próxima varredura): a caixa recebeu e-mail de
+  sequência nas últimas 20 h; o teto da loja por hora ou por dia (`store.sequence_per_hour`/`sequence_per_day`); ou a
+  **reserva da entrega** (D27: mais de 60 linhas no `email_log` da loja nas últimas 24 h). Senão insere `queued` e enfileira
   `sequence_send { sequenceId, unsubToken }` na mesma transação (o token em claro só no payload do job, como na
   recuperação).
 - [ ] **Step 1: testes que falham** (relógio injetado):
   - `pedido pago há 25 h, passo D+1 ativo desde antes → 1 linha queued + 1 job`.
   - `ligar a sequência com 500 compradores de ontem → nenhuma linha` (`paid_at < activated_at`).
   - `devido há 30 h (worker parado) → nada`.
-  - `optout → skipped optout`; `comprou o Completo → passo da oferta skipped ja_comprou`.
+  - `optout → skipped optout`; `comprou o Completo, ou o Almanaque com o bump → passo D+5 skipped ja_tem`.
   - `dois passos devidos para a mesma caixa → um agora, o outro na varredura depois de 20 h`.
-  - `101º da loja na hora → sem linha`.
+  - `11º da loja na hora e 31º no dia → sem linha`; `61 e-mails no email_log em 24 h → nenhuma sequência enfileirada`;
+    `devido há 25 h sem vaga → skipped cota`.
   - `duas varreduras simultâneas → uma linha por (pedido, passo)`.
   - `log sem e-mail nem token`.
 - [ ] Steps 2–5. Commit `feat(sequencia): varredura dos passos devidos`.
@@ -587,9 +595,12 @@ dois e-mails de entrega" e "outro navegador com o link do obrigado não vê a of
   `/api/health`. A migração roda no entrypoint. Isso é feito pelo dono ou com o ok dele. Este plano não roda nada
   contra a produção.
 - A: criar o cupom de teste no painel, fazer uma compra real com cupom (Pix) e reembolsar.
-- B1/B2: configurar a oferta `post_purchase` (ex.: "5 Kits Extras pós-compra") e o upsell no `/c/almanaque`, e fazer
-  uma compra real só do Almanaque → upsell → reembolsar os dois.
-- C: escrever os passos, mandar o teste para si mesmo e só ligar depois do jurídico.
+- A: o dono cria o cupom KIDS10 (10%, Almanaque, Completo e a oferta pública dos kits, 30 dias, 1 por pessoa).
+- B1/B2: ofertas `post_purchase` "5 Kits Extras" R$ 17,10 (upsell) e R$ 12,90 (downsell) ligadas ao `/c/almanaque`,
+  com os textos aprovados; compra real só do Almanaque → upsell → reembolsar os dois.
+- C: oferta pública `/c/kits` R$ 17,10; passos D+1, D+3 e D+5 (com `?cupom=KIDS10` e `skip_if_has_offer_id` = kits)
+  na oferta Almanaque; mandar o teste para si mesmo e só ligar depois do jurídico. Com o Resend gratuito, acompanhar
+  `skipped cota` e migrar para o plano pago quando as vendas passarem de ~25 por dia.
 
 ## Fora deste plano
 
