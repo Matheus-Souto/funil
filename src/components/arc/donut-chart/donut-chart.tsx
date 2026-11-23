@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type Ref } from "react";
-import { AnimatePresence, animate, frame, cancelFrame, motion, motionValue, useInView, useReducedMotion, type MotionValue, type Transition } from "motion/react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent, type Ref } from "react";
+import { animate, frame, cancelFrame, motion, motionValue, useInView, useReducedMotion, type MotionValue, type Transition } from "motion/react";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./donut-chart.module.css";
 
@@ -37,14 +37,6 @@ export interface DonutChartProps {
   activeKey?: string | null;
   defaultActiveKey?: string | null;
   onActiveChange?: (key: string | null) => void;
-  /** Controlled hidden segment keys. A hidden segment closes and the rest of the ring redistributes. */
-  hiddenKeys?: string[];
-  defaultHiddenKeys?: string[];
-  onHiddenKeysChange?: (keys: string[]) => void;
-  /** What clicking a legend row does: show or hide its segment, or pin it as the selected segment. */
-  legendAction?: "toggle" | "select";
-  /** The synced legend beside or below the ring. */
-  legend?: boolean;
   emptyLabel?: string;
   ref?: Ref<HTMLElement>;
   className?: string;
@@ -85,11 +77,11 @@ function sliceData(data: DonutChartDatum[], groupBelow: number, maxSegments: num
   return [...parts.filter(item => keep.has(item.key)).map(item => ({ ...item })), { key: OTHER, label: otherLabel, value: rest.reduce((sum, item) => sum + item.value, 0), members: rest }];
 }
 
-/** Turns of the ring for each slice in data order; a hidden slice closes to a point where it sits. */
-function layout(slices: Slice[], hidden: Set<string>) {
-  const total = slices.reduce((sum, item) => sum + (hidden.has(item.key) ? 0 : item.value), 0) || 1;
+/** Turns of the ring for each slice in data order. */
+function layout(slices: Slice[]) {
+  const total = slices.reduce((sum, item) => sum + item.value, 0) || 1;
   let at = 0;
-  return new Map(slices.map(item => { const arc = { start: at, end: at + (hidden.has(item.key) ? 0 : item.value / total) }; at = arc.end; return [item.key, arc]; }));
+  return new Map(slices.map(item => { const arc = { start: at, end: at + item.value / total }; at = arc.end; return [item.key, arc]; }));
 }
 
 /** Half the width, in pixels, of a sector's outer edge once the gap is cut; below a couple of pixels a segment fades rather than drawing a hairline. */
@@ -172,21 +164,16 @@ function useReducedMotionSafe() {
   return !!useReducedMotion() && hydrated;
 }
 
-export function DonutChart({ data, label, unit = "", formatValue = value => grouped.format(value), totalLabel = "Total", size = 208, thickness = 24, groupBelow = .04, maxSegments = 6, otherLabel = "Outros", activeKey, defaultActiveKey = null, onActiveChange, hiddenKeys, defaultHiddenKeys, onHiddenKeysChange, legendAction = "toggle", legend = true, emptyLabel = "Sem dados ainda", ref, className }: DonutChartProps) {
+export function DonutChart({ data, label, unit = "", formatValue = value => grouped.format(value), totalLabel = "Total", size = 208, thickness = 24, groupBelow = .04, maxSegments = 6, otherLabel = "Outros", activeKey, defaultActiveKey = null, onActiveChange, emptyLabel = "Sem dados ainda", ref, className }: DonutChartProps) {
   const reduced = useReducedMotionSafe();
   const figure = useRef<HTMLElement>(null);
   useImperativeHandle(ref, () => figure.current as HTMLElement);
   const inView = useInView(figure, { once: true, amount: .35 });
-  const legendId = useId();
   const slices = sliceData(data, groupBelow, maxSegments, otherLabel);
 
-  // Hidden segments are controlled or not, like selection.
-  const [ownHidden, setOwnHidden] = useState<string[]>(defaultHiddenKeys ?? []);
-  const hiddenList = hiddenKeys ?? ownHidden;
-  const hidden = new Set(hiddenList.filter(key => slices.some(item => item.key === key)));
-  const visible = slices.filter(item => !hidden.has(item.key));
+  const visible = slices;
   const total = visible.reduce((sum, item) => sum + item.value, 0);
-  const signature = `${slices.map(item => `${item.key}:${item.value}${hidden.has(item.key) ? "h" : ""}`).join("|")}`;
+  const signature = slices.map(item => `${item.key}:${item.value}`).join("|");
   const suffix = unit ? ` ${unit}` : "";
 
   // Colors follow a key from the first time it is seen, so a segment keeps its color through every dataset.
@@ -221,16 +208,6 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
   const activeSlice = visible.find(item => item.key === current) ?? null;
 
   const [announcement, setAnnouncement] = useState("");
-  const setHidden = (key: string) => {
-    const isHidden = hidden.has(key);
-    if (!isHidden && visible.length <= 1) return;
-    const next = isHidden ? hiddenList.filter(item => item !== key) : [...hiddenList, key];
-    if (hiddenKeys === undefined) setOwnHidden(next);
-    onHiddenKeysChange?.(next);
-    const item = slices.find(slice => slice.key === key);
-    const nextTotal = slices.reduce((sum, slice) => sum + (next.includes(slice.key) ? 0 : slice.value), 0);
-    if (item) setAnnouncement(`${item.label} ${isHidden ? "shown" : "hidden"}. ${totalLabel} ${formatValue(nextTotal)}${suffix}.`);
-  };
 
   // Geometry in the chart's own units; the SVG scales with its container.
   const c = size / 2, outer = c - MARGIN, inner = Math.max(8, outer - thickness);
@@ -267,12 +244,12 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
   const latest = useRef({ drawn, slices });
   useLayoutEffect(() => { latest.current = { drawn, slices }; });
 
-  // New data, or a segment shown or hidden, moves every arc from wherever it is on screen, keeping its velocity if it was already moving.
+  // New data moves every arc from wherever it is on screen, keeping its velocity if it was already moving.
   const shown = inView || reduced;
   useEffect(() => {
     if (!shown) return;
     const { drawn: order, slices: now } = latest.current;
-    const goal = layout(now, hidden);
+    const goal = layout(now);
     targets.current = goal;
     const first = segments.current.size === 0;
     const place = (index: number) => { const before = order.slice(0, index).reverse().find(item => goal.has(item.key)); return before ? goal.get(before.key)!.end : 0; };
@@ -310,7 +287,7 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
       animate(segment.end, to.end, { ...settle, onComplete: leaving ? () => drop(item.key) : undefined });
     });
     schedule();
-  }, [shown, signature, reduced, schedule]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [shown, signature, reduced, schedule]);
 
   // The active segment slides out along its middle and thickens a little; the one it replaces settles back at the same time.
   useEffect(() => {
@@ -345,18 +322,10 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
   };
 
   const format = (value: number) => `${formatValue(value)}${suffix}`;
-  const describe = (item: Slice) => `${item.label}, ${format(item.value)}, ${shareText(item.value / (total || 1))}${item.members ? `. Includes ${item.members.map(member => member.label).join(", ")}` : ""}`;
+  const describe = (item: Slice) => `${item.label}, ${format(item.value)}, ${shareText(item.value / (total || 1))}${item.members ? `. Inclui ${item.members.map(member => member.label).join(", ")}` : ""}`;
 
-  // Arrow keys walk the segments, in the legend or on the ring itself when there is no legend.
-  const rows = useRef<(HTMLButtonElement | null)[]>([]);
+  // Arrow keys walk the segments on the ring.
   const step = (key: string, index: number, count: number) => ({ ArrowDown: index + 1, ArrowRight: index + 1, ArrowUp: index - 1, ArrowLeft: index - 1, Home: 0, End: count - 1 } as Record<string, number>)[key];
-  const onLegendKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    if (event.key === "Escape" && selected) { event.preventDefault(); select(null); return; }
-    const next = step(event.key, index, slices.length);
-    if (next === undefined) return;
-    event.preventDefault();
-    rows.current[(next + slices.length) % slices.length]?.focus();
-  };
   const onRingKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!visible.length) return;
     if (event.key === "Escape") { event.preventDefault(); setPreview(null); if (selected) select(null); return; }
@@ -369,7 +338,6 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
     setPreview(item.key);
     setAnnouncement(describe(item));
   };
-  const onLegendBlur = (event: FocusEvent<HTMLButtonElement>) => { if (!(event.relatedTarget instanceof Node && event.currentTarget.closest("ul")?.contains(event.relatedTarget))) setPreview(null); };
 
   // One readout per segment plus the total; the active one rolls in from the side it sits on, so moving clockwise rolls the drum forward.
   const identity = activeSlice ? activeSlice.key : total ? "__total" : "__empty";
@@ -377,12 +345,11 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
   const activeIndex = Math.max(0, readouts.findIndex(item => item.key === (identity === "__empty" ? "__total" : identity)));
 
   const summary = total ? `${label}. ${totalLabel} ${format(total)}. ${visible.map(describe).join(". ")}.` : `${label}. ${emptyLabel}.`;
-  const members = (item: Slice) => item.members ? item.members.length > 2 ? `${item.members.slice(0, 2).map(member => member.label).join(", ")} and ${item.members.length - 2} more` : item.members.map(member => member.label).join(" and ") : null;
-  const ringLabel = `${label}. Use the arrow keys to read each segment.`;
+  const ringLabel = `${label}. Use as setas para ler cada parte.`;
 
-  return <figure ref={figure} className={[styles.figure, className].filter(Boolean).join(" ")} aria-label={label} data-legend={legend || undefined}>
+  return <figure ref={figure} className={[styles.figure, className].filter(Boolean).join(" ")} aria-label={label}>
     <div className={styles.ring} style={{ width: size, "--inner": `${(inner * 2) / size * 100}%` } as CSSProperties}
-      tabIndex={legend ? undefined : 0} role={legend ? undefined : "group"} aria-label={legend ? undefined : ringLabel} onKeyDown={legend ? undefined : onRingKey} onBlur={legend ? undefined : () => setPreview(null)}>
+      tabIndex={0} role="group" aria-label={ringLabel} onKeyDown={onRingKey} onBlur={() => setPreview(null)}>
       <svg ref={svg} className={styles.svg} viewBox={`0 0 ${size} ${size}`} aria-hidden="true" focusable="false" onPointerMove={onRingMove} onPointerLeave={() => setPreview(null)} onClick={onRingClick} data-hovering={current !== null || undefined}>
         <circle className={styles.track} cx={c} cy={c} r={(outer + inner) / 2} strokeWidth={outer - inner} data-idle={(!shown || !total) || undefined} />
         {drawn.map(item => <path key={item.key} ref={registerPath} data-key={item.key} className={styles.segment} data-active={item.key === current || undefined} data-dim={(current !== null && item.key !== current) || undefined} style={{ "--slice": colorFor(item) } as CSSProperties} />)}
@@ -391,30 +358,10 @@ export function DonutChart({ data, label, unit = "", formatValue = value => grou
         {readouts.map((item, index) => <motion.span key={item.key} className={styles.readout} initial={false} {...drum(index - activeIndex, reduced)}>
           <span className={styles.centerLabel}>{item.label}</span>
           <span className={styles.centerValue}>{item.value || item.meta ? <Count value={item.value} format={formatValue} reduced={reduced} /> : " "}</span>
-          <span className={styles.centerMeta}>{item.meta ? <><Count value={total && !hidden.has(item.key) ? item.value / total : 0} format={shareText} reduced={reduced} /> of {totalLabel.toLowerCase()}</> : unit || " "}</span>
+          <span className={styles.centerMeta}>{item.meta ? <><Count value={total ? item.value / total : 0} format={shareText} reduced={reduced} /> {totalLabel.toLowerCase()}</> : unit || " "}</span>
         </motion.span>)}
       </div>
     </div>
-    {legend && slices.length > 0 && <ul className={styles.legend} aria-label={`${label}, segments${legendAction === "toggle" ? ". Press a segment to show or hide it" : ""}`} id={legendId} onPointerLeave={() => setPreview(null)}>
-      <AnimatePresence initial={false}>{slices.map((item, index) => {
-        const off = hidden.has(item.key);
-        // A row that joins or leaves (a part folding into Other, say) opens or closes its height, so the rows below and the card around them glide instead of jumping.
-        return <motion.li key={item.key} className={styles.item} initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={reduced ? { duration: 0 } : spring.smooth}>
-          <button ref={node => { if (node) rows.current[index] = node; }} type="button" className={styles.row} aria-pressed={legendAction === "toggle" ? !off : selected === item.key} aria-label={off ? `${item.label}, hidden` : describe(item)} data-active={item.key === current || undefined} data-pinned={selected === item.key || undefined} data-hidden={off || undefined} style={{ "--slice": colorFor(item) } as CSSProperties}
-            onClick={() => legendAction === "toggle" ? setHidden(item.key) : select(selected === item.key ? null : item.key)}
-            onPointerEnter={event => { if (event.pointerType === "mouse") setPreview(off ? null : item.key); }}
-            onFocus={event => { if (event.currentTarget.matches(":focus-visible")) setPreview(off ? null : item.key); }} onBlur={onLegendBlur} onKeyDown={event => onLegendKey(event, index)}>
-            <span className={styles.dot} aria-hidden="true" />
-            <span className={styles.rowText}>
-              <span className={styles.rowLabel}>{item.label}</span>
-              {item.members && <span className={styles.rowMembers}>{members(item)}</span>}
-            </span>
-            <span className={styles.rowValue} aria-hidden="true"><Count value={item.value} format={formatValue} reduced={reduced} /></span>
-            <span className={styles.rowShare} aria-hidden="true"><Count value={off || !total ? 0 : item.value / total} format={shareText} reduced={reduced} /></span>
-          </button>
-        </motion.li>;
-      })}</AnimatePresence>
-    </ul>}
     <p className={styles.srOnly}>{summary}</p>
     <p className={styles.srOnly} aria-live="polite">{announcement}</p>
     {total > 0 && <div className={styles.srOnly}><table>

@@ -459,7 +459,7 @@ export function ColorPicker({
 
         <motion.div className={styles.body} style={{ opacity: contentOpacity, y: contentY }}>
           <div className={styles.area} data-active={active === "area" || undefined} {...areaPad}>
-            <motion.div ref={areaThumb} className={styles.areaThumb} role="slider" tabIndex={0} aria-roledescription="2D slider"
+            <motion.div ref={areaThumb} className={styles.areaThumb} role="slider" tabIndex={0} aria-roledescription="controle de duas direções"
               aria-label="Saturação e brilho" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(hsva.s * 100)}
               aria-valuetext={`Saturação ${Math.round(hsva.s * 100)}%, brilho ${Math.round(hsva.v * 100)}%`}
               style={{ left: areaLeft, top: areaTop }}

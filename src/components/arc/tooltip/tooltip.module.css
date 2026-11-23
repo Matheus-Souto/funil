@@ -13,6 +13,8 @@
 .text { position: relative; display: block; overflow: clip; overflow-clip-margin: var(--space-2); }
 .measure { position: absolute; top: 0; left: 0; width: max-content; max-width: calc(15rem - 20px); visibility: hidden; pointer-events: none; }
 .line { display: block; width: max-content; max-width: calc(15rem - 20px); }
+/* Painel: texto mais largo que a bolha quebra linha (ex.: nome, papel e e-mail na sidebar recolhida) em vez de ser cortado. */
+.measure, .line { white-space: normal; overflow-wrap: anywhere; }
 @keyframes tooltip-exit { to { --tooltip-exit: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .tooltip, .tooltip[data-state="closed"], .tooltip[data-instant][data-state$="-open"] { transform: none; transition: opacity var(--duration-instant) var(--ease-standard); }

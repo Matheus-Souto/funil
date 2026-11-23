@@ -2,13 +2,14 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
-import { auditLog, offer, offerProduct, product, store } from "@/lib/db/schema";
+import { auditLog, job, offer, offerProduct, product, store } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
-import { backfillPageCounts, PAGE_COUNT_UNKNOWN } from "@/lib/catalog/page-count";
+import { BUSY_WAIT_MS, NEXT_ROUND_MS, backfillPageCounts, PAGE_COUNT_UNKNOWN, scheduleNextRound } from "@/lib/catalog/page-count";
+import { pdfLimiter } from "@/lib/pdf/sandbox";
 import { checkPdfBytes, createProduct, deleteProduct, listProducts, readProductFile, updateProduct } from "@/lib/catalog/products";
 import { createOffer, getOffer, getPublicOffer, listOffers, setOfferProducts, setOfferSlug, updateOffer, updateOfferPrice } from "@/lib/catalog/offers";
 import {
@@ -226,10 +227,10 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const [bRow] = await withStore(storeId, (tx) => tx.select({ fileKey: product.fileKey }).from(product).where(eq(product.id, b.id)));
     await storage.delete(bRow!.fileKey);
     const r = await backfillPageCounts({ storeId });
-    expect(r).toEqual({ updated: 1, failed: [{ storeId, productId: b.id, reason: "arquivo não encontrado no storage" }], more: false, busy: false });
+    expect(r).toEqual({ updated: 1, failed: [{ storeId, productId: b.id, reason: "arquivo não encontrado no storage" }], deferred: [], more: false, busy: false });
     expect(await pageCounts(storeId)).toEqual({ [a.id]: 4, [b.id]: PAGE_COUNT_UNKNOWN, [c.id]: 99 });
     // O marcado não volta para a fila e, para quem lê, é desconhecido.
-    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false, busy: false });
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], deferred: [], more: false, busy: false });
     const listed = await call(listProducts, storeId, owner, {});
     expect(Object.fromEntries(listed.map((p) => [p.id, p.pageCount]))).toEqual({ [a.id]: 4, [b.id]: null, [c.id]: 99 });
   }, HEAVY_TEST_MS);
@@ -249,7 +250,7 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const p = await call(createProduct, storeId, owner, { name: "Excluído", fileName: "x.pdf", file: await makePdf(3) });
     await call(deleteProduct, storeId, owner, { id: p.id });
     await clear(storeId, [p.id]);
-    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], more: false, busy: false });
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], deferred: [], more: false, busy: false });
     expect((await pageCounts(storeId))[p.id]).toBeNull();
   }, HEAVY_TEST_MS);
 
@@ -258,8 +259,8 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     const ids: string[] = [];
     for (const n of [1, 2, 3]) ids.push((await call(createProduct, storeId, owner, { name: `P${n}`, fileName: `p${n}.pdf`, file: await makePdf(n) })).id);
     await clear(storeId, ids);
-    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 2, failed: [], more: true, busy: false });
-    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 1, failed: [], more: false, busy: false });
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 2, failed: [], deferred: [], more: true, busy: false });
+    expect(await backfillPageCounts({ storeId, limit: 2 })).toEqual({ updated: 1, failed: [], deferred: [], more: false, busy: false });
     expect(await pageCounts(storeId)).toEqual({ [ids[0]!]: 1, [ids[1]!]: 2, [ids[2]!]: 3 });
   }, HEAVY_TEST_MS);
 
@@ -269,9 +270,82 @@ describe("backfillPageCounts (produtos antigos sem page_count)", () => {
     await clear(storeId, [p.id]);
     const ac = new AbortController();
     ac.abort();
-    expect(await backfillPageCounts({ storeId, signal: ac.signal })).toEqual({ updated: 0, failed: [], more: true, busy: false });
+    expect(await backfillPageCounts({ storeId, signal: ac.signal })).toEqual({ updated: 0, failed: [], deferred: [], more: true, busy: false });
     expect((await pageCounts(storeId))[p.id]).toBeNull();
   }, HEAVY_TEST_MS);
+
+  test("Worker de PDF ocupado (carimbo de comprador): cede a vaga, não marca nada e avisa `busy`", async () => {
+    const { storeId } = await seedStore();
+    const p = await call(createProduct, storeId, owner, { name: "Espera", fileName: "e.pdf", file: await makePdf(2) });
+    await clear(storeId, [p.id]);
+    let release!: () => void;
+    const held = pdfLimiter.run(() => new Promise<void>((r) => (release = r)));
+    try {
+      expect(pdfLimiter.active).toBe(1);
+      expect(await backfillPageCounts({ storeId })).toEqual({ updated: 0, failed: [], deferred: [], more: true, busy: true });
+      expect((await pageCounts(storeId))[p.id]).toBeNull();
+    } finally {
+      release();
+      await held;
+    }
+    expect(await backfillPageCounts({ storeId })).toEqual({ updated: 1, failed: [], deferred: [], more: false, busy: false });
+    expect((await pageCounts(storeId))[p.id]).toBe(2);
+  }, HEAVY_TEST_MS);
+
+  test("tempo-limite do Worker: não marca 0, pula até a próxima subida e conta os demais", async () => {
+    const { storeId } = await seedStore();
+    const a = await call(createProduct, storeId, owner, { name: "Lento", fileName: "l.pdf", file: await makePdf(2) });
+    await clear(storeId, [a.id]);
+    const skip = new Set<string>();
+    // 1 ms: o Worker não chega a responder (simula a subida carregada).
+    expect(await backfillPageCounts({ storeId, skip, sandbox: { timeoutMs: 1 } })).toEqual({
+      updated: 0,
+      failed: [],
+      deferred: [{ storeId, productId: a.id }],
+      more: false,
+      busy: false,
+    });
+    expect((await pageCounts(storeId))[a.id]).toBeNull();
+    // Neste processo ele não é relido (nem trava a fila dos outros)...
+    const b = await call(createProduct, storeId, owner, { name: "Outro", fileName: "o.pdf", file: await makePdf(3) });
+    await clear(storeId, [b.id]);
+    expect(await backfillPageCounts({ storeId, skip })).toEqual({ updated: 1, failed: [], deferred: [], more: false, busy: false });
+    // ...e na próxima subida (conjunto novo) é contado.
+    expect(await backfillPageCounts({ storeId, skip: new Set() })).toEqual({ updated: 1, failed: [], deferred: [], more: false, busy: false });
+    expect(await pageCounts(storeId)).toEqual({ [a.id]: 2, [b.id]: 3 });
+  }, HEAVY_TEST_MS);
+
+  test("orçamento de tempo esgotado: não começa outro PDF e deixa para a próxima rodada", async () => {
+    const { storeId } = await seedStore();
+    const ids: string[] = [];
+    for (const n of [1, 2]) ids.push((await call(createProduct, storeId, owner, { name: `T${n}`, fileName: `t${n}.pdf`, file: await makePdf(n) })).id);
+    await clear(storeId, ids);
+    // Relógio falso: cada leitura avança 30 s. Prazo = 30 s + 70 s = 100 s; a loja entra aos 60 s, o 1º PDF aos 90 s
+    // e o 2º (120 s) já não começa.
+    let t0 = 0;
+    const now = () => (t0 += 30_000);
+    const r = await backfillPageCounts({ storeId, budgetMs: 70_000, now, skip: new Set() });
+    expect(r).toEqual({ updated: 1, failed: [], deferred: [], more: true, busy: false });
+  }, HEAVY_TEST_MS);
+
+  test("reagendamento: sobrou → próxima rodada em 5 s; ocupado → em 60 s; terminou ou abortou → nada", async () => {
+    const queued = () => t.ownerDb.select().from(job).where(and(eq(job.type, "backfill_page_count"), eq(job.status, "queued")));
+    const reset = () => t.ownerDb.delete(job).where(eq(job.type, "backfill_page_count"));
+    const live = new AbortController().signal;
+    const now = Date.UTC(2026, 10, 23, 12, 0, 0);
+    await reset();
+    await scheduleNextRound({ more: true, busy: false }, live, now);
+    expect((await queued()).map((j) => j.runAt.getTime())).toEqual([now + NEXT_ROUND_MS]);
+    await reset();
+    await scheduleNextRound({ more: true, busy: true }, live, now);
+    expect((await queued()).map((j) => j.runAt.getTime())).toEqual([now + BUSY_WAIT_MS]);
+    await reset();
+    await scheduleNextRound({ more: false, busy: false }, live, now);
+    const ac = new AbortController();
+    ac.abort();
+    await scheduleNextRound({ more: true, busy: true }, ac.signal, now);
+    expect(await queued()).toEqual([]);
+  });
 
   test("roda como job a cada subida (backfill_page_count registrado no worker)", async () => {
     const { getHandlers } = await import("@/lib/jobs/handlers");

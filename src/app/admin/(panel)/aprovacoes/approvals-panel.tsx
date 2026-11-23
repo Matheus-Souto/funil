@@ -125,7 +125,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                   <div className={s.apActions}>
                     <button
                       type="button"
-                      className={`${s.btn} ${s.btnSm}`}
+                      className={`${s.btn} ${s.btnSm} ${s.btnDangerGhost}`}
                       disabled={!r.canDecide || busy}
                       aria-label={`Recusar o pedido: ${r.description}`}
                       onClick={() => {
@@ -170,7 +170,6 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                   rows={history.map((r) => ({ ...r, statusLabel: (STATUS[r.status] ?? { label: r.status }).label, decision: decisionText(r) }))}
                   rowKey="id"
                   caption="Histórico de pedidos de aprovação"
-                  itemName={{ one: "pedido", other: "pedidos" }}
                   columns={[
                     {
                       key: "description",
@@ -205,7 +204,7 @@ export function ApprovalsPanel({ pending, history }: { pending: ApprovalRow[]; h
                         );
                       },
                     },
-                    { key: "createdTs", label: "Pedido em", render: (_, r) => <span className={s.nowrap}>{r.createdAt}</span> },
+                    { key: "createdTs", label: "Pedido em", numeric: false, render: (_, r) => <span className={s.nowrap}>{r.createdAt}</span> },
                     { key: "decision", label: "Decisão", sortable: false, render: (_, r) => <span className={s.muted}>{r.decision}</span> },
                   ]}
                 />

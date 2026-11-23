@@ -17,7 +17,7 @@ import { firstParam } from "@/lib/panel-params";
 import { getStoreSettings } from "@/lib/store-settings";
 import { Art, Kpi, Notice, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
-import { parseDashboardRange } from "../date-range";
+import { MAX_RANGE_DAYS, parseDashboardRange } from "../date-range";
 import { RangePicker } from "./range-picker";
 import { CreditCard, QrCode, Zap } from "lucide-react";
 import { PIcon } from "../icons";
@@ -92,6 +92,11 @@ export default async function Overview({ searchParams }: { searchParams: Promise
       />
 
       <div className={s.noticeStrip}>
+        {range.capped ? (
+          <Notice tone="info">
+            O período tem no máximo <b>{MAX_RANGE_DAYS} dias</b>: mostrando {range.label}. Para ver datas anteriores, escolha um período que termine mais cedo.
+          </Notice>
+        ) : null}
         {cardNotice ? <CardSetupBanner /> : null}
         {pending > 0 ? (
           <Notice

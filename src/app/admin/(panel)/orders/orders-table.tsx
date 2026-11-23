@@ -34,10 +34,11 @@ export function OrdersTable({ rows, paged = false, filters = {} }: { rows: Order
         rows={rows}
         rowKey="id"
         caption="Pedidos"
-        itemName={{ one: "pedido", other: "pedidos" }}
         emptyMessage="Nenhum pedido com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
         sorting={!paged}
+        // Pix manual pendente: alguém precisa conferir no extrato e liberar.
+        rowTone={(o) => (o.status === "pending" && o.method === "pix_manual" ? "warning" : undefined)}
         columns={[
           {
             key: "code",
@@ -76,7 +77,7 @@ export function OrdersTable({ rows, paged = false, filters = {} }: { rows: Order
             filter: filters.status,
             render: (_, o) => <StatusBadge status={o.status} method={o.method} label={o.refundRequested && o.status === "paid" ? "Estorno solicitado" : undefined} />,
           },
-          { key: "createdTs", label: "Data", render: (_, o) => <span className={s.nowrap}>{o.createdText}</span> },
+          { key: "createdTs", label: "Data", numeric: false, render: (_, o) => <span className={s.nowrap}>{o.createdText}</span> },
         ]}
       />
     </div>

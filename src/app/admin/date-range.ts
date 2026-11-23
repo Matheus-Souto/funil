@@ -30,6 +30,8 @@ export interface DashboardRange {
   compare: string;
   /** Rótulo curto do período: "21/11/26" ou "15/11/26 – 21/11/26". */
   label: string;
+  /** O pedido passava de MAX_RANGE_DAYS e o começo foi cortado (a tela avisa). */
+  capped: boolean;
 }
 
 const short = (day: string) => `${day.slice(8, 10)}/${day.slice(5, 7)}/${day.slice(2, 4)}`;
@@ -53,7 +55,8 @@ export function parseDashboardRange(sp: { de?: string; ate?: string; periodo?: s
   if (ate > today) ate = today;
   if (de > ate) de = ate;
   let days = Math.round((midnight(ate).getTime() - midnight(de).getTime()) / DAY_MS) + 1;
-  if (days > MAX_RANGE_DAYS) {
+  const capped = days > MAX_RANGE_DAYS;
+  if (capped) {
     de = addDays(ate, -(MAX_RANGE_DAYS - 1));
     days = MAX_RANGE_DAYS;
   }
@@ -62,5 +65,5 @@ export function parseDashboardRange(sp: { de?: string; ate?: string; periodo?: s
   const to = endsToday ? now : midnight(addDays(ate, 1));
   const prev = { from: new Date(from.getTime() - days * DAY_MS), to: new Date(to.getTime() - days * DAY_MS) };
   const compare = days === 1 ? (endsToday ? "ontem no mesmo horário" : "dia anterior") : `${days} dias anteriores`;
-  return { de, ate, days, from, to, prev, endsToday, compare, label: days === 1 ? short(de) : `${short(de)} – ${short(ate)}` };
+  return { de, ate, days, from, to, prev, endsToday, compare, label: days === 1 ? short(de) : `${short(de)} – ${short(ate)}`, capped };
 }

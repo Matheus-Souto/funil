@@ -32,7 +32,6 @@ export function LeadsTable({ rows, paged = false, canWrite, canOpenOrders, statu
         rows={rows}
         rowKey="id"
         caption="Contatos"
-        itemName={{ one: "contato", other: "contatos" }}
         emptyMessage="Nenhum contato com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
         sorting={!paged}
@@ -75,7 +74,7 @@ export function LeadsTable({ rows, paged = false, canWrite, canOpenOrders, statu
               </span>
             ),
           },
-          { key: "createdTs", label: "Capturado", render: (_, l) => <span className={`${s.muted} ${s.nowrap}`}>{l.createdText}</span> },
+          { key: "createdTs", label: "Capturado", numeric: false, render: (_, l) => <span className={`${s.muted} ${s.nowrap}`}>{l.createdText}</span> },
           {
             key: "id",
             label: "Ações",

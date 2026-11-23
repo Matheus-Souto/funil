@@ -9,6 +9,7 @@ import { env } from "@/lib/env";
 import { errorFields, log } from "@/lib/log";
 import { pendingApprovalsCount } from "@/lib/mcp/approvals";
 import { orderCounts } from "@/lib/orders/panel";
+import { ROLE_LABEL } from "@/lib/orders/labels";
 import { needsSetup } from "@/lib/stores";
 import { accountStores } from "@/lib/team/members";
 import { PIcon } from "../icons";
@@ -95,7 +96,7 @@ export default async function PanelLayout({ children }: { children: ReactNode })
       </header>
       <PanelShell
         items={items}
-        id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail }}
+        id={{ storeName: id.storeName, userName: id.userName, userEmail: id.userEmail, roleLabel: ROLE_LABEL[role] }}
         logout={logoutAction}
         stores={stores}
         canLeave={canLeave}

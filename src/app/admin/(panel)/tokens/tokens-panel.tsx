@@ -175,7 +175,6 @@ export function TokensTable({ tokens }: { tokens: TokenRow[] }) {
             rows={tokens as Array<TokenRow & Record<string, unknown>>}
             rowKey="id"
             caption="Tokens da loja"
-            itemName={{ one: "token", other: "tokens" }}
             columns={[
               {
                 key: "name",
@@ -188,10 +187,11 @@ export function TokensTable({ tokens }: { tokens: TokenRow[] }) {
                 ),
               },
               { key: "role", label: "Papel", render: (_, t) => (t.revokedAt ? <Badge tone="neutral">Revogado</Badge> : <Badge tone="info">{ROLE_NAME[t.role] ?? t.role}</Badge>) },
-              { key: "lastUsedTs", label: "Último uso", render: (_, t) => <span className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</span> },
+              { key: "lastUsedTs", label: "Último uso", numeric: false, render: (_, t) => <span className={`${s.muted} ${s.nowrap}`}>{t.revokedAt ? `revogado em ${t.revokedAt}` : (t.lastUsedAt ?? "nunca")}</span> },
               {
                 key: "createdTs",
                 label: "Criado",
+                numeric: false,
                 render: (_, t) => (
                   <span className={s.leadCell}>
                     <span className={`${s.muted} ${s.nowrap}`}>{t.createdAt}</span>
