@@ -38,6 +38,7 @@ export interface DateRangePickerProps {
   /** Accessible name of the trigger and the dialog. Defaults to "Date range". */
   label?: string;
   placeholder?: string;
+  /** Atalhos do painel (o painel passa os seus, no dia de São Paulo; sem eles, nenhum atalho). */
   presets?: DateRangePreset[];
   minDate?: Date;
   maxDate?: Date;
@@ -57,7 +58,6 @@ type Bezier = [number, number, number, number];
 const DAY = 864e5;
 const startOfDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
 const monthStart = (date: Date) => new Date(date.getFullYear(), date.getMonth(), 1);
-const monthEnd = (date: Date) => new Date(date.getFullYear(), date.getMonth() + 1, 0);
 const addDays = (date: Date, amount: number) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + amount);
 const addMonths = (date: Date, amount: number) => new Date(date.getFullYear(), date.getMonth() + amount, 1);
 const shiftMonths = (date: Date, amount: number) => new Date(date.getFullYear(), date.getMonth() + amount, Math.min(date.getDate(), new Date(date.getFullYear(), date.getMonth() + amount + 1, 0).getDate()));
@@ -70,16 +70,6 @@ const ordered = (a: Date, b: Date): DateRange => dayDiff(a, b) <= 0 ? { start: a
 const sameRange = (a?: DateRange | null, b?: DateRange | null) => Boolean(a && b && sameDay(a.start, b.start) && sameDay(a.end, b.end));
 const clampDate = (date: Date, min?: Date, max?: Date) => min && dayDiff(date, min) < 0 ? startOfDay(min) : max && dayDiff(date, max) > 0 ? startOfDay(max) : date;
 
-export const defaultDateRangePresets: DateRangePreset[] = [
-  { label: "Hoje", range: today => ({ start: today, end: today }) },
-  { label: "Ontem", range: today => ({ start: addDays(today, -1), end: addDays(today, -1) }) },
-  { label: "Últimos 7 dias", range: today => ({ start: addDays(today, -6), end: today }) },
-  { label: "Últimos 30 dias", range: today => ({ start: addDays(today, -29), end: today }) },
-  { label: "Este mês", range: today => ({ start: monthStart(today), end: today }) },
-  { label: "Mês passado", range: today => ({ start: addMonths(today, -1), end: monthEnd(addMonths(today, -1)) }) },
-  { label: "Este trimestre", range: today => ({ start: new Date(today.getFullYear(), Math.floor(today.getMonth() / 3) * 3, 1), end: today }) },
-  { label: "Este ano", range: today => ({ start: new Date(today.getFullYear(), 0, 1), end: today }) },
-];
 
 /** The viewer's local date (lib/use-today.ts, shared with calendar). Re-exported so existing imports from date-range-picker keep working. */
 export { useToday } from "../lib/use-today";
@@ -266,7 +256,7 @@ function Months({ children, direction, reduced }: { children: ReactNode; directi
     variants={reduced ? fade : slide} initial="enter" animate="center" exit="exit">{children}</motion.div>;
 }
 
-export function DateRangePicker({ value, defaultValue = null, onChange, label = "Período", placeholder = "Escolha as datas", presets = defaultDateRangePresets, minDate, maxDate, weekStartsOn = 0, locale = "pt-BR", months = "auto", boundary, className }: DateRangePickerProps) {
+export function DateRangePicker({ value, defaultValue = null, onChange, label = "Período", placeholder = "Escolha as datas", presets = [], minDate, maxDate, weekStartsOn = 0, locale = "pt-BR", months = "auto", boundary, className }: DateRangePickerProps) {
   const reduced = useReducedFlag();
   const today = useToday();
   const uid = useId();

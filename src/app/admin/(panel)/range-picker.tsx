@@ -1,11 +1,13 @@
 "use client";
 
 // Período do Dashboard: o date-range-picker do Arc, em português, com atalhos (hoje, ontem, 7 e 30 dias, este mês, mês
-// passado). Aplicar leva para /admin?de=AAAA-MM-DD&ate=AAAA-MM-DD; o servidor lê esses dias em São Paulo.
+// passado). Aplicar leva para /admin?de=AAAA-MM-DD&ate=AAAA-MM-DD; o servidor lê esses dias em São Paulo. Enquanto o
+// servidor recalcula (um período longo pode levar alguns segundos), "Atualizando…" aparece ao lado e é anunciado.
 import { useRouter } from "next/navigation";
 import { useTransition } from "react";
 import { DateRangePicker, type DateRange, type DateRangePreset } from "@/components/arc/date-range-picker/date-range-picker";
 import { spDay } from "../date-range";
+import s from "../panel.module.css";
 
 /** "AAAA-MM-DD" com os campos locais da data (o calendário guarda o dia escolhido como data local). */
 const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -35,17 +37,29 @@ const PRESETS: DateRangePreset[] = [
 
 export function RangePicker({ de, ate }: { de: string; ate: string }) {
   const router = useRouter();
-  const [, start] = useTransition();
+  const [pending, start] = useTransition();
   const value: DateRange = { start: fromIso(de), end: fromIso(ate) };
   return (
-    <DateRangePicker
-      value={value}
-      label="Período"
-      placeholder="Escolha as datas"
-      presets={PRESETS}
-      maxDate={spToday()}
-      locale="pt-BR"
-      onChange={(r) => start(() => router.push(`/admin?de=${iso(r.start)}&ate=${iso(r.end)}`, { scroll: false }))}
-    />
+    <span className={s.rangePicker} aria-busy={pending || undefined}>
+      <span className={s.rangePending} role="status">
+        {pending ? (
+          <>
+            <svg className={s.spin} viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-6.2-8.56" strokeLinecap="round" />
+            </svg>
+            Atualizando…
+          </>
+        ) : null}
+      </span>
+      <DateRangePicker
+        value={value}
+        label="Período"
+        placeholder="Escolha as datas"
+        presets={PRESETS}
+        maxDate={spToday()}
+        locale="pt-BR"
+        onChange={(r) => start(() => router.push(`/admin?de=${iso(r.start)}&ate=${iso(r.end)}`, { scroll: false }))}
+      />
+    </span>
   );
 }

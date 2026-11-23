@@ -96,9 +96,10 @@ describe("parseDashboardRange: datas escolhidas", () => {
     expect(r.ate).toBe("2026-11-10");
     expect(r.de).toBe("2025-11-10");
     expect(r.to.getTime() - r.from.getTime()).toBe(MAX_RANGE_DAYS * 86_400_000);
+    expect(r.capped).toBe(true);
   });
 
   test(`exatamente ${MAX_RANGE_DAYS} dias passa inteiro`, () => {
-    expect(parseDashboardRange({ de: "2025-11-11", ate: "2026-11-11" }, NOON_22)).toMatchObject({ de: "2025-11-11", ate: "2026-11-11", days: MAX_RANGE_DAYS });
+    expect(parseDashboardRange({ de: "2025-11-11", ate: "2026-11-11" }, NOON_22)).toMatchObject({ de: "2025-11-11", ate: "2026-11-11", days: MAX_RANGE_DAYS, capped: false });
   });
 });
