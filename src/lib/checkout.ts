@@ -7,11 +7,12 @@
 //   Pix manual 5 por IP/hora e 3 pendentes (ou reservados: expirados há < 48 h) por e-mail na loja;
 //   Asaas (Pix do Asaas e cartão) 10 por IP/hora e 5 por e-mail/hora na loja.
 // - Cupom (D7/D8): `checkout.previewCoupon` devolve desconto e total (ou a mensagem neutra) com limite de 20 por IP por
-//   hora (toda prévia conta) e 300 por loja por hora (só as recusadas contam). `checkout.start` com `couponCode` exige
+//   hora (toda prévia conta) e 300 recusas por loja por hora. `checkout.start` com `couponCode` exige
 //   `expectedTotalCents`, conta no mesmo limite por IP (todo envio com cupom conta, não só o inválido: o limite precisa
-//   valer antes de saber a resposta, e o envio inválido não deixa pedido para contar depois) e confere o cupom sob o
-//   lock dele. Total recalculado diferente do que o comprador viu -> `conflict` PRICE_CHANGED e nenhum pedido; isso vale
-//   também sem cupom, quando o checkout manda `expectedTotalCents`.
+//   valer antes de saber a resposta, e o envio inválido não deixa pedido para contar depois), respeita o mesmo balde de
+//   recusas da loja (o envio recusado soma nele, em `startCheckout`) e confere o cupom sob o lock dele. Total
+//   recalculado diferente do que o comprador viu -> `conflict` PRICE_CHANGED e nenhum pedido; isso vale também sem
+//   cupom, quando o checkout manda `expectedTotalCents`.
 // - `startCheckout` roda `checkout.start` e, no Pix do Asaas, já cria a cobrança e guarda o QR (fora da transação).
 // - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
 //   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
@@ -21,13 +22,14 @@ import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
 import { UNKNOWN_IP } from "@/lib/client-ip";
-import { COUPON_INVALID_MESSAGE, couponInvalid, resolveCoupon } from "@/lib/coupons/apply";
+import { couponInvalid, isCouponRefusal, resolveCoupon } from "@/lib/coupons/apply";
+import { COUPON_INVALID_MESSAGE, COUPON_LIMIT_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
 import { withStore } from "@/lib/db/client";
 import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
-import { createOrder, orderParts, type Order } from "@/lib/orders/create";
+import { BUMP_UNAVAILABLE, createOrder, orderParts, type Order } from "@/lib/orders/create";
 import { groupItems, itemOrder } from "@/lib/orders/items";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
@@ -50,14 +52,10 @@ export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
 export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
 export const PIX_REGEN_PER_HOUR = 3;
 export const VIEW_LIMIT_PER_HOUR = 30;
-/** `conflict` quando o total recalculado difere do que o comprador viu (`details.code === "PRICE_CHANGED"`). */
-export const PRICE_CHANGED_MESSAGE = "O valor mudou: confira o resumo";
-export const COUPON_LIMIT_MESSAGE = "Muitas tentativas de cupom. Aguarde alguns minutos e tente de novo.";
 export { MIN_INSTALLMENT_CENTS, installmentsFor };
 
 /** Dados do servidor (fora da entrada) das ações do checkout: a hora, injetável nos testes (limites e validade). */
 type CheckoutServer = { now?: Date };
-export { COUPON_INVALID_MESSAGE };
 /** Toque (UTM etc.) maior que isto, serializado, é descartado: nunca grava payload grande de anônimo. */
 export const TOUCH_MAX_BYTES = 2048;
 const HOUR = 3600;
@@ -67,6 +65,7 @@ const asaasIpKey = (ip: string) => `checkout:asaas:ip:${ipRateKey(ip)}`;
 const asaasEmailKey = (storeId: string, email: string) => `checkout:asaas:email:${storeId}:${sha256(email)}`;
 // IP desconhecido (sem proxy confiável) cai numa chave só, como no checkout.view: nunca fica sem limite.
 const couponIpKey = (ip: string) => `coupon:ip:${ipRateKey(ip)}`;
+// Balde de RECUSAS de cupom da loja (prévia e envio); o nome da chave ficou da época em que só a prévia contava.
 const couponStoreKey = (storeId: string) => `coupon:preview:store:${storeId}`;
 
 const publicCall = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
@@ -173,10 +172,16 @@ export const checkoutStart = defineAction({
    * cupom (D8), que conta a tentativa aqui mesmo: o envio com cupom inválido não chega ao `afterCommit`.
    */
   async prepare(call: { storeId: string; server?: CheckoutServer }, input) {
-    // Envio com cupom conta no limite de cupom do IP (contra força bruta pelo envio); passou do limite -> recusa.
     const now = call.server?.now ?? new Date();
-    if (input.couponCode !== undefined && !(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR, now))) {
-      throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
+    if (input.couponCode !== undefined) {
+      // Envio com cupom conta no limite de cupom do IP (contra força bruta pelo envio); passou do limite -> recusa.
+      if (!(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR, now))) {
+        throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
+      }
+      // Balde de recusas da loja cheio (pela prévia ou pelo envio): ninguém aplica cupom até a hora virar.
+      if (!(await peekRateLimit(couponStoreKey(call.storeId), COUPON.previewPerStorePerHour, HOUR, now))) {
+        throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
+      }
     }
     const knownIp = input.clientIp !== UNKNOWN_IP;
     const [manualIpOk, asaasIpOk, asaasEmailOk] = await Promise.all([
@@ -309,7 +314,19 @@ export async function startCheckout(
 ): Promise<{ publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }> {
   const method = raw !== null && typeof raw === "object" ? (raw as { method?: unknown }).method : undefined;
   if (method === "card" && !opts.cardTicketKey) throw new ActionError("conflict", CARD_UNAVAILABLE_MESSAGE);
-  const out = await runAction(checkoutStart, { ...publicCall(call.storeId), server: { now: opts.now } }, raw);
+  let out: StartOutput;
+  try {
+    out = await runAction(checkoutStart, { ...publicCall(call.storeId), server: { now: opts.now } }, raw);
+  } catch (e) {
+    // Cupom recusado no envio (inclusive pelo limite por pessoa) soma 1 no balde de recusas da loja, como a prévia
+    // recusada. Aqui, depois do rollback da transação da ação, numa gravação própria: a contagem não se desfaz junto.
+    if (isCouponRefusal(e)) {
+      await hitRateLimit(couponStoreKey(call.storeId), HOUR, opts.now ?? new Date()).catch((err: unknown) =>
+        log.error("checkout: falha ao contar a recusa de cupom no limite da loja", { error: err }),
+      );
+    }
+    throw e;
+  }
   if (out.method === "card_asaas" && opts.cardTicketKey) {
     const cardTicket = issueCardTicket(
       { storeId: call.storeId, orderId: out.orderId, publicId: out.publicId, totalCents: out.totalCents, maxInstallments: out.maxInstallments },
@@ -380,7 +397,8 @@ export const checkoutPreviewCoupon = defineAction({
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     // Mesmo cálculo do pedido: mesmas partes (e recusas) e o mesmo `computeDiscount`.
     const { bump } = await orderParts(ctx.tx, o, input.withBump);
-    const r = await resolveCoupon(ctx.tx, ctx.storeId, { code: input.code, offerId: o.id, now: server?.now ?? new Date() });
+    // Sem lock: a prévia só lê (não cria pedido) e não deve esperar atrás de um checkout em andamento com o cupom.
+    const r = await resolveCoupon(ctx.tx, ctx.storeId, { code: input.code, offerId: o.id, now: server?.now ?? new Date(), lock: false });
     const invalid = { ok: false as const, message: COUPON_INVALID_MESSAGE };
     if ("invalid" in r) return invalid;
     const bumpCents = bump?.priceCents ?? 0;
@@ -393,6 +411,16 @@ export const checkoutPreviewCoupon = defineAction({
     if (!out.ok) await hitRateLimit(couponStoreKey(call.storeId), HOUR, prepared.now);
   },
 });
+
+/**
+ * Resposta da prévia para um erro da ação (o comprador nunca vê erro técnico): o limite e o bump indisponível passam a
+ * própria mensagem (a mesma que o envio mostraria); o resto vira a mensagem neutra do cupom.
+ */
+export function previewErrorResult(e: ActionError): Extract<PreviewOutput, { ok: false }> {
+  if (e.code === "rate_limited") return { ok: false, message: e.message };
+  if (e.code === "conflict" && e.message === BUMP_UNAVAILABLE) return { ok: false, message: BUMP_UNAVAILABLE };
+  return { ok: false, message: COUPON_INVALID_MESSAGE };
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // checkout.renewCardTicket

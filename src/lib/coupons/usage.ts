@@ -1,5 +1,6 @@
 // Contagem de usos do cupom (spec D5), numa regra só: `coupons.list` mostra o número e o `resolveCoupon` (checkout)
-// confere o limite com a mesma condição. Relógio do banco (`now()`), como o resto dos prazos de pedido.
+// confere o `max_uses` com a mesma condição. O limite por pessoa (`max_per_email`) conta só compras pagas (R-F1).
+// Relógio do banco (`now()`), como o resto dos prazos de pedido.
 import { and, count, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { Tx } from "@/lib/db/client";
 import { customer, orders } from "@/lib/db/schema";
@@ -38,9 +39,11 @@ export async function couponUses(tx: Tx, couponIds: string[]): Promise<Map<strin
 }
 
 /**
- * Usos de um cupom pela mesma caixa de e-mail (`mailboxKey`, como na recuperação: `a+x@gmail.com` e `a.x@gmail.com`
- * são a mesma pessoa), com a mesma regra de uso (`countsAsCouponUse`). O cliente guarda o e-mail digitado, não a caixa:
- * o SQL filtra um superconjunto (parte local sem `+sufixo` e sem pontos) e a conferência exata é `mailboxKey` aqui.
+ * Compras de um cupom pela mesma caixa de e-mail (`mailboxKey`, como na recuperação: `a+x@gmail.com` e `a.x@gmail.com`
+ * são a mesma pessoa). Só `paid` e `disputed` contam (R-F1): quem gerou um Pix e desistiu para pagar no cartão não fica
+ * sem o cupom. O `max_uses` global continua com a regra D5 inteira (`countsAsCouponUse`, pendentes contam). O cliente
+ * guarda o e-mail digitado, não a caixa: o SQL filtra um superconjunto (parte local sem `+sufixo` e sem pontos) e a
+ * conferência exata é `mailboxKey` aqui.
  */
 export async function couponUsesByMailbox(tx: Tx, couponId: string, email: string): Promise<number> {
   const key = mailboxKey(email);
@@ -53,7 +56,7 @@ export async function couponUsesByMailbox(tx: Tx, couponId: string, email: strin
     .where(
       and(
         eq(orders.couponId, couponId),
-        countsAsCouponUse(),
+        inArray(orders.status, ["paid", "disputed"]),
         sql`translate(split_part(split_part(${customer.email}, '@', 1), '+', 1), '.', '') = ${loose}`,
       ),
     );

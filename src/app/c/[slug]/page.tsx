@@ -61,7 +61,8 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
 
   return (
     <BuyerShell storeName={store.name} brandColor={brandColor}>
-      {offer.pixelId ? <CheckoutPixel pixelId={offer.pixelId} eventId={eventId} valueCents={offer.priceCents} /> : null}
+      {/* InitiateCheckout do navegador: o valor que a pessoa vai pagar (com o cupom do `?cupom=` já aplicado). */}
+      {offer.pixelId ? <CheckoutPixel pixelId={offer.pixelId} eventId={eventId} valueCents={coupon?.kind === "applied" ? coupon.totalCents : offer.priceCents} /> : null}
       <CheckoutForm
         storeName={store.name}
         offer={checkoutOffer(offer, methods)}

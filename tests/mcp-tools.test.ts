@@ -405,7 +405,9 @@ describe("callMcpTool", () => {
         "attribution",
         "buyer",
         "code",
+        "couponCode",
         "createdAt",
+        "discountCents",
         "expiresAt",
         "hasBump",
         "id",
@@ -606,6 +608,15 @@ describe("callMcpTool", () => {
     expect(list).not.toContain("quintanilha");
     expect(list).not.toContain("reembolse");
     expect(list).toContain("m***@gmail.com");
+  });
+
+  test("orders_get: pedido com cupom traz o código e o desconto (sem dado do comprador); sem cupom, null e 0", async () => {
+    const o = await seedOrder(s, { status: "paid", email: PII.email, coupon: { code: "KIDS10", discountCents: 99 } });
+    const out = (await callMcpTool(tool("owner", "orders_get"), call(s.storeId), { id: o.id })) as Record<string, unknown>;
+    expect([out.couponCode, out.discountCents, out.totalCents, out.subtotalCents]).toEqual(["KIDS10", 99, 990, 1089]);
+    expect(leaks(out)).toEqual([]);
+    const plain = (await callMcpTool(tool("owner", "orders_get"), call(s.storeId), { id: order.id })) as Record<string, unknown>;
+    expect([plain.couponCode, plain.discountCents]).toEqual([null, 0]);
   });
 
   test("orders_get: origem e ref recusados viram (oculto), sem sumir", async () => {

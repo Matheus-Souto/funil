@@ -1,12 +1,9 @@
 // Cupom no formulário do checkout (D7/D9): estado e regras puras, sem React nem rede. O formulário guarda um
 // `CouponState`, chama estas funções com a prévia (server action) e mostra o resultado. Assim o que a tela mostra e o
 // que o envio manda saem da mesma conta: `expectedTotalCents` é sempre o total exibido (nunca um valor que o comprador
-// não viu; se o servidor discordar, `PRICE_CHANGED` refaz a prévia e o envio espera um novo clique).
-
-export const COUPON_INVALID_MESSAGE = "Cupom inválido ou vencido";
-export const PRICE_CHANGED_MESSAGE = "O valor mudou: confira o resumo";
-export const COUPON_EMPTY_MESSAGE = "Digite o código do cupom.";
-export const COUPON_UNAVAILABLE_MESSAGE = "Não foi possível conferir o cupom agora. Tente de novo em instantes.";
+// não viu; se o servidor discordar, `PRICE_CHANGED` refaz a prévia e o envio espera um novo clique). Os textos vêm de
+// `@/lib/coupons/messages`, o mesmo módulo que o servidor usa.
+import { COUPON_EMPTY_MESSAGE, COUPON_UNAVAILABLE_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
 
 export type PreviewResult = { ok: true; code: string; discountCents: number; totalCents: number } | { ok: false; message: string };
 /** Prévia do servidor (`checkout.previewCoupon`); a oferta e o IP já estão presos na função. */

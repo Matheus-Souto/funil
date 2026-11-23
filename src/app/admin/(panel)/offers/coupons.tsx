@@ -4,10 +4,12 @@
 // digitado como porcentagem e guardado em pontos-base; valor fixo é digitado em reais e guardado em centavos (conversões
 // puras em `@/lib/coupons/form`). Cupom arquivado continua ocupando o código e não se edita. Sem regra de negócio: tudo
 // passa pelas actions do painel.
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Plus } from "lucide-react";
 import { Select } from "@/components/arc/select/select";
 import { SortableDataTable } from "@/components/arc/sortable-data-table/sortable-data-table";
+import { Switch } from "@/components/arc/switch/switch";
+import { COUPON_DUPLICATE_MESSAGE } from "@/lib/coupons/messages";
 import { amountToCents, centsToAmountInput, dateInputOf, endOfDateInput, percentToBp, percentToInput, startOfDateInput, type CouponStatus } from "@/lib/coupons/form";
 import { Art, Badge } from "../../blocks";
 import s from "../../panel.module.css";
@@ -115,6 +117,8 @@ function inputOf(f: Form, edit: CouponRow | null): { ok: true; input: Record<str
 }
 
 const DUPLICATE_HINT = " Ele pode estar arquivado: marque “Mostrar arquivados” para ver.";
+/** Quem só lê vê os botões desabilitados e esta linha (docs/padrao-de-paginas.md §5). */
+const READ_ONLY_HINT = "Só o dono e os administradores (quem edita ofertas) criam, editam e arquivam cupons.";
 
 export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow[]; offers: OfferOption[]; canWrite: boolean }) {
   const [showArchived, setShowArchived] = useState(false);
@@ -127,17 +131,26 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
   const rows = useMemo(() => (showArchived ? coupons : coupons.filter((c) => c.status !== "archived")), [coupons, showArchived]);
   const archivedCount = coupons.length - coupons.filter((c) => c.status !== "archived").length;
   const offerName = (id: string) => offers.find((o) => o.id === id)?.name ?? "Oferta";
+  const ids = useId();
 
+  // Um retorno por vez fora do diálogo: abrir um formulário apaga o aviso anterior (dos dois).
   const openForm = (row: CouponRow | null) => {
     save.setMsg(null);
+    archive.setMsg(null);
     setProblem(null);
     setF(row ? formOf(row) : emptyForm());
     setEditing({ row });
   };
+  /** Cancelar: some o erro do diálogo. Depois de salvar, o "Cupom salvo." continua visível fora dele. */
   const closeForm = () => {
     save.setMsg(null);
     setProblem(null);
     setEditing(null);
+  };
+  const openArchive = (row: CouponRow) => {
+    save.setMsg(null);
+    archive.setMsg(null);
+    setArchiving(row);
   };
   const closeArchive = () => {
     archive.setMsg(null);
@@ -154,26 +167,33 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
     }
     setProblem(null);
     const res = await save.run(() => (edit ? updateCouponAction({ id: edit.id, ...r.input }) : createCouponAction(r.input)));
-    if (res.ok) closeForm();
-    else if (res.code === "conflict" && /código/i.test(res.error)) save.setMsg({ tone: "error", text: `${res.error}.${DUPLICATE_HINT}` });
+    if (res.ok) {
+      setProblem(null);
+      setEditing(null);
+    } else if (res.code === "conflict" && res.error === COUPON_DUPLICATE_MESSAGE) save.setMsg({ tone: "error", text: `${res.error}.${DUPLICATE_HINT}` });
+    // Outros conflitos (ex.: "Este cupom já foi usado: crie outro código") ficam como vieram, no aviso do diálogo.
   };
 
   return (
     <div className={s.stack}>
       <div className={s.titleRow} style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <label className={s.switch}>
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
-          Mostrar arquivados{archivedCount > 0 ? ` (${archivedCount})` : ""}
-        </label>
-        {canWrite ? (
-          <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={() => openForm(null)}>
-            <Plus size={16} strokeWidth={2} aria-hidden="true" />
-            Novo cupom
-          </button>
-        ) : (
-          <span className={s.hint}>Só quem pode editar ofertas cria e muda cupons.</span>
-        )}
+        <Switch checked={showArchived} onCheckedChange={setShowArchived} label={`Mostrar arquivados${archivedCount > 0 ? ` (${archivedCount})` : ""}`} />
+        <button
+          type="button"
+          className={`${s.btn} ${s.btnPrimary}`}
+          onClick={() => openForm(null)}
+          disabled={!canWrite}
+          aria-describedby={canWrite ? undefined : `${ids}-ro`}
+        >
+          <Plus size={16} strokeWidth={2} aria-hidden="true" />
+          Novo cupom
+        </button>
       </div>
+      {canWrite ? null : (
+        <p id={`${ids}-ro`} className={s.hint}>
+          {READ_ONLY_HINT}
+        </p>
+      )}
 
       <section className={`${s.card} ${s.cardFlush}`} aria-label="Cupons">
         {rows.length === 0 ? (
@@ -219,7 +239,7 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
                 {
                   key: "uses",
                   label: "Usos",
-                  numeric: false,
+                  numeric: true,
                   render: (_, c) => (
                     <span className={s.leadCell}>
                       <b>{c.maxUses === null ? c.uses : `${c.uses} de ${c.maxUses}`}</b>
@@ -233,12 +253,26 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
                   label: "Ações",
                   sortable: false,
                   render: (_, c) =>
-                    canWrite && c.status !== "archived" ? (
+                    c.status !== "archived" ? (
                       <span className={s.nowrap} style={{ display: "inline-flex", gap: 8 }}>
-                        <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => openForm(c)} aria-label={`Editar o cupom ${c.code}`}>
+                        <button
+                          type="button"
+                          className={`${s.btn} ${s.btnSm}`}
+                          onClick={() => openForm(c)}
+                          disabled={!canWrite}
+                          aria-label={`Editar o cupom ${c.code}`}
+                          aria-describedby={canWrite ? undefined : `${ids}-ro`}
+                        >
                           Editar
                         </button>
-                        <button type="button" className={`${s.btn} ${s.btnSm}`} onClick={() => setArchiving(c)} aria-label={`Arquivar o cupom ${c.code}`}>
+                        <button
+                          type="button"
+                          className={`${s.btn} ${s.btnSm}`}
+                          onClick={() => openArchive(c)}
+                          disabled={!canWrite}
+                          aria-label={`Arquivar o cupom ${c.code}`}
+                          aria-describedby={canWrite ? undefined : `${ids}-ro`}
+                        >
                           Arquivar
                         </button>
                       </span>
@@ -249,7 +283,8 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
           </div>
         )}
       </section>
-      <Live msg={archiving || editing ? null : archive.msg} />
+      {/* Retorno de criar, editar e arquivar, visível depois que o diálogo fecha. */}
+      <Live msg={archiving || editing ? null : (save.msg ?? archive.msg)} />
 
       <Dialog
         open={editing !== null}
@@ -352,10 +387,7 @@ export function CouponsPanel({ coupons, offers, canWrite }: { coupons: CouponRow
               <input className={s.input} value={f.maxPerEmail} inputMode="numeric" placeholder="Sem limite" autoComplete="off" onChange={(e) => set("maxPerEmail", e.target.value)} />
             </label>
           </div>
-          <label className={s.switch}>
-            <input type="checkbox" checked={f.active} onChange={(e) => set("active", e.target.checked)} />
-            Cupom ligado
-          </label>
+          <Switch checked={f.active} onCheckedChange={(v) => set("active", v)} label="Cupom ligado" />
           <Live msg={problem ? { tone: "error", text: problem } : save.msg} />
         </form>
       </Dialog>

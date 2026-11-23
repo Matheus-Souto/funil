@@ -3,7 +3,9 @@
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { coupon, couponOffer, offer } from "@/lib/db/schema";
+import { coupon, couponOffer, offer, orders } from "@/lib/db/schema";
+import { lockCoupon } from "./apply";
+import { COUPON_DUPLICATE_MESSAGE, COUPON_USED_CODE_MESSAGE } from "./messages";
 import { normalizeCode } from "./rules";
 import { couponUses } from "./usage";
 
@@ -36,8 +38,12 @@ const code = z
   });
 const kind = z.enum(["percent", "fixed"]);
 const appliesTo = z.enum(["main", "all"]);
-const date = z.coerce.date();
+// Faixa plausível (e dentro do que o banco guarda): data absurda vira `invalid_input`, nunca erro interno.
+const date = z.coerce.date().refine((d) => d.getUTCFullYear() >= 2000 && d.getUTCFullYear() <= 2100, "Use uma data entre os anos 2000 e 2100");
 const positiveInt = z.number().int().positive().max(2_147_483_647);
+/** Teto do valor fixo (R$ 1.000.000,00), o mesmo dos totais do checkout; o percentual já vai de 1 a 9000 (`ruleIssues`). */
+const MAX_AMOUNT_CENTS = 100_000_000;
+const amountCents = z.number().int().max(MAX_AMOUNT_CENTS, "Valor fixo: no máximo R$ 1.000.000,00");
 const offerIds = z.array(id).max(200).transform((v) => [...new Set(v)]);
 
 interface Rule {
@@ -73,7 +79,7 @@ const createInput = z
     code,
     kind,
     percentBp: z.number().int().nullish().transform((v) => v ?? null),
-    amountCents: z.number().int().nullish().transform((v) => v ?? null),
+    amountCents: amountCents.nullish().transform((v) => v ?? null),
     appliesTo: appliesTo.default("main"),
     startsAt: date.nullish().transform((v) => v ?? null),
     endsAt: date.nullish().transform((v) => v ?? null),
@@ -91,7 +97,7 @@ const updateInput = z.strictObject({
   code: code.optional(),
   kind: kind.optional(),
   percentBp: z.number().int().nullable().optional(),
-  amountCents: z.number().int().nullable().optional(),
+  amountCents: amountCents.nullable().optional(),
   appliesTo: appliesTo.optional(),
   startsAt: date.nullable().optional(),
   endsAt: date.nullable().optional(),
@@ -106,11 +112,9 @@ function isUniqueViolation(e: unknown): boolean {
   return c.code === "23505" || c.cause?.code === "23505";
 }
 
-const DUPLICATE = "Já existe um cupom com este código";
-
 async function ensureCodeFree(ctx: Ctx, c: string, exceptId?: string): Promise<void> {
   const [row] = await ctx.tx.select({ id: coupon.id }).from(coupon).where(eq(coupon.code, c));
-  if (row && row.id !== exceptId) throw new ActionError("conflict", DUPLICATE);
+  if (row && row.id !== exceptId) throw new ActionError("conflict", COUPON_DUPLICATE_MESSAGE);
 }
 
 /** Toda oferta da lista precisa ser desta loja; senão `not_found`. (Oferta não tem apagamento lógico: só `active`.) */
@@ -207,7 +211,7 @@ export const createCoupon = defineAction({
         })
         .returning()) as [CouponRow];
     } catch (e) {
-      if (isUniqueViolation(e)) throw new ActionError("conflict", DUPLICATE);
+      if (isUniqueViolation(e)) throw new ActionError("conflict", COUPON_DUPLICATE_MESSAGE);
       throw e;
     }
     await writeOffers(ctx, row.id, input.offerIds);
@@ -218,15 +222,22 @@ export const createCoupon = defineAction({
 export const updateCoupon = defineAction({
   name: "coupons.update",
   description:
-    "Atualiza um cupom (só os campos enviados; os mesmos de coupons.create). Mudar tipo ou valor vale só para pedidos novos. offerIds troca a lista (vazio = todas as ofertas). Cupom arquivado não é editado.",
+    "Atualiza um cupom (só os campos enviados; os mesmos de coupons.create). Mudar tipo ou valor vale só para pedidos novos. offerIds troca a lista (vazio = todas as ofertas). Cupom arquivado não é editado. O código de um cupom que já tem pedido não muda (crie outro cupom).",
   input: updateInput,
   permission: "offers.write",
   sensitive: true,
   async run(ctx, input) {
-    // Trava a linha: edições simultâneas rodam uma depois da outra.
+    // Mesmo lock do checkout (nenhuma edição no meio da conferência de um pedido) e a linha travada: edições
+    // simultâneas rodam uma depois da outra.
+    await lockCoupon(ctx.tx, input.id);
     const [current] = await ctx.tx.select().from(coupon).where(eq(coupon.id, input.id)).for("update");
     if (!current) throw new ActionError("not_found", "Cupom não encontrado");
     if (current.archivedAt) throw new ActionError("conflict", "Cupom arquivado não pode ser editado");
+    if (input.code !== undefined && input.code !== current.code) {
+      // Qualquer pedido (até expirado ou recusado) guarda o cupom pelo id: renomear mudaria o código no histórico.
+      const [used] = await ctx.tx.select({ id: orders.id }).from(orders).where(eq(orders.couponId, current.id)).limit(1);
+      if (used) throw new ActionError("conflict", COUPON_USED_CODE_MESSAGE);
+    }
 
     // Ao trocar o tipo, o valor do tipo antigo não vale: só o que veio na entrada.
     const sameKind = input.kind === undefined || input.kind === current.kind;
@@ -257,7 +268,7 @@ export const updateCoupon = defineAction({
         .where(eq(coupon.id, input.id))
         .returning()) as [CouponRow];
     } catch (e) {
-      if (isUniqueViolation(e)) throw new ActionError("conflict", DUPLICATE);
+      if (isUniqueViolation(e)) throw new ActionError("conflict", COUPON_DUPLICATE_MESSAGE);
       throw e;
     }
     if (input.offerIds) await writeOffers(ctx, input.id, input.offerIds);
@@ -272,6 +283,8 @@ export const archiveCoupon = defineAction({
   permission: "offers.write",
   sensitive: true,
   async run(ctx, input) {
+    // Mesmo lock do checkout: o arquivamento não cai no meio da conferência de um pedido.
+    await lockCoupon(ctx.tx, input.id);
     const [current] = await ctx.tx.select().from(coupon).where(eq(coupon.id, input.id)).for("update");
     if (!current) throw new ActionError("not_found", "Cupom não encontrado");
     if (current.archivedAt) return (await toViews(ctx, [current]))[0]!;

@@ -5,13 +5,14 @@
 import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { clientIpFrom } from "@/lib/client-ip";
-import { NEEDS_CPF, checkoutPreviewCoupon, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { NEEDS_CPF, checkoutPreviewCoupon, checkoutView, previewErrorResult, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { COUPON_INVALID_MESSAGE, COUPON_UNAVAILABLE_MESSAGE } from "@/lib/coupons/messages";
 import { checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { resolveStore } from "@/lib/stores";
 import { fbcFromFbclid } from "@/lib/tracking/touch";
-import { COUPON_INVALID_MESSAGE, COUPON_UNAVAILABLE_MESSAGE, type PreviewResult } from "./coupon-logic";
+import type { PreviewResult } from "./coupon-logic";
 
 export type StartResult =
   // `cardTicket`: só no cartão; o checkout o repassa ao iframe do cartão no `pay`.
@@ -85,8 +86,7 @@ export async function previewCouponAction(input: unknown): Promise<PreviewResult
       clientIp: clientIpFrom(h, env.TRUST_PROXY),
     });
   } catch (e) {
-    if (e instanceof ActionError && e.code === "rate_limited") return { ok: false, message: e.message };
-    if (e instanceof ActionError) return { ok: false, message: COUPON_INVALID_MESSAGE };
+    if (e instanceof ActionError) return previewErrorResult(e);
     log.error("checkout: erro inesperado ao conferir o cupom", { error: e });
     return { ok: false, message: COUPON_UNAVAILABLE_MESSAGE };
   }

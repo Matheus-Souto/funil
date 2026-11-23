@@ -156,7 +156,7 @@ const OVERRIDES: Record<string, Override> = {
   },
   "orders.get": {
     description:
-      "Detalhe de um pedido: comprador mascarado, itens, pagamentos, estorno, histórico e origem (UTM). Sem IP, user agent, links de download nem e-mails.",
+      "Detalhe de um pedido: comprador mascarado, itens, cupom e desconto, pagamentos, estorno, histórico e origem (UTM). Sem IP, user agent, links de download nem e-mails.",
     project: (out) => {
       const d = out as OrderDetail;
       return {
@@ -168,6 +168,9 @@ const OVERRIDES: Record<string, Override> = {
         paidAt: d.paidAt,
         expiresAt: d.expiresAt,
         subtotalCents: d.subtotalCents,
+        // Cupom: só o código (não é dado pessoal) e o desconto em centavos.
+        discountCents: d.discountCents,
+        couponCode: d.coupon?.code ?? null,
         totalCents: d.totalCents,
         manualAmountCents: d.manualAmountCents,
         hasBump: d.hasBump,

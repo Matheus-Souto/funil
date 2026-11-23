@@ -6,12 +6,13 @@ import { eq } from "drizzle-orm";
 import "@/lib/actions/all";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { registry } from "@/lib/actions/registry";
-import { installmentsFor, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { installmentsFor, previewErrorResult, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { BUMP_UNAVAILABLE } from "@/lib/orders/create";
 import { verifyCardTicket } from "@/lib/payments/card-ticket";
 import { createOffer } from "@/lib/catalog/offers";
 import { archiveCoupon, createCoupon, getCoupon, listCoupons, updateCoupon } from "@/lib/coupons/actions";
 import { ownerDb, withStore } from "@/lib/db/client";
-import { auditLog, coupon, couponOffer, orderItem, orders, rateLimit } from "@/lib/db/schema";
+import { auditLog, coupon, couponOffer, offer, orderItem, orders, rateLimit } from "@/lib/db/schema";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { savePixManual } from "@/lib/payments/manual";
@@ -295,6 +296,40 @@ describe("ações do painel (coupons.*)", () => {
     expect(await code(runAction(updateCoupon, call, { id: ok.id, percentBp: 9500 }))).toBe("invalid_input");
   });
 
+  test("valores fora da faixa (valor fixo enorme, datas absurdas) → invalid_input, nunca erro interno", async () => {
+    const s = await seedPanelStore("Cupons faixa");
+    const call = panelCall(s.storeId);
+    const fixedBase = { kind: "fixed" as const, amountCents: 500 };
+    expect(await code(runAction(createCoupon, call, { code: "BIG1", kind: "fixed", amountCents: 2_147_483_648 }))).toBe("invalid_input");
+    expect(await code(runAction(createCoupon, call, { code: "BIG2", kind: "fixed", amountCents: 100_000_001 }))).toBe("invalid_input");
+    expect(await code(runAction(createCoupon, call, { code: "BIG3", kind: "percent", percentBp: 2_147_483_648 }))).toBe("invalid_input");
+    expect(await code(runAction(createCoupon, call, { code: "DT1", ...fixedBase, startsAt: "1899-12-31T00:00:00Z" }))).toBe("invalid_input");
+    expect(await code(runAction(createCoupon, call, { code: "DT2", ...fixedBase, endsAt: "2101-01-01T00:00:00Z" }))).toBe("invalid_input");
+    expect(await code(runAction(createCoupon, call, { code: "DT3", ...fixedBase, endsAt: "+275760-09-13T00:00:00Z" }))).toBe("invalid_input");
+    const ok = await runAction(createCoupon, call, { code: "FAIXA", ...fixedBase, amountCents: 100_000_000, endsAt: "2100-12-31T00:00:00Z" });
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, amountCents: 2_147_483_648 }))).toBe("invalid_input");
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, startsAt: "0001-01-01T00:00:00Z" }))).toBe("invalid_input");
+    expect(await code(runAction(updateCoupon, call, { id: ok.id, maxUses: 2_147_483_648 }))).toBe("invalid_input");
+  });
+
+  test("código de cupom já usado não muda (conflict com mensagem clara); os outros campos mudam", async () => {
+    const s = await seedPanelStore("Cupons renomear");
+    const call = panelCall(s.storeId);
+    const c = await runAction(createCoupon, call, { code: "ANTES", ...base });
+    // Sem pedido: renomear é permitido.
+    const renamed = await runAction(updateCoupon, call, { id: c.id, code: "NOVO" });
+    expect(renamed.code).toBe("NOVO");
+    // Com pedido (qualquer situação: o código fica no histórico do pedido, do CSV e das métricas), não.
+    const o = await seedOrder(s, { status: "expired", coupon: { code: "NOVO", discountCents: 99 } });
+    expect(o.couponId).toBe(c.id);
+    const err = await fail(runAction(updateCoupon, call, { id: c.id, code: "OUTRO" }));
+    expect([err?.code, err?.message]).toEqual(["conflict", "Este cupom já foi usado: crie outro código"]);
+    expect((await runAction(getCoupon, call, { id: c.id })).code).toBe("NOVO");
+    // Mandar o mesmo código (o formulário manda tudo) e mudar outros campos continua valendo.
+    const edited = await runAction(updateCoupon, call, { id: c.id, code: "novo", percentBp: 1500 });
+    expect([edited.code, edited.percentBp]).toEqual(["NOVO", 1500]);
+  });
+
   test("ofertas: de outra loja ou inexistente → not_found; nada é gravado", async () => {
     const s = await seedPanelStore("Cupons of");
     const o = await seedPanelStore("Cupons of outra");
@@ -541,31 +576,35 @@ describe("cupom no checkout", () => {
     expect(other.totalCents).toBe(891);
   });
 
-  test("max_per_email: pedido expirado não conta; Pix pendente não vencido conta", async () => {
-    const s = await shop();
-    await newCoupon(s.storeId);
-    const who = `b-${randomUUID().slice(0, 8)}@example.com`;
-    const first = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
-    // Pendente e não vencido: conta.
-    const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } })));
-    expect(e.code).toBe("invalid_input");
-    await ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, first.orderId));
-    const again = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
-    expect(again.totalCents).toBe(891);
-  });
-
-  test("max_per_email: cartão pendente há 3 h não conta; há 1 h conta", async () => {
+  test("max_per_email conta só compras pagas: Pix pendente da mesma caixa não impede o cartão com o cupom; pago, impede", async () => {
     const fake = createFakeAsaas();
     const s = await shop({ asaas: fake });
     await newCoupon(s.storeId);
-    const who = `d-${randomUUID().slice(0, 8)}@example.com`;
+    const who = `b-${randomUUID().slice(0, 8)}@example.com`;
+    const pix = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
+    expect((await orderOf(s.storeId, pix.orderId)).status).toBe("pending");
+    // Desistiu do Pix e foi para o cartão: o Pix pendente não conta no limite por pessoa.
     const card = { method: "card", couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who, cpf: "52998224725" } };
-    const first = await start(s.storeId, startInput(s.slug, card));
+    const second = await start(s.storeId, startInput(s.slug, card));
+    expect((await orderOf(s.storeId, second.orderId)).method).toBe("card_asaas");
+    // Pago (ou contestado): agora conta.
+    await ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, pix.orderId));
+    const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } })));
+    expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
+    setAsaasFetchForTests();
+  });
+
+  test("max_uses (limite global) conta pendentes: cartão pendente há 1 h ocupa o uso; há 3 h libera", async () => {
+    const fake = createFakeAsaas();
+    const s = await shop({ asaas: fake });
+    await newCoupon(s.storeId, { maxUses: 1, maxPerEmail: null });
+    const card = () => ({ method: "card", couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: mail(), cpf: "52998224725" } });
+    const first = await start(s.storeId, startInput(s.slug, card()));
     expect((await orderOf(s.storeId, first.orderId)).method).toBe("card_asaas");
     await ownerDb.update(orders).set({ createdAt: new Date(Date.now() - 3_600_000) }).where(eq(orders.id, first.orderId));
-    expect((await fail(start(s.storeId, startInput(s.slug, card)))).code).toBe("invalid_input");
+    expect((await fail(start(s.storeId, startInput(s.slug, card())))).code).toBe("invalid_input");
     await ownerDb.update(orders).set({ createdAt: new Date(Date.now() - 3 * 3_600_000) }).where(eq(orders.id, first.orderId));
-    expect((await start(s.storeId, startInput(s.slug, card))).totalCents).toBe(891);
+    expect((await start(s.storeId, startInput(s.slug, card()))).totalCents).toBe(891);
     setAsaasFetchForTests();
   });
 
@@ -623,6 +662,22 @@ describe("cupom no checkout", () => {
     const e = await fail(start(cheap.storeId, startInput(cheap.slug, { couponCode: "KIDS10", expectedTotalCents: 500 })));
     expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
     expect(await orderCount(cheap.storeId)).toBe(0);
+  });
+
+  test("prévia com o bump marcado e indisponível mostra a mensagem do bump (a mesma do envio), não a de cupom inválido", async () => {
+    const s = await shop({ bump: true });
+    await newCoupon(s.storeId);
+    await ownerDb.update(offer).set({ bumpPriceCents: null }).where(eq(offer.id, s.offerId));
+    const ip = nextIp();
+    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: true, clientIp: ip }, NOW));
+    const sent = await fail(start(s.storeId, startInput(s.slug, { withBump: true, couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip }), NOW));
+    expect(previewErrorResult(e)).toEqual({ ok: false, message: sent.message });
+    expect(sent.message).toBe(BUMP_UNAVAILABLE);
+    // O resto continua neutro; o limite mostra a própria mensagem.
+    expect(previewErrorResult(new ActionError("not_found", "Oferta não encontrada"))).toEqual({ ok: false, message: INVALID });
+    expect(previewErrorResult(new ActionError("rate_limited", "Muitas tentativas"))).toEqual({ ok: false, message: "Muitas tentativas" });
+    // Recusa pelo bump não é tentativa de código: não conta no balde da loja.
+    expect(await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, `coupon:preview:store:${s.storeId}`))).toEqual([]);
   });
 
   test("checkout.previewCoupon é pública, sem auditoria, e não aparece no MCP", () => {
@@ -700,6 +755,52 @@ describe("cupom no checkout", () => {
     expect((await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip }), NOW))).code).toBe("rate_limited");
     // Sem cupom o mesmo IP compra normalmente.
     expect((await start(s.storeId, startInput(s.slug, { clientIp: ip }), NOW)).totalCents).toBe(990);
+  });
+
+  describe("balde da loja (300 recusas por hora) vale para a prévia e para o envio", () => {
+    const hour = 3_600_000;
+    const storeKey = (storeId: string) => `coupon:preview:store:${storeId}`;
+    const counter = async (storeId: string) => (await ownerDb.select().from(rateLimit).where(eq(rateLimit.key, storeKey(storeId))))[0]?.count ?? 0;
+    const fill = (storeId: string, count: number) =>
+      ownerDb.insert(rateLimit).values({ key: storeKey(storeId), windowStart: new Date(Math.floor(NOW.getTime() / hour) * hour), count });
+    // O envio de verdade (server action) passa por `startCheckout`, com o relógio injetado.
+    const send = (storeId: string, input: Record<string, unknown>, now = NOW) => startCheckout({ storeId }, input, { now });
+
+    test("envio recusado (código inválido) soma 1 no balde da loja, apesar do rollback; cheio, a prévia e o envio com cupom são barrados", async () => {
+      const s = await shop();
+      await newCoupon(s.storeId);
+      await fill(s.storeId, 299);
+      const e = await fail(send(s.storeId, startInput(s.slug, { couponCode: "ERRADO", expectedTotalCents: 891 })));
+      expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
+      expect(await counter(s.storeId)).toBe(300);
+      expect((await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW))).code).toBe("rate_limited");
+      expect((await fail(send(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 })))).code).toBe("rate_limited");
+      // Comprar sem cupom segue normal; na hora seguinte o cupom volta.
+      expect((await send(s.storeId, startInput(s.slug))).method).toBe("pix_manual");
+      expect((await send(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 }), new Date(NOW.getTime() + hour))).method).toBe("pix_manual");
+    });
+
+    test("300 prévias recusadas barram o envio com cupom", async () => {
+      const s = await shop();
+      await newCoupon(s.storeId);
+      await fill(s.storeId, 299);
+      expect(await preview(s.storeId, { slug: s.slug, code: "ERRADO", withBump: false, clientIp: nextIp() }, NOW)).toEqual({ ok: false, message: INVALID });
+      const before = await orderCount(s.storeId);
+      const e = await fail(send(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 })));
+      expect(e.code).toBe("rate_limited");
+      expect(await orderCount(s.storeId)).toBe(before);
+    });
+
+    test("recusa pelo limite por pessoa também conta; envio aceito não conta", async () => {
+      const s = await shop();
+      await newCoupon(s.storeId);
+      const who = mail();
+      const first = await send(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
+      expect(await counter(s.storeId)).toBe(0);
+      await ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.publicId, first.publicId));
+      expect((await fail(send(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } })))).code).toBe("invalid_input");
+      expect(await counter(s.storeId)).toBe(1);
+    });
   });
 
   test("cartão parcelado: parcelas pelo total com desconto (Completo 2700 em até 5x + fixo 500 → 4x; sem cupom → 5x); a renovação também", async () => {

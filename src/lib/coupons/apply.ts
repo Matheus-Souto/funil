@@ -4,36 +4,52 @@ import { and, eq, sql } from "drizzle-orm";
 import { ActionError } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
 import { coupon, couponOffer } from "@/lib/db/schema";
+import { COUPON_INVALID_MESSAGE } from "./messages";
 import { normalizeCode, type CouponRule } from "./rules";
 import { couponUses, couponUsesByMailbox } from "./usage";
-
-/** Mensagem neutra: nunca diz qual regra falhou (vencido, esgotado, outra oferta, já usado por esta pessoa...). */
-export const COUPON_INVALID_MESSAGE = "Cupom inválido ou vencido";
 
 /** `invalid_input` no campo do cupom do checkout. */
 export const couponInvalid = () =>
   new ActionError("invalid_input", COUPON_INVALID_MESSAGE, [{ path: ["couponCode"], message: COUPON_INVALID_MESSAGE }]);
 
+/** Recusa do cupom pelo `couponInvalid` (não um erro de esquema no campo): é o que conta no balde de recusas da loja. */
+export const isCouponRefusal = (e: unknown): boolean =>
+  e instanceof ActionError &&
+  e.code === "invalid_input" &&
+  e.message === COUPON_INVALID_MESSAGE &&
+  Array.isArray(e.details) &&
+  e.details.some((d: { path?: unknown }) => Array.isArray(d.path) && d.path[0] === "couponCode");
+
+/**
+ * `pg_advisory_xact_lock('coupon:' || id)`, até o fim da transação. O checkout (conferência dos usos e insert do pedido)
+ * e as edições do painel (`coupons.update` e `coupons.archive`) tomam o mesmo lock: um não grava no meio do outro.
+ */
+export async function lockCoupon(tx: Tx, id: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"coupon:" + id}, 0))`);
+}
+
 export type ResolvedCoupon = CouponRule & { id: string; code: string };
 
 /**
  * Cupom válido para a oferta agora: ativo, não arquivado, dentro da validade (`starts_at <= now < ends_at`), na lista
- * de ofertas (vazia = todas), com `usos < max_uses` e, com e-mail, `usos da caixa < max_per_email` (uso = regra D5).
- * Toma `pg_advisory_xact_lock('coupon:' || id)` antes de contar: chamado na transação que cria o pedido, o lock vai até
- * o commit e cobre a conferência e o insert (duas compras no último uso: só uma passa).
+ * de ofertas (vazia = todas), com `usos < max_uses` (uso = regra D5, pendentes contam) e, com e-mail,
+ * `compras pagas da caixa < max_per_email` (R-F1: só `paid`/`disputed`).
+ * Com `lock` (padrão), toma o lock do cupom antes de contar: chamado na transação que cria o pedido, o lock vai até o
+ * commit e cobre a conferência e o insert (duas compras no último uso: só uma passa). A prévia passa `lock: false`: só
+ * lê, não cria pedido, e não deve enfileirar atrás de um checkout em andamento.
  */
 export async function resolveCoupon(
   tx: Tx,
   storeId: string,
-  q: { code: string; offerId: string; email?: string; now: Date },
+  q: { code: string; offerId: string; email?: string; now: Date; lock?: boolean },
 ): Promise<{ coupon: ResolvedCoupon } | { invalid: true }> {
   const invalid = { invalid: true as const };
   const code = normalizeCode(q.code);
   if (code === null) return invalid;
   const [found] = await tx.select({ id: coupon.id }).from(coupon).where(and(eq(coupon.storeId, storeId), eq(coupon.code, code)));
   if (!found) return invalid;
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"coupon:" + found.id}, 0))`);
-  // Relido sob o lock (estado de agora, não o de antes de esperar).
+  if (q.lock !== false) await lockCoupon(tx, found.id);
+  // Relido depois do lock (no checkout: o estado de agora, não o de antes de esperar).
   const [c] = await tx.select().from(coupon).where(eq(coupon.id, found.id));
   if (!c || !c.active || c.archivedAt !== null) return invalid;
   const now = q.now.getTime();

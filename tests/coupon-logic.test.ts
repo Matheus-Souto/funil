@@ -2,10 +2,8 @@
 // Foco: preço mostrado = preço enviado (`expectedTotalCents` é o total da tela), prévia refeita ao marcar o bump e
 // `PRICE_CHANGED` refazendo a prévia sem reenviar.
 import { describe, expect, test } from "bun:test";
+import { COUPON_INVALID_MESSAGE, COUPON_UNAVAILABLE_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
 import {
-  COUPON_INVALID_MESSAGE,
-  COUPON_UNAVAILABLE_MESSAGE,
-  PRICE_CHANGED_MESSAGE,
   afterStartFailure,
   applyCoupon,
   closeCoupon,
@@ -19,7 +17,6 @@ import {
   submitCoupon,
   type CouponState,
   type PreviewFn,
-  type PreviewResult,
 } from "@/app/c/[slug]/coupon-logic";
 
 const PRICE = 990;
@@ -229,13 +226,5 @@ describe("resposta do envio", () => {
     const r = await afterStartFailure(preview, applied(), false, failure({ message: "Confira os campos marcados.", fields: { "customer.email": "Confira o e-mail" } }));
     expect(r).toEqual({ coupon: applied(), message: null, handled: false });
     expect(calls).toEqual([]);
-  });
-});
-
-describe("resultado do servidor (tipos)", () => {
-  test("PreviewResult aceita os dois formatos da ação", () => {
-    const a: PreviewResult = { ok: true, code: "KIDS10", discountCents: 99, totalCents: 891 };
-    const b: PreviewResult = { ok: false, message: COUPON_INVALID_MESSAGE };
-    expect([a.ok, b.ok]).toEqual([true, false]);
   });
 });
