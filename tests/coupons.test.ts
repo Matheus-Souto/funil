@@ -6,6 +6,8 @@ import { eq } from "drizzle-orm";
 import "@/lib/actions/all";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { registry } from "@/lib/actions/registry";
+import { installmentsFor, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { verifyCardTicket } from "@/lib/payments/card-ticket";
 import { createOffer } from "@/lib/catalog/offers";
 import { archiveCoupon, createCoupon, getCoupon, listCoupons, updateCoupon } from "@/lib/coupons/actions";
 import { ownerDb, withStore } from "@/lib/db/client";
@@ -368,12 +370,16 @@ describe("cupom no checkout", () => {
     if (!a) throw new Error(`ação não registrada: ${name}`);
     return a;
   };
-  const preview = (storeId: string, input: Record<string, unknown>) =>
-    runAction(action("checkout.previewCoupon"), pub(storeId), input) as Promise<
+  // Relógio injetado (`call.server.now`): os limites de cupom são por janela fixa de hora; com a hora real, um teste que
+  // cruzasse a virada da hora contaria em duas janelas. Meio da hora, longe das bordas.
+  const NOW = new Date("2026-11-23T10:30:00.000Z");
+  const at = (storeId: string, now?: Date) => ({ ...pub(storeId), ...(now ? { server: { now } } : {}) });
+  const preview = (storeId: string, input: Record<string, unknown>, now?: Date) =>
+    runAction(action("checkout.previewCoupon"), at(storeId, now), input) as Promise<
       { ok: true; code: string; discountCents: number; totalCents: number } | { ok: false; message: string }
     >;
-  const start = (storeId: string, input: Record<string, unknown>) =>
-    runAction(action("checkout.start"), pub(storeId), input) as Promise<{ publicId: string; orderId: string; totalCents: number }>;
+  const start = (storeId: string, input: Record<string, unknown>, now?: Date) =>
+    runAction(action("checkout.start"), at(storeId, now), input) as Promise<{ publicId: string; orderId: string; totalCents: number }>;
   const fail = (p: Promise<unknown>) =>
     p.then(
       () => {
@@ -387,7 +393,7 @@ describe("cupom no checkout", () => {
   const mail = () => `c-${randomUUID()}@example.com`;
 
   /** Loja com Pix manual, `main` produtos principais pelo `price` e, opcional, bump de 5 produtos por 1710. */
-  async function shop(o: { main?: number; price?: number; bump?: boolean; asaas?: FakeAsaas } = {}) {
+  async function shop(o: { main?: number; price?: number; bump?: boolean; asaas?: FakeAsaas; maxInstallments?: number } = {}) {
     const { storeId } = await seedStore("Cupom checkout");
     const call = ownerCall(storeId);
     if (o.asaas) {
@@ -407,6 +413,7 @@ describe("cupom no checkout", () => {
       priceCents: o.price ?? 990,
       methods: ["pix", "card"],
       pixMode: "manual",
+      ...(o.maxInstallments ? { maxInstallments: o.maxInstallments } : {}),
       ...(o.bump ? { bump: { productIds: kits, priceCents: 1710, label: "5 Kits Extras" } } : {}),
     });
     return { storeId, slug, offerId: created.id, call };
@@ -525,8 +532,11 @@ describe("cupom no checkout", () => {
     const variant = `${base.replace(".", "")}+x@googlemail.com`;
     const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: variant } })));
     expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
-    // A prévia com o e-mail também recusa; outra pessoa usa normalmente.
-    expect(await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, email: variant, clientIp: nextIp() })).toEqual({ ok: false, message: INVALID });
+    // A prévia não recebe e-mail nem confere o limite por caixa (não revela se a caixa de alguém usou o cupom): ok.
+    expect(await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() })).toEqual({ ok: true, code: "KIDS10", discountCents: 99, totalCents: 891 });
+    const strict = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, email: variant, clientIp: nextIp() }));
+    expect(strict.code).toBe("invalid_input");
+    // Outra pessoa usa normalmente.
     const other = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 }));
     expect(other.totalCents).toBe(891);
   });
@@ -625,22 +635,24 @@ describe("cupom no checkout", () => {
     await newCoupon(s.storeId);
     const ip = nextIp();
     for (let i = 0; i < 20; i++) {
-      const r = await preview(s.storeId, { slug: s.slug, code: i % 2 ? "KIDS10" : `ERRADO${i}`, withBump: false, clientIp: ip });
+      const r = await preview(s.storeId, { slug: s.slug, code: i % 2 ? "KIDS10" : `ERRADO${i}`, withBump: false, clientIp: ip }, NOW);
       expect(r.ok).toBe(i % 2 === 1);
     }
-    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }));
+    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }, NOW));
     expect(e.code).toBe("rate_limited");
-    // Outro IP segue.
-    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() })).ok).toBe(true);
+    // Outro IP segue; o mesmo IP na hora seguinte também.
+    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW)).ok).toBe(true);
+    const nextHour = new Date(NOW.getTime() + 3_600_000);
+    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }, nextHour)).ok).toBe(true);
   });
 
   test("300 prévias da loja na hora → rate_limited para qualquer IP", async () => {
     const s = await shop();
     await newCoupon(s.storeId);
     const hour = 3_600_000;
-    const windowStart = new Date(Math.floor(Date.now() / hour) * hour);
+    const windowStart = new Date(Math.floor(NOW.getTime() / hour) * hour);
     await ownerDb.insert(rateLimit).values({ key: `coupon:preview:store:${s.storeId}`, windowStart, count: 300 });
-    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }));
+    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }, NOW));
     expect(e.code).toBe("rate_limited");
   });
 
@@ -649,13 +661,30 @@ describe("cupom no checkout", () => {
     await newCoupon(s.storeId);
     const ip = nextIp();
     for (let i = 0; i < 20; i++) {
-      const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: `ERRADO${i}`, expectedTotalCents: 891, clientIp: ip })));
+      const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: `ERRADO${i}`, expectedTotalCents: 891, clientIp: ip }), NOW));
       expect(e.code).toBe("invalid_input");
     }
-    expect((await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }))).code).toBe("rate_limited");
-    expect((await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip })))).code).toBe("rate_limited");
+    expect((await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }, NOW))).code).toBe("rate_limited");
+    expect((await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip }), NOW))).code).toBe("rate_limited");
     // Sem cupom o mesmo IP compra normalmente.
-    expect((await start(s.storeId, startInput(s.slug, { clientIp: ip }))).totalCents).toBe(990);
+    expect((await start(s.storeId, startInput(s.slug, { clientIp: ip }), NOW)).totalCents).toBe(990);
+  });
+
+  test("cartão parcelado: parcelas pelo total com desconto (Completo 2700 em até 5x + fixo 500 → 4x; sem cupom → 5x); a renovação também", async () => {
+    const fake = createFakeAsaas();
+    const s = await shop({ main: 6, price: 2700, maxInstallments: 5, asaas: fake });
+    await newCoupon(s.storeId, { code: "MENOS5", kind: "fixed", percentBp: null, amountCents: 500 });
+    const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+    const card = (over: Record<string, unknown>) => startInput(s.slug, { method: "card", customer: { cpf: "52998224725" }, ...over });
+    const withCoupon = await startCheckout({ storeId: s.storeId }, card({ couponCode: "MENOS5", expectedTotalCents: 2200 }), { cardTicketKey: KEY });
+    const ticket = verifyCardTicket(withCoupon.cardTicket!, KEY)!;
+    expect([ticket.totalCents, ticket.maxInstallments]).toEqual([2200, 4]);
+    const renewed = verifyCardTicket(await renewCardTicket({ storeId: s.storeId }, { publicId: withCoupon.publicId, ticket: withCoupon.cardTicket }, KEY), KEY)!;
+    expect([renewed.totalCents, renewed.maxInstallments]).toEqual([2200, 4]);
+    const plain = await startCheckout({ storeId: s.storeId }, card({}), { cardTicketKey: KEY });
+    expect(verifyCardTicket(plain.cardTicket!, KEY)!.maxInstallments).toBe(5);
+    expect([installmentsFor(5, 2200), installmentsFor(5, 2700), installmentsFor(12, 500), installmentsFor(3, 499)]).toEqual([4, 5, 1, 1]);
+    setAsaasFetchForTests();
   });
 
   test("auditoria do checkout.start com cupom → tem o código, não tem e-mail em claro", async () => {

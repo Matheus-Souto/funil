@@ -52,6 +52,19 @@ export const VIEW_LIMIT_PER_HOUR = 30;
 /** `conflict` quando o total recalculado difere do que o comprador viu (`details.code === "PRICE_CHANGED"`). */
 export const PRICE_CHANGED_MESSAGE = "O valor mudou: confira o resumo";
 export const COUPON_LIMIT_MESSAGE = "Muitas tentativas de cupom. Aguarde alguns minutos e tente de novo.";
+/** Parcela mínima do Asaas no cartão: R$ 5,00 (o editor da oferta avisa o mesmo valor). */
+export const MIN_INSTALLMENT_CENTS = 500;
+
+/**
+ * Parcelas que o pedido aceita: o máximo da oferta, limitado para nenhuma parcela ficar abaixo de R$ 5,00 sobre o
+ * total do PEDIDO (com desconto). Ex.: R$ 22,00 numa oferta de até 5x -> 4x.
+ */
+export function installmentsFor(offerMax: number, totalCents: number): number {
+  return Math.min(offerMax, Math.max(1, Math.floor(totalCents / MIN_INSTALLMENT_CENTS)));
+}
+
+/** Dados do servidor (fora da entrada) das ações do checkout: a hora, injetável nos testes (limites e validade). */
+type CheckoutServer = { now?: Date };
 export { COUPON_INVALID_MESSAGE };
 /** Toque (UTM etc.) maior que isto, serializado, é descartado: nunca grava payload grande de anônimo. */
 export const TOUCH_MAX_BYTES = 2048;
@@ -167,9 +180,10 @@ export const checkoutStart = defineAction({
    * método do pedido que vai ser criado; quem soma é `afterCommit`, só para o pedido criado. A exceção é o limite de
    * cupom (D8), que conta a tentativa aqui mesmo: o envio com cupom inválido não chega ao `afterCommit`.
    */
-  async prepare(call, input) {
+  async prepare(call: { storeId: string; server?: CheckoutServer }, input) {
     // Envio com cupom conta no limite de cupom do IP (contra força bruta pelo envio); passou do limite -> recusa.
-    if (input.couponCode !== undefined && !(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR))) {
+    const now = call.server?.now ?? new Date();
+    if (input.couponCode !== undefined && !(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR, now))) {
       throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
     }
     const knownIp = input.clientIp !== UNKNOWN_IP;
@@ -190,7 +204,7 @@ export const checkoutStart = defineAction({
     if (knownIp) await hitRateLimit(asaasIpKey(input.clientIp), HOUR);
     await hitRateLimit(asaasEmailKey(call.storeId, input.customer.email), HOUR);
   },
-  async run(ctx, input, limits): Promise<StartOutput> {
+  async run(ctx, input, limits, server?: CheckoutServer): Promise<StartOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     if (!o.methods.includes(input.method)) {
@@ -202,7 +216,8 @@ export const checkoutStart = defineAction({
     // Cupom conferido sob o lock dele (vai até o commit: cobre a contagem de usos e o insert do pedido).
     let couponRef: { id: string } | undefined;
     if (input.couponCode !== undefined) {
-      const r = await resolveCoupon(ctx.tx, ctx.storeId, { code: input.couponCode, offerId: o.id, email: buyer.email, now: new Date() });
+      const now = server?.now ?? new Date();
+      const r = await resolveCoupon(ctx.tx, ctx.storeId, { code: input.couponCode, offerId: o.id, email: buyer.email, now });
       if ("invalid" in r) throw couponInvalid();
       couponRef = { id: r.coupon.id };
     }
@@ -263,9 +278,10 @@ export const checkoutStart = defineAction({
       publicId: order.publicId,
       method: order.method as "pix_manual" | "pix_asaas" | "card_asaas",
       orderId: order.id,
-      // O bilhete do cartão leva o total e as parcelas (o iframe confere com o que o checkout mostrou).
+      // O bilhete do cartão leva o total e as parcelas (o iframe confere com o que o checkout mostrou). Parcelas sobre o
+      // total do pedido (com desconto): nenhuma abaixo da parcela mínima do Asaas.
       totalCents: order.totalCents,
-      maxInstallments: o.maxInstallments,
+      maxInstallments: installmentsFor(o.maxInstallments, order.totalCents),
     };
   },
 });
@@ -301,7 +317,7 @@ export async function startCheckout(
 ): Promise<{ publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }> {
   const method = raw !== null && typeof raw === "object" ? (raw as { method?: unknown }).method : undefined;
   if (method === "card" && !opts.cardTicketKey) throw new ActionError("conflict", CARD_UNAVAILABLE_MESSAGE);
-  const out = await runAction(checkoutStart, publicCall(call.storeId), raw);
+  const out = await runAction(checkoutStart, { ...publicCall(call.storeId), server: { now: opts.now } }, raw);
   if (out.method === "card_asaas" && opts.cardTicketKey) {
     const cardTicket = issueCardTicket(
       { storeId: call.storeId, orderId: out.orderId, publicId: out.publicId, totalCents: out.totalCents, maxInstallments: out.maxInstallments },
@@ -340,12 +356,12 @@ type PreviewOutput = { ok: true; code: string; discountCents: number; totalCents
 export const checkoutPreviewCoupon = defineAction({
   name: "checkout.previewCoupon",
   description: "Confere um cupom no checkout público e devolve o desconto e o total (ou uma mensagem neutra).",
-  input: z.object({
+  // Sem e-mail de propósito: a prévia não confere o limite por comprador (seria um oráculo para saber se a caixa de
+  // outra pessoa já usou o cupom). Só o `checkout.start` confere `max_per_email`.
+  input: z.strictObject({
     slug,
     code: z.string().max(64),
     withBump: z.boolean(),
-    /** Opcional: com ele a prévia já confere o limite por comprador. Nunca vai a log nem auditoria. */
-    email: z.string().max(254).optional(),
     /** Preenchido pela borda HTTP. */
     clientIp: z.string().min(1).max(64),
   }),
@@ -353,26 +369,21 @@ export const checkoutPreviewCoupon = defineAction({
   // Anônima e repetível: sem linha de auditoria (como checkout.view).
   audit: false,
   /** D8: 20 por IP e 300 por loja por hora; toda prévia conta (código inválido também). */
-  async prepare(call, input) {
-    if (!(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR))) {
+  async prepare(call: { storeId: string; server?: CheckoutServer }, input) {
+    const now = call.server?.now ?? new Date();
+    if (!(await checkRateLimit(couponIpKey(input.clientIp), COUPON.previewPerIpPerHour, HOUR, now))) {
       throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
     }
-    if (!(await checkRateLimit(couponStoreKey(call.storeId), COUPON.previewPerStorePerHour, HOUR))) {
+    if (!(await checkRateLimit(couponStoreKey(call.storeId), COUPON.previewPerStorePerHour, HOUR, now))) {
       throw new ActionError("rate_limited", COUPON_LIMIT_MESSAGE);
     }
   },
-  async run(ctx, input): Promise<PreviewOutput> {
+  async run(ctx, input, _prepared: void, server?: CheckoutServer): Promise<PreviewOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     // Mesmo cálculo do pedido: mesmas partes (e recusas) e o mesmo `computeDiscount`.
     const { bump } = await orderParts(ctx.tx, o, input.withBump);
-    const email = input.email?.trim().toLowerCase();
-    const r = await resolveCoupon(ctx.tx, ctx.storeId, {
-      code: input.code,
-      offerId: o.id,
-      email: email && validEmail(email) ? email : undefined,
-      now: new Date(),
-    });
+    const r = await resolveCoupon(ctx.tx, ctx.storeId, { code: input.code, offerId: o.id, now: server?.now ?? new Date() });
     const invalid = { ok: false as const, message: COUPON_INVALID_MESSAGE };
     if ("invalid" in r) return invalid;
     const bumpCents = bump?.priceCents ?? 0;
@@ -427,7 +438,7 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
-    const terms = { totalCents: o.totalCents, maxInstallments: o.maxInstallments };
+    const terms = { totalCents: o.totalCents, maxInstallments: installmentsFor(o.maxInstallments, o.totalCents) };
     return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, server.ticketKey, now) };
   },
 });
