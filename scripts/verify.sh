@@ -249,9 +249,15 @@ start_app() {
     SMTP_HOST=localhost SMTP_PORT=1025 ASAAS_BASE_URL="$asaas_url" META_GRAPH_BASE_URL="$asaas_url/meta" \
     RESEND_BASE_URL="$asaas_url/resend" TELEGRAM_BASE_URL="$asaas_url/telegram" \
     BASE_URL="$base_url" SECRET="$secret" MODE=single E2E_SEED_ROUTES=1 SETUP_TOKEN="$(cat "$RUN_DIR/setup-token")" \
-    "${isolated[@]}" PORT="$port" HOSTNAME=127.0.0.1 NODE_ENV=production bun run start > "$RUN_DIR/app.log" 2>&1 &
+    "${isolated[@]}" PORT="$port" NODE_ENV=production bun run start -H 127.0.0.1 -p "$port" > "$RUN_DIR/app.log" 2>&1 &
   APP_PID=$!
   curl -fs --retry 40 --retry-delay 1 --retry-connrefused "$base_url/api/health" > /dev/null || return 1
+  # O app de teste (rota /api/test-only ligada, chaves de teste) só pode escutar no loopback: `next start` ignora
+  # HOSTNAME e, sem -H, escuta em todas as interfaces, exposto no IP da máquina durante a rodada.
+  if command -v ss > /dev/null && ss -Htln "sport = :$port" | awk '{print $4}' | grep -qv '^127\.0\.0\.1:'; then
+    echo "o app de teste escuta fora do loopback na porta $port"
+    return 1
+  fi
   curl -fs --retry 40 --retry-delay 1 --retry-connrefused "$card_origin/healthz" > /dev/null
 }
 

@@ -315,6 +315,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   });
 
   test("painel: produtos com upload do PDF (validação e progresso) e oferta com bump pelo editor", async () => {
+    // Três envios de PDF e duas ofertas pelo editor somam uns 15–20 s de ações; com a máquina carregada passou dos 30 s.
+    test.slow();
     const page = owner;
     await page.goto("/admin/products");
     const newProduct = () => page.getByRole("button", { name: "Novo produto", exact: true }).click();
