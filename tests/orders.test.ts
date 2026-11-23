@@ -191,7 +191,10 @@ describe("transitionOrder", () => {
             expect(r).toEqual({ changed: true });
             const prev = model;
             model = to;
-            if (to === "paid") prev === "disputed" ? restore++ : paid++;
+            if (to === "paid") {
+              if (prev === "disputed") restore++;
+              else paid++;
+            }
             if (to === "refunded" || to === "disputed") revoke++;
           } else {
             expect((r as ActionError).code).toBe("conflict");

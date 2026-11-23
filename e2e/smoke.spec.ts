@@ -1391,10 +1391,135 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     await owner.getByRole("button", { name: "Reembolsar" }).click();
     await owner.getByRole("dialog", { name: "Reembolsar R$ 27,00 para Maria Aparecida Souza?" }).getByRole("button", { name: "Reembolsar R$ 27,00" }).click();
     await expect(owner.getByText("Estorno solicitado. O pedido muda para reembolsado assim que o Asaas confirmar.")).toBeVisible();
+    // `Connection: close`: o diálogo do reembolso deixa a conexão keep-alive parada uns segundos e o `next start` a fecha;
+    // reaproveitá-la dava `read ECONNRESET` (docs/painel-pendencias.md, item 4). Cada checagem abre uma conexão nova.
+    const fresh = { connection: "close" };
     await expect
-      .poll(async () => Promise.all(mail.links.map(async (l) => (await request.get(l)).status())), { timeout: 30_000 })
+      .poll(async () => Promise.all(mail.links.map(async (l) => (await request.get(l, { headers: fresh })).status())), { timeout: 30_000 })
       .toEqual(mail.links.map(() => 410));
     const origin = new URL(mail.links[0]!).origin;
-    for (const link of mail.links) expect((await request.post(link, { headers: { origin } })).status(), link).toBe(410);
+    for (const link of mail.links) expect((await request.post(link, { headers: { origin, ...fresh } })).status(), link).toBe(410);
+  });
+
+  // ---- Resend, Telegram, captura de contato, lembrete de recuperação e descadastro (/sair) ----
+  // Por último: o Resend vira o provedor ativo e os testes de antes leem o Mailpit (SMTP).
+  type FakeMail = { from: string; to: string[]; subject: string; html: string; text: string; headers?: Record<string, string> };
+  const fakeMails = async (request: APIRequestContext) => ((await (await request.get(`${asaasBase}/__control/resend`)).json()) as { mails: FakeMail[] }).mails;
+  const fakeTelegram = async (request: APIRequestContext) =>
+    ((await (await request.get(`${asaasBase}/__control/telegram`)).json()) as { messages: { chatId: string; text: string }[] }).messages;
+
+  test("integrações: Resend e Telegram pelo painel, contato do checkout, lembrete por e-mail e descadastro em um clique", async ({ browser, page, request }) => {
+    // Várias telas do painel mais o worker (a cada 2 s) entregando o aviso e o lembrete: passa dos 30 s padrão (slow: 90 s).
+    test.slow();
+    expect(OWNER_DB, "o verify passa E2E_OWNER_DATABASE_URL").not.toBe("");
+    const sql = postgres(OWNER_DB, { max: 1 });
+    const CHAT = "-1001234567890";
+    const BOT_TOKEN = `123456789:${"A".repeat(35)}`;
+    const RESEND_KEY = `re_${"b".repeat(30)}`;
+    const leadEmail = `contato.${stamp}@exemplo.com`;
+    try {
+      // Resend: salvar, mandar o teste e passar a ser o provedor ativo. A chave nunca volta ao navegador.
+      await owner.goto("/admin/connections");
+      await owner.getByRole("button", { name: "Conectar Resend" }).click();
+      const resend = owner.locator("#resend");
+      await resend.getByLabel("Remetente (e-mail)").fill("contato@manakids.com.br");
+      await resend.getByLabel("Chave de API").fill(RESEND_KEY);
+      await resend.getByRole("button", { name: "Salvar", exact: true }).click();
+      await owner.getByRole("dialog", { name: "Salvar o Resend da loja?" }).getByRole("button", { name: "Salvar", exact: true }).click();
+      await expect(resend.getByText("Resend salvo.")).toBeVisible();
+      expect(await owner.content()).not.toContain(RESEND_KEY);
+      await resend.getByLabel("Enviar e-mail de teste para").fill("teste.resend@exemplo.com");
+      await resend.getByRole("button", { name: "Enviar teste" }).click();
+      await expect(resend.getByText("E-mail de teste enviado para teste.resend@exemplo.com.")).toBeVisible();
+      const test = (await fakeMails(request)).find((m) => m.to.includes("teste.resend@exemplo.com"));
+      expect(test?.from).toContain("contato@manakids.com.br");
+      await resend.getByRole("button", { name: "Usar este provedor" }).click();
+      await owner.getByRole("dialog", { name: "Enviar e-mails pelo Resend?" }).getByRole("button", { name: "Usar este provedor" }).click();
+      await expect(resend.getByText("Provedor de e-mail trocado para Resend.")).toBeVisible();
+      await owner.keyboard.press("Escape");
+      await expect(resend).toBeHidden();
+
+      // Telegram: o token é conferido no getMe antes de salvar; o aviso de abandono antes do pagamento fica ligado.
+      await owner.getByRole("button", { name: "Conectar Telegram" }).click();
+      const tg = owner.locator("#telegram");
+      await tg.getByLabel("Token do bot").fill(BOT_TOKEN);
+      await tg.getByLabel("Chat id").fill(CHAT);
+      await tg.getByLabel("Abandono antes do pagamento").check();
+      await tg.getByLabel("Avisar abandono depois de (minutos)").fill("10");
+      await tg.getByRole("button", { name: "Salvar", exact: true }).click();
+      await owner.getByRole("dialog", { name: "Salvar o Telegram da loja?" }).getByRole("button", { name: "Salvar", exact: true }).click();
+      await expect(tg.getByText("Telegram salvo.")).toBeVisible();
+      await expect(tg.getByText("@loja_teste_bot")).toBeVisible();
+      expect(await owner.content()).not.toContain(BOT_TOKEN);
+      await tg.getByRole("button", { name: "Enviar teste" }).click();
+      await expect(tg.getByText("Mensagem de teste enviada.")).toBeVisible();
+      expect((await fakeTelegram(request)).map((m) => m.chatId)).toContain(CHAT);
+      await owner.keyboard.press("Escape");
+
+      // Configurações: captura de contato (com o e-mail de privacidade) e o lembrete de quem saiu antes do pedido.
+      await owner.goto("/admin/settings?aba=contatos");
+      await owner.getByRole("switch", { name: "Guardar o contato de quem não finaliza a compra" }).click();
+      await owner.getByLabel("E-mail para pedidos de privacidade").fill("privacidade@manakids.com.br");
+      await owner.getByRole("switch", { name: "Recuperação de vendas por e-mail" }).click();
+      const leadReminder = owner.getByRole("switch", { name: /^Digitou o e-mail e saiu antes do pedido/ });
+      if ((await leadReminder.getAttribute("aria-checked")) !== "true") await leadReminder.click();
+      await owner.getByRole("button", { name: "Salvar alterações" }).click();
+      await expect(owner.getByRole("region", { name: "Alterações não salvas" })).toBeHidden();
+
+      // O comprador digita o e-mail no checkout e sai sem pedir: o contato é gravado (o aviso de privacidade aparece).
+      await page.goto("/c/mana-basica");
+      await expect(page.getByText(/guarda seu e-mail e celular por até 30 dias/)).toBeVisible();
+      await page.getByLabel("E-mail", { exact: true }).fill(leadEmail);
+      await page.getByLabel("E-mail", { exact: true }).blur();
+      await expect.poll(async () => (await sql`select id from checkout_lead where email = ${leadEmail}`).length, { timeout: 15_000 }).toBe(1);
+      const [lead] = await sql<{ id: string }[]>`select id from checkout_lead where email = ${leadEmail}`;
+      await page.close();
+
+      // O tempo passa (no banco descartável da rodada): o contato nasceu há 61 min, o aviso do Telegram e a varredura da
+      // recuperação ficam para agora. O worker (a cada 2 s) faz o resto pelo caminho de produção.
+      await sql`update checkout_lead set created_at = now() - interval '61 minutes' where id = ${lead!.id}`;
+      await sql`update job set run_at = now() where status = 'queued' and type = 'notify_telegram' and payload->>'leadId' = ${lead!.id}`;
+      // A varredura roda ao subir o app e volta à fila a cada 5 min (`scheduleOnce`): adianta a que estiver na fila ou
+      // põe uma para agora, como o agendamento faria.
+      await sql`update job set run_at = now() where status = 'queued' and type = 'recovery_scan'`;
+      await sql`insert into job (type, payload, run_at) select 'recovery_scan', '{}'::jsonb, now()
+        where not exists (select 1 from job where type = 'recovery_scan' and status = 'queued')`;
+
+      // Telegram: aviso de abandono com o código do contato e nenhum dado dele.
+      const code = lead!.id.replace(/-/g, "").slice(0, 6).toUpperCase();
+      await expect.poll(async () => (await fakeTelegram(request)).filter((m) => m.text.includes(code)).length, { timeout: 30_000 }).toBe(1);
+      const notice = (await fakeTelegram(request)).find((m) => m.text.includes(code))!;
+      expect(notice.chatId).toBe(CHAT);
+      expect(notice.text).not.toContain(leadEmail);
+      expect(notice.text).not.toContain(leadEmail.split("@")[0]!);
+
+      // Lembrete pelo Resend, com o descadastro em um clique (RFC 8058) no cabeçalho e no rodapé.
+      await expect.poll(async () => (await fakeMails(request)).filter((m) => m.to.includes(leadEmail)).length, { timeout: 30_000 }).toBe(1);
+      const reminder = (await fakeMails(request)).find((m) => m.to.includes(leadEmail))!;
+      const sair = /https?:\/\/\S+\/sair\/[A-Za-z0-9_-]+/.exec(reminder.text)?.[0];
+      expect(sair, "link de descadastro no texto").toBeTruthy();
+      expect(reminder.headers?.["List-Unsubscribe"]).toBe(`<${sair}>`);
+      expect(reminder.headers?.["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
+
+      // O contato aparece em Contatos para o dono.
+      await owner.goto("/admin/contatos");
+      await expect(owner.getByText(leadEmail)).toBeVisible();
+
+      // /sair: GET só pergunta (nada gravado); o botão descadastra; o mesmo link depois não descadastra de novo.
+      const optouts = async () => (await sql`select 1 from email_optout`).length;
+      const before = await optouts();
+      // Sem sessão: quem abre o link do e-mail é o comprador (o token do link é a autorização).
+      const anon = await browser.newContext({ viewport: MOBILE });
+      const unsub = await anon.newPage();
+      await unsub.goto(new URL(sair!).pathname);
+      await expect(unsub.getByRole("heading", { name: /^Não quer mais receber lembretes da / })).toBeVisible();
+      expect(await optouts()).toBe(before);
+      await unsub.getByRole("button", { name: "Não quero mais receber" }).click();
+      await expect(unsub.getByRole("heading", { name: /não vai mais mandar lembretes de compra para este e-mail\.$/ })).toBeVisible();
+      expect(await optouts()).toBe(before + 1);
+      await anon.close();
+    } finally {
+      await sql.end();
+    }
   });
 });
