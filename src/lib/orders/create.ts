@@ -1,8 +1,10 @@
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, type Ctx } from "@/lib/actions/core";
 import { loadOfferProducts, type ProductRef } from "@/lib/catalog/offer-products";
+import { couponInvalid } from "@/lib/coupons/apply";
+import { computeDiscount, type CouponRule } from "@/lib/coupons/rules";
 import { randomToken } from "@/lib/crypto";
-import { customer, offer, orderItem, orders } from "@/lib/db/schema";
+import { coupon, customer, offer, orderItem, orders } from "@/lib/db/schema";
 import { enqueue } from "@/lib/jobs";
 import { convertLeads } from "@/lib/leads/capture";
 import { splitCents } from "@/lib/money";
@@ -31,6 +33,11 @@ export type CreateOrderInput = {
   asaasPixFallback?: boolean;
   /** Chave do visitante (a mesma do `checkout.saveLead`): converte o contato guardado dessa página, mesmo com outro e-mail. */
   leadKey?: string;
+  /**
+   * Cupom já conferido por `resolveCoupon` na MESMA transação (o lock do cupom vale até o commit). O desconto é
+   * recalculado aqui a partir do cupom no banco; desconto 0 (o piso de R$ 5,00 come tudo) -> cupom inválido.
+   */
+  coupon?: { id: string };
 };
 
 /** Bump marcado que não está mais disponível: o checkout mostra a mensagem como veio (ramo `conflict`). */
@@ -45,10 +52,32 @@ function methodAllowed(method: Method, methods: string[], pixMode: string, asaas
   return methods.includes("pix") && pixMode === (method === "pix_manual" ? "manual" : "asaas");
 }
 
+type OfferRow = typeof offer.$inferSelect;
+
+/**
+ * Produtos do pedido de uma oferta: os principais e, com o bump marcado, os do bump com o preço dele. Mesmas recusas do
+ * `createOrder` (a prévia do cupom usa esta função para calcular o mesmo total): principal apagado -> `not_found`; bump
+ * marcado e indisponível -> `conflict` com `BUMP_UNAVAILABLE`.
+ */
+export async function orderParts(
+  tx: Ctx["tx"],
+  o: OfferRow,
+  withBump: boolean,
+): Promise<{ main: ProductRef[]; bump: { products: ProductRef[]; priceCents: number } | null }> {
+  const list = (await loadOfferProducts(tx, [o.id])).get(o.id)!;
+  const live = (ps: ProductRef[]) => ps.length > 0 && ps.every((p) => p.deletedAt === null);
+  if (!live(list.main)) throw new ActionError("not_found", "Oferta não encontrada");
+  if (!withBump) return { main: list.main, bump: null };
+  if (!live(list.bump) || o.bumpPriceCents === null) throw new ActionError("conflict", BUMP_UNAVAILABLE);
+  return { main: list.main, bump: { products: list.bump, priceCents: o.bumpPriceCents } };
+}
+
 /**
  * Cria o pedido recalculando preços a partir do banco (nunca do cliente). Roda na transação de `ctx`.
  * Um `order_item` por produto da oferta (`offer_product`), na ordem da oferta: os principais dividem o preço da oferta e
  * os do bump (se marcado) o preço do bump (`splitCents`: sobra no primeiro item do grupo), e a soma dá `total_cents`.
+ * Com cupom: `subtotal` = principal + bump; o desconto do principal sai do grupo principal e o do bump do grupo do bump
+ * (`splitCents` sobre o preço já descontado de cada grupo), então a soma dos itens continua igual a `total_cents`.
  * Nunca vende combo incompleto nem diferente do que o comprador viu: qualquer principal apagado -> a oferta não vende
  * (`not_found`); bump marcado e indisponível (retirado da oferta ou com qualquer produto apagado) -> `conflict` com
  * `BUMP_UNAVAILABLE` e nenhum pedido (Ruling R4: o comprador nunca paga outro valor nem leva outro combo).
@@ -59,15 +88,22 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
   if (!o) throw new ActionError("not_found", "Oferta não encontrada");
   if (!methodAllowed(input.method, o.methods, o.pixMode, input.asaasPixFallback)) throw new ActionError("invalid_input", "Método de pagamento indisponível nesta oferta");
 
-  const list = (await loadOfferProducts(ctx.tx, [o.id])).get(o.id)!;
-  const live = (ps: ProductRef[]) => ps.length > 0 && ps.every((p) => p.deletedAt === null);
-  if (!live(list.main)) throw new ActionError("not_found", "Oferta não encontrada");
-  let bump: { products: ProductRef[]; priceCents: number } | null = null;
-  if (input.withBump) {
-    if (!live(list.bump) || o.bumpPriceCents === null) throw new ActionError("conflict", BUMP_UNAVAILABLE);
-    bump = { products: list.bump, priceCents: o.bumpPriceCents };
+  const { main, bump } = await orderParts(ctx.tx, o, input.withBump);
+  const subtotal = o.priceCents + (bump?.priceCents ?? 0);
+  let discount = { discountCents: 0, mainDiscountCents: 0, bumpDiscountCents: 0 };
+  let couponId: string | null = null;
+  if (input.coupon) {
+    const [c] = await ctx.tx.select().from(coupon).where(eq(coupon.id, input.coupon.id));
+    if (!c) throw couponInvalid();
+    discount = computeDiscount(
+      { kind: c.kind as CouponRule["kind"], percentBp: c.percentBp, amountCents: c.amountCents, appliesTo: c.appliesTo as CouponRule["appliesTo"] },
+      { mainCents: o.priceCents, bumpCents: bump?.priceCents ?? 0 },
+    );
+    // O banco exige cupom <-> desconto > 0: cupom que não desconta nada é tratado como inválido.
+    if (discount.discountCents === 0) throw couponInvalid();
+    couponId = c.id;
   }
-  const total = o.priceCents + (bump?.priceCents ?? 0);
+  const total = subtotal - discount.discountCents;
 
   const email = input.customer.email.trim().toLowerCase();
   const cpf = input.customer.cpf ?? null;
@@ -95,7 +131,9 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
         buyerCpf: cpf,
         status: "pending",
         method: input.method,
-        subtotalCents: total,
+        subtotalCents: subtotal,
+        discountCents: discount.discountCents,
+        couponId,
         totalCents: total,
         manualAmountCents: manual?.amountCents ?? null,
         hasBump: bump !== null,
@@ -136,7 +174,13 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     const prices = splitCents(priceCents, products.length);
     return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
   };
-  await ctx.tx.insert(orderItem).values([...items("main", list.main, o.priceCents), ...(bump ? items("bump", bump.products, bump.priceCents) : [])]);
+  // Soma dos grupos = (principal - desconto do principal) + (bump - desconto do bump) = total.
+  await ctx.tx
+    .insert(orderItem)
+    .values([
+      ...items("main", main, o.priceCents - discount.mainDiscountCents),
+      ...(bump ? items("bump", bump.products, bump.priceCents - discount.bumpDiscountCents) : []),
+    ]);
   // O contato guardado antes da compra (mesmo e-mail na loja ou mesma chave da página) vira "comprou" e perde e-mail e celular.
   await convertLeads(ctx.tx, ctx.storeId, { email, leadKey: input.leadKey, orderId: order.id });
   await enqueueTelegramNotices(ctx, order);

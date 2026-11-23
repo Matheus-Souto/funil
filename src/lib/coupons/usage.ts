@@ -2,7 +2,8 @@
 // confere o limite com a mesma condição. Relógio do banco (`now()`), como o resto dos prazos de pedido.
 import { and, count, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { Tx } from "@/lib/db/client";
-import { orders } from "@/lib/db/schema";
+import { customer, orders } from "@/lib/db/schema";
+import { mailboxKey } from "@/lib/recovery/rules";
 import { COUPON } from "./rules";
 
 /**
@@ -34,4 +35,27 @@ export async function couponUses(tx: Tx, couponIds: string[]): Promise<Map<strin
     .groupBy(orders.couponId);
   for (const r of rows) if (r.couponId) uses.set(r.couponId, r.n);
   return uses;
+}
+
+/**
+ * Usos de um cupom pela mesma caixa de e-mail (`mailboxKey`, como na recuperação: `a+x@gmail.com` e `a.x@gmail.com`
+ * são a mesma pessoa), com a mesma regra de uso (`countsAsCouponUse`). O cliente guarda o e-mail digitado, não a caixa:
+ * o SQL filtra um superconjunto (parte local sem `+sufixo` e sem pontos) e a conferência exata é `mailboxKey` aqui.
+ */
+export async function couponUsesByMailbox(tx: Tx, couponId: string, email: string): Promise<number> {
+  const key = mailboxKey(email);
+  // Mesma transformação dos dois lados (primeiro `@`, corta no `+`, tira pontos): toda caixa igual cai no filtro.
+  const loose = key.split("@")[0]!.split("+")[0]!.replaceAll(".", "");
+  const rows = await tx
+    .select({ email: customer.email })
+    .from(orders)
+    .innerJoin(customer, eq(customer.id, orders.customerId))
+    .where(
+      and(
+        eq(orders.couponId, couponId),
+        countsAsCouponUse(),
+        sql`translate(split_part(split_part(${customer.email}, '@', 1), '+', 1), '.', '') = ${loose}`,
+      ),
+    );
+  return rows.filter((r) => mailboxKey(r.email) === key).length;
 }

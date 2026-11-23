@@ -1,14 +1,21 @@
 // Cupom (A1): regra pura do desconto, normalização do código, isolamento por loja (RLS), FKs compostas e o check do
-// pedido (`total = subtotal - desconto`). As ações e o checkout vêm nas próximas tasks.
+// pedido (`total = subtotal - desconto`); ações do painel (A2); cupom no pedido, prévia e checkout.start (A3).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import "@/lib/actions/all";
 import { ActionError, runAction } from "@/lib/actions/core";
+import { registry } from "@/lib/actions/registry";
+import { createOffer } from "@/lib/catalog/offers";
 import { archiveCoupon, createCoupon, getCoupon, listCoupons, updateCoupon } from "@/lib/coupons/actions";
 import { ownerDb, withStore } from "@/lib/db/client";
-import { coupon, couponOffer, orders } from "@/lib/db/schema";
+import { auditLog, coupon, couponOffer, orderItem, orders, rateLimit } from "@/lib/db/schema";
+import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { saveAsaas } from "@/lib/payments/asaas/pix";
+import { savePixManual } from "@/lib/payments/manual";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
-import { createTestDb, seedStore, type TestDb } from "./db";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import type { FakeAsaas } from "./fakes/asaas";
 import { newAsaasOrder, createFakeAsaas, seedAsaasStore } from "./asaas-helpers";
 import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
@@ -345,5 +352,320 @@ describe("ações do painel (coupons.*)", () => {
     for (const o of [...counted, ...ignored]) await ownerDb.update(orders).set({ couponId: c.id, discountCents: 99, totalCents: o.subtotalCents - 99 }).where(eq(orders.id, o.id));
     expect((await runAction(getCoupon, call, { id: c.id })).uses).toBe(counted.length);
     expect((await runAction(listCoupons, call, {}))[0]!.uses).toBe(counted.length);
+  });
+});
+
+// ---- Cupom no pedido (A3): createOrder, checkout.previewCoupon e checkout.start ------------------------------------
+
+describe("cupom no checkout", () => {
+  const INVALID = "Cupom inválido ou vencido";
+  const owner = { kind: "user" as const, userId: "u1", role: "owner" as const };
+  const pub = (storeId: string) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const });
+  const ownerCall = (storeId: string) => ({ storeId, actor: owner, origin: "panel" as const });
+  // Pega a ação pelo registro (a importação de `@/lib/actions/all` registra todas).
+  const action = (name: string) => {
+    const a = registry.get(name);
+    if (!a) throw new Error(`ação não registrada: ${name}`);
+    return a;
+  };
+  const preview = (storeId: string, input: Record<string, unknown>) =>
+    runAction(action("checkout.previewCoupon"), pub(storeId), input) as Promise<
+      { ok: true; code: string; discountCents: number; totalCents: number } | { ok: false; message: string }
+    >;
+  const start = (storeId: string, input: Record<string, unknown>) =>
+    runAction(action("checkout.start"), pub(storeId), input) as Promise<{ publicId: string; orderId: string; totalCents: number }>;
+  const fail = (p: Promise<unknown>) =>
+    p.then(
+      () => {
+        throw new Error("esperava erro");
+      },
+      (e: unknown) => e as ActionError,
+    );
+
+  let ipSeq = 0;
+  const nextIp = () => `198.18.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
+  const mail = () => `c-${randomUUID()}@example.com`;
+
+  /** Loja com Pix manual, `main` produtos principais pelo `price` e, opcional, bump de 5 produtos por 1710. */
+  async function shop(o: { main?: number; price?: number; bump?: boolean; asaas?: FakeAsaas } = {}) {
+    const { storeId } = await seedStore("Cupom checkout");
+    const call = ownerCall(storeId);
+    if (o.asaas) {
+      setAsaasFetchForTests(o.asaas.fetch);
+      await runAction(saveAsaas, call, { env: "sandbox", apiKey: o.asaas.apiKey });
+    }
+    await runAction(savePixManual, call, { key: "contato@manakids.com.br", name: "Mana Kids", city: "Sao Paulo" });
+    const main: string[] = [];
+    for (let i = 0; i < (o.main ?? 1); i++) main.push((await seedProduct(storeId, `PDF ${i + 1}`)).id);
+    const kits: string[] = [];
+    if (o.bump) for (let i = 0; i < 5; i++) kits.push((await seedProduct(storeId, `Kit ${i + 1}`)).id);
+    const slug = `o-${Math.random().toString(36).slice(2, 10)}`;
+    const created = await runAction(createOffer, call, {
+      slug,
+      name: "Almanaque",
+      productIds: main,
+      priceCents: o.price ?? 990,
+      methods: ["pix", "card"],
+      pixMode: "manual",
+      ...(o.bump ? { bump: { productIds: kits, priceCents: 1710, label: "5 Kits Extras" } } : {}),
+    });
+    return { storeId, slug, offerId: created.id, call };
+  }
+
+  const newCoupon = (storeId: string, over: Record<string, unknown> = {}) =>
+    runAction(createCoupon, ownerCall(storeId), { code: "KIDS10", kind: "percent", percentBp: 1000, ...over });
+
+  const startInput = (slug: string, over: Record<string, unknown> & { customer?: Record<string, unknown> } = {}) => {
+    const { customer: c, ...rest } = over;
+    return {
+      slug,
+      withBump: false,
+      method: "pix",
+      customer: { name: "Maria Souza", email: mail(), phone: "(11) 98765-4321", ...c },
+      touch: { first: null, last: null },
+      clientIp: nextIp(),
+      userAgent: "bun-test",
+      ...rest,
+    };
+  };
+
+  const orderOf = async (storeId: string, id: string) => (await withStore(storeId, (tx) => tx.select().from(orders).where(eq(orders.id, id))))[0]!;
+  const itemsOf = (storeId: string, orderId: string) =>
+    withStore(storeId, (tx) => tx.select().from(orderItem).where(eq(orderItem.orderId, orderId)));
+  const orderCount = async (storeId: string) => (await withStore(storeId, (tx) => tx.select({ id: orders.id }).from(orders))).length;
+  const sum = (xs: { priceCents: number }[]) => xs.reduce((a, x) => a + x.priceCents, 0);
+
+  test("Almanaque + KIDS10 (10%, main) → subtotal 990, desconto 99, total 891, itens somam 891", async () => {
+    const s = await shop();
+    const c = await newCoupon(s.storeId);
+    const r = await start(s.storeId, startInput(s.slug, { couponCode: "kids10", expectedTotalCents: 891 }));
+    expect(r.totalCents).toBe(891);
+    const o = await orderOf(s.storeId, r.orderId);
+    expect(o).toMatchObject({ subtotalCents: 990, discountCents: 99, totalCents: 891, couponId: c.id });
+    expect(sum(await itemsOf(s.storeId, o.id))).toBe(891);
+  });
+
+  test("com bump e applies_to=main → total 891 + 1710 = 2601; com all → 2430; itens de cada grupo somam o grupo", async () => {
+    const s = await shop({ bump: true });
+    await newCoupon(s.storeId);
+    await newCoupon(s.storeId, { code: "TUDO10", appliesTo: "all" });
+    const main = await start(s.storeId, startInput(s.slug, { withBump: true, couponCode: "KIDS10", expectedTotalCents: 2601 }));
+    const om = await orderOf(s.storeId, main.orderId);
+    expect(om).toMatchObject({ subtotalCents: 2700, discountCents: 99, totalCents: 2601 });
+    const im = await itemsOf(s.storeId, om.id);
+    expect(sum(im.filter((i) => i.kind === "main"))).toBe(891);
+    expect(sum(im.filter((i) => i.kind === "bump"))).toBe(1710);
+    expect(sum(im)).toBe(2601);
+
+    const all = await start(s.storeId, startInput(s.slug, { withBump: true, couponCode: "TUDO10", expectedTotalCents: 2430 }));
+    const oa = await orderOf(s.storeId, all.orderId);
+    expect(oa).toMatchObject({ subtotalCents: 2700, discountCents: 270, totalCents: 2430 });
+    const ia = await itemsOf(s.storeId, oa.id);
+    expect(sum(ia.filter((i) => i.kind === "main"))).toBe(891);
+    expect(sum(ia.filter((i) => i.kind === "bump"))).toBe(1539);
+    expect(sum(ia)).toBe(2430);
+  });
+
+  test("Completo (6 PDFs) com fixo de 500 → total 2200, 6 itens somam 2200", async () => {
+    const s = await shop({ main: 6, price: 2700 });
+    await newCoupon(s.storeId, { code: "MENOS5", kind: "fixed", percentBp: null, amountCents: 500 });
+    const r = await start(s.storeId, startInput(s.slug, { couponCode: "MENOS5", expectedTotalCents: 2200 }));
+    const o = await orderOf(s.storeId, r.orderId);
+    expect(o).toMatchObject({ subtotalCents: 2700, discountCents: 500, totalCents: 2200 });
+    const items = await itemsOf(s.storeId, o.id);
+    expect(items).toHaveLength(6);
+    expect(sum(items)).toBe(2200);
+  });
+
+  test("cupom vencido, inativo, arquivado, ainda não começou, de outra oferta, inexistente ou com max_uses atingido → invalid_input e nenhum pedido", async () => {
+    const s = await shop();
+    const other = await runAction(createOffer, s.call, {
+      slug: `x-${Math.random().toString(36).slice(2, 10)}`,
+      name: "Outra",
+      productIds: [(await seedProduct(s.storeId, "Outro")).id],
+      priceCents: 1500,
+      methods: ["pix"],
+      pixMode: "manual",
+    });
+    const past = new Date(Date.now() - 2 * 86_400_000);
+    await newCoupon(s.storeId, { code: "VENCIDO", startsAt: past, endsAt: new Date(Date.now() - 60_000) });
+    await newCoupon(s.storeId, { code: "FUTURO", startsAt: new Date(Date.now() + 86_400_000) });
+    await newCoupon(s.storeId, { code: "INATIVO", active: false });
+    const arch = await newCoupon(s.storeId, { code: "ARQUIVADO" });
+    await runAction(archiveCoupon, s.call, { id: arch.id });
+    await newCoupon(s.storeId, { code: "OUTRAOFERTA", offerIds: [other.id] });
+    const esgotado = await newCoupon(s.storeId, { code: "ESGOTADO", maxUses: 1, maxPerEmail: null });
+    // O único uso do ESGOTADO é um pedido pago de outro comprador.
+    const first = await start(s.storeId, startInput(s.slug, { couponCode: "ESGOTADO", expectedTotalCents: 891 }));
+    await ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, first.orderId));
+    expect((await orderOf(s.storeId, first.orderId)).couponId).toBe(esgotado.id);
+
+    const before = await orderCount(s.storeId);
+    for (const code of ["VENCIDO", "FUTURO", "INATIVO", "ARQUIVADO", "OUTRAOFERTA", "NAOEXISTE", "ESGOTADO", "!!"]) {
+      const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: code, expectedTotalCents: 891 })));
+      expect([code, e.code, e.message]).toEqual([code, "invalid_input", INVALID]);
+      expect([code, e.details]).toEqual([code, [{ path: ["couponCode"], message: INVALID }]]);
+    }
+    expect(await orderCount(s.storeId)).toBe(before);
+  });
+
+  test("cupom restrito à oferta do checkout vale", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId, { offerIds: [s.offerId] });
+    const r = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 }));
+    expect(r.totalCents).toBe(891);
+  });
+
+  test("max_per_email 1: segundo pedido de a+x@gmail.com depois de a@gmail.com pago → invalid_input", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const base = `a.${randomUUID().slice(0, 8)}`;
+    const first = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: `${base}@gmail.com` } }));
+    await ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, first.orderId));
+    const variant = `${base.replace(".", "")}+x@googlemail.com`;
+    const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: variant } })));
+    expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
+    // A prévia com o e-mail também recusa; outra pessoa usa normalmente.
+    expect(await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, email: variant, clientIp: nextIp() })).toEqual({ ok: false, message: INVALID });
+    const other = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 }));
+    expect(other.totalCents).toBe(891);
+  });
+
+  test("max_per_email: pedido expirado não conta; Pix pendente não vencido conta", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const who = `b-${randomUUID().slice(0, 8)}@example.com`;
+    const first = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
+    // Pendente e não vencido: conta.
+    const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } })));
+    expect(e.code).toBe("invalid_input");
+    await ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, first.orderId));
+    const again = await start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who } }));
+    expect(again.totalCents).toBe(891);
+  });
+
+  test("max_per_email: cartão pendente há 3 h não conta; há 1 h conta", async () => {
+    const fake = createFakeAsaas();
+    const s = await shop({ asaas: fake });
+    await newCoupon(s.storeId);
+    const who = `d-${randomUUID().slice(0, 8)}@example.com`;
+    const card = { method: "card", couponCode: "KIDS10", expectedTotalCents: 891, customer: { email: who, cpf: "52998224725" } };
+    const first = await start(s.storeId, startInput(s.slug, card));
+    expect((await orderOf(s.storeId, first.orderId)).method).toBe("card_asaas");
+    await ownerDb.update(orders).set({ createdAt: new Date(Date.now() - 3_600_000) }).where(eq(orders.id, first.orderId));
+    expect((await fail(start(s.storeId, startInput(s.slug, card)))).code).toBe("invalid_input");
+    await ownerDb.update(orders).set({ createdAt: new Date(Date.now() - 3 * 3_600_000) }).where(eq(orders.id, first.orderId));
+    expect((await start(s.storeId, startInput(s.slug, card))).totalCents).toBe(891);
+    setAsaasFetchForTests();
+  });
+
+  test("expectedTotalCents diferente → conflict PRICE_CHANGED e nenhum pedido", async () => {
+    const s = await shop({ bump: true });
+    await newCoupon(s.storeId);
+    const before = await orderCount(s.storeId);
+    // Viu 891 mas marcou o bump (2601); viu 990 (sem o cupom) e mandou o cupom.
+    for (const [withBump, seen] of [[true, 891], [false, 990]] as const) {
+      const e = await fail(start(s.storeId, startInput(s.slug, { withBump, couponCode: "KIDS10", expectedTotalCents: seen })));
+      expect([e.code, e.message]).toEqual(["conflict", "O valor mudou: confira o resumo"]);
+      expect((e.details as { code: string }).code).toBe("PRICE_CHANGED");
+    }
+    expect(await orderCount(s.storeId)).toBe(before);
+  });
+
+  test("cupom que vence entre a prévia e o envio: invalid_input e nenhum pedido", async () => {
+    const s = await shop();
+    const c = await newCoupon(s.storeId);
+    const ip = nextIp();
+    expect(await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip })).toEqual({ ok: true, code: "KIDS10", discountCents: 99, totalCents: 891 });
+    await ownerDb.update(coupon).set({ startsAt: new Date(Date.now() - 86_400_000), endsAt: new Date(Date.now() - 1000) }).where(eq(coupon.id, c.id));
+    const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip })));
+    expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
+    expect(await orderCount(s.storeId)).toBe(0);
+  });
+
+  test("duas compras simultâneas no último uso → só uma cria o pedido (lock)", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId, { maxUses: 1, maxPerEmail: null });
+    const results = await Promise.allSettled(
+      Array.from({ length: 2 }, () => start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891 }))),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    expect(rejected.map((r) => (r.reason as ActionError).code)).toEqual(["invalid_input"]);
+    expect(await orderCount(s.storeId)).toBe(1);
+  });
+
+  test("checkout.previewCoupon: desconto e total; com bump; código inválido ou desconto zero dão a mensagem neutra", async () => {
+    const s = await shop({ bump: true });
+    await newCoupon(s.storeId);
+    await newCoupon(s.storeId, { code: "TUDO10", appliesTo: "all" });
+    const p = (code: string, withBump = false) => preview(s.storeId, { slug: s.slug, code, withBump, clientIp: nextIp() });
+    expect(await p(" kids10 ")).toEqual({ ok: true, code: "KIDS10", discountCents: 99, totalCents: 891 });
+    expect(await p("KIDS10", true)).toEqual({ ok: true, code: "KIDS10", discountCents: 99, totalCents: 2601 });
+    expect(await p("TUDO10", true)).toEqual({ ok: true, code: "TUDO10", discountCents: 270, totalCents: 2430 });
+    expect(await p("NAOEXISTE")).toEqual({ ok: false, message: INVALID });
+    expect(await p("a b")).toEqual({ ok: false, message: INVALID });
+
+    // Oferta de R$ 5,00: o piso come o desconto inteiro (desconto 0) → inválido, na prévia e no envio.
+    const cheap = await shop({ price: 500 });
+    await newCoupon(cheap.storeId);
+    expect(await preview(cheap.storeId, { slug: cheap.slug, code: "KIDS10", withBump: false, clientIp: nextIp() })).toEqual({ ok: false, message: INVALID });
+    const e = await fail(start(cheap.storeId, startInput(cheap.slug, { couponCode: "KIDS10", expectedTotalCents: 500 })));
+    expect([e.code, e.message]).toEqual(["invalid_input", INVALID]);
+    expect(await orderCount(cheap.storeId)).toBe(0);
+  });
+
+  test("checkout.previewCoupon é pública, sem auditoria, e não aparece no MCP", () => {
+    const a = action("checkout.previewCoupon");
+    expect([a.permission, a.audit]).toEqual(["public", false]);
+  });
+
+  test("21ª prévia do mesmo IP na hora → rate_limited (código inválido também conta)", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const ip = nextIp();
+    for (let i = 0; i < 20; i++) {
+      const r = await preview(s.storeId, { slug: s.slug, code: i % 2 ? "KIDS10" : `ERRADO${i}`, withBump: false, clientIp: ip });
+      expect(r.ok).toBe(i % 2 === 1);
+    }
+    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }));
+    expect(e.code).toBe("rate_limited");
+    // Outro IP segue.
+    expect((await preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() })).ok).toBe(true);
+  });
+
+  test("300 prévias da loja na hora → rate_limited para qualquer IP", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const hour = 3_600_000;
+    const windowStart = new Date(Math.floor(Date.now() / hour) * hour);
+    await ownerDb.insert(rateLimit).values({ key: `coupon:preview:store:${s.storeId}`, windowStart, count: 300 });
+    const e = await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: nextIp() }));
+    expect(e.code).toBe("rate_limited");
+  });
+
+  test("checkout.start com cupom inválido conta no limite de cupom do IP; esgotado, o envio com cupom é recusado", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const ip = nextIp();
+    for (let i = 0; i < 20; i++) {
+      const e = await fail(start(s.storeId, startInput(s.slug, { couponCode: `ERRADO${i}`, expectedTotalCents: 891, clientIp: ip })));
+      expect(e.code).toBe("invalid_input");
+    }
+    expect((await fail(preview(s.storeId, { slug: s.slug, code: "KIDS10", withBump: false, clientIp: ip }))).code).toBe("rate_limited");
+    expect((await fail(start(s.storeId, startInput(s.slug, { couponCode: "KIDS10", expectedTotalCents: 891, clientIp: ip })))).code).toBe("rate_limited");
+    // Sem cupom o mesmo IP compra normalmente.
+    expect((await start(s.storeId, startInput(s.slug, { clientIp: ip }))).totalCents).toBe(990);
+  });
+
+  test("auditoria do checkout.start com cupom → tem o código, não tem e-mail em claro", async () => {
+    const s = await shop();
+    await newCoupon(s.storeId);
+    const who = mail();
+    await start(s.storeId, startInput(s.slug, { couponCode: "kids10", expectedTotalCents: 891, customer: { email: who } }));
+    const rows = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "checkout.start")));
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows[0]!.input)).not.toContain(who);
+    expect(rows[0]!.input).toMatchObject({ coupon: "KIDS10", emailHash: createHash("sha256").update(who).digest("hex") });
   });
 });

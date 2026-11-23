@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import fc from "fast-check";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
+import { createCoupon } from "@/lib/coupons/actions";
 import { withStore } from "@/lib/db/client";
 import { job, orders, payment } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
@@ -196,6 +197,22 @@ describe("alocação do valor único", () => {
     const offer = await seedOffer(storeId, 990, "asaas");
     const o = await newOrder(storeId, offer.id, "pix_asaas");
     expect(o.manualAmountCents).toBeNull();
+  });
+
+  test("Pix manual com cupom → manual_amount_cents entre 892 e 990 e único (alocado sobre o total com desconto)", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedOffer(storeId);
+    const c = await runAction(createCoupon, { storeId, actor: owner, origin: "panel" as const }, { code: "KIDS10", kind: "percent", percentBp: 1000, maxPerEmail: null });
+    const created = await Promise.all(
+      Array.from({ length: 5 }, () => withStore(storeId, (tx) => createOrder(ctxOf(storeId, tx), { ...orderInput(offer.id), coupon: { id: c.id } }))),
+    );
+    const amounts = created.map((o) => o.manualAmountCents!);
+    expect(new Set(amounts).size).toBe(5);
+    for (const o of created) {
+      expect(o).toMatchObject({ subtotalCents: 990, discountCents: 99, totalCents: 891, couponId: c.id });
+      expect(o.manualAmountCents!).toBeGreaterThanOrEqual(892);
+      expect(o.manualAmountCents!).toBeLessThanOrEqual(990);
+    }
   });
 });
 

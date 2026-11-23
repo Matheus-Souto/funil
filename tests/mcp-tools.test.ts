@@ -154,7 +154,7 @@ describe("classificação", () => {
       }
     }
     const owner = mcpTools("owner").map((x) => x.action);
-    for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "email.applyResendEvent"]) {
+    for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "checkout.previewCoupon", "email.applyResendEvent"]) {
       expect(owner).not.toContain(name);
     }
   });
