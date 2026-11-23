@@ -49,7 +49,7 @@ function HeightFrame({ className, busy, reduce, children }: { className?: string
   </motion.div>;
 }
 
-export function Skeleton({ label = "Loading content", lines = 3, avatar = false, className, children, loading = true }: SkeletonProps) {
+export function Skeleton({ label = "Carregando", lines = 3, avatar = false, className, children, loading = true }: SkeletonProps) {
   const reduce = useReducedMotion();
   const count = Math.min(Math.max(Math.floor(lines), 1), 6);
   // Each block pulses a beat after the one above it, so the wait reads as one calm wave.

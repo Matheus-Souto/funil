@@ -380,7 +380,7 @@ export function BarChart({ data, label, period, unit = "", averageLabel = "Médi
         <span ref={measure} className={styles.measure}>{labelTexts.split("\n").filter(Boolean).map(text => <span key={text} data-text={text}>{text}</span>)}</span>
       </div>
       {/* The scrubber lies over the plot: hover or drag across it, or focus it and use the arrow keys. Vertical swipes still scroll the page. */}
-      <div className={styles.scrubber} role="slider" tabIndex={0} aria-label={`${label}, explore by ${categoryLabel.toLowerCase()}`} aria-orientation="horizontal" aria-valuemin={1} aria-valuemax={Math.max(1, data.length)} aria-valuenow={(index ?? last) + 1} aria-valuetext={valueText}
+      <div className={styles.scrubber} role="slider" tabIndex={0} aria-label={`${label}, ver valores por ${categoryLabel.toLowerCase()}`} aria-orientation="horizontal" aria-valuemin={1} aria-valuemax={Math.max(1, data.length)} aria-valuenow={(index ?? last) + 1} aria-valuetext={valueText}
         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={release} onPointerCancel={() => setActive(null)} onPointerLeave={event => { if (event.pointerType === "mouse") setActive(null); }} onKeyDown={onKeyDown} onBlur={() => setActive(null)}
         onFocus={event => { if (event.currentTarget.matches(":focus-visible") && last >= 0) setActive(current => current ?? last); }} />
     </div>

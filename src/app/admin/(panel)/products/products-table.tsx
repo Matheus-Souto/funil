@@ -26,7 +26,6 @@ export function ProductsTable({ rows, paged = false, canView, statusFilter }: { 
         rows={rows}
         rowKey="id"
         caption="Produtos"
-        itemName={{ one: "produto", other: "produtos" }}
         emptyMessage="Nenhum produto com estes filtros"
         defaultSort={{ key: "createdTs", direction: "desc" }}
         sorting={!paged}
@@ -51,7 +50,7 @@ export function ProductsTable({ rows, paged = false, canView, statusFilter }: { 
                 <span className={s.muted}>—</span>
               ),
           },
-          { key: "createdTs", label: "Enviado", render: (_, p) => <span className={`${s.muted} ${s.nowrap}`}>{p.createdText}</span> },
+          { key: "createdTs", label: "Enviado", numeric: false, render: (_, p) => <span className={`${s.muted} ${s.nowrap}`}>{p.createdText}</span> },
           // PDF original (sem carimbo): só dono e admin (products.file exige products.write).
           ...(canView ? [{ key: "id", label: "Ver", sortable: false, render: (_: unknown, p: ProductRow) => <PdfViewerButton id={p.id} name={p.name} /> }] : []),
         ]}

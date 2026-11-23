@@ -72,6 +72,8 @@ export interface ShellIdentity {
   storeName: string;
   userName: string;
   userEmail: string;
+  /** Papel na loja ("Você é dono", "Atendimento"...). */
+  roleLabel: string;
 }
 
 export function PanelShell({
@@ -105,6 +107,7 @@ export function PanelShell({
     hovered === key ? <motion.span layoutId="nav-hover" className={s.navHover} transition={glide} aria-hidden="true" /> : null;
   const [theme, changeTheme] = useTheme(initialTheme);
   const [leaving, setLeaving] = useState(false);
+  const userSummary = `${id.userName} · ${id.roleLabel} · ${id.userEmail}`;
 
   const toggle = useCallback(() => {
     setCollapsed((v) => {
@@ -258,11 +261,13 @@ export function PanelShell({
               </Tip>
             </form>
           </div>
-          <Tip show={collapsed} label={`${id.userName} · ${id.userEmail}`}>
-            <div className={s.userRow}>
+          {/* Recolhida, o texto some: a linha vira um alvo de foco (Tab) com o mesmo texto no nome e na dica. */}
+          <Tip show={collapsed} label={userSummary}>
+            <div className={s.userRow} tabIndex={collapsed ? 0 : undefined} role={collapsed ? "group" : undefined} aria-label={collapsed ? userSummary : undefined}>
               <Avatar name={id.userName || "?"} size="sm" className={s.userAvatar} />
               <span className={s.userText}>
                 <b>{id.userName}</b>
+                <small>{id.roleLabel}</small>
                 <small>{id.userEmail}</small>
               </span>
             </div>

@@ -23,7 +23,7 @@ export default async function SetupPage({ searchParams }: { searchParams: Promis
   return (
     <div className={`${s.root} ${s.auth}`}>
       <header className={s.authTop} data-bar="true">
-        <span className={s.brand} aria-label="PingaPay">
+        <span className={s.brand}>
           <BrandLogo />
         </span>
         <span className={s.muted}>Dá para mudar tudo depois em Configurações</span>

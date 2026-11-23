@@ -73,7 +73,7 @@ export function FunnelChart({ views, orders, paid }: { views: number; orders: nu
  *  fixa por método (o Arc guardaria a cor pela ordem em que viu cada chave, e ela mudaria ao trocar o período). */
 export function DonutChart({ rows }: { rows: Array<{ key: string; label: string; cents: number; color: string }> }) {
   const data = rows.filter((r) => r.cents > 0).map((r) => ({ key: r.key, label: r.label, value: r.cents, color: r.color }));
-  return <ArcDonut data={data} label="Receita por método" totalLabel="no período" formatValue={brlCenter} size={200} thickness={22} legend={false} emptyLabel="Sem vendas no período" />;
+  return <ArcDonut data={data} label="Receita por método" totalLabel="no período" formatValue={brlCenter} size={200} thickness={22} emptyLabel="Sem vendas no período" />;
 }
 
 /** Iniciais para o avatar da indicação (ex.: "ana-paula" → "AP"). */

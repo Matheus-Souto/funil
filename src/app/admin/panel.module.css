@@ -339,14 +339,6 @@
   display: grid;
   place-items: center;
 }
-.navTag {
-  margin-left: auto;
-  font-size: 11px;
-  font-weight: 500;
-  border: 1px solid var(--color-border);
-  padding: 1px 6px;
-  border-radius: 999px;
-}
 .userFoot {
   display: flex;
   flex-direction: column;
@@ -361,6 +353,12 @@
   gap: 10px;
   min-width: 0;
   padding: 4px 4px 2px;
+  border-radius: 8px;
+}
+/* Com a sidebar recolhida a linha recebe foco (Tab) para mostrar a dica com nome, papel e e-mail. */
+.userRow:focus-visible {
+  outline: 2px solid var(--color-primary-ink);
+  outline-offset: 1px;
 }
 /* Botões pequenos e sem borda da fileira de ícones (tema, configurações, senha, sair). */
 .footBtn {
@@ -584,17 +582,6 @@
     place-items: center;
   }
 }
-
-.moreMenu {
-  position: relative;
-  display: contents;
-}
-.moreMenu summary {
-  list-style: none;
-}
-.moreMenu summary::-webkit-details-marker {
-  display: none;
-}
 .moreSheet {
   position: fixed;
   inset: auto 12px 80px 12px;
@@ -618,8 +605,25 @@
   margin-bottom: 20px;
   flex-wrap: wrap;
 }
-.pageHead h1,
-.h1 {
+/* Seletor de período do Dashboard com o "Atualizando…" ao lado enquanto o servidor recalcula. */
+.rangePicker {
+  display: inline-flex;
+  align-items: center;
+}
+/* A região de status fica sempre no DOM (vazia não ocupa espaço), para o leitor de tela anunciar quando muda. */
+.rangePending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.rangePending:empty {
+  margin-right: 0;
+}
+.pageHead h1 {
   margin: 0;
   font-family: var(--font-display);
   font-weight: 600;
@@ -1155,48 +1159,6 @@
   height: 170px;
   padding-top: 22px;
 }
-.chartCol {
-  position: relative;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  align-items: center;
-  height: 100%;
-  min-width: 0;
-}
-.chartCol > i {
-  display: block;
-  width: 100%;
-  min-height: 2px;
-  border-radius: 6px 6px 2px 2px;
-  background: color-mix(in srgb, var(--color-primary) 80%, var(--color-surface));
-}
-.chartCol[data-today="true"] > i {
-  background: repeating-linear-gradient(135deg, var(--color-primary) 0 6px, color-mix(in srgb, var(--color-primary) 70%, var(--color-surface)) 6px 12px);
-}
-.chartCol[data-max="true"] > i {
-  background: var(--color-primary);
-}
-.chartCol > b {
-  position: absolute;
-  top: -20px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.chartLabels {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
-}
-.chartLabels span {
-  flex: 1;
-  text-align: center;
-  color: var(--color-text-muted);
-  font-size: 12px;
-  overflow: hidden;
-  white-space: nowrap;
-}
 
 /* ---------- Tabela ---------- */
 .table {
@@ -1224,14 +1186,8 @@
 .table tr[data-tone="warning"] td {
   background: color-mix(in srgb, var(--color-warning-soft) 55%, var(--color-surface));
 }
-.table .num,
 .table .nowrap {
   white-space: nowrap;
-}
-.table .num {
-  text-align: right;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
 }
 .table small {
   display: block;
@@ -1259,91 +1215,7 @@
   display: flex;
   gap: 8px;
 }
-.orderCards {
-  display: none;
-}
-@media (max-width: 900px) {
-  .orderTable {
-    display: none;
-  }
-  .orderCards {
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-  .orderCards li + li {
-    border-top: 1px solid var(--color-border);
-  }
-  .orderCard {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 4px 12px;
-    padding: 14px 16px;
-    color: inherit;
-    text-decoration: none;
-  }
-  .orderCard small {
-    color: var(--color-text-muted);
-    font-size: 13px;
-  }
-}
 
-/* ---------- Filtros ---------- */
-.filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.search {
-  flex: 1 1 280px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-}
-.search:focus-within {
-  outline: 2px solid var(--color-primary-ink);
-}
-.search input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: none;
-  font: inherit;
-  color: inherit;
-}
-.selectBox {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 40px;
-  padding: 0 10px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-text-muted);
-}
-.selectBox select {
-  border: 0;
-  background: none;
-  font: inherit;
-  font-weight: 600;
-  color: var(--color-text);
-}
-.pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 14px;
-}
 .pill {
   display: inline-flex;
   align-items: center;
@@ -1379,7 +1251,6 @@
   font-size: 14px;
 }
 .input,
-.select,
 .textarea {
   width: 100%;
   min-height: 42px;
@@ -1396,14 +1267,12 @@
   resize: vertical;
 }
 .input:focus,
-.select:focus,
 .textarea:focus {
   outline: none;
   border-color: var(--color-primary-ink);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 22%, transparent);
 }
 .input:disabled,
-.select:disabled,
 .textarea:disabled {
   background: var(--color-surface-2);
   color: var(--color-text-muted);
@@ -1525,11 +1394,6 @@
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
-}
-.sectionTitle {
-  margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 700;
 }
 
 /* ---------- Pedido ---------- */
@@ -1727,31 +1591,6 @@
 .drop > svg {
   color: var(--color-primary-ink);
 }
-.progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-.progress > div {
-  flex: 1;
-  min-width: 0;
-}
-.progressBar {
-  height: 6px;
-  margin: 6px 0 4px;
-  border-radius: 999px;
-  background: var(--color-surface-2);
-  overflow: hidden;
-}
-.progressBar > i {
-  display: block;
-  height: 100%;
-  background: var(--color-primary);
-  transition: width 0.15s;
-}
 
 /* Linhas de produto do editor de oferta: select + subir/descer/remover. */
 .productLines {
@@ -1855,17 +1694,6 @@
   user-select: none;
   animation: art-float 5s var(--ease-in-out) infinite;
 }
-.emptyInline {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 10px;
-}
-.emptyInline .emptyArt {
-  width: 88px;
-  height: 88px;
-  margin: 0;
-}
 .authArt {
   display: block;
   width: 120px;
@@ -1889,16 +1717,6 @@
   .authArt {
     animation: none;
   }
-}
-.emptyIcon {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  margin-bottom: 8px;
-  border-radius: var(--radius-lg);
-  background: var(--color-surface-2);
-  color: var(--color-text-muted);
 }
 .empty h2 {
   margin: 0;
@@ -2238,13 +2056,6 @@
   overflow-wrap: anywhere;
 }
 
-/* Linha com um bloco só (ex.: equipe): texto à esquerda, peso normal */
-.row > span.rowMain {
-  text-align: left;
-  font-weight: 400;
-  color: var(--color-text);
-}
-
 /* Links em texto corrido do painel na cor de destaque legível */
 .hint a {
   color: var(--color-primary-ink);
@@ -2355,34 +2166,6 @@
   color: var(--color-primary-ink);
 }
 
-/* Seletor de período com pílula que desliza (period-tabs.tsx) */
-.segmentItem {
-  position: relative;
-  display: inline-flex;
-  border-radius: 999px;
-}
-.segmentPill {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  border-radius: 999px;
-  background: var(--color-primary);
-}
-.segment .segmentItem a {
-  position: relative;
-  z-index: 1;
-  background: none;
-  transition: color 150ms var(--ease-standard);
-}
-.segment .segmentItem a[aria-current="page"] {
-  background: none;
-  color: var(--color-text-muted);
-  font-weight: 500;
-}
-.segment .segmentItem:has(.segmentPill) a {
-  color: var(--color-on-primary);
-  font-weight: 600;
-}
 .tableShell[data-max="true"] {
   box-shadow:
     0 0 0 100vmax rgb(0 0 0 / 0.35),
@@ -3176,18 +2959,6 @@
   }
 }
 
-/* Produtos no celular: só nome, status e o botão de ver o PDF (arquivo, ofertas e data ficam para telas maiores). */
-@media (max-width: 700px) {
-  .productTable th:nth-child(2),
-  .productTable td:nth-child(2),
-  .productTable th:nth-child(4),
-  .productTable td:nth-child(4),
-  .productTable th:nth-child(5),
-  .productTable td:nth-child(5) {
-    display: none;
-  }
-}
-
 /* A tabela do Arc dentro do cartão: sem a própria borda (o cartão já tem). */
 .arcTable > div {
   border: 0;
@@ -3247,12 +3018,6 @@
 }
 @media (max-width: 700px) {
   .hideSm {
-    display: none;
-  }
-  .leadTable th:nth-child(2),
-  .leadTable td:nth-child(2),
-  .leadTable th:nth-child(4),
-  .leadTable td:nth-child(4) {
     display: none;
   }
 }
@@ -3349,17 +3114,6 @@
 .roleOption:has(input:checked) {
   border-color: var(--color-primary-ink, #3e8114);
   background: var(--color-primary-soft);
-}
-.tokenTable tr[data-revoked="true"] td {
-  opacity: 0.65;
-}
-@media (max-width: 700px) {
-  .tokenTable th:nth-child(3),
-  .tokenTable td:nth-child(3),
-  .tokenTable th:nth-child(4),
-  .tokenTable td:nth-child(4) {
-    display: none;
-  }
 }
 
 /* Funil do checkout: três faixas de formato fixo à esquerda, números e taxas ao lado. */

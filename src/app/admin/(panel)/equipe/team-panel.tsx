@@ -487,11 +487,10 @@ export function InvitesTable({ invites }: { invites: InviteRow[] }) {
             rows={invites as Array<InviteRow & Record<string, unknown>>}
             rowKey="id"
             caption="Convites pendentes"
-            itemName={{ one: "convite", other: "convites" }}
             columns={[
               { key: "email", label: "E-mail", render: (_, inv) => <span className={s.leadEmail}>{inv.email}</span> },
               { key: "role", label: "Papel", render: (_, inv) => <Badge tone={ROLE_TONE[inv.role] ?? "neutral"}>{roleLabel(inv.role)}</Badge> },
-              { key: "expiresTs", label: "Validade", render: (_, inv) => <span className={`${s.muted} ${s.nowrap}`}>vence em {inv.expiresAt}</span> },
+              { key: "expiresTs", label: "Validade", numeric: false, render: (_, inv) => <span className={`${s.muted} ${s.nowrap}`}>vence em {inv.expiresAt}</span> },
               {
                 key: "sendStatus",
                 label: "Situação",

@@ -100,5 +100,5 @@ export function CopyButton({ value, label = "Copiar", className, iconOnly = fals
         <motion.span key={text} className={styles.word} {...words}>{text}</motion.span>
       </AnimatePresence>
     </span>}
-  </motion.button><span className={styles.srOnly} role="status" aria-live="polite">{state === "idle" ? "" : state === "error" ? `${label}: Could not copy` : `${label}: Copied`}</span></>;
+  </motion.button><span className={styles.srOnly} role="status" aria-live="polite">{state === "idle" ? "" : state === "error" ? `${label}: não foi possível copiar` : `${label}: copiado`}</span></>;
 }

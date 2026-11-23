@@ -25,7 +25,7 @@ export default async function ChangePasswordPage({ searchParams }: { searchParam
   return (
     <div className={`${s.root} ${s.auth}`}>
       <header className={s.authTop}>
-        <span className={s.brand} aria-label="PingaPay">
+        <span className={s.brand}>
           <BrandLogo />
         </span>
         {forced ? (

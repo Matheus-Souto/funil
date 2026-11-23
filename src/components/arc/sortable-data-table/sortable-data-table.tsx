@@ -1,9 +1,9 @@
 "use client";
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { ArrowUp } from "lucide-react";
-import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion, type Transition, type Variants } from "motion/react";
+import { animate, motion, useMotionValue, useReducedMotion, type Transition } from "motion/react";
 import { motionTokens } from "../lib/motion-tokens";
 import styles from "./sortable-data-table.module.css";
 
@@ -15,7 +15,7 @@ export type DataColumn<T> = {
   label: string;
   sortable?: boolean;
   render?: (value: unknown, row: T) => ReactNode;
-  /** Right-aligns the column with tabular numerals. Detected when every value is a number. */
+  /** Right-aligns the column with tabular numerals. Detected when every value is a number (datas em milissegundos: passe `false`). */
   numeric?: boolean;
   /** Fixed width such as 120 or "20%". Other columns are measured once and held, so sorting never reflows them. */
   width?: number | string;
@@ -34,13 +34,8 @@ export type SortableDataTableProps<T extends Record<string, unknown>> = {
   onSortChange?: (sort: SortState) => void;
   /** Painel: false desliga a ordenação de todas as colunas. Use quando as linhas são só uma página de uma lista paginada no servidor: ordenar no navegador reordenaria só a página aberta. */
   sorting?: boolean;
-  /** Adds a checkbox column, row click selection, and a count line with a clear action. */
-  selectable?: boolean;
-  selectedKeys?: string[];
-  defaultSelectedKeys?: string[];
-  onSelectionChange?: (keys: string[]) => void;
-  /** Noun for the count line, as in "6 projects". */
-  itemName?: { one: string; other: string };
+  /** Painel: destaque de uma linha (ex.: Pix manual esperando conferência). Vira `data-tone` na linha. */
+  rowTone?: (row: T) => "warning" | undefined;
 };
 
 const collator = new Intl.Collator("pt-BR", { numeric: true, sensitivity: "base" });
@@ -48,46 +43,7 @@ const isEmpty = (value: unknown) => value == null || value === "";
 const comparable = (value: unknown) => value instanceof Date ? value.getTime() : value;
 const blur = (px: number) => `blur(${px}px)`;
 const enter: Transition = { duration: motionTokens.duration.standard, ease: [...motionTokens.ease.enter] };
-const leave: Transition = { duration: motionTokens.duration.fast, ease: [...motionTokens.ease.standard] };
 const instant: Transition = { duration: motionTokens.duration.instant };
-/** Changing text rises in from the side it is moving toward and lifts away on the other. */
-const rise: Variants = {
-  enter: (direction: number) => ({ opacity: 0, y: `${.3 * direction}em`, filter: blur(motionTokens.blur.soft) }),
-  shown: { opacity: 1, y: "0em", filter: blur(0), transition: enter },
-  gone: (direction: number) => ({ opacity: 0, y: `${-.3 * direction}em`, filter: blur(motionTokens.blur.subtle), transition: leave }),
-};
-/** Reduced motion keeps the same properties as rise (no travel, no blur) so the server and a reduced-motion client render identical styles. */
-const fade: Variants = { enter: { opacity: 0, y: "0em", filter: blur(0) }, shown: { opacity: 1, y: "0em", filter: blur(0), transition: instant }, gone: { opacity: 0, y: "0em", filter: blur(0), transition: instant } };
-/** Check and dash share three points, so the header box morphs between all and some. */
-const checkPath = "M4.25 9.25 L7.25 12.25 L13.75 5.75";
-const dashPath = "M4.75 9 L9 9 L13.25 9";
-
-/** Text that changes in place. The slot eases to the new width, so the words beside it never jump. */
-function Swap({ value, direction, reduced, className }: { value: string; direction: number; reduced: boolean; className?: string }) {
-  const inner = useRef<HTMLSpanElement>(null);
-  const width = useMotionValue<number | string>("auto");
-  useLayoutEffect(() => {
-    const node = inner.current;
-    if (!node) return;
-    let settled = false;
-    const measure = () => {
-      const next = node.getBoundingClientRect().width;
-      if (settled && !reduced) animate(width, next, motionTokens.spring.morph); else width.jump(next);
-      settled = true;
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [reduced, width]);
-  return <motion.span className={[styles.swap, className].filter(Boolean).join(" ")} style={{ width }}>
-    <span ref={inner} className={styles.swapInner}>
-      <AnimatePresence mode="popLayout" initial={false} custom={direction}>
-        <motion.span key={value} className={styles.swapText} custom={direction} variants={reduced ? fade : rise} initial="enter" animate="shown" exit="gone">{value}</motion.span>
-      </AnimatePresence>
-    </span>
-  </motion.span>;
-}
 
 /** The arrow fades in where a column becomes sorted and flips on a spring when the direction changes. */
 function SortGlyph({ active, descending, reduced }: { active: boolean; descending: boolean; reduced: boolean }) {
@@ -110,33 +66,12 @@ function SortGlyph({ active, descending, reduced }: { active: boolean; descendin
   </span>;
 }
 
-function SelectBox({ checked, mixed = false, label, nav, reduced, onToggle, inputRef }: { checked: boolean; mixed?: boolean; label: string; nav: "head" | "row"; reduced: boolean; onToggle: (extend: boolean) => void; inputRef?: RefObject<HTMLInputElement | null> }) {
-  const local = useRef<HTMLInputElement>(null);
-  const ref = inputRef ?? local;
-  const on = checked || mixed;
-  useLayoutEffect(() => { if (ref.current) ref.current.indeterminate = mixed; }, [mixed, ref]);
-  const opacity: Transition = { duration: on ? motionTokens.duration.instant : motionTokens.duration.fast, ease: [...motionTokens.ease.standard] };
-  return <label className={styles.selectHit}>
-    <input ref={ref} type="checkbox" className={styles.selectInput} checked={checked} aria-label={label} data-nav={nav} onChange={event => onToggle((event.nativeEvent as MouseEvent).shiftKey === true)} />
-    <span className={styles.selectBox} data-on={on || undefined} aria-hidden="true">
-      <motion.span className={styles.selectFill} initial={false} animate={{ opacity: on ? 1 : 0, scale: on ? 1 : .6 }} transition={reduced ? { duration: 0 } : { scale: motionTokens.spring.snappy, opacity }} />
-      <svg className={styles.selectMark} viewBox="0 0 18 18" fill="none" focusable="false">
-        <motion.path initial={false} animate={{ d: mixed ? dashPath : checkPath, pathLength: on ? 1 : 0, opacity: on ? 1 : 0 }} transition={reduced ? { duration: 0 } : { d: motionTokens.spring.morph, pathLength: motionTokens.spring.snappy, opacity }} stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </span>
-  </label>;
-}
-
-export function SortableDataTable<T extends Record<string, unknown>>({ rows, columns, rowKey, caption = "Tabela", emptyMessage = "Nada para mostrar", defaultSort, onSortChange, sorting = true, selectable = false, selectedKeys, defaultSelectedKeys, onSelectionChange, itemName = { one: "linha", other: "linhas" } }: SortableDataTableProps<T>) {
+export function SortableDataTable<T extends Record<string, unknown>>({ rows, columns, rowKey, caption = "Tabela", emptyMessage = "Nada para mostrar", defaultSort, onSortChange, sorting = true, rowTone }: SortableDataTableProps<T>) {
   const reduced = useReducedMotion() ?? false;
   const tableRef = useRef<HTMLTableElement>(null);
-  const selectAllRef = useRef<HTMLInputElement>(null);
-  const anchor = useRef<string | null>(null);
   const [chosenSort, setSort] = useState<SortState | null>(defaultSort ?? null);
   const sort = sorting ? chosenSort : null;
   const [announcement, setAnnouncement] = useState("");
-  const [internalSelection, setInternalSelection] = useState<string[]>(defaultSelectedKeys ?? []);
-  const selection = useMemo(() => new Set(selectedKeys ?? internalSelection), [internalSelection, selectedKeys]);
 
   const sortedRows = useMemo(() => {
     if (!sort) return rows;
@@ -154,11 +89,9 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
   const getRowKey = (row: T) => String(typeof rowKey === "function" ? rowKey(row) : row[rowKey]);
   const keys = sortedRows.map(getRowKey);
   const order = keys.join("\u0000");
-  const selectedCount = keys.filter(key => selection.has(key)).length;
-  const allSelected = keys.length > 0 && selectedCount === keys.length;
 
   // Measure the natural column widths once, then hold them with a fixed layout so nothing reflows while rows move.
-  const signature = [selectable ? "select" : "", ...columns.map(column => column.key)].join("\u0000");
+  const signature = columns.map(column => column.key).join("\u0000");
   const [locked, setLocked] = useState<{ signature: string; widths: Record<string, number> } | null>(null);
   const widths = locked?.signature === signature ? locked.widths : null;
   useLayoutEffect(() => {
@@ -205,12 +138,6 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
     return () => observer.disconnect();
   }, [reduced, sort?.key, widths]);
 
-  const shownCount = selectedCount || keys.length;
-  const noun = selectedCount ? (selectedCount === 1 ? "selecionado" : "selecionados") : keys.length === 1 ? itemName.one : itemName.other;
-  const [lastCount, setLastCount] = useState(shownCount);
-  const [countDirection, setCountDirection] = useState(1);
-  if (shownCount !== lastCount) { setLastCount(shownCount); setCountDirection(shownCount > lastCount ? 1 : -1); }
-
   function sortBy(column: DataColumn<T>) {
     const next: SortState = { key: column.key, direction: sort?.key === column.key && sort.direction === "asc" ? "desc" : "asc" };
     setSort(next);
@@ -218,54 +145,15 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
     setAnnouncement(`Ordenado por ${column.label}, ${next.direction === "asc" ? "crescente" : "decrescente"}`);
   }
 
-  function commit(next: Set<string>) {
-    const list = keys.filter(key => next.has(key));
-    if (selectedKeys === undefined) setInternalSelection(list);
-    onSelectionChange?.(list);
-    setAnnouncement(list.length ? `${list.length} of ${keys.length} selected` : "Seleção limpa");
-  }
-
-  function toggleRow(key: string, extend: boolean) {
-    const next = new Set(selection);
-    const checked = !selection.has(key);
-    const from = extend && anchor.current ? keys.indexOf(anchor.current) : -1;
-    const to = keys.indexOf(key);
-    (from < 0 ? [key] : keys.slice(Math.min(from, to), Math.max(from, to) + 1)).forEach(item => checked ? next.add(item) : next.delete(item));
-    anchor.current = key;
-    commit(next);
-  }
-
-  function clearSelection() {
-    commit(new Set());
-    selectAllRef.current?.focus();
-  }
-
-  function onRowClick(event: ReactMouseEvent<HTMLTableRowElement>, key: string) {
-    if (!selectable || (event.target as HTMLElement).closest("a, button, input, label, select, textarea, [role='button'], [contenteditable='true']") || window.getSelection()?.toString()) return;
-    toggleRow(key, event.shiftKey);
-    // Keep the keyboard path where the pointer left off, so arrows continue from this row.
-    event.currentTarget.querySelector<HTMLInputElement>("input[type='checkbox']")?.focus({ preventScroll: true });
-  }
-
-  /** Arrows walk the header controls and the row checkboxes; Escape clears the selection. */
+  /** Arrows walk the header sort controls. */
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const target = event.target as HTMLElement;
-    if (event.key === "Escape" && selectedCount) {
-      event.preventDefault();
-      event.stopPropagation();
-      if (target.dataset.clear !== undefined) clearSelection(); else commit(new Set());
-      return;
-    }
-    const nav = target.dataset.nav;
-    if (!nav) return;
-    const list = (name: string) => [...event.currentTarget.querySelectorAll<HTMLElement>(`[data-nav="${name}"]`)];
-    const items = list(nav);
+    if (target.dataset.nav !== "head") return;
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>('[data-nav="head"]')];
     const index = items.indexOf(target);
-    const steps: Record<string, [HTMLElement[], number]> = nav === "head"
-      ? { ArrowRight: [items, index + 1], ArrowLeft: [items, index - 1], Home: [items, 0], End: [items, items.length - 1], ...(target === selectAllRef.current ? { ArrowDown: [list("row"), 0] } : {}) }
-      : { ArrowDown: [items, index + 1], ArrowUp: index === 0 && selectAllRef.current ? [[selectAllRef.current], 0] : [items, index - 1], Home: [items, 0], End: [items, items.length - 1] };
+    const steps: Record<string, number> = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: items.length - 1 };
     const step = steps[event.key];
-    const next = step?.[0][step[1]];
+    const next = step === undefined ? undefined : items[step];
     if (!next) return;
     event.preventDefault();
     next.focus();
@@ -274,14 +162,12 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
   return <div className={styles.wrapper} onKeyDown={onKeyDown}>
     <div className={styles.scroller}>
       {band ? <span className={styles.band} style={{ left: band.left, width: band.width }} aria-hidden="true" /> : null}
-      <table ref={tableRef} role="table" className={styles.table} data-fixed={widths ? "" : undefined} data-selectable={selectable || undefined}>
+      <table ref={tableRef} role="table" className={styles.table} data-fixed={widths ? "" : undefined}>
         <caption>{caption}</caption>
         <colgroup>
-          {selectable ? <col className={styles.selectCol} /> : null}
           {columns.map((column, index) => <col key={column.key} style={{ width: column.width !== undefined ? (typeof column.width === "number" ? `${column.width}px` : column.width) : widths && index > 0 ? `${widths[column.key]}%` : undefined }} />)}
         </colgroup>
         <thead role="rowgroup"><tr role="row">
-          {selectable ? <th scope="col" role="columnheader" className={styles.selectCell}><SelectBox inputRef={selectAllRef} checked={allSelected} mixed={selectedCount > 0 && !allSelected} label="Selecionar todas as linhas" nav="head" reduced={reduced} onToggle={() => commit(allSelected ? new Set() : new Set(keys))} /></th> : null}
           {columns.map((column, index) => {
             const active = sort?.key === column.key;
             const sortable = sorting && column.sortable !== false;
@@ -297,22 +183,12 @@ export function SortableDataTable<T extends Record<string, unknown>>({ rows, col
         </tr></thead>
         <tbody role="rowgroup">{sortedRows.length ? sortedRows.map((row, index) => {
           const key = keys[index]!;
-          const selected = selectable && selection.has(key);
-          return <motion.tr key={key} role="row" layout={reduced ? false : "position"} layoutDependency={order} transition={motionTokens.spring.smooth} data-selected={selected || undefined} onClick={event => onRowClick(event, key)} onMouseDown={event => { if (selectable && event.shiftKey) event.preventDefault(); }}>
-            {selectable ? <td role="cell" className={styles.selectCell}><SelectBox checked={selected} label={`Selecionar ${String(row[columns[0]?.key as string] ?? key)}`} nav="row" reduced={reduced} onToggle={extend => toggleRow(key, extend)} /></td> : null}
+          return <motion.tr key={key} role="row" layout={reduced ? false : "position"} layoutDependency={order} transition={motionTokens.spring.smooth} data-tone={rowTone?.(row)}>
             {columns.map((column, columnIndex) => <td key={column.key} role="cell" data-label={column.label} data-primary={columnIndex === 0 || undefined} data-sorted={sort?.key === column.key || undefined} data-numeric={numeric.has(column.key) || undefined}>{column.render ? column.render(row[column.key], row) : String(row[column.key] ?? "–")}</td>)}
           </motion.tr>;
-        }) : <tr role="row"><td role="cell" className={styles.empty} colSpan={columns.length + (selectable ? 1 : 0)}>{emptyMessage}</td></tr>}</tbody>
+        }) : <tr role="row"><td role="cell" className={styles.empty} colSpan={columns.length}>{emptyMessage}</td></tr>}</tbody>
       </table>
     </div>
-    {selectable ? <div className={styles.footer}>
-      <span className={styles.srOnly}>{shownCount} {noun}</span>
-      <span className={styles.count} data-active={selectedCount > 0 || undefined} aria-hidden="true">
-        <Swap className={styles.number} value={String(shownCount)} direction={countDirection} reduced={reduced} />
-        <Swap value={noun} direction={selectedCount ? 1 : -1} reduced={reduced} />
-      </span>
-      <AnimatePresence initial={false}>{selectedCount ? <motion.button key="clear" type="button" className={styles.clear} data-clear="" onClick={clearSelection} initial={reduced ? { opacity: 0 } : { opacity: 0, scale: .96, filter: blur(motionTokens.blur.soft) }} animate={{ opacity: 1, scale: 1, filter: blur(0) }} exit={reduced ? { opacity: 0, transition: instant } : { opacity: 0, scale: .98, filter: blur(motionTokens.blur.subtle), transition: leave }} transition={reduced ? instant : enter} whileTap={reduced ? undefined : { scale: .97, transition: { duration: motionTokens.duration.instant } }}>Limpar seleção</motion.button> : null}</AnimatePresence>
-    </div> : null}
     <p className={styles.srOnly} role="status">{announcement}</p>
   </div>;
 }

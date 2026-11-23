@@ -67,7 +67,7 @@ export function ThemeSwitch({ theme, onThemeChange, label, iconOnly = false }: T
       variant="secondary"
       className={classes}
       data-theme={theme}
-      aria-label={label ?? `Switch to ${next} mode`}
+      aria-label={label ?? (next === "dark" ? "Usar tema escuro" : "Usar tema claro")}
       aria-pressed={theme === "dark"}
       onClick={event => onThemeChange(next, event.currentTarget)}
     >
