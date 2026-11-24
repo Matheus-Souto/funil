@@ -429,18 +429,26 @@ Para quem já vende numa instalação `single` (`checkout.minhaloja.com.br`, car
 mesmo `pagar.checkout.minhaloja.com.br`) e dê esse mesmo domínio à loja existente. Lojas novas entram com domínio
 próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
 
-1. **Backup** (seção 10) e conferência de que só há uma loja. O `slug` dela sai da mesma consulta:
+1. **Antes de tudo**, três conferências e o backup:
+   - **SMTP:** o `multi` só aceita servidor público nas portas 587, 465, 2525 ou 25 (item 4 acima). Em
+     **Conexões → E-mail (SMTP)**, veja se a loja atual usa uma delas; se não, ajuste agora.
+   - **Só uma loja.** O `slug` dela sai da mesma consulta:
 
-   ```sh
-   cd ~/funil
-   docker compose exec -T postgres psql -U owner -d funil -c "select slug, domain from store"
-   ```
+     ```sh
+     cd ~/funil
+     docker compose exec -T postgres psql -U owner -d funil -c "select slug, domain from store"
+     ```
 
-   Deve vir uma linha só. Anote o `slug` (abaixo, `<slug da loja atual>`).
-2. **`.env`:** `MODE=multi` e `PLATFORM_DOMAIN=checkout.minhaloja.com.br`; mantenha `DOMAIN`, `BASE_URL` e
-   `CARD_ORIGIN` como estão. Atualize também a cópia do `.env` no seu cofre. Ainda **não reinicie**.
-3. **Domínio da loja atual**, antes de reiniciar (o `exec` leva o `MODE` e o `PLATFORM_DOMAIN` novos, porque o
-   container ainda roda com o `.env` antigo):
+     Deve vir uma linha só. Anote o `slug` (abaixo, `<slug da loja atual>`).
+   - **Backup** (seção 10) e conferência de que o banco abre: o `pg_restore` está no container do Postgres, então
+     lista-se o conteúdo assim (deve aparecer a lista de tabelas, entre elas `store`):
+
+     ```sh
+     age -d -i chave-backup.txt banco-AAAA-MM-DD.dump.age | docker compose exec -T postgres pg_restore -l | head -20
+     ```
+2. **Domínio da loja atual**, ainda com o `.env` antigo (o `exec` leva o `MODE` e o `PLATFORM_DOMAIN` novos por
+   `-e`). Fazer este passo antes de editar o `.env` evita que um `docker compose up` no meio do caminho suba o
+   `multi` com a loja sem domínio:
 
    ```sh
    docker compose exec -e MODE=multi -e PLATFORM_DOMAIN=checkout.minhaloja.com.br app \
@@ -448,13 +456,19 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    ```
 
    Sem esse passo, o `multi` não reconhece o host e o checkout da loja atual deixaria de abrir.
-4. **Reinicie** o app e o cartão: `docker compose up -d app card`. Confira:
+3. **`.env`:** guarde antes a versão `single`, fora da pasta dos backups:
+   `cp .env .env.single && chmod 600 .env.single`. Depois edite o `.env`: `MODE=multi` e
+   `PLATFORM_DOMAIN=checkout.minhaloja.com.br`; mantenha `DOMAIN`, `BASE_URL` e `CARD_ORIGIN` como estão. Atualize
+   também a cópia do `.env` no seu cofre.
+4. **Reinicie tudo:** `docker compose up -d` (todos os serviços, para o Caddy também pegar o ambiente novo). Confira:
    - `curl -s https://checkout.minhaloja.com.br/api/health`;
    - o checkout de uma oferta da loja atual (`/c/<slug da oferta>`) abre;
    - `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.checkout.minhaloja.com.br/form.js` mostra `200`;
-   - o login no painel funciona.
-5. **Caminho de volta:** restaure o `.env` antigo (`MODE=single`, sem `PLATFORM_DOMAIN`) e rode `docker compose up -d`.
-   No `single` o app atende a única loja sem olhar o `store.domain`, então o domínio preenchido não atrapalha.
+   - o login no painel funciona;
+   - o e-mail sai: em **Conexões → E-mail (SMTP)**, **Enviar teste**, e confira que a mensagem chegou.
+5. **Caminho de volta:** `cp .env.single .env` e `docker compose up -d`. No `single` o app atende a única loja sem
+   olhar o `store.domain`, então o domínio preenchido não atrapalha. **Vale antes de criar a loja nova.** Depois
+   dela, o `single` atende só a loja mais antiga: a loja nova fica fora do ar e o webhook dela deixa de responder.
 6. **Loja nova** (domínio próprio):
 
    ```sh
@@ -463,8 +477,9 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    ```
 
    - DNS: registro `A` de `checkout.nova-loja.com.br` para o servidor (nuvem cinza, como na seção 2).
-   - Caddy: na lista fixa (item 3 acima), o `Caddyfile.local` precisa listar `checkout.minhaloja.com.br` e
-     `checkout.nova-loja.com.br`; depois `docker compose up -d caddy`.
+   - Caddy: na lista fixa (item 3 acima), `CADDYFILE=Caddyfile.local` no `.env`, e o `Caddyfile.local` precisa listar
+     `checkout.minhaloja.com.br` e `checkout.nova-loja.com.br`, com a linha `import card/*.caddy` no fim; depois
+     `docker compose up -d caddy`.
    - Turnstile (seção 12): acrescente `checkout.nova-loja.com.br` à lista de hostnames do widget.
    - Asaas (seção 6): se a loja nova usar a **mesma** conta do Asaas, crie um segundo webhook com a URL e o token de
      autenticação que o painel da loja nova mostra (cada loja tem o seu `/api/webhooks/asaas/<id-da-loja>`). Um
