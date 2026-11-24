@@ -418,7 +418,7 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
 5. Para dar (ou trocar) o domínio próprio de uma loja que já existe: `docker compose exec app store-domain --slug
    minhaloja --domain loja.com.br` (`--clear` tira o domínio). Só funciona com `MODE=multi`. O domínio não pode
    terminar em `.PLATFORM_DOMAIN` (subdomínios da plataforma são os slugs) nem ser o `pagar.` dela; o próprio
-   `PLATFORM_DOMAIN` é aceito. O comando mostra `Domínio da loja <slug>: <antes> -> <depois>` e grava a troca no
+   `PLATFORM_DOMAIN` é aceito. A mesma regra vale para `store-create --domain`. O comando mostra `Domínio da loja <slug>: <antes> -> <depois>` e grava a troca no
    histórico de auditoria. O Caddy e o DNS seguem o item 3.
 
 ### Passar uma instalação `single` para `multi`
@@ -440,11 +440,14 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
      ```
 
      Deve vir uma linha só. Anote o `slug` (abaixo, `<slug da loja atual>`).
-   - **Backup** (seção 10) e conferência de que o banco abre: o `pg_restore` está no container do Postgres, então
-     lista-se o conteúdo assim (deve aparecer a lista de tabelas, entre elas `store`):
+   - **Backup** (seção 10) e conferência de que o banco abre e tem a tabela da loja. A chave privada do age fica só
+     no seu computador, nunca no servidor: o arquivo (gerado em `~/funil`, seção 10) é decifrado no computador e
+     seguido por `ssh` para o `pg_restore -l` do container do Postgres, que lista o conteúdo. Devem aparecer a tabela
+     `store` e os dados dela (linhas `TABLE` e `TABLE DATA`):
 
      ```sh
-     age -d -i chave-backup.txt banco-AAAA-MM-DD.dump.age | docker compose exec -T postgres pg_restore -l | head -20
+     ssh <servidor> 'cat ~/funil/banco-AAAA-MM-DD.dump.age' | age -d -i chave-backup.txt \
+       | ssh <servidor> 'cd ~/funil && docker compose exec -T postgres pg_restore -l' | grep -E 'TABLE (DATA )?public store '
      ```
 2. **Domínio da loja atual**, ainda com o `.env` antigo (o `exec` leva o `MODE` e o `PLATFORM_DOMAIN` novos por
    `-e`). Fazer este passo antes de editar o `.env` evita que um `docker compose up` no meio do caminho suba o
@@ -456,8 +459,9 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    ```
 
    Sem esse passo, o `multi` não reconhece o host e o checkout da loja atual deixaria de abrir.
-3. **`.env`:** guarde antes a versão `single`, fora da pasta dos backups:
-   `cp .env .env.single && chmod 600 .env.single`. Depois edite o `.env`: `MODE=multi` e
+3. **`.env`:** guarde antes a versão `single`, fora do clone:
+   `cp .env ~/funil.env.single && chmod 600 ~/funil.env.single`. Apague essa cópia quando a loja nova estiver
+   estável; a versão `single` continua no seu cofre. Depois edite o `.env`: `MODE=multi` e
    `PLATFORM_DOMAIN=checkout.minhaloja.com.br`; mantenha `DOMAIN`, `BASE_URL` e `CARD_ORIGIN` como estão. Atualize
    também a cópia do `.env` no seu cofre.
 4. **Reinicie tudo:** `docker compose up -d` (todos os serviços, para o Caddy também pegar o ambiente novo). Confira:
@@ -466,7 +470,7 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    - `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.checkout.minhaloja.com.br/form.js` mostra `200`;
    - o login no painel funciona;
    - o e-mail sai: em **Conexões → E-mail (SMTP)**, **Enviar teste**, e confira que a mensagem chegou.
-5. **Caminho de volta:** `cp .env.single .env` e `docker compose up -d`. No `single` o app atende a única loja sem
+5. **Caminho de volta:** `cp ~/funil.env.single .env` e `docker compose up -d`. No `single` o app atende a única loja sem
    olhar o `store.domain`, então o domínio preenchido não atrapalha. **Vale antes de criar a loja nova.** Depois
    dela, o `single` atende só a loja mais antiga: a loja nova fica fora do ar e o webhook dela deixa de responder.
 6. **Loja nova** (domínio próprio):

@@ -1,6 +1,6 @@
 # Cobrança de apps pelo funil, fase 1: PeticionaAqui (design)
 
-Data: 24/11/2026. Dono: Matheus. Integração do lado do app: Gabriel (repositório `viannaanalyst/peticionaaqui`).
+Data: 24/11/2026. Dono: Matheus. Integração do lado do app: o desenvolvedor do app (no repositório do PeticionaAqui).
 
 ## 1. Intenção
 
@@ -31,7 +31,7 @@ O app continua sendo a **fonte da verdade do plano e do acesso**. O funil cobra,
   quando possível.
 - O painel do funil mostra, por campanha: testes iniciados, pagamentos, valor e conversão teste → pagante.
 - O app recebe o aviso de pago (e de reembolso) de forma confiável: assinado, com novas tentativas e idempotente.
-- Um contrato de integração escrito para o Gabriel implementar o lado do app sozinho.
+- Um contrato de integração escrito para o desenvolvedor do app implementar o lado do app sozinho.
 
 **Não objetivos (fase 1)**
 - Recorrência mensal, troca de plano, proporcional, boleto, nota fiscal.
@@ -78,12 +78,12 @@ do teste é o evento que as campanhas conseguem otimizar.
 
 1. A compra acontece dentro do app, com a pessoa logada, depois (ou durante) o teste de 7 dias.
 2. Créditos avulsos viram **pacotes fixos** (X créditos por um valor fixo). Quais pacotes e preços: definidos no
-   painel do funil pelo dono (e no app pelo Gabriel), fora deste documento.
+   painel do funil pelo dono (e no app pelo desenvolvedor do app), fora deste documento.
 3. Mesma conta do Asaas do Kids. Sem boleto.
 4. O app é a fonte da verdade do plano; o funil só cobra, rastreia e avisa.
 5. Rastrear o caminho inteiro (abordagem B do rastreamento): início do teste + pagamento.
 6. Integração pela API servidor a servidor (abordagem A).
-7. O Gabriel implementa o lado do app; o funil entrega um contrato de integração escrito.
+7. O desenvolvedor do app implementa o lado do app; o funil entrega um contrato de integração escrito.
 8. O checkout do PeticionaAqui aceita **CPF ou CNPJ** (escritórios pagam pela empresa).
 
 ## 7. Design

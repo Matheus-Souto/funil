@@ -73,7 +73,7 @@
 
 - [ ] **Step 1:** escrever o roteiro (§7.1), com comandos e conferências, sem segredos:
   1. Backup (`docs/instalacao.md`, seção de backup) e conferir `select count(*) from store` = 1.
-  2. `.env`: `MODE=multi`, `PLATFORM_DOMAIN=checkout.moradah.com.br`, `DOMAIN` mantido; atualizar a cópia no Infisical junto.
+  2. `.env`: `MODE=multi`, `PLATFORM_DOMAIN=checkout.moradah.com.br`, `DOMAIN` mantido; atualizar a cópia no cofre de segredos junto.
   3. Antes de reiniciar: `docker compose exec app store-domain --slug <slug da Kids> --domain checkout.moradah.com.br` (funciona com `MODE=multi` passado por `-e`, como no smoke).
   4. Reiniciar `app` e `card`; conferir `/api/health`, abrir `/c/<oferta>` da Kids, `pagar.checkout.moradah.com.br/form.js`, login no painel.
   5. Caminho de volta: `.env` antigo + `docker compose up -d` (o `store.domain` preenchido não atrapalha o `single`).
@@ -285,4 +285,4 @@
 
 > PR 2 = Tasks 3–13. **PR de verificação V2** (depois do merge do PR 2): E2E com um app falso em `e2e/fakes/` que recebe o webhook e confere a assinatura, cobrindo teste → sessão → Pix do Asaas falso pago → `pagamento.confirmado`, e sessão vencida.
 >
-> **Operação com o dono (fora de PR):** migração da produção (roteiro da Task 2), criação da loja PeticionaAqui, ofertas `start_anual`, `plus_anual`, `firma_anual` e pacotes de créditos com os preços aprovados pelo Gabriel, `accept_cnpj` ligado, chave e webhook configurados.
+> **Operação com o dono (fora de PR):** migração da produção (roteiro da Task 2), criação da loja PeticionaAqui, ofertas `start_anual`, `plus_anual`, `firma_anual` e pacotes de créditos com os preços aprovados pelo desenvolvedor do app, `accept_cnpj` ligado, chave e webhook configurados.

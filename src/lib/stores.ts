@@ -136,6 +136,14 @@ const createStoreInput = z.object({
   domain: domainField.optional(),
 });
 
+/** Recusa `*.<PLATFORM_DOMAIN>` (pertence aos slugs, e `pagar.` ao cartão); o próprio PLATFORM_DOMAIN é aceito. */
+function assertNotPlatformSubdomain(domain: string, platformDomain: string | undefined): void {
+  const base = platformDomain ? normalizeHost(platformDomain) : "";
+  if (base && domain.endsWith(`.${base}`)) {
+    throw new ActionError("invalid_input", `domain: subdomínios de ${base} pertencem aos slugs das lojas`);
+  }
+}
+
 /**
  * CLI `store:create` (papel dono): cria a loja e o dono, ou vincula um usuário existente.
  * `temporaryPassword` só vem preenchida quando o usuário foi criado agora.
@@ -145,7 +153,7 @@ export async function createStoreWithOwner(raw: {
   slug: string;
   ownerEmail: string;
   domain?: string;
-}): Promise<{ storeId: string; userId: string; temporaryPassword: string | null }> {
+}, platformDomain: string | undefined = env.PLATFORM_DOMAIN): Promise<{ storeId: string; userId: string; temporaryPassword: string | null }> {
   const parsed = createStoreInput.safeParse(raw);
   if (!parsed.success) {
     throw new ActionError(
@@ -154,6 +162,7 @@ export async function createStoreWithOwner(raw: {
     );
   }
   const input = parsed.data;
+  if (input.domain) assertNotPlatformSubdomain(input.domain, platformDomain);
   const temporaryPassword = randomToken(12);
   const passwordHash = await hashPassword(temporaryPassword);
   try {
@@ -184,8 +193,7 @@ export async function createStoreWithOwner(raw: {
 
 /**
  * CLI `store:domain` (papel dono): define (ou apaga, com `null`) o domínio próprio de uma loja existente.
- * Mesma validação do `store:create`. Recusa `*.<PLATFORM_DOMAIN>` (pertence aos slugs, e `pagar.` ao cartão);
- * o próprio PLATFORM_DOMAIN é aceito. Grava `store.setDomain` em `audit_log` (ator system).
+ * Mesma validação do `store:create` (inclui a recusa de `*.<PLATFORM_DOMAIN>`). Grava `store.setDomain` em `audit_log` (ator system).
  */
 export async function setStoreDomain(
   raw: { slug: string; domain: string | null },
@@ -196,10 +204,7 @@ export async function setStoreDomain(
     const parsed = domainField.safeParse(raw.domain);
     if (!parsed.success) throw new ActionError("invalid_input", `domain: ${parsed.error.issues[0]!.message}`);
     domain = parsed.data;
-    const base = platformDomain ? normalizeHost(platformDomain) : "";
-    if (base && domain.endsWith(`.${base}`)) {
-      throw new ActionError("invalid_input", `domain: subdomínios de ${base} pertencem aos slugs das lojas`);
-    }
+    assertNotPlatformSubdomain(domain, platformDomain);
   }
   try {
     return await ownerDb.transaction(async (tx) => {

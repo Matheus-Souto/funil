@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { ActionError } from "@/lib/actions/core";
+import { ActionError, type ActionErrorCode } from "@/lib/actions/core";
 import { verifyPassword } from "@/lib/auth/password";
 import { auditLog, membership, store, users } from "@/lib/db/schema";
 import { RESERVED_SLUGS, createStoreWithOwner, resolveStore, setStoreDomain, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
@@ -229,6 +229,16 @@ describe("slug reservado", () => {
   });
 });
 
+describe("createStoreWithOwner: domínio da plataforma", () => {
+  test("x.<plataforma> → invalid_input; o domínio exato da plataforma é aceito", async () => {
+    expect(
+      await code(createStoreWithOwner({ name: "X", slug: "xis", ownerEmail: "x@exemplo.com", domain: "x.plataforma.com" }, "plataforma.com")),
+    ).toBe("invalid_input");
+    const r = await createStoreWithOwner({ name: "Y", slug: "ipsilon", ownerEmail: "y@exemplo.com", domain: "plataforma.com" }, "plataforma.com");
+    expect(r.storeId).toBeString();
+  });
+});
+
 describe("setStoreDomain (CLI)", () => {
   const multi = { mode: "multi", platformDomain: "plataforma.com" } as const;
   const mk = async (slug: string, domain: string | null = null) =>
@@ -279,18 +289,24 @@ describe("setStoreDomain (CLI)", () => {
     await setStoreDomain({ slug: "alfa", domain: "novo.exemplo.com" });
     const rows = await audits();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      storeId: s.id,
-      actor: { kind: "system" },
-      origin: "system",
-      ok: true,
-      input: { slug: "alfa", domain: "novo.exemplo.com", previous: "velho.exemplo.com" },
-    });
+    expect(rows[0]).toMatchObject({ storeId: s.id, actor: { kind: "system" }, origin: "system", ok: true });
+    expect(rows[0]!.input).toEqual({ slug: "alfa", domain: "novo.exemplo.com", previous: "velho.exemplo.com" });
   });
 
-  test("recusas não gravam auditoria", async () => {
-    await mk("alfa");
-    await setStoreDomain({ slug: "alfa", domain: "x" }).catch(() => null);
+  test("recusas não gravam auditoria e não mudam o domínio da loja", async () => {
+    await mk("alfa", "velho.exemplo.com");
+    await mk("beta", "b.exemplo.com");
+    const domainOf = async () => (await t.ownerDb.select().from(store).where(eq(store.slug, "alfa")))[0]!.domain;
+    const refusals: Array<[ActionErrorCode, { slug: string; domain: string }]> = [
+      ["invalid_input", { slug: "alfa", domain: "x" }],
+      ["conflict", { slug: "alfa", domain: "B.exemplo.com" }],
+      ["not_found", { slug: "nenhuma", domain: "x.exemplo.com" }],
+      ["invalid_input", { slug: "alfa", domain: "loja.plataforma.com" }],
+    ];
+    for (const [expected, input] of refusals) {
+      expect(await code(setStoreDomain(input, "plataforma.com"))).toBe(expected);
+      expect(await domainOf()).toBe("velho.exemplo.com");
+    }
     expect(await audits()).toHaveLength(0);
   });
 });

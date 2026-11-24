@@ -279,6 +279,16 @@ test("CLI asaas:unseal (rollback do cartão isolado): empacotada para Node na im
   expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["asaas:unseal"]).toBe("bun scripts/asaas-unseal.ts");
 });
 
+test("CLI store:domain: empacotada para Node na imagem do app, como a store-create", () => {
+  const dockerfile = read("deploy/Dockerfile");
+  expect(dockerfile).toMatch(/bun build [^\n]*scripts\/store-domain\.ts/);
+  expect(dockerfile).toMatch(/^COPY deploy\/store-domain\.sh \/usr\/local\/bin\/store-domain$/m);
+  expect(dockerfile).toMatch(/chmod 0755 [^\n]*\/usr\/local\/bin\/store-domain/);
+  expect(read("deploy/Dockerfile.dockerignore")).toMatch(/^!scripts\/store-domain\.ts$/m);
+  expect(read("deploy/store-domain.sh")).toMatch(/^exec node \/app\/cli\/scripts\/store-domain\.mjs "\$@"$/m);
+  expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["store:domain"]).toBe("bun scripts/store-domain.ts");
+});
+
 describe("Caddyfiles: HSTS em todo site servido", () => {
   for (const file of ["deploy/Caddyfile", "deploy/Caddyfile.multi", "deploy/Caddyfile.card"]) {
     test(file, () => {
