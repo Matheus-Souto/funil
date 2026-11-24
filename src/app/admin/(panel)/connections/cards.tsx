@@ -151,21 +151,27 @@ const PROVIDER_LABEL: Record<EmailProvider, string> = { smtp: "SMTP", resend: "R
 const providerBadge = (active: boolean, usable: boolean) =>
   active ? (usable ? { onLabel: "Ativo" } : { onLabel: "Ativo, com problema", warn: true }) : { onLabel: "Conectado" };
 
-/** Troca o provedor de e-mail ativo da loja. Só aparece para quem pode alterar conexões, com o provedor já configurado e ainda inativo. */
-function UseProvider({ provider }: { provider: EmailProvider }) {
+/**
+ * Troca o provedor de e-mail ativo da loja. O botão só aparece para quem pode alterar conexões, com o provedor já configurado e
+ * ainda inativo (`show`). O componente fica montado mesmo sem o botão: a troca deu certo justamente quando o provedor vira o
+ * ativo e o botão some, e a mensagem de sucesso precisa sobreviver a esse refresh.
+ */
+function UseProvider({ provider, show }: { provider: EmailProvider; show: boolean }) {
   const [confirm, setConfirm] = useState(false);
   const run = useActionRunner();
   const label = PROVIDER_LABEL[provider];
   return (
     <>
-      <button type="button" className={s.btn} onClick={() => setConfirm(true)}>
-        Usar este provedor
-      </button>
+      {show ? (
+        <button type="button" className={s.btn} onClick={() => setConfirm(true)}>
+          Usar este provedor
+        </button>
+      ) : null}
       <div style={{ width: "100%" }}>
         <Live msg={confirm ? null : run.msg} />
       </div>
       <ConfirmSave
-        open={confirm}
+        open={show && confirm}
         onClose={() => setConfirm(false)}
         title={`Enviar e-mails pelo ${label}?`}
         run={run}
@@ -556,7 +562,7 @@ export function SmtpCard({
               Editar
             </button>
           ) : null}
-          {active ? null : <UseProvider provider="smtp" />}
+          <UseProvider provider="smtp" show={!active} />
           <div style={{ width: "100%" }}>
             <Live msg={test.msg} />
           </div>
@@ -741,7 +747,7 @@ export function ResendCard({
               Editar
             </button>
           ) : null}
-          {active || data.apiKey === "unreadable" ? null : <UseProvider provider="resend" />}
+          <UseProvider provider="resend" show={!active && data.apiKey !== "unreadable"} />
           <div style={{ width: "100%" }}>
             <Live msg={test.msg} />
           </div>
