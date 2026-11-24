@@ -947,7 +947,11 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
     expect(res.type).toBe("text/csv; charset=utf-8");
     expect(res.disposition).toMatch(/^attachment; filename="pedidos-\d{4}-\d{2}-\d{2}\.csv"$/);
     const csv = res.csv;
-    expect(csv.split("\r\n")[0]).toBe('"data";"status";"método";"produto(s)";"valor";"nome";"e-mail";"telefone";"utm_source";"utm_campaign";"ref"');
+    // As colunas fixas vêm primeiro e na mesma ordem; colunas novas (ex.: cupom e desconto) só entram no fim. Nunca CPF.
+    const header = csv.split("\r\n")[0]!;
+    const BASE_HEADER = '"data";"status";"método";"produto(s)";"valor";"nome";"e-mail";"telefone";"utm_source";"utm_campaign";"ref"';
+    expect(header === BASE_HEADER || header.startsWith(`${BASE_HEADER};`), header).toBe(true);
+    expect(header.toLowerCase()).not.toContain("cpf");
     expect(csv).toContain(buyerEmail("cartao"));
     expect(csv).not.toContain("52998224725");
 
