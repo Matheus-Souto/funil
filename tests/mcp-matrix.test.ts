@@ -7,12 +7,14 @@ import { eq } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { ackAlert } from "@/lib/alerts";
+import { createCoupon, listCoupons } from "@/lib/coupons/actions";
+import { callMcpTool, mcpTools } from "@/lib/mcp/tools";
 import { createOffer, listOffers, updateOffer } from "@/lib/catalog/offers";
 import { updateProduct } from "@/lib/catalog/products";
 import { resendOrder } from "@/lib/delivery/jobs";
 import { saveSmtp, setMailTransportForTests, testSmtp, type SentMail } from "@/lib/delivery/mailer";
 import { saveResend, setResendFetchForTests, testResend } from "@/lib/delivery/resend";
-import { auditLog, mcpToken, store, storeAlert, users } from "@/lib/db/schema";
+import { auditLog, coupon, mcpToken, store, storeAlert, users } from "@/lib/db/schema";
 import { approveRequest, approvalStatus, requestApproval } from "@/lib/mcp/approvals";
 import { saveTelegram, testTelegram } from "@/lib/notify/telegram-connection";
 import { setTelegramFetchForTests } from "@/lib/notify/telegram";
@@ -103,6 +105,22 @@ describe("ações sensíveis (D1, D2, D7) e direta (D3)", () => {
     expect(created.name).toBe("Nova");
     expect((await runAction(updateOffer, panel, { id: s.offerId, name: "Outro" })).name).toBe("Outro");
     expect(await runAction(ackAlert, panel, { id: alert!.id })).toEqual({ id: alert!.id });
+  });
+
+  test("coupons.create com ator token → approval_required; pelo MCP vira pedido na fila e não cria o cupom; coupons_list sai só com a lista branca", async () => {
+    const { storeId, token, asToken, panel } = await setup();
+    const args = { code: "MCP10", kind: "percent", percentBp: 1000 };
+    expect(await code(runAction(createCoupon, asToken, args))).toBe("approval_required");
+    const owner = mcpTools("owner").find((x) => x.name === "coupons_create")!;
+    const out = (await callMcpTool(owner, { storeId, tokenId: token.kind === "token" ? token.tokenId : "", role: "owner" }, args)) as Record<string, unknown>;
+    expect(out).toMatchObject({ status: "pending" });
+    expect(await t.ownerDb.select().from(coupon).where(eq(coupon.storeId, storeId))).toEqual([]);
+
+    await runAction(createCoupon, panel, { ...args, offerIds: [] });
+    const list = (await callMcpTool(mcpTools("reader").find((x) => x.name === "coupons_list")!, { storeId, tokenId: randomUUID(), role: "reader" }, {})) as object[];
+    expect(list).toHaveLength(1);
+    expect(Object.keys(list[0]!).sort()).toEqual(["active", "amountCents", "appliesTo", "archivedAt", "code", "endsAt", "id", "kind", "maxPerEmail", "maxUses", "offerIds", "percentBp", "startsAt", "uses"]);
+    expect((await runAction(listCoupons, panel, {}))[0]!.code).toBe("MCP10");
   });
 
   test("products.update com ator token roda direto", async () => {

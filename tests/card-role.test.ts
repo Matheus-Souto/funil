@@ -15,6 +15,8 @@ import {
   auditLog,
   cardAttempt,
   checkoutLead,
+  coupon,
+  couponOffer,
   customer,
   emailOptout,
   integration,
@@ -270,6 +272,23 @@ describe("papel card: atributos e o que fica de fora", () => {
     ).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(shop.storeId, (tx) => tx`update team_invite set status = 'revoked'`)).rejects.toThrow(PERMISSION_DENIED);
     await expect(asCardIn(shop.storeId, (tx) => tx`delete from team_invite`)).rejects.toThrow(PERMISSION_DENIED);
+  });
+
+  test("coupon e coupon_offer (cupons): select, insert, update e delete dão permission denied", async () => {
+    const { shop } = await pendingOrder();
+    const [cp] = await t.ownerDb.insert(coupon).values({ storeId: shop.storeId, code: "SOMENTE-DONO", kind: "percent", percentBp: 1000 }).returning({ id: coupon.id });
+    await t.ownerDb.insert(couponOffer).values({ storeId: shop.storeId, couponId: cp!.id, offerId: shop.offerId });
+    await expect(asCardIn(shop.storeId, (tx) => tx`select code from coupon`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`select offer_id from coupon_offer`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(shop.storeId, (tx) => tx`insert into coupon (store_id, code, kind, percent_bp) values (${shop.storeId}, 'OUTRO', 'percent', 1000)`),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(
+      asCardIn(shop.storeId, (tx) => tx`insert into coupon_offer (store_id, coupon_id, offer_id) values (${shop.storeId}, ${cp!.id}, ${shop.offerId})`),
+    ).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`update coupon set active = false`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from coupon`)).rejects.toThrow(PERMISSION_DENIED);
+    await expect(asCardIn(shop.storeId, (tx) => tx`delete from coupon_offer`)).rejects.toThrow(PERMISSION_DENIED);
   });
 
   test("conexões: sem insert, update nem delete", async () => {

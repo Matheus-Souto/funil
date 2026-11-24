@@ -6,7 +6,7 @@
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { checkoutLead, checkoutView, orders } from "@/lib/db/schema";
+import { checkoutLead, checkoutView, coupon, orders } from "@/lib/db/schema";
 import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
 import { WAS_PAID } from "@/lib/recovery/checks";
 import { RECOVERY } from "@/lib/recovery/rules";
@@ -107,7 +107,7 @@ async function recoverySummary(ctx: Ctx, from: Date, to: Date): Promise<Recovery
 
 export const metricsSummary = defineAction({
   name: "metrics.summary",
-  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve. recovery: lembretes de recuperação por e-mail enviados no período (sent), quantos viraram venda da mesma oferta e do mesmo e-mail em até 7 dias (recovered), a receita desses pedidos (recoveredRevenueCents) e os mesmos números por caso (lead, pix, card); cobre só os últimos 90 dias (retenção dos lembretes).",
+  description: "Números do período: visitas ao checkout, pedidos, pagos, receita (centavos), por método, por origem (utm_source) e por indicação (ref), por cupom (coupons: código, pedidos pagos, desconto e receita em centavos), contatos capturados (leads) e quantos viraram pedido (leadsConverted). leads e leadsConverted cobrem só os últimos 30 dias (retenção dos contatos): fora disso contam menos do que houve. recovery: lembretes de recuperação por e-mail enviados no período (sent), quantos viraram venda da mesma oferta e do mesmo e-mail em até 7 dias (recovered), a receita desses pedidos (recoveredRevenueCents) e os mesmos números por caso (lead, pix, card); cobre só os últimos 90 dias (retenção dos lembretes).",
   input: range,
   permission: "metrics.read",
   audit: false,
@@ -148,6 +148,14 @@ export const metricsSummary = defineAction({
       .where(and(paidIn, isNotNull(orders.ref)))
       .groupBy(orders.ref);
 
+    // Pedidos pagos do período por código de cupom: só código e números (nada do comprador).
+    const couponRows = await ctx.tx
+      .select({ code: coupon.code, orders: n(), discountCents: money(orders.discountCents), revenueCents: money(orders.totalCents) })
+      .from(orders)
+      .innerJoin(coupon, eq(coupon.id, orders.couponId))
+      .where(paidIn)
+      .groupBy(coupon.code);
+
     const byRevenue = <T extends { revenueCents: number; paid: number }>(key: (x: T) => string) => (a: T, b: T) =>
       b.revenueCents - a.revenueCents || b.paid - a.paid || key(a).localeCompare(key(b));
     return {
@@ -163,6 +171,7 @@ export const metricsSummary = defineAction({
         .map((r) => ({ ref: r.ref!, paid: r.paid, revenueCents: r.revenueCents }))
         .sort(byRevenue((x) => x.ref))
         .slice(0, 50),
+      coupons: couponRows.sort((a, b) => b.revenueCents - a.revenueCents || b.orders - a.orders || a.code.localeCompare(b.code)).slice(0, 50),
       recovery: await recoverySummary(ctx, from, to),
     };
   },

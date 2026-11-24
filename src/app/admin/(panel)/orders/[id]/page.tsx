@@ -159,6 +159,17 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                   <span>{brl(g.priceCents)}</span>
                 </div>
               ))}
+              {d.coupon ? (
+                <div className={s.row}>
+                  <span>
+                    Cupom <span className={s.mono}>{d.coupon.code}</span>
+                    <small className={s.muted} style={{ display: "block" }}>
+                      Desconto já aplicado nos valores acima · subtotal {brl(d.subtotalCents)}
+                    </small>
+                  </span>
+                  <span>−{brl(d.discountCents)}</span>
+                </div>
+              ) : null}
               {manual && amount !== d.totalCents ? (
                 <div className={s.row}>
                   <span>Centavos de identificação (Pix manual)</span>

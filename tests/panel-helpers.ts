@@ -1,9 +1,10 @@
 // Semeadura direta (papel dono) para os testes do painel: loja, produtos, oferta, clientes e pedidos em qualquer estado.
 import { randomBytes, randomUUID } from "node:crypto";
+import { and, eq } from "drizzle-orm";
 import type { Actor } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { ownerDb } from "@/lib/db/client";
-import { checkoutView, customer, offer, offerProduct, orderItem, orders, product } from "@/lib/db/schema";
+import { checkoutView, coupon, customer, offer, offerProduct, orderItem, orders, product } from "@/lib/db/schema";
 import { seedStore } from "./db";
 
 export const actorOf = (role: Role): Extract<Actor, { kind: "user" }> => ({ kind: "user", userId: randomUUID(), role });
@@ -61,6 +62,8 @@ export interface SeedOrder {
   hasBump?: boolean;
   manualAmountCents?: number | null;
   refundRequestedAt?: Date | null;
+  /** Cupom aplicado (criado na loja se ainda não existir): `totalCents` é o valor pago; o subtotal é total + desconto. */
+  coupon?: { code: string; discountCents: number };
 }
 
 /** Pedido com item principal (e bump, se `hasBump`). Datas e estados livres (sem passar pela máquina de estados). */
@@ -75,6 +78,12 @@ export async function seedOrder(s: PanelStore, o: SeedOrder = {}) {
   const total = o.totalCents ?? (o.hasBump ? 2700 : 990);
   const last = o.utmSource ? { utm_source: o.utmSource, ...(o.utmCampaign ? { utm_campaign: o.utmCampaign } : {}) } : null;
   const method = o.method ?? "pix_asaas";
+  let couponId: string | null = null;
+  if (o.coupon) {
+    const [found] = await ownerDb.select({ id: coupon.id }).from(coupon).where(and(eq(coupon.storeId, s.storeId), eq(coupon.code, o.coupon.code)));
+    couponId = found?.id ?? (await ownerDb.insert(coupon).values({ storeId: s.storeId, code: o.coupon.code, kind: "percent", percentBp: 1000 }).returning({ id: coupon.id }))[0]!.id;
+  }
+  const discount = o.coupon?.discountCents ?? 0;
   const [row] = await ownerDb
     .insert(orders)
     .values({
@@ -87,8 +96,10 @@ export async function seedOrder(s: PanelStore, o: SeedOrder = {}) {
       buyerCpf: o.cpf ?? null,
       status,
       method,
-      subtotalCents: total,
+      subtotalCents: total + discount,
       totalCents: total,
+      couponId,
+      discountCents: discount,
       manualAmountCents: method === "pix_manual" ? (o.manualAmountCents ?? total + 3) : null,
       hasBump: o.hasBump ?? false,
       expiresAt: method === "card_asaas" ? null : new Date(Date.now() + 86_400_000),

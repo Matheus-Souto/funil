@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ActionError, runAction, TOKEN_DENIED, type Action } from "@/lib/actions/core";
 import { hasPermission, type Permission, type Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
+import type { CouponView } from "@/lib/coupons/actions";
 import { RECOVERY_CASES, type RecoveryCase, type metricsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
 import { cleanTouch, HIDDEN_LABEL, labelOrHidden, safeLabel } from "@/lib/orders/report";
@@ -100,7 +101,27 @@ interface Override {
   project?(out: unknown): unknown;
 }
 
+/** Cupom pela lista branca de campos (campo novo na ação não sai pelo MCP). O código do cupom não é dado pessoal. */
+const projectCoupon = (c: CouponView) => ({
+  id: c.id,
+  code: c.code,
+  kind: c.kind,
+  percentBp: c.percentBp,
+  amountCents: c.amountCents,
+  appliesTo: c.appliesTo,
+  startsAt: c.startsAt,
+  endsAt: c.endsAt,
+  maxUses: c.maxUses,
+  maxPerEmail: c.maxPerEmail,
+  active: c.active,
+  archivedAt: c.archivedAt,
+  offerIds: [...c.offerIds],
+  uses: c.uses,
+});
+
 const OVERRIDES: Record<string, Override> = {
+  "coupons.list": { project: (out) => (out as CouponView[]).map(projectCoupon) },
+  "coupons.get": { project: (out) => projectCoupon(out as CouponView) },
   "orders.list": {
     description:
       "Lista pedidos (mais recentes primeiro; pageSize 10, 25, 50 ou 100, padrão 50) com filtros de status e método: um valor (status, method) ou vários (statuses, methods). Nome e e-mail do comprador mascarados.",
@@ -135,7 +156,7 @@ const OVERRIDES: Record<string, Override> = {
   },
   "orders.get": {
     description:
-      "Detalhe de um pedido: comprador mascarado, itens, pagamentos, estorno, histórico e origem (UTM). Sem IP, user agent, links de download nem e-mails.",
+      "Detalhe de um pedido: comprador mascarado, itens, cupom e desconto, pagamentos, estorno, histórico e origem (UTM). Sem IP, user agent, links de download nem e-mails.",
     project: (out) => {
       const d = out as OrderDetail;
       return {
@@ -147,6 +168,9 @@ const OVERRIDES: Record<string, Override> = {
         paidAt: d.paidAt,
         expiresAt: d.expiresAt,
         subtotalCents: d.subtotalCents,
+        // Cupom: só o código (não é dado pessoal) e o desconto em centavos.
+        discountCents: d.discountCents,
+        couponCode: d.coupon?.code ?? null,
         totalCents: d.totalCents,
         manualAmountCents: d.manualAmountCents,
         hasBump: d.hasBump,
@@ -198,6 +222,8 @@ const OVERRIDES: Record<string, Override> = {
           ref: label,
           ...r,
         })),
+        // Cupons: só o código (não é dado pessoal) e números, campo a campo.
+        coupons: d.coupons.map((c) => ({ code: c.code, orders: c.orders, discountCents: c.discountCents, revenueCents: c.revenueCents })),
         // Recuperação por e-mail: só números, campo a campo (quem recebeu o lembrete nunca sai).
         recovery: {
           sent: d.recovery.sent,

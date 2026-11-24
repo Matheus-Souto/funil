@@ -5,17 +5,20 @@
 import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { clientIpFrom } from "@/lib/client-ip";
-import { NEEDS_CPF, checkoutView, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { NEEDS_CPF, checkoutPreviewCoupon, checkoutView, previewErrorResult, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { COUPON_INVALID_MESSAGE, COUPON_UNAVAILABLE_MESSAGE } from "@/lib/coupons/messages";
 import { checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { log } from "@/lib/log";
 import { resolveStore } from "@/lib/stores";
 import { fbcFromFbclid } from "@/lib/tracking/touch";
+import type { PreviewResult } from "./coupon-logic";
 
 export type StartResult =
   // `cardTicket`: só no cartão; o checkout o repassa ao iframe do cartão no `pay`.
   | { ok: true; publicId: string; method: "pix_manual" | "pix_asaas" | "card_asaas"; cardTicket?: string }
-  | { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean };
+  // `priceChanged`: o total recalculado difere do mostrado (nenhum pedido criado); o checkout refaz a prévia do cupom.
+  | { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean; priceChanged?: boolean };
 
 const GENERIC = "Não foi possível continuar agora. Tente de novo em instantes.";
 const NEEDS_CPF_MESSAGE = "O Pix direto da loja está indisponível agora. Informe o CPF para gerar o Pix automático.";
@@ -58,10 +61,34 @@ export async function startCheckoutAction(input: unknown): Promise<StartResult> 
       if (e.code === "conflict" && e.message === NEEDS_CPF) return { ok: false, needsCpf: true, message: NEEDS_CPF_MESSAGE };
       if (e.code === "invalid_input") return { ok: false, message: e.message === "Entrada inválida" ? "Confira os campos marcados." : e.message, fields: fieldsOf(e.details) };
       if (e.code === "provider_error") return { ok: false, message: GENERIC };
+      if (e.code === "conflict" && (e.details as { code?: unknown } | undefined)?.code === "PRICE_CHANGED") return { ok: false, priceChanged: true, message: e.message };
       return { ok: false, message: e.message };
     }
     log.error("checkout: erro inesperado ao criar o pedido", { error: e });
     return { ok: false, message: GENERIC };
+  }
+}
+
+/**
+ * "Aplicar" cupom (e refazer a prévia ao marcar o bump). Só monta a entrada (o IP vem do servidor) e chama
+ * `checkout.previewCoupon`, que tem limite por IP e por loja. Sempre devolve resposta: o comprador nunca vê erro técnico.
+ */
+export async function previewCouponAction(input: unknown): Promise<PreviewResult> {
+  const h = await headers();
+  const store = await resolveStore(h.get("host") ?? "");
+  if (!store) return { ok: false, message: COUPON_INVALID_MESSAGE };
+  const body = input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  try {
+    return await runAction(checkoutPreviewCoupon, { storeId: store.id, actor: { kind: "public" }, origin: "public" }, {
+      slug: body.slug,
+      code: body.code,
+      withBump: body.withBump,
+      clientIp: clientIpFrom(h, env.TRUST_PROXY),
+    });
+  } catch (e) {
+    if (e instanceof ActionError) return previewErrorResult(e);
+    log.error("checkout: erro inesperado ao conferir o cupom", { error: e });
+    return { ok: false, message: COUPON_UNAVAILABLE_MESSAGE };
   }
 }
 

@@ -154,7 +154,7 @@ describe("classificação", () => {
       }
     }
     const owner = mcpTools("owner").map((x) => x.action);
-    for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "email.applyResendEvent"]) {
+    for (const name of ["orders.export", "products.create", "approvals.request", "team.list", "mcpTokens.create", "checkout.start", "checkout.previewCoupon", "email.applyResendEvent"]) {
       expect(owner).not.toContain(name);
     }
   });
@@ -192,12 +192,37 @@ describe("classificação", () => {
     }
   });
 
+  test("cupons: leitura para quem tem offers.read; as três de escrita com aprovação; traffic só lê", () => {
+    for (const role of ["owner", "admin", "reader", "traffic", "support"] as const) {
+      const names = mcpTools(role).map((x) => x.name);
+      expect([role, names.includes("coupons_list"), names.includes("coupons_get")]).toEqual([role, true, true]);
+      expect([role, names.some((n) => ["coupons_create", "coupons_update", "coupons_archive"].includes(n))]).toEqual([role, hasPermission(role, "offers.write")]);
+    }
+    for (const n of ["coupons_create", "coupons_update", "coupons_archive"]) {
+      const x = tool("owner", n);
+      expect([n, x.approval, x.description.startsWith(APPROVAL_PREFIX)]).toEqual([n, true, true]);
+    }
+    for (const n of ["coupons_list", "coupons_get"]) expect(tool("reader", n).approval).toBe(false);
+  });
+
+  test("coupons_list e coupons_get: a projeção é a lista branca (campo novo não sai)", () => {
+    const row = {
+      id: "i", code: "KIDS10", kind: "percent", percentBp: 1000, amountCents: null, appliesTo: "main", startsAt: null, endsAt: null,
+      maxUses: 5, maxPerEmail: 1, active: true, archivedAt: null, offerIds: ["o1"], uses: 2, campoNovo: "zuleica@exemplo.com", storeId: "s",
+    };
+    const keys = ["active", "amountCents", "appliesTo", "archivedAt", "code", "endsAt", "id", "kind", "maxPerEmail", "maxUses", "offerIds", "percentBp", "startsAt", "uses"];
+    const list = tool("reader", "coupons_list").project([row]) as object[];
+    expect(Object.keys(list[0]!).sort()).toEqual(keys);
+    expect(Object.keys(tool("reader", "coupons_get").project(row) as object).sort()).toEqual(keys);
+    expect(JSON.stringify(list)).not.toMatch(/campoNovo|zuleica|storeId/);
+  });
+
   test("reader vê só catálogo, métricas e o relatório de vendas pagas", () => {
     expect(
       mcpTools("reader")
         .map((x) => x.name)
         .sort(),
-    ).toEqual(["approvals_status", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    ).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
   });
 
   test("traffic não lista pedidos nem ações de connections.write", () => {
@@ -248,6 +273,7 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: { ...zero, extra: "x" }, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      coupons: [{ code: "KIDS10", orders: 1, discountCents: 99, revenueCents: 891, extra: "x", email: "zuleica@exemplo.com" }],
       recovery: {
         sent: 3,
         recovered: 1,
@@ -268,6 +294,7 @@ describe("nomes e esquemas", () => {
       byMethod: { pix_manual: zero, pix_asaas: zero, card_asaas: zero },
       bySource: [],
       byRef: [],
+      coupons: [{ code: "KIDS10", orders: 1, discountCents: 99, revenueCents: 891 }],
       recovery: {
         sent: 3,
         recovered: 1,
@@ -378,7 +405,9 @@ describe("callMcpTool", () => {
         "attribution",
         "buyer",
         "code",
+        "couponCode",
         "createdAt",
+        "discountCents",
         "expiresAt",
         "hasBump",
         "id",
@@ -444,7 +473,22 @@ describe("callMcpTool", () => {
       { ref: "amigo", paid: 1, revenueCents: 990 },
     ]);
     // Projeção explícita: só as chaves conhecidas.
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "coupons", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+  });
+
+  test("metrics_summary pelo MCP traz coupons só com código e números (nenhuma string com @)", async () => {
+    const m = await seedPanelStore("Cupons MCP");
+    await seedOrder(m, { totalCents: 891, email: "comprador.sigiloso@exemplo.com", coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(m, { totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    for (const role of ["reader", "owner"] as const) {
+      const out = (await callMcpTool(tool(role, "metrics_summary"), call(m.storeId, role), range)) as { coupons: unknown };
+      expect(out.coupons).toEqual([{ code: "KIDS10", orders: 2, discountCents: 198, revenueCents: 1782 }]);
+      const text = JSON.stringify(out);
+      expect(text).not.toContain("@");
+      expect(text).not.toContain("sigiloso");
+      expect(Object.keys((out.coupons as object[])[0]!).sort()).toEqual(["code", "discountCents", "orders", "revenueCents"]);
+    }
   });
 
   test("metrics_summary pelo MCP traz leads e leadsConverted como números e nada mais de contato", async () => {
@@ -471,7 +515,7 @@ describe("callMcpTool", () => {
     expect(typeof out.leadsConverted).toBe("number");
     const text = JSON.stringify(out);
     for (const secret of [email, phone, sha(email), "contato.sigiloso"]) expect(text).not.toContain(secret);
-    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
+    expect(Object.keys(out).sort()).toEqual(["byMethod", "byRef", "bySource", "coupons", "leads", "leadsConverted", "orders", "paid", "recovery", "revenueCents", "views"]);
   });
 
   test("metrics_summary pelo MCP traz recovery só com números (nenhuma string com @)", async () => {
@@ -564,6 +608,15 @@ describe("callMcpTool", () => {
     expect(list).not.toContain("quintanilha");
     expect(list).not.toContain("reembolse");
     expect(list).toContain("m***@gmail.com");
+  });
+
+  test("orders_get: pedido com cupom traz o código e o desconto (sem dado do comprador); sem cupom, null e 0", async () => {
+    const o = await seedOrder(s, { status: "paid", email: PII.email, coupon: { code: "KIDS10", discountCents: 99 } });
+    const out = (await callMcpTool(tool("owner", "orders_get"), call(s.storeId), { id: o.id })) as Record<string, unknown>;
+    expect([out.couponCode, out.discountCents, out.totalCents, out.subtotalCents]).toEqual(["KIDS10", 99, 990, 1089]);
+    expect(leaks(out)).toEqual([]);
+    const plain = (await callMcpTool(tool("owner", "orders_get"), call(s.storeId), { id: order.id })) as Record<string, unknown>;
+    expect([plain.couponCode, plain.discountCents]).toEqual([null, 0]);
   });
 
   test("orders_get: origem e ref recusados viram (oculto), sem sumir", async () => {

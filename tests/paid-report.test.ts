@@ -100,6 +100,17 @@ describe("orders.paidReport", () => {
     }
   });
 
+  test("couponCode e discountCents: o código do cupom e o desconto; sem cupom, nulo e zero", async () => {
+    const s = await seedPanelStore();
+    await seedOrder(s, { paidAt: D("2026-01-10T15:00:00Z"), totalCents: 891, coupon: { code: "KIDS10", discountCents: 99 } });
+    await seedOrder(s, { paidAt: D("2026-01-11T15:00:00Z") });
+    const r = await runAction(paidReport, panelCall(s.storeId), WIDE);
+    expect(r.orders.map((o) => [o.couponCode, o.discountCents, o.totalCents])).toEqual([
+      ["KIDS10", 99, 891],
+      [null, 0, 990],
+    ]);
+  });
+
   test("nome de produto apagado continua no histórico", async () => {
     const s = await seedPanelStore();
     await seedOrder(s, { paidAt: D("2026-01-10T15:00:00Z") });

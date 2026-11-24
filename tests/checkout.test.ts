@@ -174,6 +174,19 @@ describe("checkout.start: método, CPF e valores", () => {
     expect(items.map((i) => i.priceCents).sort()).toEqual([1710, 990]);
   });
 
+  test("cupom sem expectedTotalCents -> invalid_input; total esperado sem cupom: igual cria, diferente -> conflict PRICE_CHANGED e nenhum pedido", async () => {
+    const s = await seed();
+    const noTotal = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { couponCode: "KIDS10" })));
+    expect(noTotal.code).toBe("invalid_input");
+    expect(JSON.stringify(noTotal.details)).toContain("expectedTotalCents");
+    const same = await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { expectedTotalCents: 990 }));
+    expect(same.totalCents).toBe(990);
+    const changed = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { withBump: true, expectedTotalCents: 990 })));
+    expect([changed.code, changed.message, (changed.details as { code?: string }).code]).toEqual(["conflict", "O valor mudou: confira o resumo", "PRICE_CHANGED"]);
+    const rows = await withStore(s.storeId, (tx) => tx.select({ id: orders.id }).from(orders));
+    expect(rows).toHaveLength(1);
+  });
+
   test("oferta inexistente ou inativa -> not_found", async () => {
     const s = await seed();
     expect((await fail(runAction(checkoutStart, pub(s.storeId), startInput("nao-existe")))).code).toBe("not_found");

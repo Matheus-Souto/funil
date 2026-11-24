@@ -3,7 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { withStore } from "@/lib/db/client";
-import { cardAttempt, customer, job, orders, payment } from "@/lib/db/schema";
+import { cardAttempt, customer, job, offer, orders, payment } from "@/lib/db/schema";
+import { startCheckout } from "@/lib/checkout";
+import { createCoupon } from "@/lib/coupons/actions";
+import { verifyCardTicket } from "@/lib/payments/card-ticket";
 import { env } from "@/lib/env";
 import { asaasDueDate, createAsaasClient, setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import {
@@ -198,6 +201,35 @@ describe("payWithCard: aprovação", () => {
     expect(a!.asaasPaymentId).toBe(pays[0]!.providerId);
     const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
     expect(jobs.map((j) => j.type)).toContain("deliver_order");
+  });
+
+  test("cartão com cupom → bilhete com totalCents 891; payWithCard cobra 8,91 no Asaas falso", async () => {
+    const { fake, call, storeId, offerId } = await setup(990);
+    await runAction(createCoupon, { storeId, actor: owner, origin: "panel" as const }, { code: "KIDS10", kind: "percent", percentBp: 1000 });
+    const [of] = await withStore(storeId, (tx) => tx.select({ slug: offer.slug }).from(offer).where(eq(offer.id, offerId)));
+    const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+    const r = await startCheckout(
+      call,
+      {
+        slug: of!.slug,
+        withBump: false,
+        method: "card",
+        customer: { name: "Bia Lima", email: email(), phone: "(11) 98888-7777", cpf: "52998224725" },
+        touch: { first: null, last: null },
+        couponCode: "KIDS10",
+        expectedTotalCents: 891,
+        clientIp: nextIp(),
+        userAgent: "bun-test",
+      },
+      { cardTicketKey: KEY },
+    );
+    expect(verifyCardTicket(r.cardTicket!, KEY)?.totalCents).toBe(891);
+    expect(await payWithCard(call, input(r.publicId), fastDeps)).toEqual({ status: "approved" });
+    const posts = paymentPosts(fake);
+    expect(posts).toHaveLength(1);
+    expect((posts[0]!.body as Record<string, unknown>).value).toBe(8.91);
+    const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, verifyCardTicket(r.cardTicket!, KEY)!.orderId)));
+    expect(pays[0]!.amountCents).toBe(891);
   });
 
   test("mesma idempotencyKey em 2 chamadas paralelas -> uma única cobrança no Asaas", async () => {

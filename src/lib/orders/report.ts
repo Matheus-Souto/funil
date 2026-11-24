@@ -3,7 +3,7 @@
 import { and, asc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction } from "@/lib/actions/core";
-import { offer, orderItem, orders, product } from "@/lib/db/schema";
+import { coupon, offer, orderItem, orders, product } from "@/lib/db/schema";
 import { orderCode } from "@/lib/format";
 import { spDayKey } from "@/lib/metrics";
 import { itemOrder } from "./items";
@@ -92,7 +92,7 @@ export function cleanTouch(v: unknown): Record<string, string> | null {
 export const paidReport = defineAction({
   name: "orders.paidReport",
   description:
-    "Relatório de pedidos pagos no período (até 92 dias), sem dados pessoais do comprador: código, data, oferta, produtos, valor, método e origem (UTM). Paginado por cursor.",
+    "Relatório de pedidos pagos no período (até 92 dias), sem dados pessoais do comprador: código, data, oferta, produtos, valor, cupom e desconto, método e origem (UTM). Paginado por cursor.",
   input,
   permission: "orders.report",
   audit: false,
@@ -107,6 +107,8 @@ export const paidReport = defineAction({
         offerId: orders.offerId,
         offerName: offer.name,
         totalCents: orders.totalCents,
+        discountCents: orders.discountCents,
+        couponCode: coupon.code,
         method: orders.method,
         firstTouch: orders.firstTouch,
         lastTouch: orders.lastTouch,
@@ -114,6 +116,7 @@ export const paidReport = defineAction({
       })
       .from(orders)
       .innerJoin(offer, eq(offer.id, orders.offerId))
+      .leftJoin(coupon, eq(coupon.id, orders.couponId))
       .where(
         and(
           eq(orders.status, "paid"),
@@ -150,6 +153,8 @@ export const paidReport = defineAction({
           offerName: r.offerName,
           items: items.get(r.id) ?? [],
           totalCents: r.totalCents,
+          couponCode: r.couponCode,
+          discountCents: r.discountCents,
           method: r.method,
           firstTouch: cleanTouch(r.firstTouch),
           lastTouch: cleanTouch(r.lastTouch),

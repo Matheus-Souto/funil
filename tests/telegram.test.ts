@@ -8,7 +8,7 @@ import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
 import { noticeFor } from "@/lib/delivery/jobs";
 import { orderCode } from "@/lib/format";
-import { auditLog, checkoutLead, integration, job, offer, orders, store, storeAlert, telegramNotice } from "@/lib/db/schema";
+import { auditLog, checkoutLead, coupon, integration, job, offer, orders, store, storeAlert, telegramNotice } from "@/lib/db/schema";
 import { runDueJobs, type Job } from "@/lib/jobs";
 import { checkoutSaveLead } from "@/lib/leads/capture";
 import { getHandlers } from "@/lib/jobs/handlers";
@@ -186,6 +186,12 @@ describe("textos dos avisos", () => {
 
   test("sale", () => {
     expect(telegramMessage("sale", base)).toBe("Venda: Almanaque + 5 Kits — R$ 27,00 — Pix — pedido #AB12CD");
+  });
+  test("sale com cupom: segunda linha com o código e o desconto (sinal de menos de verdade); os outros eventos não levam", () => {
+    const coupon = { code: "KIDS10", discountCents: 99 };
+    expect(telegramMessage("sale", { ...base, totalCents: 891, coupon })).toBe("Venda: Almanaque + 5 Kits — R$ 8,91 — Pix — pedido #AB12CD\nCupom: KIDS10 (−R$ 0,99)");
+    expect(telegramMessage("pix_generated", { ...base, coupon })).not.toContain("Cupom");
+    expect(telegramMessage("sale", { ...base, coupon: undefined })).not.toContain("Cupom");
   });
   test("pix_generated", () => {
     expect(telegramMessage("pix_generated", base)).toBe("Pix gerado: Almanaque + 5 Kits — R$ 27,00 — pedido #AB12CD");
@@ -546,6 +552,20 @@ describe("aviso de venda no Telegram", () => {
     const marks = await notices(o.id);
     expect(marks).toHaveLength(1);
     expect(marks[0]).toMatchObject({ event: "sale", messageId: 7, storeId: shop.storeId });
+  });
+
+  test("sale de pedido com cupom traz a linha do cupom; sem cupom o texto não muda", async () => {
+    const shop = await seedShop();
+    const o = await pendingOrder(shop);
+    const [c] = await t.ownerDb.insert(coupon).values({ storeId: shop.storeId, code: "KIDS10", kind: "percent", percentBp: 1000 }).returning({ id: coupon.id });
+    await t.ownerDb.update(orders).set({ couponId: c!.id, discountCents: 99, totalCents: sql`${orders.subtotalCents} - 99` }).where(eq(orders.id, o.id));
+    await runAction(releaseOrder, panel(shop.storeId), { orderId: o.id });
+    const calls = fakeTg(okFor);
+    await runJob(shop, "sale", o.id);
+    const [row] = await t.ownerDb.select({ publicId: orders.publicId }).from(orders).where(eq(orders.id, o.id));
+    const text = sendCalls(calls)[0]!.body.text as string;
+    expect(text).toBe(`Venda: Almanaque + 5 Kits — R$ 35,91 — Pix manual — pedido #${orderCode(row!.publicId)}\nCupom: KIDS10 (−R$ 0,99)`);
+    expect(text).not.toMatch(/@|Maria|Teste|52998224725/);
   });
 
   test("nenhuma mensagem contém nome, e-mail, CPF ou telefone do cliente", async () => {

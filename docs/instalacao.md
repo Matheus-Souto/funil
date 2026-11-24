@@ -924,6 +924,87 @@ balanceamento (o modelo da seção anterior serve). Casos Pix e cartão: a pesso
 pedido cabe em **procedimentos preliminares do contrato a pedido do titular** (art. 7º, V) ou em legítimo interesse.
 Em todos: link de saída de um clique e nenhum uso além do lembrete.
 
+## Cupons
+
+Cupom é um código de desconto aplicado no checkout. Sem item novo no menu.
+
+**Onde criar.** Em **Ofertas**, aba **Cupons**: lista, criar, editar e arquivar. Cada cupom tem:
+
+- **Código:** de 3 a 32 caracteres (letras, números, `-` e `_`). Guardado em maiúsculas e único por loja.
+- **Tipo:** percentual (de 0,01% a 90%) ou valor fixo em reais.
+- **Ofertas:** as marcadas. Nenhuma marcada vale para todas as ofertas da loja.
+- **Vale para:** por padrão, **só o produto principal**; o bump fica com preço fixo. Há a opção de estender o
+  desconto ao bump (aí o desconto se divide entre os dois, na proporção).
+- **Validade:** começa e termina em datas do horário de São Paulo; o cupom vale até o fim do último dia. Vazio: sem
+  início ou sem fim.
+- **Limite de usos:** total do cupom. Vazio: sem limite.
+- **Limite por pessoa:** padrão **1**. Conta só **compras pagas** (pagas ou contestadas) e por **caixa de entrada**:
+  `ana+promo@exemplo.com` e, no Gmail, `a.na@gmail.com` e `ana@gmail.com` são a mesma pessoa. Quem gerou um Pix com o
+  cupom e desistiu para pagar no cartão consegue usar o cupom de novo; depois de uma compra paga, não.
+
+**O que conta como uso (limite de usos).** Pedido **pago** ou **contestado**, mais os que ainda podem ser pagos: Pix
+pendente que não venceu e cartão pendente criado há menos de 2 horas. Reembolsado, expirado e recusado não contam. A
+conferência roda dentro do `checkout.start`, travada por cupom (criar pedido, editar e arquivar o cupom esperam um pelo
+outro). Um cartão pendente há mais de 2 horas que seja aprovado depois pode passar do limite por poucos usos. O mesmo
+vale para o limite por pessoa: como só a compra paga conta, dois pedidos pendentes da mesma pessoa podem ser pagos.
+
+**Piso de R$ 5,00.** O total com desconto nunca fica abaixo de R$ 5,00. Se o desconto passar disso, ele é cortado e o
+checkout mostra o desconto real. Se não sobrar desconto (total já no piso), o cupom é recusado. Com cupom, as
+**parcelas** do cartão também são limitadas para nenhuma ficar abaixo de R$ 5,00 (ex.: R$ 22,00 numa oferta de até 5x
+vira até 4x). Sem cupom, valem as parcelas configuradas na oferta, como antes. O mínimo de cobrança do Asaas para Pix e cartão
+**ainda precisa ser confirmado no sandbox**; até lá vale o piso de R$ 5,00.
+
+**No checkout.** "Tenho um cupom" fica recolhido; **Aplicar** mostra o desconto e o total. Cupom que não existe, venceu,
+estourou o limite ou não vale para a oferta mostra sempre a mesma mensagem, **"Cupom inválido ou vencido"**, sem dizer
+qual regra falhou. Isso vale também no envio: cupom que venceu (ou esgotou) entre a prévia e o "Pagar" mostra "Cupom
+inválido ou vencido" e **não** cria o pedido. O valor mostrado é o valor cobrado: se o **total** mudar entre a prévia e o
+envio (preço da oferta alterado, bump marcado ou desmarcado), o checkout avisa "O valor mudou: confira o resumo",
+atualiza o resumo e **não** cria o pedido. Bump marcado que saiu da oferta mostra a mensagem do bump ("O acréscimo não
+está mais disponível. Atualize a página."), na prévia e no envio.
+
+**Pix manual com cupom.** O valor único do Pix manual soma de 1 a 99 centavos ao total (para identificar o pagamento no
+extrato). Num desconto pequeno (ex.: R$ 0,50), esse acréscimo pode comer parte ou todo o desconto. O pedido e os
+relatórios guardam o total com desconto; o acréscimo é só do valor do Pix.
+
+**Link com cupom.** `/c/<slug>?cupom=CODIGO` abre o checkout com o cupom já aplicado (para anúncio e e-mail). O código
+também entra na origem da venda como `cupom`.
+
+**Contra adivinhação de códigos.**
+
+- **20 por IP por hora:** conta toda tentativa com cupom, válida ou não: cada "Aplicar", cada envio do checkout com
+  cupom e cada abertura de um link com `?cupom=`. Passou do limite, aquele IP fica sem cupom até a hora virar.
+- **300 recusas por loja por hora:** conta só os cupons **recusados** (na prévia e no envio, inclusive pelo limite por
+  pessoa). Com o balde cheio, **ninguém** aplica cupom na loja por até 1 hora; comprar sem cupom segue normal. Cupom
+  válido não conta, então uma campanha com muito tráfego não trava a loja.
+
+Confira o `TRUST_PROXY` (seção 2), senão todo mundo parece ter o mesmo IP e divide os mesmos 20.
+
+**Arquivar.** O cupom para de valer na hora e **não se apaga, nem se edita, nem se religa**. O código continua ocupado,
+então não dá para reaproveitá-lo. Para um desconto novo, crie outro cupom.
+
+**Renomear.** Só cupom que ainda não tem pedido (de qualquer situação) pode trocar de código: o pedido guarda o cupom,
+e renomear mudaria o código no histórico, no CSV e nas métricas. Cupom já usado: crie outro código. Os outros campos
+(valor, validade, limites, ofertas, ligado) mudam normalmente e valem só para pedidos novos.
+
+**Quem pode.** Criar, editar e arquivar: dono e administradores (permissão de editar ofertas). Os outros papéis veem a
+lista com os botões desabilitados.
+
+**Onde ver os resultados.**
+
+- **Pedido:** mostra o cupom e o desconto.
+- **CSV de pedidos:** ganha as colunas `cupom` e `desconto`.
+- **Métricas:** por cupom, pedidos, desconto total e receita. Saem pelo `metrics.summary` (MCP, para agentes de IA);
+  ainda não há tela no painel para elas.
+- **Telegram:** o aviso de venda traz "Cupom: CODIGO (−R$ X)". O código não é dado pessoal.
+- **Meta:** o `value` é o valor pago (já com desconto), no `Purchase` e no `InitiateCheckout`, inclusive o do navegador
+  quando a página abre com `?cupom=` aplicado. Nenhum parâmetro novo.
+- **Recuperação:** o lembrete de Pix e de cartão usa o valor com desconto; o lembrete de contato não leva o cupom.
+
+**Agentes de IA (MCP).** Consultar (`coupons.list`, `coupons.get`) usa `offers.read`. Criar, editar e arquivar
+(`coupons.create`, `coupons.update`, `coupons.archive`) usam `offers.write` e **passam pela fila de aprovação**, porque
+mudam preço. `metrics.summary` traz `coupons` com código, pedidos, desconto e receita em centavos; `orders.get` traz
+`couponCode` e `discountCents`; nunca dado de comprador.
+
 ## 14. Problemas comuns
 
 - **O checkout não mostra o cartão e o painel avisa "falta configurar o serviço de cartão"**: a instalação está sem

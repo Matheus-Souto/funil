@@ -1,5 +1,6 @@
 export * from "./core";
 export * from "./catalog";
+export * from "./coupons";
 export * from "./orders";
 export * from "./integrations";
 export * from "./jobs";
