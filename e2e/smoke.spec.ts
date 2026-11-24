@@ -1130,6 +1130,8 @@ test.describe("painel e compra pelo checkout (Tasks 11–14)", () => {
   });
 
   test("painel: telas no desktop (1280) e no celular (390, tema escuro)", async ({ browser }) => {
+    // Doze telas com print, em três contextos, somam uns 30 s de ações: com a máquina carregada estoura os 30 s padrão.
+    test.slow();
     await owner.goto("/admin");
     await expect(owner.getByRole("heading", { name: "Dashboard" })).toBeVisible();
     await expect(owner.getByText("Por origem")).toBeVisible();
