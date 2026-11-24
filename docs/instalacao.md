@@ -949,8 +949,9 @@ outro). Um cartão pendente há mais de 2 horas que seja aprovado depois pode pa
 vale para o limite por pessoa: como só a compra paga conta, dois pedidos pendentes da mesma pessoa podem ser pagos.
 
 **Piso de R$ 5,00.** O total com desconto nunca fica abaixo de R$ 5,00. Se o desconto passar disso, ele é cortado e o
-checkout mostra o desconto real. Se não sobrar desconto (total já no piso), o cupom é recusado. As **parcelas** do
-cartão também são limitadas para nenhuma ficar abaixo de R$ 5,00. O mínimo de cobrança do Asaas para Pix e cartão
+checkout mostra o desconto real. Se não sobrar desconto (total já no piso), o cupom é recusado. Com cupom, as
+**parcelas** do cartão também são limitadas para nenhuma ficar abaixo de R$ 5,00 (ex.: R$ 22,00 numa oferta de até 5x
+vira até 4x). Sem cupom, valem as parcelas configuradas na oferta, como antes. O mínimo de cobrança do Asaas para Pix e cartão
 **ainda precisa ser confirmado no sandbox**; até lá vale o piso de R$ 5,00.
 
 **No checkout.** "Tenho um cupom" fica recolhido; **Aplicar** mostra o desconto e o total. Cupom que não existe, venceu,

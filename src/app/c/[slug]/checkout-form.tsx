@@ -301,8 +301,9 @@ export function CheckoutForm(props: {
     if (coupon.kind === "applied") runCoupon(refreshCoupon(preview, coupon, checked));
   }
   const brandColor = props.brandColor ?? undefined;
-  // Parcelas pelo total mostrado (com desconto): a mesma conta do servidor (`installmentsFor`).
-  const maxInstallments = installmentsFor(offer.maxInstallments, total);
+  // Parcelas: a mesma conta do servidor (`installmentsFor`). Com cupom aplicado, pelo total mostrado (com desconto) e
+  // nenhuma abaixo de R$ 5,00; sem cupom, as da oferta (R-V1). Vale para o "Em até Nx" e para o iframe.
+  const maxInstallments = installmentsFor(offer.maxInstallments, total, { discounted: coupon.kind === "applied" });
   const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments, brandColor });
   useEffect(() => {
     // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.

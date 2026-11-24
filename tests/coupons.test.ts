@@ -816,7 +816,20 @@ describe("cupom no checkout", () => {
     expect([renewed.totalCents, renewed.maxInstallments]).toEqual([2200, 4]);
     const plain = await startCheckout({ storeId: s.storeId }, card({}), { cardTicketKey: KEY });
     expect(verifyCardTicket(plain.cardTicket!, KEY)!.maxInstallments).toBe(5);
-    expect([installmentsFor(5, 2200), installmentsFor(5, 2700), installmentsFor(12, 500), installmentsFor(3, 499)]).toEqual([4, 5, 1, 1]);
+    const d = { discounted: true };
+    expect([installmentsFor(5, 2200, d), installmentsFor(5, 2700, d), installmentsFor(12, 500, d), installmentsFor(3, 499, d)]).toEqual([4, 5, 1, 1]);
+    setAsaasFetchForTests();
+  });
+
+  test("sem cupom, o cartão mantém as parcelas da oferta (R$ 9,90 em até 3x → 3x), no bilhete e na renovação (R-V1)", async () => {
+    const fake = createFakeAsaas();
+    const s = await shop({ price: 990, maxInstallments: 3, asaas: fake });
+    const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+    const out = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: "52998224725" } }), { cardTicketKey: KEY });
+    const ticket = verifyCardTicket(out.cardTicket!, KEY)!;
+    expect([ticket.totalCents, ticket.maxInstallments]).toEqual([990, 3]);
+    const renewed = verifyCardTicket(await renewCardTicket({ storeId: s.storeId }, { publicId: out.publicId, ticket: out.cardTicket }, KEY), KEY)!;
+    expect([renewed.totalCents, renewed.maxInstallments]).toEqual([990, 3]);
     setAsaasFetchForTests();
   });
 

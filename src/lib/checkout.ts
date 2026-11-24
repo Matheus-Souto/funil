@@ -275,10 +275,10 @@ export const checkoutStart = defineAction({
       publicId: order.publicId,
       method: order.method as "pix_manual" | "pix_asaas" | "card_asaas",
       orderId: order.id,
-      // O bilhete do cartão leva o total e as parcelas (o iframe confere com o que o checkout mostrou). Parcelas sobre o
-      // total do pedido (com desconto): nenhuma abaixo da parcela mínima do Asaas.
+      // O bilhete do cartão leva o total e as parcelas (o iframe confere com o que o checkout mostrou). Com cupom, parcelas
+      // sobre o total do pedido (com desconto), nenhuma abaixo de R$ 5,00; sem cupom, as da oferta (R-V1).
       totalCents: order.totalCents,
-      maxInstallments: installmentsFor(o.maxInstallments, order.totalCents),
+      maxInstallments: installmentsFor(o.maxInstallments, order.totalCents, { discounted: order.discountCents > 0 }),
     };
   },
 });
@@ -458,6 +458,7 @@ export const checkoutRenewCardTicket = defineAction({
         method: orders.method,
         status: orders.status,
         totalCents: orders.totalCents,
+        discountCents: orders.discountCents,
         maxInstallments: offer.maxInstallments,
       })
       .from(orders)
@@ -467,7 +468,7 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
-    const terms = { totalCents: o.totalCents, maxInstallments: installmentsFor(o.maxInstallments, o.totalCents) };
+    const terms = { totalCents: o.totalCents, maxInstallments: installmentsFor(o.maxInstallments, o.totalCents, { discounted: o.discountCents > 0 }) };
     return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, server.ticketKey, now) };
   },
 });
