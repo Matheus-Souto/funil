@@ -4,7 +4,7 @@ import { ActionError } from "@/lib/actions/core";
 import { hashPassword } from "@/lib/auth/password";
 import { randomToken, timingSafeEqualStr } from "@/lib/crypto";
 import { db, ownerDb } from "@/lib/db/client";
-import { membership, store, users } from "@/lib/db/schema";
+import { auditLog, membership, store, users } from "@/lib/db/schema";
 import { env, isLoopbackUrl } from "@/lib/env";
 import { log } from "@/lib/log";
 
@@ -120,6 +120,11 @@ export async function setupFirstRun(
   });
 }
 
+const domainField = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "domínio inválido");
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const createStoreInput = z.object({
   name: z.string().trim().min(1).max(120),
@@ -128,12 +133,7 @@ const createStoreInput = z.object({
     .regex(SLUG, "slug inválido (a-z, 0-9 e hífen)")
     .refine((v) => !RESERVED_SLUGS.includes(v), "slug reservado"),
   ownerEmail: email,
-  domain: z
-    .string()
-    .trim()
-    .toLowerCase()
-    .regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "domínio inválido")
-    .optional(),
+  domain: domainField.optional(),
 });
 
 /**
@@ -177,6 +177,53 @@ export async function createStoreWithOwner(raw: {
   } catch (e) {
     if (e instanceof Error && /unique|duplicate/i.test(`${e.message} ${String((e as { cause?: unknown }).cause)}`)) {
       throw new ActionError("conflict", "Slug ou domínio já em uso");
+    }
+    throw e;
+  }
+}
+
+/**
+ * CLI `store:domain` (papel dono): define (ou apaga, com `null`) o domínio próprio de uma loja existente.
+ * Mesma validação do `store:create`. Recusa `*.<PLATFORM_DOMAIN>` (pertence aos slugs, e `pagar.` ao cartão);
+ * o próprio PLATFORM_DOMAIN é aceito. Grava `store.setDomain` em `audit_log` (ator system).
+ */
+export async function setStoreDomain(
+  raw: { slug: string; domain: string | null },
+  platformDomain: string | undefined = env.PLATFORM_DOMAIN,
+): Promise<{ storeId: string; previous: string | null }> {
+  let domain: string | null = null;
+  if (raw.domain !== null) {
+    const parsed = domainField.safeParse(raw.domain);
+    if (!parsed.success) throw new ActionError("invalid_input", `domain: ${parsed.error.issues[0]!.message}`);
+    domain = parsed.data;
+    const base = platformDomain ? normalizeHost(platformDomain) : "";
+    if (base && domain.endsWith(`.${base}`)) {
+      throw new ActionError("invalid_input", `domain: subdomínios de ${base} pertencem aos slugs das lojas`);
+    }
+  }
+  try {
+    return await ownerDb.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ id: store.id, domain: store.domain })
+        .from(store)
+        .where(eq(store.slug, raw.slug))
+        .for("update")
+        .limit(1);
+      if (!row) throw new ActionError("not_found", "Loja não encontrada");
+      await tx.update(store).set({ domain }).where(eq(store.id, row.id));
+      await tx.insert(auditLog).values({
+        storeId: row.id,
+        actor: { kind: "system" },
+        origin: "system",
+        action: "store.setDomain",
+        input: { slug: raw.slug, domain, previous: row.domain },
+        ok: true,
+      });
+      return { storeId: row.id, previous: row.domain };
+    });
+  } catch (e) {
+    if (e instanceof Error && /unique|duplicate/i.test(`${e.message} ${String((e as { cause?: unknown }).cause)}`)) {
+      throw new ActionError("conflict", "Domínio já em uso por outra loja");
     }
     throw e;
   }

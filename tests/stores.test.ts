@@ -2,8 +2,8 @@ import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { ActionError } from "@/lib/actions/core";
 import { verifyPassword } from "@/lib/auth/password";
-import { membership, store, users } from "@/lib/db/schema";
-import { RESERVED_SLUGS, createStoreWithOwner, resolveStore, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
+import { auditLog, membership, store, users } from "@/lib/db/schema";
+import { RESERVED_SLUGS, createStoreWithOwner, resolveStore, setStoreDomain, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
 import { setDbForTests } from "@/lib/db/client";
 import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 
@@ -226,5 +226,71 @@ describe("slug reservado", () => {
     const r = await setupFirstRun({ ...setup, storeName: "Pagar" }, "single");
     const [s] = await t.ownerDb.select().from(store).where(eq(store.id, r.storeId));
     expect(s!.slug).not.toBe("pagar");
+  });
+});
+
+describe("setStoreDomain (CLI)", () => {
+  const multi = { mode: "multi", platformDomain: "plataforma.com" } as const;
+  const mk = async (slug: string, domain: string | null = null) =>
+    (await t.ownerDb.insert(store).values({ name: slug, slug, domain }).returning())[0]!;
+  const audits = () => t.ownerDb.select().from(auditLog).where(eq(auditLog.action, "store.setDomain"));
+
+  test("grava o domínio normalizado e a loja passa a resolver por ele", async () => {
+    const s = await mk("alfa");
+    const r = await setStoreDomain({ slug: "alfa", domain: "Checkout.Exemplo.com.br" });
+    expect(r).toEqual({ storeId: s.id, previous: null });
+    expect((await resolveStore("checkout.exemplo.com.br", multi))?.id).toBe(s.id);
+  });
+
+  test("domínio de outra loja → conflict", async () => {
+    await mk("alfa", "a.exemplo.com.br");
+    await mk("beta");
+    expect(await code(setStoreDomain({ slug: "beta", domain: "A.exemplo.com.br" }))).toBe("conflict");
+  });
+
+  test("domínio inválido → invalid_input", async () => {
+    await mk("alfa");
+    for (const domain of ["http://x", "x", "*.exemplo.com"]) {
+      expect(await code(setStoreDomain({ slug: "alfa", domain }))).toBe("invalid_input");
+    }
+  });
+
+  test("null apaga o domínio e devolve o anterior", async () => {
+    const s = await mk("alfa", "velho.exemplo.com");
+    expect(await setStoreDomain({ slug: "alfa", domain: null })).toEqual({ storeId: s.id, previous: "velho.exemplo.com" });
+    expect((await t.ownerDb.select().from(store).where(eq(store.id, s.id)))[0]!.domain).toBeNull();
+  });
+
+  test("slug inexistente → not_found", async () => {
+    expect(await code(setStoreDomain({ slug: "nenhuma", domain: "x.exemplo.com" }))).toBe("not_found");
+  });
+
+  test("subdomínios da plataforma e pagar.<plataforma> são recusados; o domínio da plataforma em si é aceito", async () => {
+    await mk("alfa");
+    for (const domain of ["loja.plataforma.com", "a.b.Plataforma.com", "pagar.plataforma.com"]) {
+      expect(await code(setStoreDomain({ slug: "alfa", domain }, "plataforma.com"))).toBe("invalid_input");
+    }
+    expect((await setStoreDomain({ slug: "alfa", domain: "plataforma.com" }, "plataforma.com")).previous).toBeNull();
+    expect((await t.ownerDb.select().from(store))[0]!.domain).toBe("plataforma.com");
+  });
+
+  test("grava auditoria store.setDomain com ator system e sem dado pessoal", async () => {
+    const s = await mk("alfa", "velho.exemplo.com");
+    await setStoreDomain({ slug: "alfa", domain: "novo.exemplo.com" });
+    const rows = await audits();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      storeId: s.id,
+      actor: { kind: "system" },
+      origin: "system",
+      ok: true,
+      input: { slug: "alfa", domain: "novo.exemplo.com", previous: "velho.exemplo.com" },
+    });
+  });
+
+  test("recusas não gravam auditoria", async () => {
+    await mk("alfa");
+    await setStoreDomain({ slug: "alfa", domain: "x" }).catch(() => null);
+    expect(await audits()).toHaveLength(0);
   });
 });

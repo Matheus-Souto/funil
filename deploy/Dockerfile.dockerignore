@@ -21,4 +21,5 @@ test-results
 # a imagem só precisa das CLIs de operação (criação de loja, rollback do cartão isolado).
 scripts/*
 !scripts/store-create.ts
+!scripts/store-domain.ts
 !scripts/asaas-unseal.ts
