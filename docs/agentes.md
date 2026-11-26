@@ -33,7 +33,7 @@ Toda fatia é revisada por um modelo de **outra família** antes do merge (Claud
 
 ## Verificação e merge
 - O agente abre o preview sozinho: navega, clica, snapshot, avalia.
-- `/verify` passa na worktree da thread; saída colada, não resumida. Leva ~11–14 min: segundo plano, sem interromper. No máximo 2 ao mesmo tempo, com carga de 1 e 5 min da VPS < 4. O banco da rodada é `verify_<sha curto>` e é recriado a cada início: **nunca duas rodadas no mesmo commit ao mesmo tempo**, em worktrees diferentes ou não.
+- `/verify` passa na worktree da thread; saída colada, não resumida. Leva ~11–14 min: segundo plano, sem interromper. O banco da rodada é `verify_<sha curto>` e é recriado a cada início: **nunca duas rodadas no mesmo commit ao mesmo tempo**, em worktrees diferentes ou não.
 - Abra o PR, `watch_pull_request` até os checks ficarem verdes e a revisão da outra família sem pendência, e **mergeie**. Depois reporte.
 - Merge na `main` **não é deploy**: produção (`~/funil`) só sobe com ok do Matheus.
 
