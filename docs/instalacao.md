@@ -381,8 +381,10 @@ loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes lista
    - **Lista fixa (sem plugin):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (fora do git), ponha
      `CADDYFILE=Caddyfile.local` no `.env` e, no `Caddyfile.local`, troque a primeira linha por
      `{$DOMAIN}, minhaloja.plataforma.com.br, outraloja.plataforma.com.br, loja.com.br {` (subdomínios e domínios
-     próprios das lojas). Depois `docker compose up -d caddy`. Cada nome precisa de um registro DNS apontando para o
-     servidor; o Caddy emite um certificado para cada um.
+     próprios das lojas). Depois `docker compose up -d --force-recreate caddy` (o Caddyfile é montado como arquivo: só
+     recriando o container ele lê a versão editada) e confira cada nome novo com
+     `curl -s -o /dev/null -w '%{http_code}\n' https://<nome novo>/api/health` (`200`). Cada nome precisa de um
+     registro DNS apontando para o servidor; o Caddy emite um certificado para cada um.
    - **Curinga `*.plataforma.com.br` (opcional, desafio DNS):** o certificado curinga exige um Caddy com o plugin do
      seu DNS. Com Cloudflare: monte a imagem de `deploy/caddy-dns.Dockerfile`, crie um token da Cloudflare com
      permissão *Zone → DNS → Edit*, e num `compose.override.yaml`:
@@ -430,8 +432,9 @@ mesmo `pagar.checkout.minhaloja.com.br`) e dê esse mesmo domínio à loja exist
 próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
 
 1. **Antes de tudo**, três conferências e o backup:
-   - **SMTP:** o `multi` só aceita servidor público nas portas 587, 465, 2525 ou 25 (item 4 acima). Em
-     **Conexões → E-mail (SMTP)**, veja se a loja atual usa uma delas; se não, ajuste agora.
+   - **SMTP** (só se a loja envia pelo SMTP: em **Conexões**, o cartão **E-mail (SMTP)** está com o selo **Ativo**;
+     quem envia pelo Resend pula esta conferência): o `multi` só aceita servidor público nas portas 587, 465, 2525 ou
+     25 (item 4 acima). Veja se o servidor e a porta do cartão SMTP atendem a isso; se não, ajuste agora.
    - **Só uma loja.** O `slug` dela sai da mesma consulta:
 
      ```sh
@@ -440,18 +443,30 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
      ```
 
      Deve vir uma linha só. Anote o `slug` (abaixo, `<slug da loja atual>`).
-   - **Backup** (seção 10) e conferência de que o banco abre e tem a tabela da loja. A chave privada do age fica só
-     no seu computador, nunca no servidor: o arquivo (gerado em `~/funil`, seção 10) é decifrado no computador e
-     seguido por `ssh` para o `pg_restore -l` do container do Postgres, que lista o conteúdo. Devem aparecer a tabela
-     `store` e os dados dela (linhas `TABLE` e `TABLE DATA`):
+   - **Backup** (seção 10) e conferência de que o dump está inteiro e tem a tabela da loja. A chave privada do age
+     fica só no seu computador, nunca no servidor: rode o comando abaixo **no seu computador**. Ele traz o arquivo
+     cifrado (gerado em `~/funil`, seção 10), decifra localmente e manda o dump, em fluxo, para o `pg_restore` do
+     container do Postgres, que lê o dump **inteiro** (todos os dados, não só o índice) e gera o SQL; o `grep -c`
+     conta, nesse SQL, a carga da tabela `store`. Nada é gravado no banco nem no disco do servidor:
 
      ```sh
+     set -o pipefail
      ssh <servidor> 'cat ~/funil/banco-AAAA-MM-DD.dump.age' | age -d -i chave-backup.txt \
-       | ssh <servidor> 'cd ~/funil && docker compose exec -T postgres pg_restore -l' | grep -E 'TABLE (DATA )?public store '
+       | ssh <servidor> 'cd ~/funil && docker compose exec -T postgres bash -o pipefail -c "pg_restore -f - | grep -c \"^COPY public.store \""' \
+       && echo "backup conferido"
      ```
+
+     Deve terminar com `1` e `backup conferido`. O que vale é o `backup conferido`: num arquivo cortado o `1` pode
+     aparecer antes do erro do `pg_restore` (`could not read from input file: end of file`). Qualquer erro (chave
+     errada, arquivo cortado ou corrompido, ou `0` para a tabela `store`) termina sem o `backup conferido`: faça outro
+     backup e confira de novo antes de seguir.
 2. **Domínio da loja atual**, ainda com o `.env` antigo (o `exec` leva o `MODE` e o `PLATFORM_DOMAIN` novos por
    `-e`). Fazer este passo antes de editar o `.env` evita que um `docker compose up` no meio do caminho suba o
-   `multi` com a loja sem domínio:
+   `multi` com a loja sem domínio.
+
+   Antes, **atualize a imagem para esta versão** (seção 10, "Atualizar", com o backup do passo 1 já conferido),
+   ainda em `single`: o comando `store-domain` só existe a partir dela. Confira `migrate: ok` em
+   `docker compose logs app` e o `/api/health`. Depois:
 
    ```sh
    docker compose exec -e MODE=multi -e PLATFORM_DOMAIN=checkout.minhaloja.com.br app \
@@ -469,10 +484,16 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    - o checkout de uma oferta da loja atual (`/c/<slug da oferta>`) abre;
    - `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.checkout.minhaloja.com.br/form.js` mostra `200`;
    - o login no painel funciona;
-   - o e-mail sai: em **Conexões → E-mail (SMTP)**, **Enviar teste**, e confira que a mensagem chegou.
+   - o e-mail sai: em **Conexões**, no cartão do provedor de e-mail ativo (selo **Ativo**: **E-mail (SMTP)** ou
+     **E-mail (Resend)**), **Enviar teste**, e confira que a mensagem chegou.
 5. **Caminho de volta:** `cp ~/funil.env.single .env` e `docker compose up -d`. No `single` o app atende a única loja sem
    olhar o `store.domain`, então o domínio preenchido não atrapalha. **Vale antes de criar a loja nova.** Depois
-   dela, o `single` atende só a loja mais antiga: a loja nova fica fora do ar e o webhook dela deixa de responder.
+   dela, o `single` atende só a loja mais antiga: o checkout e o painel da loja nova ficam fora do ar. O webhook do
+   Asaas da loja nova, porém, **continua funcionando**: a URL dele usa o `BASE_URL`, e a rota acha a loja pelo id no
+   caminho e pelo token, não pelo domínio. Decida o que fazer com isso: desative o segundo webhook no painel do Asaas
+   (os pedidos da loja nova param de ser atualizados até você reativá-lo), ou deixe-o ligado e aceite que pagamentos,
+   estornos e vencimentos pendentes continuem atualizando os pedidos da loja nova (e disparando as entregas deles)
+   enquanto ela está fora do ar.
 6. **Loja nova** (domínio próprio):
 
    ```sh
@@ -483,11 +504,15 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
    - DNS: registro `A` de `checkout.nova-loja.com.br` para o servidor (nuvem cinza, como na seção 2).
    - Caddy: na lista fixa (item 3 acima), `CADDYFILE=Caddyfile.local` no `.env`, e o `Caddyfile.local` precisa listar
      `checkout.minhaloja.com.br` e `checkout.nova-loja.com.br`, com a linha `import card/*.caddy` no fim; depois
-     `docker compose up -d caddy`.
+     `docker compose up -d --force-recreate caddy` (só recriando o container o Caddy lê o arquivo editado). Confira o
+     HTTPS do host novo (com o DNS acima já propagado):
+     `curl -s -o /dev/null -w '%{http_code}\n' https://checkout.nova-loja.com.br/api/health` deve mostrar `200`, e
+     `curl -s https://checkout.minhaloja.com.br/api/health` continua respondendo.
    - Turnstile (seção 12): acrescente `checkout.nova-loja.com.br` à lista de hostnames do widget.
    - Asaas (seção 6): se a loja nova usar a **mesma** conta do Asaas, crie um segundo webhook com a URL e o token de
      autenticação que o painel da loja nova mostra (cada loja tem o seu `/api/webhooks/asaas/<id-da-loja>`). Um
-     pagamento da outra loja que chegue ao webhook errado é ignorado com resposta 200; não estranhe.
+     pagamento da outra loja que chegue ao webhook errado é ignorado com resposta 200, sem mexer em pedido nem gravar
+     dados da cobrança no histórico de auditoria da loja que não é dona dela; não estranhe.
 
 ## 12. Cartão (serviço isolado `pagar.`)
 
