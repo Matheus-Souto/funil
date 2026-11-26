@@ -99,15 +99,26 @@ export const applyAsaasPayment = defineAction({
     parcelsUnavailable: i.parcelsUnavailable ?? false,
     chargeCents: i.chargeCents ?? null,
   }),
+  // Duas lojas na mesma conta Asaas recebem cada evento nos dois webhooks: na loja que não tem o pedido (ou sem pedido
+  // nosso), nada muda e a auditoria não guarda dados da cobrança alheia (id, valor, status, estornos, parcelas).
+  auditSuccess: (out: { applied: boolean; reason?: string }) => out.reason !== "sem_pedido" && out.reason !== "pedido_de_outra_loja",
   async run(ctx, input) {
     let p = input;
-    if (!p.externalReference || !UUID.test(p.externalReference)) return { applied: false, reason: "sem_pedido" };
+    // Fora da auditoria (ver `auditSuccess`), mas com rastro para o operador: só a loja e o motivo, nada da cobrança.
+    if (!p.externalReference || !UUID.test(p.externalReference)) {
+      log.info("evento do Asaas ignorado", { storeId: ctx.storeId, reason: "sem_pedido" });
+      return { applied: false, reason: "sem_pedido" };
+    }
     const [o] = await ctx.tx
       .select()
       .from(orders)
       .where(and(eq(orders.id, p.externalReference), eq(orders.storeId, ctx.storeId)))
       .for("update");
-    if (!o || (o.method !== "pix_asaas" && o.method !== "card_asaas")) return { applied: false, reason: "pedido_de_outra_loja_ou_metodo" };
+    if (!o) {
+      log.info("evento do Asaas ignorado", { storeId: ctx.storeId, reason: "pedido_de_outra_loja" });
+      return { applied: false, reason: "pedido_de_outra_loja" };
+    }
+    if (o.method !== "pix_asaas" && o.method !== "card_asaas") return { applied: false, reason: "metodo_nao_asaas" };
 
     const rows = await ctx.tx.select().from(payment).where(and(eq(payment.provider, "asaas"), eq(payment.orderId, o.id)));
     const [global] = await ctx.tx
@@ -265,6 +276,8 @@ export const noteUnreachableAsaasPayment = defineAction({
     event: z.string().max(64).nullable(),
   }),
   permission: "system",
+  // Cobrança que não é de uma conta anterior desta loja (ex.: de outra loja na mesma conta Asaas): nada a registrar.
+  auditSuccess: (out: { recorded: boolean }) => out.recorded,
   async run(ctx, p) {
     const [row] = await ctx.tx
       .select()

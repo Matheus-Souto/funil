@@ -166,6 +166,47 @@ test("audit:false não grava", async () => {
   expect(await auditRows(storeId)).toHaveLength(0);
 });
 
+test("auditSuccess decide pela saída se o sucesso é auditado; falha e gancho que lança continuam auditados", async () => {
+  const { storeId } = await seedStore();
+  const action = defineAction(
+    {
+      name: "t.auditsuccess",
+      description: "x",
+      input: z.object({ mine: z.boolean(), fail: z.boolean().optional(), ref: z.string() }),
+      permission: "products.read",
+      auditSuccess: (out: { mine: boolean }) => out.mine,
+      run: async (_ctx, i) => {
+        if (i.fail) throw new ActionError("conflict", "falhou");
+        return { mine: i.mine };
+      },
+    },
+    def,
+  );
+  const call = { storeId, actor: owner, origin: "panel" as const };
+  expect(await runAction(action, call, { mine: false, ref: "alheio-123" })).toEqual({ mine: false });
+  expect(await auditRows(storeId)).toHaveLength(0);
+  await runAction(action, call, { mine: true, ref: "meu" });
+  expect((await auditRows(storeId)).map((r) => r.input)).toEqual([{ mine: true, ref: "meu" }]);
+  await runAction(action, call, { mine: false, fail: true, ref: "x" }).catch(() => null);
+  expect((await auditRows(storeId)).map((r) => r.ok).sort()).toEqual([false, true]);
+
+  const throws = defineAction(
+    {
+      name: "t.auditsuccess.throws",
+      description: "x",
+      input: z.object({}),
+      permission: "products.read",
+      auditSuccess: () => {
+        throw new Error("quebrou");
+      },
+      run: async () => 1,
+    },
+    def,
+  );
+  expect(await runAction(throws, call, {})).toBe(1);
+  expect((await auditRows(storeId)).filter((r) => r.action === throws.name)).toHaveLength(1);
+});
+
 test("ctx.tx só enxerga a loja do call.storeId", async () => {
   const a = await seedStore("A");
   const b = await seedStore("B");

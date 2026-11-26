@@ -29,10 +29,10 @@ FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY . .
 RUN bun run build
-# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs,
+# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs, cli/src/cli/store-domain.mjs,
 # cli/scripts/asaas-unseal.mjs), então os caminhos relativos de migrate.ts continuam valendo: cli/src/lib/db/rls.sql e
 # cli/drizzle/.
-RUN bun build src/lib/db/migrate.ts scripts/store-create.ts scripts/asaas-unseal.ts --target=node --format=esm --root=. \
+RUN bun build src/lib/db/migrate.ts scripts/store-create.ts src/cli/store-domain.ts scripts/asaas-unseal.ts --target=node --format=esm --root=. \
       --outdir=/cli --entry-naming='[dir]/[name].mjs' \
  && cp src/lib/db/rls.sql /cli/src/lib/db/rls.sql \
  && cp -r drizzle /cli/drizzle
@@ -81,8 +81,9 @@ COPY --from=build /cli ./cli
 COPY --from=card-build /src/dist/card/form.js.sha256 ./card-form.sha256
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint
 COPY deploy/store-create.sh /usr/local/bin/store-create
+COPY deploy/store-domain.sh /usr/local/bin/store-domain
 COPY deploy/asaas-unseal.sh /usr/local/bin/asaas-unseal
-RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/store-create /usr/local/bin/asaas-unseal \
+RUN chmod 0755 /usr/local/bin/entrypoint /usr/local/bin/store-create /usr/local/bin/store-domain /usr/local/bin/asaas-unseal \
  && mkdir -p /data /app/.next/cache \
  && chown node:node /data /app/.next/cache
 USER node

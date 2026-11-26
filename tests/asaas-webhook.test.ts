@@ -153,6 +153,53 @@ describe("efeito do webhook (sempre reconsulta)", () => {
     expect(await statusOf(a.order.id)).toBe("pending");
   });
 
+  test("duas lojas na mesma conta Asaas: evento do pedido da loja A no webhook da loja B não grava dados da cobrança na auditoria de B", async () => {
+    const fake = createFakeAsaas();
+    const a = await setup(990, fake);
+    const b = await setup(990, fake);
+    a.fake.setStatus(a.paymentId, "RECEIVED");
+    const applyRows = async (storeId: string) =>
+      (await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, storeId))).filter((r) => r.action === "payments.applyAsaasPayment");
+    const payRow = async () => (await t.ownerDb.select().from(payment).where(eq(payment.orderId, a.order.id)))[0]!;
+    const before = await payRow();
+
+    for (let i = 0; i < 2; i++) {
+      expect((await handleAsaasWebhook(b.storeId, hdr(b.webhookToken), event(a.paymentId))).status).toBe(200);
+    }
+    expect(await applyRows(b.storeId)).toHaveLength(0);
+    const bAudit = JSON.stringify(await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, b.storeId)));
+    expect(bAudit).not.toContain(a.paymentId);
+    expect(bAudit).not.toContain(a.order.id);
+    expect(await statusOf(a.order.id)).toBe("pending");
+    expect(await payRow()).toEqual(before);
+    expect(await jobsOf(a.order.id, "deliver_order")).toHaveLength(0);
+
+    // O mesmo evento no webhook da dona aplica e audita normalmente.
+    expect((await handleAsaasWebhook(a.storeId, hdr(a.webhookToken), event(a.paymentId))).status).toBe(200);
+    expect(await statusOf(a.order.id)).toBe("paid");
+    expect(await applyRows(a.storeId)).toHaveLength(1);
+  });
+
+  test("cobrança sem pedido nosso (sem externalReference) não vai para a auditoria", async () => {
+    const s = await setup();
+    s.fake.payments.get(s.paymentId)!.externalReference = null;
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    const rows = (await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, s.storeId))).filter((r) => r.action === "payments.applyAsaasPayment");
+    expect(rows).toHaveLength(0);
+  });
+
+  test("pedido da própria loja com outro método continua na auditoria (metodo_nao_asaas)", async () => {
+    const s = await setup();
+    await t.ownerDb.update(orders).set({ method: "pix_manual" }).where(eq(orders.id, s.order.id));
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("pending");
+    const rows = (await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, s.storeId))).filter((r) => r.action === "payments.applyAsaasPayment");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ok: true, origin: "webhook" });
+  });
+
   test("cobrança já vinculada a outro pedido da mesma loja não libera um terceiro", async () => {
     const s = await setup();
     const other = await newAsaasOrder(s.storeId, s.offerId, "outro@example.com");

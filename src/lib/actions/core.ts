@@ -61,6 +61,12 @@ export interface ActionDef<I, O, P = undefined, S = undefined> {
    */
   auditResult?: (output: O) => unknown;
   /**
+   * Decide pela saída se o sucesso vira linha em `audit_log` (padrão: sempre). `false` quando a ação recebeu dados que
+   * não são da loja e nada fez com eles (ex.: evento do Asaas de uma cobrança de outra loja na mesma conta): gravar a
+   * entrada guardaria dado alheio na auditoria desta loja. Falhas continuam auditadas; se o gancho lançar, audita.
+   */
+  auditSuccess?: (output: O) => boolean;
+  /**
    * Trabalho externo (ex.: testar uma chave num provedor) que NÃO deve segurar transação. Roda depois de permissão,
    * validação e portão de ação sensível, e antes de `withStore`; o resultado vai como 3º argumento de `run`.
    * Falhas são auditadas como as demais rejeições (só chaves da entrada). Recebe também `server` (como `run`), ex. o IP
@@ -279,7 +285,7 @@ export async function runAction<I, O, P = any, S = any>(
         const resultId = resultIdOf(out);
         if (resultId) await tx.update(approvalRequest).set({ resultId }).where(eq(approvalRequest.id, approval.requestId));
       }
-      if (audited) await tx.insert(auditLog).values(entry(capped(successView(out)), true));
+      if (audited && auditsSuccess(action.auditSuccess, out)) await tx.insert(auditLog).values(entry(capped(successView(out)), true));
       return out;
     });
   } catch (e) {
@@ -303,6 +309,15 @@ export async function runAction<I, O, P = any, S = any>(
     }
   }
   return committed;
+}
+
+function auditsSuccess<O>(hook: ((output: O) => boolean) | undefined, out: O): boolean {
+  if (!hook) return true;
+  try {
+    return hook(out);
+  } catch {
+    return true;
+  }
 }
 
 /**
