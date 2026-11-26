@@ -456,6 +456,8 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
        && echo "backup conferido"
      ```
 
+     Rode num `bash` ou `zsh` (o `set -o pipefail` não existe no `sh`) e com a chave SSH carregada no agente
+     (`ssh-add`): o comando abre duas conexões ao mesmo tempo e dois pedidos de senha disputariam o terminal.
      Deve terminar com `1` e `backup conferido`. O que vale é o `backup conferido`: num arquivo cortado o `1` pode
      aparecer antes do erro do `pg_restore` (`could not read from input file: end of file`). Qualquer erro (chave
      errada, arquivo cortado ou corrompido, ou `0` para a tabela `store`) termina sem o `backup conferido`: faça outro

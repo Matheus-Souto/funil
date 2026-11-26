@@ -249,6 +249,11 @@ describe("createStoreWithOwner: domínio da plataforma", () => {
     expect(await t.ownerDb.select().from(store).where(eq(store.slug, "beta"))).toHaveLength(0);
     expect(await t.ownerDb.select().from(users)).toHaveLength(0);
     expect((await resolveStore("beta.plataforma.com", multi))?.id).toBe(old!.id);
+    // A mensagem específica sobrevive ao catch genérico de unicidade, mesmo com "unique" no slug.
+    await t.ownerDb.insert(store).values({ name: "Outra", slug: "outra", domain: "unique-shop.plataforma.com" });
+    const msg = await createStoreWithOwner({ name: "U", slug: "unique-shop", ownerEmail: "u@exemplo.com" }, "plataforma.com").catch((e: unknown) => e);
+    expect((msg as ActionError).code).toBe("conflict");
+    expect((msg as ActionError).message).toContain("já pertence a outra loja");
     // Outro slug passa; sem PLATFORM_DOMAIN não há subdomínio de slug a proteger.
     expect((await createStoreWithOwner({ name: "Gama", slug: "gama", ownerEmail: "g@exemplo.com" }, "plataforma.com")).storeId).toBeString();
     expect((await createStoreWithOwner({ name: "Beta", slug: "beta", ownerEmail: "b@exemplo.com" }, "")).storeId).toBeString();

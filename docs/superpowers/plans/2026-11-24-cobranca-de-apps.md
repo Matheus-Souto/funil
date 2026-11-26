@@ -45,10 +45,10 @@
 
 **Files:**
 - Modify: `src/lib/stores.ts` (nova função; reaproveita a validação de `domain` do `createStoreWithOwner`, linha ~131)
-- Create: `scripts/store-domain.ts`
+- Create: `src/cli/store-domain.ts` (saiu de `scripts/`, caminho protegido, na revisão)
 - Create: `deploy/store-domain.sh`
-- Modify: `deploy/Dockerfile:35` (empacotar `scripts/store-domain.ts`) e `:83-85` (copiar e `chmod` o wrapper), `deploy/Dockerfile.dockerignore` (`!scripts/store-domain.ts`)
-- Modify: `package.json` (`"store:domain": "bun scripts/store-domain.ts"`)
+- Modify: `deploy/Dockerfile:35` (empacotar `src/cli/store-domain.ts`) e `:83-85` (copiar e `chmod` o wrapper)
+- Modify: `package.json` (`"store:domain": "bun src/cli/store-domain.ts"`)
 - Test: `tests/stores.test.ts`
 
 **Interfaces:**
@@ -62,7 +62,7 @@
   - `setStoreDomain com slug inexistente` → `not_found`.
   - Grava em `audit_log` uma linha `store.setDomain` com `{ slug, domain, previous }` e ator `system`.
 - [ ] **Step 2:** `bun test tests/stores.test.ts` → FAIL (`setStoreDomain` não existe).
-- [ ] **Step 3:** implementar `setStoreDomain` (transação com o papel dono, como `createStoreWithOwner`); `scripts/store-domain.ts` com `parseArgs` (`--slug`, `--domain` ou `--clear`), só com `MODE=multi` (mesma mensagem do `store-create`), imprime `Domínio da loja <slug>: <antes> -> <depois>`; wrapper `deploy/store-domain.sh` igual ao `deploy/store-create.sh`.
+- [ ] **Step 3:** implementar `setStoreDomain` (transação com o papel dono, como `createStoreWithOwner`); `src/cli/store-domain.ts` com `parseArgs` (`--slug`, `--domain` ou `--clear`), só com `MODE=multi` (mesma mensagem do `store-create`), imprime `Domínio da loja <slug>: <antes> -> <depois>`; wrapper `deploy/store-domain.sh` igual ao `deploy/store-create.sh`.
 - [ ] **Step 4:** `bun test tests/stores.test.ts` → PASS; `bun run check` → OK.
 - [ ] **Step 5:** commit `feat(lojas): CLI store-domain para definir o domínio de uma loja existente`.
 

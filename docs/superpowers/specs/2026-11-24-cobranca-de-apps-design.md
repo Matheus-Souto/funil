@@ -53,7 +53,7 @@ O app continua sendo a **fonte da verdade do plano e do acesso**. O funil cobra,
   mudança de verificação (`e2e/`, `scripts/verify*`, `.github/`) em PR separado.
 - **Mesma conta do Asaas** para as duas lojas (decisão do dono). O webhook do Asaas já é por loja
   (`/api/webhooks/asaas/[storeId]`) e ignora, com 200, pagamento cujo `externalReference` é pedido de outra loja
-  (`pedido_de_outra_loja_ou_metodo`, `src/lib/payments/asaas/webhook.ts:110`). Na conta do Asaas ficam dois webhooks, um
+  (`pedido_de_outra_loja`, sem gravar a cobrança na auditoria da loja receptora; `src/lib/payments/asaas/webhook.ts`). Na conta do Asaas ficam dois webhooks, um
   por loja, cada um com o `webhookToken` da sua loja.
 - Sem boleto (decisão do dono). Pix e cartão, como hoje.
 - O checkout de hoje exige CPF para o Asaas e só aceita CPF (`requireCpf` em `src/lib/checkout.ts`). **Decisão do

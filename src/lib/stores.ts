@@ -192,6 +192,7 @@ export async function createStoreWithOwner(raw: {
       return { storeId: s!.id, userId, temporaryPassword: created ? temporaryPassword : null };
     });
   } catch (e) {
+    if (e instanceof ActionError) throw e;
     if (e instanceof Error && /unique|duplicate/i.test(`${e.message} ${String((e as { cause?: unknown }).cause)}`)) {
       throw new ActionError("conflict", "Slug ou domínio já em uso");
     }

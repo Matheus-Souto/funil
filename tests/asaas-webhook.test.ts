@@ -189,6 +189,17 @@ describe("efeito do webhook (sempre reconsulta)", () => {
     expect(rows).toHaveLength(0);
   });
 
+  test("pedido da própria loja com outro método continua na auditoria (metodo_nao_asaas)", async () => {
+    const s = await setup();
+    await t.ownerDb.update(orders).set({ method: "pix_manual" }).where(eq(orders.id, s.order.id));
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("pending");
+    const rows = (await t.ownerDb.select().from(auditLog).where(eq(auditLog.storeId, s.storeId))).filter((r) => r.action === "payments.applyAsaasPayment");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ok: true, origin: "webhook" });
+  });
+
   test("cobrança já vinculada a outro pedido da mesma loja não libera um terceiro", async () => {
     const s = await setup();
     const other = await newAsaasOrder(s.storeId, s.offerId, "outro@example.com");
