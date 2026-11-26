@@ -15,3 +15,6 @@
 - Toda tabela nova tem `store_id` e chama `enable_store_rls` (isolamento por loja via RLS).
 - Dados de cartão nunca são persistidos nem logados.
 - O app roda em Node em produção (`next start`): não use APIs exclusivas do Bun em `src/`.
+
+## Agentes
+- Divisão de trabalho entre agentes e modelos: @docs/agentes.md
