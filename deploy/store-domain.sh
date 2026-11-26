@@ -4,4 +4,4 @@
 #   docker compose exec app store-domain --slug minhaloja --clear
 set -eu
 cd /app
-exec node /app/cli/scripts/store-domain.mjs "$@"
+exec node /app/cli/src/cli/store-domain.mjs "$@"

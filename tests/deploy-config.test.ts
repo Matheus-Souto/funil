@@ -279,14 +279,19 @@ test("CLI asaas:unseal (rollback do cartão isolado): empacotada para Node na im
   expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["asaas:unseal"]).toBe("bun scripts/asaas-unseal.ts");
 });
 
-test("CLI store:domain: empacotada para Node na imagem do app, como a store-create", () => {
+test("CLI store:domain: em src/cli (fora de scripts/), empacotada para Node na imagem do app, como a store-create", () => {
   const dockerfile = read("deploy/Dockerfile");
-  expect(dockerfile).toMatch(/bun build [^\n]*scripts\/store-domain\.ts/);
+  expect(dockerfile).toMatch(/bun build [^\n]*src\/cli\/store-domain\.ts/);
+  expect(dockerfile).not.toMatch(/scripts\/store-domain/);
   expect(dockerfile).toMatch(/^COPY deploy\/store-domain\.sh \/usr\/local\/bin\/store-domain$/m);
   expect(dockerfile).toMatch(/chmod 0755 [^\n]*\/usr\/local\/bin\/store-domain/);
-  expect(read("deploy/Dockerfile.dockerignore")).toMatch(/^!scripts\/store-domain\.ts$/m);
-  expect(read("deploy/store-domain.sh")).toMatch(/^exec node \/app\/cli\/scripts\/store-domain\.mjs "\$@"$/m);
-  expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["store:domain"]).toBe("bun scripts/store-domain.ts");
+  // src/ vai inteiro para o contexto do build; scripts/ só com as exceções listadas.
+  expect(read("deploy/Dockerfile.dockerignore")).not.toMatch(/store-domain/);
+  expect(read("deploy/Dockerfile.dockerignore")).not.toMatch(/^src/m);
+  expect(read("deploy/store-domain.sh")).toMatch(/^exec node \/app\/cli\/src\/cli\/store-domain\.mjs "\$@"$/m);
+  expect((JSON.parse(read("package.json")) as { scripts: Record<string, string> }).scripts["store:domain"]).toBe("bun src/cli/store-domain.ts");
+  // Roda em Node na imagem: nada do Bun no código da CLI.
+  expect(read("src/cli/store-domain.ts")).not.toMatch(/\bBun\.|from "bun"|bun:/);
 });
 
 describe("Caddyfiles: HSTS em todo site servido", () => {

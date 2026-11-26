@@ -14,7 +14,7 @@
     "migration": "drizzle-kit generate",
     "migrate": "bun src/lib/db/migrate.ts",
     "store:create": "bun scripts/store-create.ts",
-    "store:domain": "bun scripts/store-domain.ts",
+    "store:domain": "bun src/cli/store-domain.ts",
     "asaas:unseal": "bun scripts/asaas-unseal.ts",
     "hygiene": "bun scripts/check-test-hygiene.ts",
     "verify": "bash scripts/verify.sh",

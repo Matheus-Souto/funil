@@ -29,10 +29,10 @@ FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY . .
 RUN bun run build
-# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs, cli/scripts/store-domain.mjs,
+# CLIs para Node. A saída repete a árvore do repositório (cli/src/lib/db/migrate.mjs, cli/scripts/store-create.mjs, cli/src/cli/store-domain.mjs,
 # cli/scripts/asaas-unseal.mjs), então os caminhos relativos de migrate.ts continuam valendo: cli/src/lib/db/rls.sql e
 # cli/drizzle/.
-RUN bun build src/lib/db/migrate.ts scripts/store-create.ts scripts/store-domain.ts scripts/asaas-unseal.ts --target=node --format=esm --root=. \
+RUN bun build src/lib/db/migrate.ts scripts/store-create.ts src/cli/store-domain.ts scripts/asaas-unseal.ts --target=node --format=esm --root=. \
       --outdir=/cli --entry-naming='[dir]/[name].mjs' \
  && cp src/lib/db/rls.sql /cli/src/lib/db/rls.sql \
  && cp -r drizzle /cli/drizzle
