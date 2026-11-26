@@ -11,11 +11,11 @@ Claude Opus 5.5, effort `high`, na thread aberta pelo Matheus. Planeja, divide e
 | Fatias paralelas da mesma feature | Opus 5.5 `high` (cópias) |
 | Spec clara, migração, script, código repetitivo | GPT-6.2 Sol (Codex) |
 | Problema longo e difícil (~20 min: cartão, RLS, máquina de estados) | Fable 5.2 `high`; devolve a execução ao maestro |
-| Segunda opinião de outra família sobre o trabalho do Claude | GPT-6.2 Astra |
-| Revisão do trabalho do Sol | GPT-6.2 Astra (`xhigh`/`ultra`) |
+| Revisão do trabalho do Claude | GPT-6.2 Astra (`xhigh`) |
+| Revisão do trabalho do Sol | Opus 5.5 (Claude); Astra só como revisão adicional, porque Sol e Astra são da mesma família |
 | Consulta rápida, tarefa pequena | Haiku 5.5 ou GPT-6 Luna |
 
-Toda fatia é revisada por um modelo de **outra família** antes do merge. Toque em pagamento, cartão ou dado pessoal: revisão de segurança com Astra `ultra`.
+Toda fatia é revisada por um modelo de **outra família** antes do merge (Claude revisa Codex e vice-versa). Toque em pagamento, cartão ou dado pessoal: revisão de segurança com Astra `ultra`.
 
 ## Effort
 `high` para todos (Fable fica em `high`, nunca `max`). `xhigh`/`max` só no bug difícil ou na checagem final. Astra pode usar `ultra` em revisão.
@@ -33,7 +33,7 @@ Toda fatia é revisada por um modelo de **outra família** antes do merge. Toque
 
 ## Verificação e merge
 - O agente abre o preview sozinho: navega, clica, snapshot, avalia.
-- `/verify` passa na worktree da thread; saída colada, não resumida. Leva ~11–14 min: segundo plano, sem interromper. No máximo 2 ao mesmo tempo, com carga de 1 e 5 min da VPS < 4.
+- `/verify` passa na worktree da thread; saída colada, não resumida. Leva ~11–14 min: segundo plano, sem interromper. No máximo 2 ao mesmo tempo, com carga de 1 e 5 min da VPS < 4. O banco da rodada é `verify_<sha curto>` e é recriado a cada início: **nunca duas rodadas no mesmo commit ao mesmo tempo**, em worktrees diferentes ou não.
 - Abra o PR, `watch_pull_request` até os checks ficarem verdes e a revisão da outra família sem pendência, e **mergeie**. Depois reporte.
 - Merge na `main` **não é deploy**: produção (`~/funil`) só sobe com ok do Matheus.
 
@@ -45,10 +45,10 @@ Threads são caixa de entrada: feche o que terminou, adie o que espera, corrija 
 - Tarefa delegada passando de 25 min de trabalho (sem contar `/verify` rodando): interrompa, reescreva o briefing menor, relance.
 - Duas threads no mesmo arquivo: a segunda espera o primeiro merge e rebaseia.
 - Limite de uso: mova a fatia para o outro fornecedor (Claude ↔ Codex).
-- `/verify` falhando 3 vezes seguidas na mesma branch: pare e avise (o contador trava; só o Matheus destrava).
+- `/verify` responde `PARE` quando há 3 rodadas de correção falhas na branch **ou no total** (`.verify/state.json`): pare e chame o Matheus (só ele roda `bun run verify:reset`). Não recomece a tarefa em outra worktree para escapar da trava.
 
 ## Entrega
 Um PR por fatia com a saída do `/verify`, e um relatório curto: **feito / esperando / falhou**.
 
 ## Autonomia
-Não pare para chamadas de rotina, commit, push, PR nem merge. **Pare e peça ok** para: deploy ou qualquer coisa em `~/funil` (produção); migração aplicada em banco real; gasto; exclusão de dados ou branches alheias; segredos (Infisical); mudança em verificação (`.claude/`, `scripts/verify*`, `e2e/`, `.github/`, `REVIEW.md`) (o GitHub não barra: a proteção não exige revisão do code owner, então a regra é sua); ambiguidade que muda o objetivo. Nenhum dado pessoal de comprador vai para briefing, log ou relatório.
+Não pare para chamadas de rotina, commit, push, PR nem merge. **Pare e peça ok** para: deploy ou qualquer coisa em `~/funil` (produção); migração aplicada em banco real; gasto; exclusão de dados ou branches alheias; segredos (Infisical); mudança em verificação: qualquer arquivo da lista do `REVIEW.md` (`.claude/`, `scripts/`, `.verify/gate-mode`, script `check` do `package.json`, `tests/verify/`, `eslint.config.js`) e também `e2e/`, `.github/`, `REVIEW.md` e o `CODEOWNERS`. Essas mudanças vão sempre em PR separado de código de produto, mesmo com o ok do Matheus. O GitHub não barra isso (a proteção não exige revisão do code owner): a barreira é esta regra; ambiguidade que muda o objetivo. Nenhum dado pessoal de comprador vai para briefing, log ou relatório.
