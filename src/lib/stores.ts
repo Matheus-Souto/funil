@@ -167,6 +167,14 @@ export async function createStoreWithOwner(raw: {
   const passwordHash = await hashPassword(temporaryPassword);
   try {
     return await ownerDb.transaction(async (tx) => {
+      // Loja anterior a esta regra pode ter `domain = <slug>.<PLATFORM_DOMAIN>`: `resolveStore` procura o domínio antes
+      // do slug, então esse host abriria a loja antiga, nunca a nova.
+      const base = platformDomain ? normalizeHost(platformDomain) : "";
+      if (base) {
+        const host = `${input.slug}.${base}`;
+        const [taken] = await tx.select({ id: store.id }).from(store).where(sql`lower(${store.domain}) = ${host}`).limit(1);
+        if (taken) throw new ActionError("conflict", `O domínio ${host} já pertence a outra loja; escolha outro slug ou mude o domínio dela`);
+      }
       const [s] = await tx
         .insert(store)
         .values({ name: input.name, slug: input.slug, domain: input.domain ?? null })

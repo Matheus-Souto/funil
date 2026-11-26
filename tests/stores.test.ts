@@ -237,6 +237,22 @@ describe("createStoreWithOwner: domínio da plataforma", () => {
     const r = await createStoreWithOwner({ name: "Y", slug: "ipsilon", ownerEmail: "y@exemplo.com", domain: "plataforma.com" }, "plataforma.com");
     expect(r.storeId).toBeString();
   });
+
+  test("slug cujo <slug>.<plataforma> já é o domínio de uma loja antiga → conflict, nada é criado e o host segue na loja antiga", async () => {
+    const multi = { mode: "multi", platformDomain: "plataforma.com" } as const;
+    const [old] = await t.ownerDb.insert(store).values({ name: "Antiga", slug: "antiga", domain: "beta.plataforma.com" }).returning();
+    for (const platformDomain of ["plataforma.com", "Plataforma.com."]) {
+      const err = await createStoreWithOwner({ name: "Beta", slug: "beta", ownerEmail: "b@exemplo.com" }, platformDomain).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ActionError);
+      expect((err as ActionError).code).toBe("conflict");
+    }
+    expect(await t.ownerDb.select().from(store).where(eq(store.slug, "beta"))).toHaveLength(0);
+    expect(await t.ownerDb.select().from(users)).toHaveLength(0);
+    expect((await resolveStore("beta.plataforma.com", multi))?.id).toBe(old!.id);
+    // Outro slug passa; sem PLATFORM_DOMAIN não há subdomínio de slug a proteger.
+    expect((await createStoreWithOwner({ name: "Gama", slug: "gama", ownerEmail: "g@exemplo.com" }, "plataforma.com")).storeId).toBeString();
+    expect((await createStoreWithOwner({ name: "Beta", slug: "beta", ownerEmail: "b@exemplo.com" }, "")).storeId).toBeString();
+  }, HEAVY_TEST_MS);
 });
 
 describe("setStoreDomain (CLI)", () => {

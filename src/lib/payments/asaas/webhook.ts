@@ -99,6 +99,9 @@ export const applyAsaasPayment = defineAction({
     parcelsUnavailable: i.parcelsUnavailable ?? false,
     chargeCents: i.chargeCents ?? null,
   }),
+  // Duas lojas na mesma conta Asaas recebem cada evento nos dois webhooks: na loja que não tem o pedido (ou sem pedido
+  // nosso), nada muda e a auditoria não guarda dados da cobrança alheia (id, valor, status, estornos, parcelas).
+  auditSuccess: (out: { applied: boolean; reason?: string }) => out.reason !== "sem_pedido" && out.reason !== "pedido_de_outra_loja",
   async run(ctx, input) {
     let p = input;
     if (!p.externalReference || !UUID.test(p.externalReference)) return { applied: false, reason: "sem_pedido" };
@@ -107,7 +110,8 @@ export const applyAsaasPayment = defineAction({
       .from(orders)
       .where(and(eq(orders.id, p.externalReference), eq(orders.storeId, ctx.storeId)))
       .for("update");
-    if (!o || (o.method !== "pix_asaas" && o.method !== "card_asaas")) return { applied: false, reason: "pedido_de_outra_loja_ou_metodo" };
+    if (!o) return { applied: false, reason: "pedido_de_outra_loja" };
+    if (o.method !== "pix_asaas" && o.method !== "card_asaas") return { applied: false, reason: "metodo_nao_asaas" };
 
     const rows = await ctx.tx.select().from(payment).where(and(eq(payment.provider, "asaas"), eq(payment.orderId, o.id)));
     const [global] = await ctx.tx
