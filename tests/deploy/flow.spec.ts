@@ -24,6 +24,12 @@ const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpp
 const MAX_PDF_BYTES = 52_428_800; // teto do upload (src/lib/catalog/products.ts)
 const BIG_PAGES = 140;
 
+/** Escolhe uma opção num menu do painel (Select do Arc: botão "combobox" que abre a lista de opções). */
+async function pickOption(page: Page, name: string, option: string) {
+  await page.getByRole("combobox", { name, exact: true }).click();
+  await page.getByRole("option", { name: option, exact: true }).click();
+}
+
 /** PDF de e-book ilustrado: uma imagem por página (gradiente com ruído, comprime como ilustração). ~0,34 MB/página. */
 async function illustratedPdf(pages: number): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -72,7 +78,9 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   await expect(owner.getByRole("heading", { name: "Boas-vindas, Loja Deploy" })).toBeVisible();
 
   // Conexões: chave Pix manual e SMTP (Mailpit do smoke, na rede do compose).
+  // Cada conexão é uma linha com o botão "Conectar <nome>"; o formulário abre num modal (o id fica no modal).
   await owner.goto("/admin/connections");
+  await owner.getByRole("button", { name: "Conectar Pix manual" }).click();
   const pix = owner.locator("#pix-manual-card");
   await pix.getByLabel("Chave Pix").fill("contato@lojadeploy.com.br");
   await pix.getByLabel("Nome do recebedor").fill("Loja Deploy");
@@ -80,6 +88,9 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   await pix.getByRole("button", { name: "Salvar chave Pix" }).click();
   await owner.getByRole("dialog", { name: "Salvar esta chave Pix?" }).getByRole("button", { name: "Salvar chave" }).click();
   await expect(pix.getByText("Chave Pix salva.")).toBeVisible();
+  await owner.keyboard.press("Escape");
+  await expect(pix).toBeHidden();
+  await owner.getByRole("button", { name: "Conectar SMTP" }).click();
   const smtp = owner.locator("#smtp");
   await smtp.getByLabel("Servidor").fill("mailpit");
   await smtp.getByLabel("Porta", { exact: true }).fill("1025");
@@ -96,6 +107,7 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   const bigPath = join(OUT, "guia-grande.pdf");
   writeFileSync(bigPath, big);
   await owner.goto("/admin/products");
+  await owner.getByRole("button", { name: "Novo produto", exact: true }).click();
   await owner.getByLabel("Nome do produto").fill("Guia do deploy");
   await owner.getByLabel("Arquivo PDF do produto").setInputFiles(bigPath);
   await owner.getByRole("button", { name: "Criar produto" }).click();
@@ -105,7 +117,7 @@ test("instalação nova: setup, produto, oferta, Pix manual liberado e download 
   await owner.goto("/admin/offers/nova");
   await owner.getByLabel("Nome da oferta").fill("Guia do deploy");
   await owner.getByLabel("Preço", { exact: true }).fill("9,90");
-  await owner.getByLabel("Produto entregue").selectOption({ label: "Guia do deploy" });
+  await pickOption(owner, "Produto entregue", "Guia do deploy");
   await owner.getByLabel("Endereço (slug)").fill("guia-deploy");
   await owner.getByRole("button", { name: "Criar oferta" }).click();
   await expect(owner.getByText("Oferta criada.")).toBeVisible();
@@ -168,6 +180,7 @@ test("cartão isolado pelo Caddy: Asaas (falso) conectado e compra com cartão p
 
   // Asaas falso do smoke (127.0.0.1:4010 dentro do app e do card; tests/smoke.compose.yaml), conectado pelo painel.
   await owner.goto("/admin/connections");
+  await owner.getByRole("button", { name: "Conectar Asaas" }).click();
   const asaas = owner.locator("#asaas");
   await asaas.getByLabel("Chave de API").fill("fake-asaas-key");
   await asaas.getByRole("button", { name: "Conectar Asaas" }).click();
@@ -177,7 +190,7 @@ test("cartão isolado pelo Caddy: Asaas (falso) conectado e compra com cartão p
   await owner.goto("/admin/offers/nova");
   await owner.getByLabel("Nome da oferta").fill("Guia do deploy no cartão");
   await owner.getByLabel("Preço", { exact: true }).fill("9,90");
-  await owner.getByLabel("Produto entregue").selectOption({ label: "Guia do deploy" });
+  await pickOption(owner, "Produto entregue", "Guia do deploy");
   await owner.getByLabel("Endereço (slug)").fill("guia-cartao");
   await owner.getByLabel("Cartão de crédito").check();
   await owner.getByRole("button", { name: "Criar oferta" }).click();
