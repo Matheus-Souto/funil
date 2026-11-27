@@ -8,12 +8,13 @@ import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
 import { appTrial, auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
 import { parseEnv } from "@/lib/env";
-import type { Job } from "@/lib/jobs";
+import { enqueue, type Job } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
 import { releaseOrder, savePixManual } from "@/lib/payments/manual";
 import { refundOrder } from "@/lib/payments/refund";
 import { META_GRAPH_VERSION, buildMetaUserData, purchaseEventId, saveMeta, setMetaFetchForTests, testMeta } from "@/lib/tracking/meta";
+import { seedAppOffer, seedAppOrder, seedAppTrial } from "./app-fixtures";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeMeta, type FakeMeta } from "./fakes/meta";
 
@@ -361,6 +362,86 @@ describe("meta_event Purchase (API de Conversões)", () => {
     await runAction(refundOrder, panel(shop.storeId), { orderId: o.id });
     const jobs = await metaJobs(o.id);
     expect(jobs.map((j) => (j.payload as { event: string }).event)).toEqual(["Purchase"]);
+  });
+});
+
+describe("meta_event do pedido de app", () => {
+  const enqueueEvent = (storeId: string, payload: Record<string, unknown>) =>
+    withStore(storeId, (tx) => enqueue(tx, { storeId, type: "meta_event", payload }));
+
+  test("Purchase: external_id = sha256(conta), content_ids = [app_code], fbc/fbp do próprio pedido; conta nunca em claro", async () => {
+    const shop = await seedShop();
+    const app = await seedAppOffer(shop.storeId, { appCode: "start_anual" });
+    await seedAppTrial(shop.storeId, { account: "tenant-42", fbc: "fb.1.1700000000000.trial", fbp: "fb.1.1700000000000.111" });
+    const o = await seedAppOrder(shop.storeId, {
+      offerId: app.id,
+      account: "tenant-42",
+      email: "bia@exemplo.test",
+      totalCents: 29_900,
+      fbc: "fb.1.1700000000000.pedido",
+      fbp: "fb.1.1700000000000.222",
+    });
+    await enqueueEvent(shop.storeId, { event: "Purchase", orderId: o.id });
+    await runMetaJobs(o.id);
+    expect(meta.events).toHaveLength(1);
+    const ev = meta.events[0]!.event;
+    expect(ev.event_name).toBe("Purchase");
+    expect(ev.event_id).toBe(purchaseEventId(o.publicId));
+    expect(ev.custom_data).toEqual({ currency: "BRL", value: 299, content_ids: ["start_anual"], content_type: "product", order_id: o.publicId });
+    const ud = ev.user_data!;
+    expect(ud.external_id).toEqual([sha("tenant-42")]);
+    expect(ud.em).toEqual([sha("bia@exemplo.test")]);
+    expect(ud.fbc).toBe("fb.1.1700000000000.pedido");
+    expect(ud.fbp).toBe("fb.1.1700000000000.222");
+    const raw = JSON.stringify(ev);
+    for (const needle of ["tenant-42", "bia@exemplo.test", o.customerId, o.id]) expect([needle, raw.includes(needle)]).toEqual([needle, false]);
+  });
+
+  test("Purchase sem fbc/fbp no pedido: herda do app_trial da conta (campo a campo); teste de outra loja não vale", async () => {
+    const shop = await seedShop();
+    const app = await seedAppOffer(shop.storeId);
+    await seedAppTrial(shop.storeId, { account: "tenant-9", fbc: "fb.1.1700000000000.trial", fbp: "fb.1.1700000000000.333" });
+    const other = await seedShop({ meta: false });
+    await seedAppTrial(other.storeId, { account: "tenant-8", fbc: "fb.1.1700000000000.alheio", fbp: "fb.1.1700000000000.444" });
+
+    const both = await seedAppOrder(shop.storeId, { offerId: app.id, account: "tenant-9" });
+    const onlyFbp = await seedAppOrder(shop.storeId, { offerId: app.id, account: "tenant-9", email: "outra@exemplo.test", fbp: "fb.1.1700000000000.555" });
+    const foreign = await seedAppOrder(shop.storeId, { offerId: app.id, account: "tenant-8" });
+    for (const o of [both, onlyFbp, foreign]) {
+      await enqueueEvent(shop.storeId, { event: "Purchase", orderId: o.id });
+      await runMetaJobs(o.id);
+    }
+    const byOrder = new Map(meta.events.map((e) => [e.event.custom_data!.order_id, e.event.user_data!]));
+    expect(byOrder.get(both.publicId)).toMatchObject({ fbc: "fb.1.1700000000000.trial", fbp: "fb.1.1700000000000.333" });
+    expect(byOrder.get(onlyFbp.publicId)).toMatchObject({ fbc: "fb.1.1700000000000.trial", fbp: "fb.1.1700000000000.555" });
+    const f = byOrder.get(foreign.publicId)!;
+    expect([f.fbc, f.fbp]).toEqual([undefined, undefined]);
+    expect(f.external_id).toEqual([sha("tenant-8")]);
+  });
+
+  test("InitiateCheckout do pedido de app usa a mesma identidade (conta e app_code) do Purchase", async () => {
+    const shop = await seedShop();
+    const app = await seedAppOffer(shop.storeId, { appCode: "plus_anual" });
+    const o = await seedAppOrder(shop.storeId, { offerId: app.id, account: "tenant-ic", status: "pending" });
+    const eventId = randomUUID();
+    await enqueueEvent(shop.storeId, { event: "InitiateCheckout", orderId: o.id, eventId });
+    await runMetaJobs(o.id);
+    expect(meta.events).toHaveLength(1);
+    const ev = meta.events[0]!.event;
+    expect(ev.event_id).toBe(eventId);
+    expect(ev.event_source_url).toBe(`http://localhost:3000/c/${app.slug}`);
+    expect(ev.custom_data).toEqual({ currency: "BRL", value: 299, content_ids: ["plus_anual"], content_type: "product" });
+    expect(ev.user_data!.external_id).toEqual([sha("tenant-ic")]);
+  });
+
+  test("pedido download continua igual (external_id do cliente e ids de produto) mesmo com teste de app na loja", async () => {
+    const shop = await seedShop();
+    await seedAppTrial(shop.storeId, { account: "tenant-x", fbc: "fb.1.1700000000000.trial", fbp: "fb.1.1700000000000.666" });
+    const o = await paidOrder(shop);
+    await runMetaJobs(o.id);
+    const ev = meta.events[0]!.event;
+    expect(ev.custom_data!.content_ids).toEqual([shop.mainId, shop.bumpId]);
+    expect(ev.user_data).toMatchObject({ external_id: [sha(o.customerId)], fbc: "fb.1.1700000000000.abc", fbp: "fb.1.1700000000000.999" });
   });
 });
 

@@ -4,6 +4,9 @@
 //   - Purchase: `purchase:<publicId>` (nunca o id interno do pedido: a página pública também dispara com este id);
 //   - StartTrial: início do teste de um app (`apps.registerTrial`), com o `event_id` do registro de teste
 //     (`trial:<id>` ou o que o app mandou para deduplicar com o Pixel dele); marca em `conversion` por `trial_id`.
+// Pedido de app (`app_account` preenchido): `external_id` = SHA-256 da conta (o mesmo do StartTrial, o Meta liga o
+// teste ao pagamento), `content_ids = [app_code]` e `fbc`/`fbp` do teste da conta quando o pedido não tem. Pedido
+// `download`: `external_id` = SHA-256 do `customerId` e `content_ids` = ids de produto.
 // Reembolso não é enviado ao Meta. Nenhuma chamada ao Meta dentro de transação do banco.
 //
 // Versão da Graph API: v27.0 (a mais recente em 18/11/2026, lançada em 4/11/2026; fonte:
@@ -11,7 +14,8 @@
 // https://developers.facebook.com/documentation/ads-commerce/conversions-api/using-the-api).
 // Normalização dos dados (https://developers.facebook.com/documentation/ads-commerce/conversions-api/parameters/customer-information-parameters):
 // em = minúsculo e sem espaços; ph = só dígitos com código do país; fn/ln = minúsculos, sem pontuação, acentos
-// mantidos (UTF-8); country = código ISO de 2 letras minúsculo; tudo em SHA-256. external_id = SHA-256 do id do cliente.
+// mantidos (UTF-8); country = código ISO de 2 letras minúsculo; tudo em SHA-256. external_id = SHA-256 do id do cliente
+// (ou da conta, no app).
 // client_ip_address, client_user_agent, fbc e fbp vão sem hash.
 import { createHash } from "node:crypto";
 import { and, eq, isNotNull } from "drizzle-orm";
@@ -367,17 +371,13 @@ export const metaEventJob: JobHandler = async (j, signal) => {
 
     const conn = await getIntegration(tx, storeId, "meta");
     if (!conn?.secret) return { skip: "sem_conexao" };
-    const [of] = await tx.select({ slug: offer.slug, pixelId: offer.pixelId }).from(offer).where(eq(offer.id, o.offerId));
+    const [of] = await tx.select({ slug: offer.slug, pixelId: offer.pixelId, appCode: offer.appCode }).from(offer).where(eq(offer.id, o.offerId));
     const pixelId = validPixel(of?.pixelId) ?? validPixel((conn.config as MetaConfig).pixelId);
     if (!of || !pixelId) return { skip: "sem_pixel" };
     const [c] = await tx.select({ email: customer.email, name: customer.name, phone: customer.phone }).from(customer).where(eq(customer.id, o.customerId));
     const [s] = await tx.select({ domain: store.domain, slug: store.slug }).from(store).where(eq(store.id, storeId));
     if (!c || !s) throw new Error("pedido sem cliente ou loja");
-    const items = await tx
-      .select({ productId: orderItem.productId })
-      .from(orderItem)
-      .where(eq(orderItem.orderId, o.id))
-      .orderBy(...itemOrder); // ordem do pedido: principais e depois o bump, cada grupo na ordem da oferta
+    const identity = o.appAccount !== null ? await appIdentity(tx, storeId, o.appAccount, of.appCode, o) : await downloadIdentity(tx, o);
 
     const base = storeBaseUrl(s);
     const event = {
@@ -392,15 +392,15 @@ export const metaEventJob: JobHandler = async (j, signal) => {
         name: o.buyerName ?? c.name,
         ip: o.clientIp,
         ua: o.userAgent,
-        fbc: o.fbc,
-        fbp: o.fbp,
-        externalId: o.customerId,
+        fbc: identity.fbc,
+        fbp: identity.fbp,
+        externalId: identity.externalId,
       }),
       custom_data: {
         currency: "BRL",
         // Centavos inteiros até aqui; reais só na borda com o Meta.
         value: o.totalCents / 100,
-        content_ids: items.map((i) => i.productId),
+        content_ids: identity.contentIds,
         content_type: "product",
         ...(p.event === "Purchase" ? { order_id: o.publicId } : {}),
       },
@@ -442,6 +442,43 @@ export const metaEventJob: JobHandler = async (j, signal) => {
   );
   log.info("meta_event enviado", { orderId: p.orderId, event: p.event });
 };
+
+interface OrderIdentity {
+  externalId: string;
+  contentIds: string[];
+  fbc: string | null;
+  fbp: string | null;
+}
+
+/** Pedido `download`: cliente do pedido e os produtos, na ordem do pedido (principais e depois o bump). */
+async function downloadIdentity(tx: Tx, o: typeof orders.$inferSelect): Promise<OrderIdentity> {
+  const items = await tx.select({ productId: orderItem.productId }).from(orderItem).where(eq(orderItem.orderId, o.id)).orderBy(...itemOrder);
+  return { externalId: o.customerId, contentIds: items.map((i) => i.productId), fbc: o.fbc, fbp: o.fbp };
+}
+
+/**
+ * Pedido de app: a conta (o mesmo `external_id` do StartTrial) e o `app_code` da oferta. `fbc`/`fbp`, campo a campo,
+ * do pedido ou, sem eles, do teste da mesma conta nesta loja (o comprador costuma pagar dias depois do clique no
+ * anúncio, que ficou registrado no cadastro do app).
+ */
+async function appIdentity(
+  tx: Tx,
+  storeId: string,
+  account: string,
+  appCode: string | null,
+  o: { fbc: string | null; fbp: string | null },
+): Promise<OrderIdentity> {
+  let { fbc, fbp } = o;
+  if (!fbc || !fbp) {
+    const [tr] = await tx
+      .select({ fbc: appTrial.fbc, fbp: appTrial.fbp })
+      .from(appTrial)
+      .where(and(eq(appTrial.storeId, storeId), eq(appTrial.account, account)));
+    fbc ||= tr?.fbc ?? null;
+    fbp ||= tr?.fbp ?? null;
+  }
+  return { externalId: account, contentIds: appCode ? [appCode] : [], fbc, fbp };
+}
 
 /**
  * `StartTrial` do registro de teste: mesmo fluxo do pedido (lê numa transação curta, envia fora dela, marca
