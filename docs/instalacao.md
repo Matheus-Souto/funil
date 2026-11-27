@@ -289,6 +289,14 @@ No painel: **Conexões → Meta**.
 Eventos enviados: InitiateCheckout, AddPaymentInfo e Purchase, com o mesmo `event_id` no navegador e no servidor (o
 Meta deduplica). Detalhes em `docs/seguranca-pagamento.md`.
 
+### App com conta de usuário (Conexões → App (integração))
+
+Para cobrar um app (ex.: o PeticionaAqui) pelo funil: em **Conexões → App (integração)**, crie a chave da API, salve a
+URL do webhook do app (o segredo da assinatura aparece uma única vez), os hosts de retorno e o endereço público do app,
+e confira com **Enviar teste**. As ofertas do app são criadas com a entrega "app" e o código no app. O contrato
+completo para quem desenvolve o app (chamadas, avisos, assinatura e lista de conferência) está em
+[`docs/integracao-apps.md`](integracao-apps.md).
+
 ## 9. Página de vendas (Cloudflare) com o `t.js`
 
 O `t.js` leva as UTMs, o `fbclid` e a indicação (`?ref=`) da página de vendas para o checkout, para as vendas
