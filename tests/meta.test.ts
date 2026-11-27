@@ -2,10 +2,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
+import { registerTrial, trialEventId } from "@/lib/apps/trials";
 import { createOffer, getPublicOffer, setOfferPixel, setOfferProducts } from "@/lib/catalog/offers";
 import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
-import { auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
+import { appTrial, auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
 import { parseEnv } from "@/lib/env";
 import type { Job } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
@@ -402,6 +403,92 @@ describe("meta_event InitiateCheckout (checkout.start)", () => {
     // 16-64 caracteres url-safe também valem
     const c = await runAction(checkoutStart, pub(on.storeId), start(on.slug, "abcdefghijklmnop_-12"));
     expect(await metaJobs(c.orderId)).toHaveLength(1);
+  });
+});
+
+describe("meta_event StartTrial (início do teste do app)", () => {
+  const integ = (storeId: string) => ({ storeId, actor: { kind: "token", tokenId: randomUUID(), role: "integration" } as Actor, origin: "api" as const });
+  const trialJobs = (trialId: string) =>
+    t.ownerDb
+      .select()
+      .from(job)
+      .where(and(eq(job.type, "meta_event"), sql`${job.payload}->>'trialId' = ${trialId}`));
+  async function runTrialJobs(trialId: string): Promise<Job[]> {
+    const handler = getHandlers().meta_event!;
+    const rows = await trialJobs(trialId);
+    for (const j of rows) await handler(j, new AbortController().signal);
+    return rows;
+  }
+  const trialRow = async (storeId: string, id: string) => (await withStore(storeId, (tx) => tx.select().from(appTrial).where(eq(appTrial.id, id))))[0]!;
+
+  test("manda StartTrial com o event_id do registro, e-mail e conta em sha256, fbc, fbp, ip, user agent e value 0; não reenvia com marca sent", async () => {
+    const shop = await seedShop();
+    const started = new Date(Date.now() - 3_600_000);
+    const r = await runAction(registerTrial, integ(shop.storeId), {
+      conta: "tenant-7",
+      email: " Bia@Exemplo.com ",
+      origem: { fbc: "fb.1.1700000000000.clk", fbp: "fb.1.1700000000000.777" },
+      ip: "203.0.113.20",
+      user_agent: "Mozilla/5.0 cadastro",
+      iniciado_em: started.toISOString(),
+    });
+    const jobs = await runTrialJobs(r.id);
+    expect(jobs.map((j) => j.payload)).toEqual([{ event: "StartTrial", trialId: r.id }]);
+    expect(meta.events).toHaveLength(1);
+    const { pixelId, event: ev } = meta.events[0]!;
+    expect(pixelId).toBe(PIXEL);
+    expect(ev.event_name).toBe("StartTrial");
+    expect(ev.event_id).toBe(trialEventId(r.id));
+    expect(ev.event_time).toBe(Math.floor(started.getTime() / 1000));
+    expect(ev.action_source).toBe("website");
+    expect(ev.custom_data).toEqual({ value: 0, currency: "BRL" });
+    expect(ev.user_data).toMatchObject({
+      em: [sha("bia@exemplo.com")],
+      external_id: [sha("tenant-7")],
+      fbc: "fb.1.1700000000000.clk",
+      fbp: "fb.1.1700000000000.777",
+      client_ip_address: "203.0.113.20",
+      client_user_agent: "Mozilla/5.0 cadastro",
+    });
+    const raw = JSON.stringify(ev);
+    for (const needle of ["bia@exemplo.com", "Bia@Exemplo.com", "tenant-7"]) expect([needle, raw.includes(needle)]).toEqual([needle, false]);
+
+    // Marca por registro de teste; repetir o job não reenvia. Depois do envio, ip e user agent somem do registro.
+    await runTrialJobs(r.id);
+    expect(meta.events).toHaveLength(1);
+    const marks = await withStore(shop.storeId, (tx) => tx.select().from(conversion).where(eq(conversion.trialId, r.id)));
+    expect(marks.map((m) => [m.event, m.eventId, m.status, m.orderId])).toEqual([["StartTrial", trialEventId(r.id), "sent", null]]);
+    expect(await trialRow(shop.storeId, r.id)).toMatchObject({ clientIp: null, userAgent: null });
+  });
+
+  test("event_id enviado pelo app vai ao Meta (dedup com o Pixel do navegador)", async () => {
+    const shop = await seedShop();
+    const r = await runAction(registerTrial, integ(shop.storeId), { conta: "c-px", email: "px@exemplo.com", event_id: "pixel-do-app-0123456789" });
+    await runTrialJobs(r.id);
+    expect(meta.events.map((e) => e.event.event_id)).toEqual(["pixel-do-app-0123456789"]);
+  });
+
+  test("erro transitório: o job falha, sem marca e com ip guardado; permanente: marca failed e não reenvia", async () => {
+    const shop = await seedShop();
+    const r = await runAction(registerTrial, integ(shop.storeId), { conta: "c-err", email: "err@exemplo.com", ip: "203.0.113.30", user_agent: "UA" });
+    meta.failNext(1, 500, 2);
+    await expect(runTrialJobs(r.id)).rejects.toThrow();
+    expect(await trialRow(shop.storeId, r.id)).toMatchObject({ clientIp: "203.0.113.30" });
+    meta.failNext(1, 400, 100);
+    await runTrialJobs(r.id);
+    const marks = await withStore(shop.storeId, (tx) => tx.select().from(conversion).where(eq(conversion.trialId, r.id)));
+    expect(marks.map((m) => [m.status, m.errorCode])).toEqual([["failed", 100]]);
+    await runTrialJobs(r.id);
+    expect(meta.events).toHaveLength(0);
+  });
+
+  test("registro de teste apagado antes do envio: o job termina sem chamar o Meta", async () => {
+    const shop = await seedShop();
+    const r = await runAction(registerTrial, integ(shop.storeId), { conta: "c-gone", email: "gone@exemplo.com" });
+    const before = meta.requests.length; // o saveMeta da loja já testou o token
+    await t.ownerDb.delete(appTrial).where(eq(appTrial.id, r.id));
+    await runTrialJobs(r.id);
+    expect(meta.requests).toHaveLength(before);
   });
 });
 

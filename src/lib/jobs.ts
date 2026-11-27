@@ -23,7 +23,8 @@ export type JobType =
   | "sweep_leads"
   | "recovery_scan"
   | "recovery_send"
-  | "backfill_page_count";
+  | "backfill_page_count"
+  | "sweep_app_trials";
 export type Job = typeof job.$inferSelect;
 /** `signal` é abortado quando o tempo-limite estoura: o handler deve repassá-lo ao HTTP/SMTP que fizer. */
 export type JobHandler = (job: Job, signal: AbortSignal) => Promise<void>;

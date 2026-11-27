@@ -18,7 +18,7 @@ export function sweepLeadsRunAt(startup: boolean, nowMs: number = Date.now()): D
 }
 
 /**
- * Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders e recovery_scan a cada 5 min, sweep_watermarks diário, sweep_mcp e
+ * Liga o worker (intervalo de 2 s) e os agendamentos (expire_orders e recovery_scan a cada 5 min, sweep_watermarks e sweep_app_trials diários, sweep_mcp e
  * sweep_leads de hora em hora (o sweep_leads, o primeiro já ao subir), pci_page_monitor semanal). Devolve a função de parada.
  */
 export function startWorker(): () => void {
@@ -46,6 +46,10 @@ export function startWorker(): () => void {
     );
     void scheduleOnce("sweep_leads", sweepLeadsRunAt(startup)).catch((e: unknown) =>
       log.error("falha ao agendar sweep_leads", { error: e }),
+    );
+    // Retenção dos testes do app (ip e user agent em 7 dias, teste sem pagamento em 180): uma vez por dia.
+    void scheduleOnce("sweep_app_trials", new Date(Date.now() + SWEEP_EVERY_MS)).catch((e: unknown) =>
+      log.error("falha ao agendar sweep_app_trials", { error: e }),
     );
     // PCI DSS 11.6.1: cabeçalhos e scripts das páginas de pagamento conferidos em produção, toda semana.
     void scheduleOnce("pci_page_monitor", new Date(Date.now() + PCI_MONITOR_EVERY_MS)).catch((e: unknown) =>
