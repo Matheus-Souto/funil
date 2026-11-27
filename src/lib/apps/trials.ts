@@ -2,15 +2,17 @@
 // avisa logo depois do cadastro. Grava um registro de teste (`app_trial`) por (loja, conta) e enfileira o `StartTrial`
 // do Meta. O e-mail nunca é guardado em claro (só os hashes, como na recuperação de vendas); nome e telefone são
 // aceitos e descartados. ip e user agent só ficam enquanto o `StartTrial` não sai (o job os apaga ao terminar) e, no
-// máximo, 7 dias (`sweep_app_trials`); teste que não virou pagamento some em 180 dias (§7.9).
+// máximo, 7 dias (`sweep_app_trials`); teste que não virou pagamento some em 180 dias (§7.9). O mesmo job limpa as
+// sessões de pagamento vencidas (src/lib/apps/sessions.ts): sem pedido, apagadas 7 dias depois de vencer; com pedido,
+// a linha fica (o pedido aponta para ela) sem nome, e-mail e telefone (o pedido guarda os dele).
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
-import { and, eq, isNotNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction } from "@/lib/actions/core";
 import { sha256 } from "@/lib/crypto";
 import { db, withStore } from "@/lib/db/client";
-import { appTrial, orders, store } from "@/lib/db/schema";
+import { appCheckoutSession, appTrial, orders, store } from "@/lib/db/schema";
 import { enqueue, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { mailboxHash, recoveryEmailHash } from "@/lib/recovery/rules";
@@ -38,6 +40,8 @@ export const TRIAL_RETENTION_MAX_DAYS = 180;
 const SWEEP_CYCLE_DAYS = 1;
 export const TRIAL_CLIENT_DATA_SWEEP_DAYS = TRIAL_CLIENT_DATA_MAX_DAYS - SWEEP_CYCLE_DAYS;
 export const TRIAL_RETENTION_SWEEP_DAYS = TRIAL_RETENTION_MAX_DAYS - SWEEP_CYCLE_DAYS;
+/** Sessão de pagamento sem pedido: apagada este tanto de dias depois de vencer (reexportado por sessions.ts). */
+export const SESSION_RETENTION_DAYS = 7;
 
 const optionalText = (max: number) =>
   z
@@ -149,7 +153,9 @@ export const registerTrial = defineAction({
 /**
  * `sweep_app_trials` (global, diário): loja a loja (a tabela `store` não tem RLS), zera ip e user agent dos testes com
  * mais de 6 dias e apaga os testes com mais de 179 dias (um ciclo antes dos tetos de 7 e 180) cuja conta não tem pedido pago nesta loja (pago e depois
- * reembolsado ou contestado também segura: o teste fica enquanto o pedido existir). Falha numa loja não impede as
+ * reembolsado ou contestado também segura: o teste fica enquanto o pedido existir). Também limpa as sessões de
+ * pagamento: vencida com pedido perde nome, e-mail e telefone; sem pedido, apagada 7 dias depois de vencer (como a
+ * varredura é diária, até 8 dias no pior caso). Falha numa loja não impede as
  * demais; ao final, se alguma falhou, o job falha para tentar de novo. Log só com `storeId` e contagens.
  */
 export const sweepAppTrialsJob: JobHandler = async () => {
@@ -157,7 +163,7 @@ export const sweepAppTrialsJob: JobHandler = async () => {
   let failed = 0;
   for (const { id: storeId } of stores) {
     try {
-      const [cleared, deleted] = await withStore(storeId, async (tx) => [
+      const [cleared, deleted, sessionsCleared, sessionsDeleted] = await withStore(storeId, async (tx) => [
         await tx
           .update(appTrial)
           .set({ clientIp: null, userAgent: null })
@@ -177,8 +183,41 @@ export const sweepAppTrialsJob: JobHandler = async () => {
             ),
           )
           .returning({ id: appTrial.id }),
+        // Sessão vencida com pedido: o pedido já tem nome, telefone e o e-mail (no cliente); a sessão perde os dela. As
+        // colunas são `not null` desde a 0038: o apagamento grava texto vazio (sem migração nova só para isso).
+        await tx
+          .update(appCheckoutSession)
+          .set({ buyerName: "", buyerEmail: "", buyerPhone: null })
+          .where(
+            and(
+              lt(appCheckoutSession.expiresAt, sql`now()`),
+              isNotNull(appCheckoutSession.orderId),
+              or(sql`${appCheckoutSession.buyerName} <> ''`, sql`${appCheckoutSession.buyerEmail} <> ''`, isNotNull(appCheckoutSession.buyerPhone)),
+              sql`exists (select 1 from ${orders} where ${orders.storeId} = ${appCheckoutSession.storeId} and ${orders.id} = ${appCheckoutSession.orderId} and ${orders.buyerName} is not null)`,
+            ),
+          )
+          .returning({ id: appCheckoutSession.id }),
+        // Sessão sem pedido, vencida há mais de 7 dias: some (nenhum pedido aponta para ela).
+        await tx
+          .delete(appCheckoutSession)
+          .where(
+            and(
+              lt(appCheckoutSession.expiresAt, sql`now() - make_interval(days => ${SESSION_RETENTION_DAYS})`),
+              isNull(appCheckoutSession.orderId),
+              sql`not exists (select 1 from ${orders} where ${orders.storeId} = ${appCheckoutSession.storeId} and ${orders.appSessionId} = ${appCheckoutSession.id})`,
+            ),
+          )
+          .returning({ id: appCheckoutSession.id }),
       ]);
-      if (cleared.length > 0 || deleted.length > 0) log.info("retenção dos testes do app", { storeId, cleared: cleared.length, deleted: deleted.length });
+      if (cleared.length > 0 || deleted.length > 0 || sessionsCleared.length > 0 || sessionsDeleted.length > 0) {
+        log.info("retenção dos testes do app", {
+          storeId,
+          cleared: cleared.length,
+          deleted: deleted.length,
+          sessionsCleared: sessionsCleared.length,
+          sessionsDeleted: sessionsDeleted.length,
+        });
+      }
     } catch (e) {
       failed++;
       log.error("falha na retenção dos testes do app", { storeId, error: e });

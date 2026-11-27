@@ -752,7 +752,7 @@ describe("cartão: bilhete do pedido (iframe do serviço isolado)", () => {
     expect((await fail(run(b.cardTicket))).code).toBe("forbidden");
     expect((await fail(run(undefined))).code).toBe("invalid_input");
     const ok = await run(a.cardTicket);
-    expect(verifyCardTicket(ok.ticket, KEY)).toMatchObject({ storeId: s.storeId, publicId: a.publicId });
+    expect("ticket" in ok && verifyCardTicket(ok.ticket, KEY)).toMatchObject({ storeId: s.storeId, publicId: a.publicId });
   });
 
   test("checkout.renewCardTicket: a chave (e a hora) ficam fora da entrada: nem no schema, nem no catálogo de ações", async () => {

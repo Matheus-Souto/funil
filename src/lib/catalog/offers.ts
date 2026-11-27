@@ -8,7 +8,9 @@ import { bumpInput, checkOfferProducts, loadOfferProducts, productsFields, refin
 import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
 const id = z.uuid();
-const slug = z.string().regex(/^[a-z0-9-]{3,60}$/, "Use 3 a 60 caracteres: letras minúsculas, números e hífen");
+/** Endereço público da oferta (/c/<slug>): também o formato aceito em `oferta` pela API do app. */
+export const offerSlugSchema = z.string().regex(/^[a-z0-9-]{3,60}$/, "Use 3 a 60 caracteres: letras minúsculas, números e hífen");
+const slug = offerSlugSchema;
 const name = z.string().trim().min(1).max(200);
 const priceCents = z.number().int().positive().max(2_147_483_647);
 const methods = z.array(z.enum(["pix", "card"])).min(1).refine((m) => new Set(m).size === m.length, "Métodos repetidos");

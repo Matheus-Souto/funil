@@ -7,9 +7,11 @@ import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import s from "../../(design)/buyer.module.css";
 import { Icon } from "../../(design)/icons";
 import { BuyerShell } from "../../(design)/shell";
+import { APP_ACCESS_TEXT } from "../../c/[slug]/texts";
 import { regeneratePixAction } from "./actions";
 import { PurchasePixel } from "./pixel";
 import { CopyPixButton, OrderLive } from "./status";
+import { pendingView } from "./view";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Seu pedido", robots: { index: false } };
@@ -32,7 +34,7 @@ export default async function OrderPage({
 
   return (
     <BuyerShell storeName={store.name} brandColor={brandColor}>
-      {order.status === "pending" ? <OrderLive publicId={publicId} status={order.status} /> : null}
+      {order.status === "pending" ? <OrderLive publicId={publicId} status={order.status} sessionClosed={order.app?.sessionClosed ?? null} /> : null}
       <OrderBody order={order} storeName={store.name} publicId={publicId} pixNotice={typeof pixNotice === "string" ? pixNotice : undefined} />
     </BuyerShell>
   );
@@ -41,9 +43,17 @@ export default async function OrderPage({
 function OrderBody({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   switch (order.status) {
     case "pending":
-      if (order.method === "pix_manual") return <ManualPix order={order} storeName={storeName} />;
-      if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
-      return <CardPending order={order} />;
+      // Sessão do app encerrada antes de qualquer meio de pagamento (regra e exceção do cartão em `pendingView`).
+      switch (pendingView(order)) {
+        case "session_closed":
+          return <AppSessionClosed order={order} closed={order.app!.sessionClosed!} />;
+        case "pix_manual":
+          return <ManualPix order={order} storeName={storeName} />;
+        case "pix_asaas":
+          return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
+        default:
+          return <CardPending order={order} />;
+      }
     case "paid":
       return <ThankYou order={order} storeName={storeName} publicId={publicId} />;
     case "expired":
@@ -168,6 +178,7 @@ function ManualPix({ order, storeName }: { order: OrderPublic; storeName: string
 
 function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   const pix = order.pix;
+  const app = order.offer.delivery === "app";
   return (
     <main className={s.main}>
       <div className={s.banner} role="status" aria-live="polite">
@@ -195,13 +206,18 @@ function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPubli
                   : "O código Pix não ficou pronto. Toque abaixo para gerar um novo."}
               </span>
             </p>
-            {/* POST (server action): nunca é disparado por um simples GET da página. */}
-            <form action={regeneratePixAction.bind(null, publicId)}>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`}>
-                <Icon name="refresh-cw" size={20} />
-                Gerar novo código Pix
-              </button>
-            </form>
+            {/* POST (server action): nunca é disparado por um simples GET da página. Pedido de app com a sessão encerrada
+                (vencida ou já paga): sem novo código; o comprador volta ao app. */}
+            {app && !order.app?.sessionId ? (
+              <BackToApp order={order} />
+            ) : (
+              <form action={regeneratePixAction.bind(null, publicId)}>
+                <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`}>
+                  <Icon name="refresh-cw" size={20} />
+                  Gerar novo código Pix
+                </button>
+              </form>
+            )}
           </>
         )}
       </section>
@@ -230,15 +246,18 @@ function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPubli
       </section>
       {pix ? <QrCard pix={pix} amount={order.totalCents} size={184} /> : null}
       <p className={s.mailNote}>
-        <Icon name="mail" />
-        <span>Assim que o pagamento for confirmado, enviamos o acesso para o e-mail que você informou. Pode fechar esta página.</span>
+        <Icon name={app ? "smartphone" : "mail"} />
+        <span>
+          {app ? APP_ACCESS_TEXT : "Assim que o pagamento for confirmado, enviamos o acesso para o e-mail que você informou."} Pode fechar esta página.
+        </span>
       </p>
       <p className={s.foot}>
         Pedido #{order.code}
-        {order.offer.methods.includes("card") ? (
+        {order.offer.methods.includes("card") && retryHref(order, true) ? (
           <>
             {" · "}
-            <Link href={`/c/${order.offer.slug}?metodo=cartao`}>Pagar com cartão</Link>
+            {/* Pelo app, o cartão abre na mesma sessão (só enquanto ela serve; o checkout de app não abre sem ela). */}
+            <Link href={retryHref(order, true)!}>Pagar com cartão</Link>
           </>
         ) : null}
       </p>
@@ -257,7 +276,10 @@ function CardPending({ order }: { order: OrderPublic }) {
       <section className={`${s.card} ${s.center}`}>
         <p className={s.lead}>Estamos confirmando o pagamento de</p>
         <p className={`${s.bigAmount} ${s.money}`}>{brl(order.totalCents)}</p>
-        <p className={s.heroText}>Não pague de novo: assim que o banco responder, esta página mostra o resultado e o acesso chega no seu e-mail.</p>
+        <p className={s.heroText}>
+          Não pague de novo: assim que o banco responder, esta página mostra o resultado
+          {order.offer.delivery === "app" ? ". O acesso é liberado no app." : " e o acesso chega no seu e-mail."}
+        </p>
       </section>
       <p className={s.foot}>Pedido #{order.code}</p>
     </main>
@@ -278,22 +300,43 @@ function ThankYou({ order, storeName, publicId }: { order: OrderPublic; storeNam
           Obrigado pela compra{order.buyerFirstName ? `, ${order.buyerFirstName}` : ""}.
         </p>
       </div>
-      <section className={`${s.card} ${s.accessCard}`}>
-        <div className={s.accessTop}>
-          <span className={s.accessIcon}>
-            <Icon name="mail-check" size={22} />
-          </span>
-          <div>
-            <p className={s.accessTitle}>Enviamos o acesso para seu e-mail</p>
-            <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
-              No e-mail que você informou na compra.
-            </p>
+      {order.offer.delivery === "app" ? (
+        <section className={`${s.card} ${s.accessCard}`}>
+          <div className={s.accessTop}>
+            <span className={s.accessIcon}>
+              <Icon name="smartphone" size={22} />
+            </span>
+            <div>
+              <p className={s.accessTitle}>O acesso é liberado no app</p>
+              <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
+                Volte ao app para usar o que você comprou.
+              </p>
+            </div>
           </div>
-        </div>
-        <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 14, fontSize: 14 }}>
-          Não chegou em 5 minutos? Procure em <b style={{ color: "var(--color-text)" }}>Spam</b> ou <b style={{ color: "var(--color-text)" }}>Promoções</b>.
-        </p>
-      </section>
+          {order.app?.returnUrl ? (
+            <a className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`} href={order.app.returnUrl}>
+              Voltar ao app
+            </a>
+          ) : null}
+        </section>
+      ) : (
+        <section className={`${s.card} ${s.accessCard}`}>
+          <div className={s.accessTop}>
+            <span className={s.accessIcon}>
+              <Icon name="mail-check" size={22} />
+            </span>
+            <div>
+              <p className={s.accessTitle}>Enviamos o acesso para seu e-mail</p>
+              <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
+                No e-mail que você informou na compra.
+              </p>
+            </div>
+          </div>
+          <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 14, fontSize: 14 }}>
+            Não chegou em 5 minutos? Procure em <b style={{ color: "var(--color-text)" }}>Spam</b> ou <b style={{ color: "var(--color-text)" }}>Promoções</b>.
+          </p>
+        </section>
+      )}
       {order.thankYouText ? (
         <section className={s.card}>
           <p className={s.eyebrow}>Uma mensagem da {storeName}</p>
@@ -324,7 +367,70 @@ function ThankYou({ order, storeName, publicId }: { order: OrderPublic; storeNam
   );
 }
 
+/**
+ * Link de nova tentativa no checkout. Pedido de app: só com a sessão ainda utilizável (`?s=`); senão `null`, e a página
+ * orienta reabrir o pagamento pelo app. Pedido de download: o checkout da oferta, como antes.
+ */
+function retryHref(order: OrderPublic, card = false): string | null {
+  const q = new URLSearchParams();
+  if (order.offer.delivery === "app") {
+    if (!order.app?.sessionId) return null;
+    q.set("s", order.app.sessionId);
+  }
+  if (card) q.set("metodo", "cartao");
+  const qs = q.toString();
+  return `/c/${order.offer.slug}${qs ? `?${qs}` : ""}`;
+}
+
+/** Pedido de app sem sessão utilizável: nova tentativa só pelo app (com o botão de volta quando o app mandou o retorno). */
+function BackToApp({ order }: { order: OrderPublic }) {
+  return (
+    <>
+      <p className={`${s.p0} ${s.muted}`}>Para pagar de novo, abra o pagamento outra vez pelo app.</p>
+      {order.app?.returnUrl ? (
+        <a className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={order.app.returnUrl}>
+          Voltar ao app
+        </a>
+      ) : null}
+    </>
+  );
+}
+
+/** Pedido de app pendente com a sessão encerrada: só o desfecho e "Voltar ao app" (sem QR, código nem botões de pagar). */
+function AppSessionClosed({ order, closed }: { order: OrderPublic; closed: "paid" | "expired" }) {
+  const paid = closed === "paid";
+  return (
+    <main className={`${s.main} ${s.mainCenter}`}>
+      <div className={s.hero}>
+        <div className={s.heroIcon} data-tone="neutral">
+          <Icon name={paid ? "circle-check" : "timer-off"} size={30} />
+        </div>
+        <h1 className={`${s.heroTitle} ${s.heroTitleSm}`}>{paid ? "Pagamento já concluído" : "Link de pagamento vencido"}</h1>
+        <p className={s.heroText}>
+          {paid ? (
+            <>
+              Este link já foi pago em outro pedido. <b>Não pague de novo:</b> o acesso é liberado no app.
+            </>
+          ) : (
+            "Este link de pagamento venceu. Volte ao app e tente de novo."
+          )}
+        </p>
+      </div>
+      {order.app?.returnUrl ? (
+        <section className={`${s.card} ${s.actions}`}>
+          <a className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={order.app.returnUrl}>
+            Voltar ao app
+          </a>
+        </section>
+      ) : null}
+      <p className={s.foot}>Pedido #{order.code}</p>
+    </main>
+  );
+}
+
 function Expired({ order }: { order: OrderPublic }) {
+  const pixAgain = retryHref(order);
+  const cardAgain = order.offer.methods.includes("card") ? retryHref(order, true) : null;
   return (
     <main className={`${s.main} ${s.mainCenter}`}>
       <div className={s.hero}>
@@ -343,12 +449,16 @@ function Expired({ order }: { order: OrderPublic }) {
             <b className={s.money}>{brl(i.priceCents)}</b>
           </div>
         ))}
-        <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={`/c/${order.offer.slug}`}>
-          <Icon name="refresh-cw" size={20} />
-          Gerar novo Pix
-        </Link>
-        {order.offer.methods.includes("card") ? (
-          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.btnSecondary}`} href={`/c/${order.offer.slug}?metodo=cartao`}>
+        {pixAgain ? (
+          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={pixAgain}>
+            <Icon name="refresh-cw" size={20} />
+            Gerar novo Pix
+          </Link>
+        ) : (
+          <BackToApp order={order} />
+        )}
+        {cardAgain ? (
+          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.btnSecondary}`} href={cardAgain}>
             <Icon name="credit-card" size={20} />
             Pagar com cartão
           </Link>
@@ -382,9 +492,13 @@ function Closed({ order }: { order: OrderPublic }) {
       </div>
       {order.status === "declined" ? (
         <section className={`${s.card} ${s.actions}`}>
-          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={`/c/${order.offer.slug}`}>
-            Tentar de novo
-          </Link>
+          {retryHref(order) ? (
+            <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={retryHref(order)!}>
+              Tentar de novo
+            </Link>
+          ) : (
+            <BackToApp order={order} />
+          )}
         </section>
       ) : null}
       <p className={s.foot}>Pedido #{order.code}</p>

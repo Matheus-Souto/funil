@@ -453,8 +453,13 @@ async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged
   const known = rows.some(
     (r) => r.providerId === charged.id || (installment !== null && (r.raw as { installment?: string } | null)?.installment === installment),
   );
+  // Pedido de app expirado no meio da cobrança (a renovação do bilhete encerra o pedido quando a sessão vence ou outro
+  // pedido dela é pago, e o serviço cobra fora da trava): o dinheiro entrou, então segue como pagamento real
+  // (`expired -> paid`, como o Pix pago depois do vencimento) e a eleição da sessão (`enqueueAppNotice`) decide se ele
+  // libera no app ou é duplicado (alerta de reembolso).
+  const lateApp = o!.status === "expired" && o!.appAccount !== null;
   // Pedido já pago por outra cobrança (ex.: uma tentativa anterior de resultado desconhecido): pagamento em dobro.
-  const duplicate = paid && !known && o!.status !== "pending";
+  const duplicate = paid && !known && o!.status !== "pending" && !lateApp;
   if (!known) {
     const rawInfo = { ...(installment ? { installment } : {}), ...(duplicate ? { duplicate: true } : {}) };
     await tx
@@ -480,7 +485,7 @@ async function applyCharge(ctx: Ctx, orderId: string, attemptId: string, charged
   }
   if (!paid) return unknown();
   try {
-    await transitionOrder(ctx, orderId, "paid", "cartão aprovado no Asaas");
+    await transitionOrder(ctx, orderId, "paid", "cartão aprovado no Asaas", { allowFromExpired: lateApp });
   } catch (e) {
     if (!(e instanceof ActionError && e.code === "conflict")) throw e;
     log.warn("cartão aprovado em pedido que não aceita pagamento", { orderId, orderStatus: o!.status });

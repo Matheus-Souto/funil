@@ -4,25 +4,30 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { pollOrderStatus } from "@/lib/order-poll";
+import { liveKey } from "./view";
 import s from "../../(design)/buyer.module.css";
 import { Icon } from "../../(design)/icons";
 
-/** Recarrega a página (dados do servidor) quando o status do pedido muda. Não desenha nada. */
-export function OrderLive({ publicId, status }: { publicId: string; status: string }) {
+/**
+ * Recarrega a página (dados do servidor) quando o status do pedido muda ou, no pedido de app, quando a sessão fecha
+ * (paga por outro pedido dela, ou vencida). Não desenha nada.
+ */
+export function OrderLive({ publicId, status, sessionClosed = null }: { publicId: string; status: string; sessionClosed?: string | null }) {
   const router = useRouter();
   useEffect(
     () =>
       pollOrderStatus({
-        initial: status,
+        initial: liveKey(status, sessionClosed),
         fetchStatus: async () => {
           const res = await fetch(`/api/orders/${encodeURIComponent(publicId)}/status`, { cache: "no-store" });
           if (!res.ok) return null;
-          const body = (await res.json()) as { status?: unknown };
-          return typeof body.status === "string" ? body.status : null;
+          const body = (await res.json()) as { status?: unknown; sessionClosed?: unknown };
+          if (typeof body.status !== "string") return null;
+          return liveKey(body.status, typeof body.sessionClosed === "string" ? body.sessionClosed : null);
         },
         onChange: () => router.refresh(),
       }),
-    [publicId, status, router],
+    [publicId, status, sessionClosed, router],
   );
   return null;
 }
