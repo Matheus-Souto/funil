@@ -338,7 +338,7 @@ export async function createIntegrationKeyAction(name: string) {
 
 export async function revokeIntegrationKeyAction(id: string) {
   const panel = await requirePanelActor();
-  return call(panel, revokeMcpToken, { id }, () => "Chave revogada. O app deixou de acessar a API.");
+  return call(panel, revokeMcpToken, { id, onlyRole: "integration" }, () => "Chave revogada. O app deixou de acessar a API.");
 }
 
 export async function updateSettingsAction(input: unknown) {

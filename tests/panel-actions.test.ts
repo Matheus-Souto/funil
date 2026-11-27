@@ -8,7 +8,7 @@ import { createSession, lookupSession, SESSION_COOKIE } from "@/lib/auth/session
 import { connectionsStatus } from "@/lib/connections";
 import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
-import { auditLog, downloadLink, emailLog, integration, job, membership, offer, offerProduct, orderItem, payment, product, rateLimit, session, store, storeAlert, teamInvite, users } from "@/lib/db/schema";
+import { auditLog, downloadLink, emailLog, integration, job, mcpToken, membership, offer, offerProduct, orderItem, payment, product, rateLimit, session, store, storeAlert, teamInvite, users } from "@/lib/db/schema";
 import { saveSmtp, setMailTransportForTests, type SentMail } from "@/lib/delivery/mailer";
 import { centsToInput, parseBrl } from "@/lib/format";
 import { createIntegrationSecrets, getIntegration, saveIntegration } from "@/lib/integrations";
@@ -965,5 +965,35 @@ describe("Equipe e convites: server actions", () => {
     const state = await acceptInviteAction(null, form);
     expect(state).toEqual({ error: "As senhas não conferem.", name: "Pessoa Convidada" });
     expect(JSON.stringify(state)).not.toContain("senha-do-convidado");
+  });
+});
+
+describe("server actions das chaves de integração (cartão do app em Conexões)", () => {
+  async function ownerLoggedIn() {
+    const { storeId } = await seedStore("Loja do app");
+    const [u] = await t.ownerDb.insert(users).values({ email: `dono-${randomBytes(4).toString("hex")}@example.com`, name: "Dona", passwordHash: "x" }).returning({ id: users.id });
+    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "owner" });
+    jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
+    return { storeId, userId: u!.id };
+  }
+
+  test("createIntegrationKeyAction cria token com papel integration (a chave volta só no data); revokeIntegrationKeyAction só revoga chave integration", async () => {
+    const { createIntegrationKeyAction, createMcpTokenAction, revokeIntegrationKeyAction } = await import("@/app/admin/(panel)/actions");
+    const { storeId } = await ownerLoggedIn();
+    const created = await createIntegrationKeyAction("PeticionaAqui");
+    expect(created).toMatchObject({ ok: true, message: "Chave criada." });
+    if (!created.ok) return;
+    expect(created.data.role).toBe("integration");
+    expect(created.message).not.toContain(created.data.token);
+
+    const mcp = await createMcpTokenAction({ name: "Agente", role: "reader" });
+    if (!mcp.ok) throw new Error("token MCP não criado");
+    const refused = await revokeIntegrationKeyAction((mcp.data as { id: string }).id);
+    expect(refused).toMatchObject({ ok: false, code: "not_found" });
+
+    expect(await revokeIntegrationKeyAction(created.data.id)).toMatchObject({ ok: true, message: "Chave revogada. O app deixou de acessar a API." });
+    const rows = await withStore(storeId, (tx) => tx.select({ role: mcpToken.role, revokedAt: mcpToken.revokedAt }).from(mcpToken));
+    expect(rows.find((r) => r.role === "reader")?.revokedAt).toBeNull();
+    expect(rows.find((r) => r.role === "integration")?.revokedAt).toBeInstanceOf(Date);
   });
 });

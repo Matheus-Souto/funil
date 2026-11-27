@@ -11,10 +11,10 @@ import { integration } from "@/lib/db/schema";
 export const APP_RETURN_HOSTS_MAX = 10;
 
 /**
- * Nome de host DNS com pelo menos um ponto e o último rótulo em letras (o que já recusa IPv4 e `localhost`): sem
- * esquema, porta, caminho nem espaço. Rótulos de 1 a 63 caracteres, sem hífen na ponta; até 253 no total.
+ * Nome de host DNS com pelo menos um ponto e o último rótulo em letras ou punycode `xn--…` (o que já recusa IPv4 e
+ * `localhost`): sem esquema, porta, caminho nem espaço. Rótulos de 1 a 63 caracteres, sem hífen na ponta; até 253 no total.
  */
-const HOST_RE = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const HOST_RE = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$/;
 
 const HOST_MESSAGE = "Host de retorno inválido: use só o nome (ex.: app.exemplo.com.br), sem https://, porta nem caminho.";
 

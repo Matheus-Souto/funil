@@ -14,6 +14,15 @@ import { getIntegration, readIntegration } from "@/lib/integrations";
 import { parseTelegramConfig } from "@/lib/notify/telegram-connection";
 
 const str = (v: unknown) => (typeof v === "string" ? v : null);
+/** Só `https://host[:porta]` de uma URL (sem caminho nem busca), ou `null`. */
+const originOnly = (url: string | undefined): string | null => {
+  if (!url) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
 const baseUrl = () => env.BASE_URL.replace(/\/+$/, "");
 const webhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/asaas/${storeId}`;
 const resendWebhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/resend/${storeId}`;
@@ -122,8 +131,9 @@ export const connectionsStatus = defineAction({
         ? (() => {
             const c = parseAppWebhookConfig(app.config);
             return {
-              // A URL pode carregar uma credencial do app no caminho: token MCP só vê que existe (`secret`).
-              url: isToken ? null : (c.url ?? null),
+              // A URL pode carregar uma credencial do app no caminho ou na busca: inteira só para quem edita (como o
+              // token do webhook do Asaas); os demais do painel veem só a origem; token MCP, nada.
+              url: isToken ? null : canWrite ? (c.url ?? null) : originOnly(c.url),
               returnHosts: c.returnHosts ?? [],
               publicOrigin: c.publicOrigin ?? null,
               secret: app.unreadable ? ("unreadable" as const) : app.secret ? ("configured" as const) : null,

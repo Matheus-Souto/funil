@@ -1222,7 +1222,7 @@ export function AppCard({
       onClosed={() => setReveal(null)}
     >
       {reveal ? (
-        <div className={s.stack} ref={revealBox} tabIndex={-1} style={{ outline: "none", marginBottom: 16 }}>
+        <div className={`${s.stack} ${s.connReveal}`} ref={revealBox} tabIndex={-1}>
           <p role="alert" className={s.tokenWarn}>
             Copie agora: {reveal.kind === "secret" ? "o segredo" : "a chave"} não aparece de novo.
           </p>
@@ -1247,7 +1247,7 @@ export function AppCard({
         </div>
       ) : null}
 
-      <h3 className={s.h2} style={{ marginBottom: 12 }}>
+      <h3 className={`${s.h2} ${s.connSubhead}`}>
         Webhook do app
       </h3>
       {editing && canWrite ? (
@@ -1310,7 +1310,7 @@ export function AppCard({
                 Cancelar
               </button>
             ) : null}
-            <button type="submit" className={`${s.btn} ${s.btnPrimary}`}>
+            <button type="submit" className={`${s.btn} ${s.btnPrimary}`} disabled={reveal !== null}>
               {configured ? "Salvar alterações" : "Salvar webhook"}
             </button>
           </div>
@@ -1338,21 +1338,21 @@ export function AppCard({
               Editar
             </button>
           ) : null}
-          <button type="button" className={s.btn} onClick={() => setConfirm("rotate")}>
+          <button type="button" className={s.btn} disabled={reveal !== null} onClick={() => setConfirm("rotate")}>
             Gerar segredo novo
           </button>
-          <div style={{ width: "100%" }}>
+          <div className={s.connFull}>
             <Live msg={test.msg} />
           </div>
         </div>
       ) : null}
 
-      <div className={s.card} style={{ marginTop: 16, background: "var(--color-bg)" }}>
-        <h3 className={s.h2} style={{ marginBottom: 12 }}>
+      <div className={`${s.card} ${s.connInset}`}>
+        <h3 className={`${s.h2} ${s.connSubhead}`}>
           Chaves da API
         </h3>
         {canManageKeys ? (
-          <div className={s.stack} style={{ gap: 10 }}>
+          <div className={`${s.stack} ${s.connInsetStack}`}>
             {active.length > 0 ? (
               <div className={`${s.rows} ${s.factRows}`}>
                 {active.map((k) => (
@@ -1360,7 +1360,7 @@ export function AppCard({
                     <span>
                       {k.name} <span className={s.mono}>…{k.last4}</span>
                     </span>
-                    <span style={{ display: "inline-flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className={s.headActions}>
                       <small className={s.muted}>{k.lastUsedAt ? `usada em ${k.lastUsedAt}` : `criada em ${k.createdAt}, nunca usada`}</small>
                       <button type="button" className={s.linkBtn} onClick={() => setRevoking(k)} aria-label={`Revogar a chave ${k.name}`}>
                         Revogar
@@ -1370,12 +1370,12 @@ export function AppCard({
                 ))}
               </div>
             ) : (
-              <p className={s.muted} style={{ margin: 0 }}>
+              <p className={s.connNote}>
                 Nenhuma chave ativa. O app precisa de uma para registrar testes e criar pagamentos.
               </p>
             )}
             <form
-              style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}
+              className={s.headActions}
               onSubmit={async (e) => {
                 e.preventDefault();
                 await keyRun.run(() => createIntegrationKeyAction(keyName.trim()), {
@@ -1392,22 +1392,22 @@ export function AppCard({
               </label>
               <input
                 id="app-key-name"
-                className={s.input}
-                style={{ flex: "1 1 180px", minHeight: 36 }}
+                className={`${s.input} ${s.connKeyInput}`}
                 value={keyName}
                 required
                 maxLength={60}
                 placeholder="Nome da chave (ex.: PeticionaAqui produção)"
                 onChange={(e) => setKeyName(e.target.value)}
               />
-              <button type="submit" className={s.btn} disabled={keyRun.pending || keyName.trim() === ""}>
+              {/* Com um segredo ou chave na tela, outro "copie agora" o apagaria antes de ser copiado. */}
+              <button type="submit" className={s.btn} disabled={keyRun.pending || keyName.trim() === "" || reveal !== null}>
                 {keyRun.pending ? "Criando…" : "Criar chave"}
               </button>
             </form>
             <Live msg={revoking ? null : (revoke.msg ?? keyRun.msg)} />
           </div>
         ) : (
-          <p className={s.muted} style={{ margin: 0 }}>
+          <p className={s.connNote}>
             Só o dono da loja cria e revoga as chaves da API.
           </p>
         )}

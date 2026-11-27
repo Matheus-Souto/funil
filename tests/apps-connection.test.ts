@@ -11,9 +11,9 @@ import { rotateAppWebhookSecret, saveAppWebhook, testAppWebhook } from "@/lib/ap
 import { setAppWebhookForTests } from "@/lib/apps/webhook";
 import { connectionsStatus } from "@/lib/connections";
 import { withStore } from "@/lib/db/client";
-import { auditLog, membership, users } from "@/lib/db/schema";
+import { auditLog, integration, mcpToken, membership, users } from "@/lib/db/schema";
 import { readIntegration } from "@/lib/integrations";
-import { createMcpToken, listMcpTokens } from "@/lib/mcp/tokens";
+import { createMcpToken, listMcpTokens, revokeMcpToken } from "@/lib/mcp/tokens";
 import { MCP_EXCLUDED, mcpTools } from "@/lib/mcp/tools";
 import { startFakeApp, type FakeApp } from "./apps-helpers";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -127,6 +127,57 @@ describe("connections.saveAppWebhook", () => {
     expect((await withStore(storeId, (tx) => readIntegration(tx, storeId, "app_webhook")))?.config.publicOrigin).toBeUndefined();
   });
 
+  test("nome que não resolve no DNS: mensagem própria, diferente de 'precisa ser público'", async () => {
+    const { panel } = await store();
+    setAppWebhookForTests({
+      allowLoopback: false,
+      lookup: async () => {
+        throw new Error("ENOTFOUND");
+      },
+    });
+    const e = await failure(runAction(saveAppWebhook, panel, { url: "https://nao-existe.exemplo.com.br/webhook" }));
+    expect(e?.code).toBe("invalid_input");
+    expect(e?.message).toContain("não foi encontrado");
+    expect(e?.message).not.toContain("público");
+  });
+
+  test("hosts de retorno aceitam TLD punycode (xn--)", async () => {
+    const { storeId, panel } = await store();
+    await runAction(saveAppWebhook, panel, { url: "https://app.exemplo.com.br/webhook", returnHosts: ["app.exemplo.xn--p1ai", "XN--80AK6AA92E.com"] });
+    expect((await withStore(storeId, (tx) => readIntegration(tx, storeId, "app_webhook")))?.config.returnHosts).toEqual(["app.exemplo.xn--p1ai", "xn--80ak6aa92e.com"]);
+    expect(await code(runAction(saveAppWebhook, panel, { url: "https://app.exemplo.com.br/webhook", returnHosts: ["app.exemplo.xn--"] }))).toBe("invalid_input");
+  });
+
+  test("segredo guardado ilegível (SECRET trocado): a gravação gera outro e o mostra uma vez", async () => {
+    const { storeId, panel } = await store();
+    await t.ownerDb.insert(integration).values({ storeId, kind: "app_webhook", config: { url: "https://app.exemplo.com.br/webhook" }, secret: "v1.selo-que-nao-abre" });
+    expect((await runAction(connectionsStatus, panel, {})).app?.secret).toBe("unreadable");
+    const r = await runAction(saveAppWebhook, panel, { url: "https://app.exemplo.com.br/webhook" });
+    expect(typeof r.secret).toBe("string");
+    const conn = await withStore(storeId, (tx) => readIntegration(tx, storeId, "app_webhook"));
+    expect(conn).toMatchObject({ secret: r.secret, unreadable: false });
+  });
+
+  test("duas primeiras gravações ao mesmo tempo: um segredo só (o que ficou guardado), devolvido a uma delas", async () => {
+    const { storeId, panel } = await store();
+    const url = "https://app.exemplo.com.br/webhook";
+    const results = await Promise.all([runAction(saveAppWebhook, panel, { url }), runAction(saveAppWebhook, panel, { url }), runAction(saveAppWebhook, panel, { url })]);
+    const secrets = results.map((r) => r.secret).filter((x): x is string => typeof x === "string");
+    expect(secrets).toHaveLength(1);
+    expect((await withStore(storeId, (tx) => readIntegration(tx, storeId, "app_webhook")))?.secret).toBe(secrets[0]);
+  });
+
+  test("URL inteira só para quem edita (dono); admin e tráfego veem só a origem", async () => {
+    const { storeId, panel } = await store();
+    await runAction(saveAppWebhook, panel, { url: "https://app.exemplo.com.br/hooks/credencial-7f3a?k=1" });
+    expect((await runAction(connectionsStatus, panel, {})).app?.url).toBe("https://app.exemplo.com.br/hooks/credencial-7f3a?k=1");
+    for (const role of ["admin", "traffic"] as Role[]) {
+      const st = await runAction(connectionsStatus, as(storeId, role), {});
+      expect([role, st.app?.url]).toEqual([role, "https://app.exemplo.com.br"]);
+      expect(JSON.stringify(st)).not.toContain("credencial-7f3a");
+    }
+  });
+
   test("papel admin (sem connections.write) não salva, não gira o segredo e não testa", async () => {
     const { storeId } = await store();
     const admin = as(storeId, "admin");
@@ -163,6 +214,15 @@ describe("connections.rotateAppWebhookSecret e connections.testAppWebhook", () =
     const e = await failure(runAction(testAppWebhook, panel, {}));
     expect(e?.code).toBe("provider_error");
     expect(e?.message).toBe("O app não respondeu com 2xx (HTTP 500)");
+  });
+
+  test("limite do teste de envio também pelo painel: 10 por minuto por loja, o 11º → rate_limited sem chamar o app", async () => {
+    const { panel, path } = await store();
+    loopback();
+    await runAction(saveAppWebhook, panel, { url: `${app.base}${path}` });
+    for (let i = 0; i < 10; i++) expect(await code(runAction(testAppWebhook, panel, {}))).toBe("ok");
+    expect(await code(runAction(testAppWebhook, panel, {}))).toBe("rate_limited");
+    expect(app.hitsOf(path)).toHaveLength(10);
   });
 
   test("sem webhook configurado: testar e girar o segredo → conflict", async () => {
@@ -235,5 +295,16 @@ describe("chaves de integração", () => {
     expect((await runAction(listMcpTokens, panel, {})).map((x) => x.id)).toEqual([mcp.id]);
     expect((await runAction(listMcpTokens, panel, { kind: "mcp" })).map((x) => x.id)).toEqual([mcp.id]);
     expect((await runAction(listMcpTokens, panel, { kind: "integration" })).map((x) => x.id)).toEqual([key.id]);
+  });
+
+  test("revogar com onlyRole integration não alcança token do MCP; alcança a chave", async () => {
+    const { storeId, panel } = await ownerStore();
+    const mcp = await runAction(createMcpToken, panel, { name: "Claude da loja", role: "reader" });
+    const key = await runAction(createMcpToken, panel, { name: "PeticionaAqui", role: "integration" });
+    expect(await code(runAction(revokeMcpToken, panel, { id: mcp.id, onlyRole: "integration" }))).toBe("not_found");
+    expect(await runAction(revokeMcpToken, panel, { id: key.id, onlyRole: "integration" })).toEqual({ revoked: true });
+    const rows = await withStore(storeId, (tx) => tx.select({ id: mcpToken.id, revokedAt: mcpToken.revokedAt }).from(mcpToken));
+    expect(rows.find((r) => r.id === mcp.id)?.revokedAt).toBeNull();
+    expect(rows.find((r) => r.id === key.id)?.revokedAt).toBeInstanceOf(Date);
   });
 });

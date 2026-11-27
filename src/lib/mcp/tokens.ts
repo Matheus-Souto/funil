@@ -128,12 +128,17 @@ export async function revokeToken(tx: Tx, id: string): Promise<boolean> {
 
 export const revokeMcpToken = defineAction({
   name: "mcpTokens.revoke",
-  description: "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados).",
-  input: z.object({ id: z.uuid() }),
+  description:
+    "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados). `onlyRole: integration`: só revoga se for uma chave da API de integração (senão, não encontrado).",
+  input: z.object({ id: z.uuid(), onlyRole: z.literal("integration").optional() }),
   permission: "team.manage",
   sensitive: true,
-  async run(ctx, { id }) {
+  async run(ctx, { id, onlyRole }) {
     await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
+    if (onlyRole) {
+      const [row] = await ctx.tx.select({ role: mcpToken.role }).from(mcpToken).where(eq(mcpToken.id, id));
+      if (!row || row.role !== onlyRole) throw new ActionError("not_found", "Chave não encontrada");
+    }
     if (await revokeToken(ctx.tx, id)) return { revoked: true };
     const [found] = await ctx.tx.select({ id: mcpToken.id }).from(mcpToken).where(eq(mcpToken.id, id));
     if (!found) throw new ActionError("not_found", "Token não encontrado");

@@ -7,16 +7,27 @@
 // aprovação (o pedido e a resposta ficariam ao alcance do agente), e o teste só faz sentido junto da configuração.
 // Desvio consciente do §7.9, que previa a fila; `sensitive: true` continua valendo no painel (e barra qualquer token).
 import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { randomToken } from "@/lib/crypto";
-import { withStore } from "@/lib/db/client";
+import { withStore, type Tx } from "@/lib/db/client";
 import { readIntegration, saveIntegration, type IntegrationConfig } from "@/lib/integrations";
 import { limitConnectionTest } from "@/lib/mcp/limits";
+import { checkRateLimit } from "@/lib/payments/ratelimit";
 import { appPublicOriginSchema, appReturnHostsSchema, parseAppWebhookConfig } from "./config";
-import { appWebhookDestinationAllowed, sendAppWebhook } from "./webhook";
+import { appWebhookDestinationProblem, sendAppWebhook } from "./webhook";
 
 const URL_MAX = 2000;
+/** "Enviar teste" pelo painel também tem teto (o MCP nem chega aqui): por loja, por minuto. */
+const TEST_LIMIT = 10;
+const TEST_WINDOW_SEC = 60;
+
+/**
+ * Serializa, por loja, quem lê e grava a conexão do app (gravar, girar o segredo): duas primeiras gravações ao mesmo
+ * tempo não geram dois segredos (a segunda espera e já encontra o da primeira). Trava da transação, solta no fim dela.
+ */
+const lockAppConnection = (tx: Tx, storeId: string) => tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${"app_webhook:" + storeId}, 0))`);
 
 const invalid = (field: string, message: string) => new ActionError("invalid_input", message, [{ path: [field], message, code: "custom" }]);
 
@@ -33,8 +44,10 @@ async function checkWebhookUrl(raw: string): Promise<string> {
   }
   if (u.username !== "" || u.password !== "") throw invalid("url", "Tire usuário e senha da URL do webhook: o funil assina cada aviso com o segredo.");
   if (u.hash !== "") throw invalid("url", "A URL do webhook não pode ter # (fragmento).");
-  if (!(await appWebhookDestinationAllowed(u.toString()))) {
+  const problem = await appWebhookDestinationProblem(u.toString());
+  if (problem !== null) {
     if (u.protocol !== "https:") throw invalid("url", "Use uma URL https:// para o webhook do app.");
+    if (problem === "unresolved") throw invalid("url", "O endereço do webhook não foi encontrado (DNS): confira o domínio.");
     throw invalid("url", "O endereço do webhook precisa ser público na internet (não vale IP local, privado ou interno).");
   }
   return u.toString();
@@ -71,6 +84,7 @@ export const saveAppWebhook = defineAction({
   // A resolução de nomes (rede) fica fora da transação.
   prepare: async (_call, input) => ({ url: await checkWebhookUrl(input.url) }),
   async run(ctx, input, { url }) {
+    await lockAppConnection(ctx.tx, ctx.storeId);
     const current = await readIntegration(ctx.tx, ctx.storeId, "app_webhook");
     const prev = parseAppWebhookConfig(current?.config);
     const returnHosts = input.returnHosts ?? prev.returnHosts ?? [];
@@ -91,6 +105,7 @@ export const rotateAppWebhookSecret = defineAction({
   permission: "connections.write",
   sensitive: true,
   async run(ctx) {
+    await lockAppConnection(ctx.tx, ctx.storeId);
     const current = await readIntegration(ctx.tx, ctx.storeId, "app_webhook");
     if (!current || typeof current.config.url !== "string") throw new ActionError("conflict", "Configure o webhook do app antes de gerar um segredo.");
     const secret = randomToken(32);
@@ -114,6 +129,9 @@ export const testAppWebhook = defineAction({
   // O envio (rede) acontece aqui, fora da transação; `run` só devolve o código.
   async prepare(call) {
     await limitConnectionTest(call.actor, "testAppWebhook", call.storeId);
+    if (!(await checkRateLimit(`apptest:${call.storeId}`, TEST_LIMIT, TEST_WINDOW_SEC))) {
+      throw new ActionError("rate_limited", "Muitos testes seguidos. Espere um minuto e tente de novo.");
+    }
     const conn = await withStore(call.storeId, (tx) => readIntegration(tx, call.storeId, "app_webhook"));
     const url = typeof conn?.config.url === "string" ? conn.config.url : null;
     if (!url) throw new ActionError("conflict", "Configure o webhook do app antes de testar.");
