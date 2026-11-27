@@ -14,7 +14,7 @@ import { fieldsMessage } from "@/lib/card-frame/protocol";
 import type { CheckoutMethod as Method, CheckoutOffer } from "@/lib/catalog/checkout-offer";
 import { brl } from "@/lib/format";
 import { installmentsFor } from "@/lib/payments/installments";
-import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
+import { maskTaxId, normalizeBrMobile, onlyDigits, validEmail, validTaxId } from "@/lib/validation/br";
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
 import { TrustSeals } from "../../(design)/shell";
@@ -61,10 +61,6 @@ const maskPhone = (v: string) => {
   if (d.length <= 2) return d.length ? `(${d}` : "";
   if (d.length <= 7) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
   return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
-};
-const maskCpf = (v: string) => {
-  const d = onlyDigits(v).slice(0, 11);
-  return d.replace(/^(\d{3})(\d)/, "$1.$2").replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d{1,2})$/, ".$1-$2");
 };
 /** Caminho de erro do servidor (zod do checkout) -> campo do formulário. */
 function fieldFromPath(path: string): FieldKey | null {
@@ -304,12 +300,15 @@ export function CheckoutForm(props: {
   // Parcelas: a mesma conta do servidor (`installmentsFor`). Com cupom aplicado, pelo total mostrado (com desconto) e
   // nenhuma abaixo de R$ 5,00; sem cupom, as da oferta (R-V1). Vale para o "Em até Nx" e para o iframe.
   const maxInstallments = installmentsFor(offer.maxInstallments, total, { discounted: coupon.kind === "applied" });
-  const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments, brandColor });
+  /** Loja que aceita CPF ou CNPJ (escritórios pagam pela empresa); sem a opção, só CPF. */
+  const acceptCnpj = offer.acceptCnpj;
+  const docLabel = acceptCnpj ? "CPF ou CNPJ" : "CPF";
+  const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments, brandColor, acceptCnpj });
   useEffect(() => {
     // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.
-    frameConfig.current = { totalCents: total, maxInstallments, brandColor };
+    frameConfig.current = { totalCents: total, maxInstallments, brandColor, acceptCnpj };
     frameCtrl.current?.setConfig(frameConfig.current);
-  }, [total, maxInstallments, brandColor]);
+  }, [total, maxInstallments, brandColor, acceptCnpj]);
 
   useEffect(() => {
     const want = couponFocus.current;
@@ -379,8 +378,8 @@ export function CheckoutForm(props: {
     if (!normalizeBrMobile(v.phone)) e.phone = "Informe um celular com DDD, ex.: (11) 98765-4321.";
     const needCpf = m === "card" || asaasPix || needsCpf;
     if (needCpf) {
-      if (!onlyDigits(v.cpf)) e.cpf = "Informe o CPF.";
-      else if (!validCpf(onlyDigits(v.cpf))) e.cpf = "CPF inválido. Confira os 11 números.";
+      if (!onlyDigits(v.cpf)) e.cpf = `Informe o ${docLabel}.`;
+      else if (!validTaxId(onlyDigits(v.cpf), acceptCnpj)) e.cpf = acceptCnpj ? "CPF ou CNPJ inválido. Confira os números." : "CPF inválido. Confira os 11 números.";
     }
     return e;
   }
@@ -421,7 +420,7 @@ export function CheckoutForm(props: {
     }
     if (r.needsCpf) {
       setNeedsCpf(true);
-      setErrors({ cpf: "Informe o CPF para continuar." });
+      setErrors({ cpf: `Informe o ${docLabel} para continuar.` });
       setFormError(r.message);
       return;
     }
@@ -670,13 +669,13 @@ export function CheckoutForm(props: {
               <div className={s.stack} style={{ marginTop: 14 }}>
                 <Field
                   id="cpf"
-                  label="CPF"
+                  label={docLabel}
                   value={v.cpf}
-                  onChange={set("cpf", maskCpf)}
+                  onChange={set("cpf", (x) => maskTaxId(x, acceptCnpj))}
                   error={errors.cpf}
                   hint={method === "card" ? "Exigido para pagar com cartão." : "Exigido pelo Pix para gerar a cobrança no seu nome."}
                   inputMode="numeric"
-                  placeholder="000.000.000-00"
+                  placeholder={acceptCnpj ? "CPF ou CNPJ" : "000.000.000-00"}
                 />
               </div>
             ) : null}

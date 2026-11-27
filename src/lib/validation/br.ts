@@ -15,6 +15,33 @@ export function validCpf(d: string): boolean {
   return true;
 }
 
+/** CNPJ com dígitos verificadores corretos (14 dígitos, não todos iguais). Recebe só dígitos. */
+export function validCnpj(d: string): boolean {
+  if (!/^\d{14}$/.test(d) || /^(\d)\1{13}$/.test(d)) return false;
+  for (const n of [12, 13]) {
+    const w = n === 12 ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += Number(d[i]) * w[i]!;
+    const r = sum % 11;
+    if ((r < 2 ? 0 : 11 - r) !== Number(d[n])) return false;
+  }
+  return true;
+}
+
+/** Documento do comprador: CPF sempre; CNPJ só na loja que aceita (`store.accept_cnpj`). Recebe só dígitos. */
+export function validTaxId(d: string, acceptCnpj: boolean): boolean {
+  return validCpf(d) || (acceptCnpj && validCnpj(d));
+}
+
+/** Máscara do documento enquanto digita: CPF até 11 dígitos; com CNPJ aceito, passa a CNPJ do 12º dígito em diante. */
+export function maskTaxId(v: string, acceptCnpj: boolean): string {
+  const d = onlyDigits(v).slice(0, acceptCnpj ? 14 : 11);
+  if (d.length <= 11) {
+    return d.replace(/^(\d{3})(\d)/, "$1.$2").replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d{1,2})$/, ".$1-$2");
+  }
+  return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{0,2})$/, (_, a, b, c, e, f) => `${a}.${b}.${c}/${e}${f ? `-${f}` : ""}`);
+}
+
 /** DDDs válidos no Brasil (Anatel). */
 const DDD = new Set([
   11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 24, 27, 28, 31, 32, 33, 34, 35, 37, 38, 41, 42, 43, 44, 45, 46, 47, 48, 49,

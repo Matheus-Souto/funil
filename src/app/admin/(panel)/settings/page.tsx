@@ -28,7 +28,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     <>
       <PageHead title="Configurações" />
       <SettingsPanel
-        initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "", recovery: st.recovery }}
+        initial={{ name: st.name, notifyEmail: st.notifyEmail ?? "", brandColor: st.brandColor, leadCapture: st.leadCapture, privacyEmail: st.privacyEmail ?? "", recovery: st.recovery, acceptCnpj: st.acceptCnpj }}
         canWrite={canWrite}
         initialTab={initialTab}
         script={

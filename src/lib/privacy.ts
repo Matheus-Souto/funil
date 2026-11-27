@@ -52,10 +52,14 @@ export function maskPhone(v: string | null | undefined): string | null {
   return d.length < 4 ? "(**) *****-****" : `(**) *****-${d.slice(-4)}`;
 }
 
-/** "52998224725" -> "***.982.247-**" (só os dígitos do meio, para conferência com o comprador). */
+/**
+ * "52998224725" -> "***.982.247-**" (só os dígitos do meio, para conferência com o comprador). CNPJ (loja que aceita):
+ * "11222333000181" -> "**.222.333/****-**".
+ */
 export function maskCpf(cpf: string | null | undefined): string | null {
   if (!cpf) return null;
   const d = cpf.replace(/\D/g, "");
+  if (d.length === 14) return `**.${d.slice(2, 5)}.${d.slice(5, 8)}/****-**`;
   if (d.length !== 11) return "***";
   return `***.${d.slice(3, 6)}.${d.slice(6, 9)}-**`;
 }

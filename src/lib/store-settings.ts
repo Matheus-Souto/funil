@@ -1,4 +1,5 @@
-// Configurações da loja no painel: nome, e-mail para aviso de venda, cor do checkout e o trecho do t.js.
+// Configurações da loja no painel: nome, e-mail para aviso de venda, cor do checkout, CPF ou CNPJ no checkout e o trecho
+// do t.js.
 // A tabela `store` não tem RLS: toda leitura/escrita aqui filtra por `ctx.storeId` (a loja do ator).
 import { eq } from "drizzle-orm";
 import { z } from "zod";
@@ -13,7 +14,7 @@ const HEX = /^#[0-9a-f]{6}$/i;
 export const getStoreSettings = defineAction({
   name: "store.getSettings",
   description:
-    "Dados da loja para o painel: nome, e-mail de aviso de venda, cor do checkout, captura de contato (liga/desliga e e-mail de privacidade), recuperação de vendas por e-mail (liga/desliga e os três casos), endereço do checkout e trecho do t.js.",
+    "Dados da loja para o painel: nome, e-mail de aviso de venda, cor do checkout, CPF ou CNPJ no checkout (acceptCnpj), captura de contato (liga/desliga e e-mail de privacidade), recuperação de vendas por e-mail (liga/desliga e os três casos), endereço do checkout e trecho do t.js.",
   input: z.object({}),
   permission: "connections.read",
   audit: false,
@@ -29,6 +30,7 @@ export const getStoreSettings = defineAction({
       leadCapture: s.leadCapture,
       privacyEmail: s.privacyEmail,
       recovery: { on: s.recoveryOn, lead: s.recoveryLead, pix: s.recoveryPix, card: s.recoveryCard },
+      acceptCnpj: s.acceptCnpj,
       checkoutBaseUrl: base,
       trackingSnippet: trackingSnippet(base),
     };
@@ -38,7 +40,7 @@ export const getStoreSettings = defineAction({
 export const updateStoreSettings = defineAction({
   name: "store.updateSettings",
   description:
-    "Altera o nome da loja, o e-mail que recebe o aviso de venda, a cor do checkout (#RRGGBB ou null = padrão) e a captura de contato de quem não finaliza a compra (só liga com o e-mail público de privacidade preenchido) e a recuperação de vendas por e-mail (liga/desliga e os casos lead, pix e cartão; só liga com o e-mail da loja conectado em Conexões).",
+    "Altera o nome da loja, o e-mail que recebe o aviso de venda, a cor do checkout (#RRGGBB ou null = padrão) e a captura de contato de quem não finaliza a compra (só liga com o e-mail público de privacidade preenchido) e a recuperação de vendas por e-mail (liga/desliga e os casos lead, pix e cartão; só liga com o e-mail da loja conectado em Conexões). acceptCnpj: o checkout aceita CPF ou CNPJ (Pix do Asaas e titular do cartão); desligado, só CPF.",
   input: z.object({
     name: z.string().trim().min(1, "Informe o nome da loja").max(100),
     notifyEmail: z.string().trim().toLowerCase().max(254).pipe(z.email("E-mail inválido")).nullable(),
@@ -50,6 +52,8 @@ export const updateStoreSettings = defineAction({
     privacyEmail: z.string().trim().toLowerCase().max(254).pipe(z.email("E-mail inválido")).nullable().optional(),
     /** Omitida: mantém. Ligar `on` exige conexão salva do provedor de e-mail ativo da loja. */
     recovery: z.object({ on: z.boolean(), lead: z.boolean(), pix: z.boolean(), card: z.boolean() }).optional(),
+    /** Omitida: mantém. Ligada, o checkout aceita CPF ou CNPJ (Pix do Asaas e titular do cartão). */
+    acceptCnpj: z.boolean().optional(),
   }),
   permission: "connections.write",
   // O e-mail de aviso recebe nome e e-mail dos compradores: MCP/IA precisam de aprovação.
@@ -77,6 +81,7 @@ export const updateStoreSettings = defineAction({
       ...(input.recovery
         ? { recoveryOn: input.recovery.on, recoveryLead: input.recovery.lead, recoveryPix: input.recovery.pix, recoveryCard: input.recovery.card }
         : {}),
+      ...(input.acceptCnpj !== undefined ? { acceptCnpj: input.acceptCnpj } : {}),
       ...(input.brandColor !== undefined ? { brandColor: input.brandColor === null ? null : input.brandColor.toUpperCase() } : {}),
     };
     const [row] = await ctx.tx

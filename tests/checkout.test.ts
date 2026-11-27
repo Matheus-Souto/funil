@@ -23,6 +23,7 @@ import {
   checkoutStart,
   checkoutView as checkoutViewAction,
   getOrderPublic,
+  requireTaxId,
   handleOrderStatus,
   regenerateOrderPix,
   renewCardTicket,
@@ -60,6 +61,8 @@ const nextIp = () => `203.0.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
 const email = () => `c-${randomUUID()}@example.com`;
 const CPF = "52998224725";
 const CPF_B = "11144477735";
+/** CNPJ sintético com dígitos verificadores válidos (exemplo clássico de documentação, não é de empresa real). */
+const CNPJ = "11222333000181";
 
 type Over = Record<string, unknown> & { customer?: Record<string, unknown> };
 function startInput(slug: string, over: Over = {}) {
@@ -1178,5 +1181,91 @@ describe("oferta de app no checkout (Task 5)", () => {
       expect([e.code, e.message]).toEqual(["invalid_input", "Abra o pagamento pelo app"]);
     }
     expect(await withStore(s.storeId, (tx) => tx.select().from(orders))).toEqual([]);
+  });
+});
+
+describe("CPF ou CNPJ por loja (Task 8)", () => {
+  const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+  const acceptCnpj = (storeId: string, on = true) => t.ownerDb.update(store).set({ acceptCnpj: on }).where(eq(store.id, storeId));
+  const refused = (f: () => unknown) => {
+    try {
+      f();
+    } catch (e) {
+      return e as ActionError;
+    }
+    throw new Error("esperava erro");
+  };
+
+  test("requireTaxId: mensagens com e sem CNPJ, no campo customer.cpf; devolve os dígitos", () => {
+    const cases: [string | undefined, boolean, string][] = [
+      [undefined, false, "Informe o CPF"],
+      ["", false, "Informe o CPF"],
+      [undefined, true, "Informe o CPF ou CNPJ"],
+      ["12345678900", false, "CPF inválido. Confira os 11 números."],
+      [CNPJ, false, "CPF inválido. Confira os 11 números."],
+      ["12345678900", true, "CPF ou CNPJ inválido. Confira os números."],
+      ["11222333000182", true, "CPF ou CNPJ inválido. Confira os números."],
+    ];
+    for (const [doc, accept, message] of cases) {
+      const e = refused(() => requireTaxId(doc, { acceptCnpj: accept }));
+      expect([doc, accept, e.code, e.message]).toEqual([doc, accept, "invalid_input", message]);
+      expect(e.details).toEqual([{ path: ["customer", "cpf"], message }]);
+    }
+    expect(requireTaxId(CPF, { acceptCnpj: false })).toBe(CPF);
+    expect(requireTaxId(CPF, { acceptCnpj: true })).toBe(CPF);
+    expect(requireTaxId(CNPJ, { acceptCnpj: true })).toBe(CNPJ);
+  });
+
+  test("Pix do Asaas: CNPJ aceito com a opção (o cliente do Asaas recebe o CNPJ); sem ela, a mensagem do CPF", async () => {
+    const fake = createFakeAsaas();
+    const s = await seed({ pixMode: "asaas", asaas: fake });
+    const off = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { customer: { cpf: "11.222.333/0001-81" } })));
+    expect([off.code, off.message]).toEqual(["invalid_input", "CPF inválido. Confira os 11 números."]);
+    await acceptCnpj(s.storeId);
+    const r = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { customer: { cpf: "11.222.333/0001-81" } }));
+    const o = await orderBy(s.storeId, r.publicId);
+    expect(o.buyerCpf).toBe(CNPJ);
+    expect((await customerOf(s.storeId, o.customerId)).cpf).toBe(CNPJ);
+    expect([...fake.customers.values()].at(-1)).toMatchObject({ cpfCnpj: CNPJ });
+    const bad = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { customer: { cpf: "11.222.333/0001-82" } })));
+    expect([bad.code, bad.message]).toEqual(["invalid_input", "CPF ou CNPJ inválido. Confira os números."]);
+    const missing = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug)));
+    expect([missing.code, missing.message]).toEqual(["invalid_input", "Informe o CPF ou CNPJ"]);
+    // CPF continua valendo na loja com a opção.
+    expect((await runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { customer: { cpf: CPF } }))).method).toBe("pix_asaas");
+  });
+
+  test("cartão: CNPJ do comprador com a opção; o bilhete leva acceptCnpj (também na renovação) só na loja que aceita", async () => {
+    const s = await seed({ asaas: createFakeAsaas() });
+    const before = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CPF } }), { cardTicketKey: KEY });
+    expect(verifyCardTicket(before.cardTicket!, KEY)).not.toHaveProperty("acceptCnpj");
+    const off = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { method: "card", customer: { cpf: CNPJ } })));
+    expect(off.message).toBe("CPF inválido. Confira os 11 números.");
+    await acceptCnpj(s.storeId);
+    const card = await startCheckout({ storeId: s.storeId }, startInput(s.slug, { method: "card", customer: { cpf: CNPJ } }), { cardTicketKey: KEY });
+    expect((await orderBy(s.storeId, card.publicId)).buyerCpf).toBe(CNPJ);
+    expect(verifyCardTicket(card.cardTicket!, KEY)).toMatchObject({ publicId: card.publicId, acceptCnpj: true });
+    const renewed = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY);
+    expect(verifyCardTicket(renewed, KEY)).toMatchObject({ publicId: card.publicId, acceptCnpj: true });
+    // Opção desligada depois: o bilhete renovado deixa de aceitar CNPJ no titular.
+    await acceptCnpj(s.storeId, false);
+    const again = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: renewed }, KEY);
+    expect(verifyCardTicket(again, KEY)).not.toHaveProperty("acceptCnpj");
+  });
+
+  test("bilhete: acceptCnpj vai e volta assinado; sem a opção, o corpo é o de sempre", () => {
+    const base = { storeId: randomUUID(), orderId: randomUUID(), publicId: "ped_1", totalCents: 990, maxInstallments: 1 };
+    expect(verifyCardTicket(issueCardTicket({ ...base, acceptCnpj: true }, KEY), KEY)).toEqual({ ...base, acceptCnpj: true });
+    const plain = issueCardTicket(base, KEY);
+    expect(verifyCardTicket(plain, KEY)).toEqual(base);
+    expect(JSON.parse(Buffer.from(plain.split(".")[0]!, "base64url").toString())).not.toHaveProperty("c");
+  });
+
+  test("página: getPublic e checkoutOffer dizem se a loja aceita CNPJ", async () => {
+    const s = await seed();
+    const read = async () => checkoutOffer(await runAction(getPublicOffer, pub(s.storeId), { slug: s.slug }), ["pix"]).acceptCnpj;
+    expect(await read()).toBe(false);
+    await acceptCnpj(s.storeId);
+    expect(await read()).toBe(true);
   });
 });

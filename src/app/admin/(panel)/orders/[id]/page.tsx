@@ -274,7 +274,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             </p>
             {d.buyer.cpfMasked ? (
               <p style={{ margin: "2px 0 0" }} className={s.muted}>
-                CPF {d.buyer.cpfMasked}
+                {d.buyer.cpfMasked.includes("/") ? "CNPJ" : "CPF"} {d.buyer.cpfMasked}
               </p>
             ) : null}
           </section>

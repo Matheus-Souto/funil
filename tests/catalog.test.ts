@@ -469,6 +469,7 @@ describe("offers", () => {
       thankYouText: "Obrigado!",
       pixelId: null,
       leadCapture: null,
+      acceptCnpj: false,
     });
     const json = JSON.stringify(res);
     for (const leak of ["fileKey", "file_key", "fileName", "storeId", "products/"]) expect(json).not.toContain(leak);

@@ -371,7 +371,10 @@ export const getPublicOffer = defineAction({
     if (!app && (main.length === 0 || main.some((p) => p.deletedAt))) throw new ActionError("not_found", "Oferta não encontrada");
     const hasBump = !app && bump.length > 0 && o.bumpPriceCents !== null && !bump.some((p) => p.deletedAt);
     // Aviso de captura de contato: só com a captura ligada. O e-mail de privacidade é público (aparece no aviso).
-    const [st] = await ctx.tx.select({ on: store.leadCapture, privacyEmail: store.privacyEmail }).from(store).where(eq(store.id, ctx.storeId));
+    const [st] = await ctx.tx
+      .select({ on: store.leadCapture, privacyEmail: store.privacyEmail, acceptCnpj: store.acceptCnpj })
+      .from(store)
+      .where(eq(store.id, ctx.storeId));
     const names = (ps: ProductRef[]) => ps.map((p) => ({ name: p.name }));
     return {
       id: o.id,
@@ -388,6 +391,8 @@ export const getPublicOffer = defineAction({
       thankYouText: o.thankYouText,
       pixelId: await pixelIdFor(ctx.tx, ctx.storeId, o.pixelId),
       leadCapture: st?.on && st.privacyEmail ? { privacyEmail: st.privacyEmail } : null,
+      /** A loja aceita CPF ou CNPJ no checkout (só CPF sem a opção). */
+      acceptCnpj: st?.acceptCnpj ?? false,
     };
   },
 });

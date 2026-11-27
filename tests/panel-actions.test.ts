@@ -480,6 +480,7 @@ describe("maskCpf", () => {
     expect(maskCpf("52998224725")).toBe("***.982.247-**");
     expect(maskCpf(null)).toBeNull();
     expect(maskCpf("123")).toBe("***");
+    expect(maskCpf("11222333000181")).toBe("**.222.333/****-**");
   });
 });
 
@@ -498,6 +499,22 @@ describe("store.updateSettings / store.getSettings", () => {
     expect(got).toMatchObject({ name: "Maná Kids", notifyEmail: null, brandColor: null });
     expect(got.trackingSnippet).toMatch(/^<script src="http:\/\/localhost:3000\/t\.js" data-checkout="localhost:3000" defer><\/script>$/);
     expect(got.checkoutBaseUrl).toBe("http://localhost:3000");
+  });
+
+  test("CPF ou CNPJ no checkout (acceptCnpj): desligado por padrão; só quem muda configurações liga; omitido mantém", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ acceptCnpj: false });
+    for (const role of ["admin", "support", "traffic"] as const) {
+      expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId, role), { ...base, acceptCnpj: true }))).toBe("forbidden");
+    }
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: "sim" }))).toBe("invalid_input");
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: true });
+    expect((await t.ownerDb.select().from(store).where(eq(store.id, s.storeId)))[0]!.acceptCnpj).toBe(true);
+    await runAction(updateStoreSettings, panelCall(s.storeId), base);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId, "traffic"), {})).toMatchObject({ acceptCnpj: true });
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: false });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ acceptCnpj: false });
   });
 
   test("captura de contato: ligar sem privacyEmail -> invalid_input no campo; com e-mail liga; getSettings devolve os dois", async () => {

@@ -16,6 +16,8 @@ export interface CheckoutOffer {
   methods: CheckoutMethod[];
   pixMode: "manual" | "asaas";
   maxInstallments: number;
+  /** O documento do comprador pode ser CPF ou CNPJ (loja com a opção); senão, só CPF. */
+  acceptCnpj: boolean;
   /**
    * `productName`: o nome do produto se o bump tem um só; com mais, o rótulo (obrigatório nesse caso).
    * `contents`: os nomes separados por " · " com mais de 1 produto; `null` com 1.
@@ -32,6 +34,7 @@ export interface PublicOfferLike {
   priceCents: number;
   pixMode: string;
   maxInstallments: number;
+  acceptCnpj?: boolean;
   bump: { products: Named[]; priceCents: number; label: string | null } | null;
 }
 
@@ -50,6 +53,7 @@ export function checkoutOffer(o: PublicOfferLike, methods: CheckoutMethod[]): Ch
     methods,
     pixMode: o.pixMode as "manual" | "asaas",
     maxInstallments: o.maxInstallments,
+    acceptCnpj: o.acceptCnpj === true,
     bump: bump
       ? {
           productName: bump.products.length === 1 ? bump.products[0]!.name : (bump.label ?? joinNames(bump.products)),

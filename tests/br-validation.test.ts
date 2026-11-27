@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { cardExpiryValid, normalizeBrMobile, validCpf, validEmail } from "@/lib/validation/br";
+import { cardExpiryValid, maskTaxId, normalizeBrMobile, validCnpj, validCpf, validEmail, validTaxId } from "@/lib/validation/br";
+import { normalizePixKey } from "@/lib/payments/manual";
 
 describe("validações brasileiras do checkout", () => {
   test("CPF: dígitos verificadores", () => {
@@ -8,6 +9,31 @@ describe("validações brasileiras do checkout", () => {
     expect(validCpf("12345678900")).toBe(false);
     expect(validCpf("11111111111")).toBe(false);
     expect(validCpf("5299822472")).toBe(false);
+  });
+
+  test("CNPJ: dígitos verificadores (o validCnpj saiu do Pix manual, que continua aceitando chave CNPJ)", () => {
+    expect(validCnpj("11222333000181")).toBe(true);
+    expect(validCnpj("11444777000161")).toBe(true);
+    expect(validCnpj("11222333000182")).toBe(false);
+    expect(validCnpj("11111111111111")).toBe(false);
+    expect(validCnpj("1122233300018")).toBe(false);
+    expect(validCnpj("52998224725")).toBe(false);
+    expect(normalizePixKey("11.222.333/0001-81")).toBe("11222333000181");
+  });
+
+  test("CPF ou CNPJ conforme a loja: sem a opção, só CPF; máscara pelos dígitos", () => {
+    expect(validTaxId("52998224725", false)).toBe(true);
+    expect(validTaxId("11222333000181", false)).toBe(false);
+    expect(validTaxId("11222333000181", true)).toBe(true);
+    expect(validTaxId("52998224725", true)).toBe(true);
+    expect(validTaxId("11222333000182", true)).toBe(false);
+    expect(validTaxId("12345678900", true)).toBe(false);
+    expect(maskTaxId("52998224725", false)).toBe("529.982.247-25");
+    expect(maskTaxId("11222333000181", false)).toBe("112.223.330-00");
+    expect(maskTaxId("52998224725", true)).toBe("529.982.247-25");
+    expect(maskTaxId("529.982.247-251", true)).toBe("52.998.224/7251");
+    expect(maskTaxId("11222333000181", true)).toBe("11.222.333/0001-81");
+    expect(maskTaxId("112223330001819", true)).toBe("11.222.333/0001-81");
   });
 
   test("celular: DDD válido, 9 + 8 dígitos, sem repetição; aceita máscara e +55", () => {

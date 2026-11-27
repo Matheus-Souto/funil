@@ -143,8 +143,6 @@ export function OfferEditor(props: {
   canPixel: boolean;
   /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
   cardAvailable: boolean;
-  /** A loja aceita CPF ou CNPJ no checkout (Configurações → Checkout). */
-  acceptCnpj?: boolean;
   /** Acabou de ser criada (a página nova mostra a confirmação). */
   created?: boolean;
 }) {
@@ -586,7 +584,7 @@ export function OfferEditor(props: {
                 {app ? (
                   <p className={s.payNote} role="note">
                     <Info size={14} strokeWidth={2} aria-hidden="true" />
-                    Oferta de app: à vista, com Pix do Asaas ou cartão. O comprador informa CPF{props.acceptCnpj ? " ou CNPJ" : ""}.
+                    Oferta de app: à vista, com Pix do Asaas ou cartão. CNPJ do comprador só com a opção em Configurações → Checkout.
                   </p>
                 ) : (
                   <div className={s.grid2}>

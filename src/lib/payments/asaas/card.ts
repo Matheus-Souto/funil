@@ -33,7 +33,7 @@ import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
 import { checkCardFingerprint, checkRateLimit, countRecentEvents, hadRecentEvent, ipRateKey, recordEvent } from "@/lib/payments/ratelimit";
 import { checkoutHostnames, verifyTurnstile, type TurnstileDeps } from "@/lib/payments/turnstile";
 import { storeCheckoutOrigins } from "@/lib/stores";
-import { cardExpiryValid } from "@/lib/validation/br";
+import { cardExpiryValid, validCnpj } from "@/lib/validation/br";
 import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
 import { asaasClientFor, asaasDueDate, centsToReais, type AsaasErrorDetails, type AsaasPayment, type CreatePaymentBody } from "./client";
 import { buyerOf, ensureAsaasCustomer } from "./pix";
@@ -145,7 +145,7 @@ type Attempt = typeof cardAttempt.$inferSelect;
  * Paga um pedido `card_asaas` com o cartão digitado. Chamada só pelo serviço de cartão isolado (POST /api/card).
  * Erros: `invalid_input`, `not_found`, `conflict`, `rate_limited` (details `{ captcha: true }` quando falta o Turnstile).
  */
-export async function payWithCard(call: { storeId: string }, raw: CardPaymentInput, deps: CardDeps = {}): Promise<CardResult> {
+export async function payWithCard(call: { storeId: string; acceptCnpj?: boolean }, raw: CardPaymentInput, deps: CardDeps = {}): Promise<CardResult> {
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
     // Só os caminhos dos campos: nunca valores (seriam dados do cartão).
@@ -159,6 +159,10 @@ export async function payWithCard(call: { storeId: string }, raw: CardPaymentInp
   // Validade antes do mês atual (São Paulo) é erro de digitação: não vira cobrança recusada nem erro de integração.
   if (!cardExpiryValid(input.card.expiryMonth, input.card.expiryYear, t)) {
     throw new ActionError("invalid_input", "Cartão vencido ou validade inválida", [{ path: ["card", "expiryMonth"] }]);
+  }
+  // Titular com CNPJ (14 dígitos) só na loja que aceita (`call.acceptCnpj`, do bilhete assinado) e com dígitos válidos.
+  if (input.holder.cpf.length === 14 && !(call.acceptCnpj && validCnpj(input.holder.cpf))) {
+    throw new ActionError("invalid_input", "Dados de pagamento inválidos", [{ path: ["holder", "cpf"] }]);
   }
 
   // 1. Leitura curta.

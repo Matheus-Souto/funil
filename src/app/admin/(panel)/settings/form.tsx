@@ -29,9 +29,18 @@ interface Initial {
   leadCapture: boolean;
   privacyEmail: string;
   recovery: { on: boolean; lead: boolean; pix: boolean; card: boolean };
+  acceptCnpj: boolean;
 }
 
-const formOf = (i: Initial) => ({ name: i.name, notifyEmail: i.notifyEmail, color: i.brandColor ?? "", leadCapture: i.leadCapture, privacyEmail: i.privacyEmail, recovery: i.recovery });
+const formOf = (i: Initial) => ({
+  name: i.name,
+  notifyEmail: i.notifyEmail,
+  color: i.brandColor ?? "",
+  leadCapture: i.leadCapture,
+  privacyEmail: i.privacyEmail,
+  recovery: i.recovery,
+  acceptCnpj: i.acceptCnpj,
+});
 
 // A mesma regra do servidor (src/lib/store-settings.ts: trim, minúsculas e z.email): o que passa aqui não volta recusado.
 const EMAIL = z.email();
@@ -42,6 +51,7 @@ const TAB_OF_FIELD: Record<string, SettingsTab> = {
   name: "loja",
   notifyEmail: "loja",
   brandColor: "checkout",
+  acceptCnpj: "checkout",
   leadCapture: "contatos",
   privacyEmail: "contatos",
   recovery: "contatos",
@@ -134,6 +144,7 @@ export function SettingsPanel({
               leadCapture: f.leadCapture,
               privacyEmail: f.privacyEmail.trim() || null,
               recovery: f.recovery,
+              acceptCnpj: f.acceptCnpj,
             }),
           )
           .then((r) => {
@@ -205,6 +216,19 @@ export function SettingsPanel({
               <span>Produto de exemplo · Pix</span>
               <span className={s.setMockBtn}>Gerar Pix de R$ 9,90</span>
               <span className={s.setMockLink}>Link e destaque na cor da loja</span>
+            </div>
+          </fieldset>
+          <fieldset disabled={!canWrite} className={`${s.settingsFieldset} ${s.setCard}`} style={{ marginTop: 16 }}>
+            <div className={s.setRowSwitch}>
+              <SetText id={`${id}-cnpj`} title="Aceitar CPF ou CNPJ">
+                No Pix automático e no cartão, o comprador pode informar o CNPJ da empresa. Desligado, só CPF.
+              </SetText>
+              <Switch
+                checked={f.acceptCnpj}
+                onCheckedChange={(v) => setF({ ...f, acceptCnpj: v })}
+                aria-labelledby={`${id}-cnpj-t`}
+                aria-describedby={`${id}-cnpj-d`}
+              />
             </div>
           </fieldset>
         </TabsContent>
