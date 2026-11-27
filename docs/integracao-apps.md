@@ -1,5 +1,3 @@
-<!-- revisar seção de pagamentos após merge do #43 -->
-
 # Integração de apps com o funil
 
 Este documento é para quem desenvolve um app com conta de usuário (o primeiro é o **PeticionaAqui**) e quer cobrar
@@ -164,7 +162,7 @@ dentro de objeto, ex.: `origem.fbc`). O funil nunca devolve de volta o valor que
 | 401 | `unauthorized` | Sem chave, chave malformada, revogada ou de outro tipo. A resposta é sempre a mesma. | Conferir a chave; não repetir em laço. |
 | 404 | `not_found` | `POST /pagamentos` com oferta que não existe, está desativada ou não é oferta de app (`"Oferta de app não encontrada"`). | Conferir o endereço da oferta. |
 | 405 | `method_not_allowed` | Método diferente de `POST`. | Corrigir o código. |
-| 409 | `conflict` | Reservado para conflito de estado; hoje nenhum dos dois endpoints o devolve. Se vier, `detalhes` traz um `code` estável. | Tratar como erro definitivo. |
+| 409 | `conflict` | Nenhum dos dois endpoints o devolve hoje (sessão vencida e preço alterado são erros do checkout, não da API). Se vier, `detalhes` traz um `code` estável. | Tratar como erro definitivo. |
 | 413 | `payload_too_large` | Corpo acima de 32 KB. | Corrigir o código. |
 | 422 | `invalid_input` | Algum campo inválido (veja `detalhes`). | Corrigir o dado; repetir igual dá o mesmo erro. |
 | 429 | `rate_limited` | Mais de 60 chamadas no minuto com a chave (ou chaves inválidas demais do mesmo IP). | Esperar o `Retry-After` (60 s) e tentar de novo. |
@@ -276,12 +274,12 @@ O servidor do app chama quando a pessoa clica em pagar, e redireciona o navegado
 | Campo | Obrigatório | Regra |
 |---|---|---|
 | `conta` | sim | A mesma `conta` do teste (1 a 64 caracteres, sem `@`). É ela que volta no aviso. |
-| `oferta` | sim | Endereço (slug) da oferta de app no funil. Ex.: `start-anual`. |
+| `oferta` | sim | Endereço (slug) da oferta de app no funil: 3 a 60 letras minúsculas, números e hífen. Ex.: `start-anual`. Fora desse formato, `422` (`"Use 3 a 60 caracteres: letras minúsculas, números e hífen"`). |
 | `email` | sim | E-mail do comprador (até 254). Aparece travado no checkout. |
 | `nome` | sim | Nome do comprador, 2 a 120 caracteres. Aparece travado no checkout. |
 | `telefone` | não | Celular com DDD (ex.: `11987654321`; aceita máscara e `+55`). Se vier inválido, `422` (`"Celular com DDD, ex.: 11987654321"`). Se não vier, o checkout pede. |
 | `origem` | não | Os mesmos campos do teste (seção 6). Se vier **qualquer** campo, a origem deste pagamento é a que veio; se não vier nada, o funil usa a origem guardada no teste da conta. |
-| `retorno` | não | Para onde o botão **Voltar ao app** da página de obrigado leva. URL `https`, sem usuário e senha, até 2048 caracteres, com host igual ao do checkout da loja ou a um dos **Hosts de retorno** (seção 2.2). Host fora da lista (ou com porta) dá `422` no campo `retorno`. |
+| `retorno` | não | Para onde o botão **Voltar ao app** das páginas do funil leva (seção 5.4). URL `https`, sem usuário e senha, até 2048 caracteres, com host igual ao do checkout da loja ou a um dos **Hosts de retorno** (seção 2.2). Host fora da lista (ou com porta) dá `422` no campo `retorno`. |
 
 Recomendação para a `origem`: **não mande** no pagamento, a menos que a conta não tenha passado pelo `POST /testes`
 (ex.: contas criadas antes da integração). Assim o pagamento herda a origem do cadastro, que é a que importa para as
@@ -294,9 +292,12 @@ O que acontece:
   mas quem a tem vê o nome e o e-mail no checkout: trate como privada (não registre em log, não mande por e-mail, não
   reaproveite depois de vencer).
 - **Vale 60 minutos.** Crie uma sessão nova a cada clique em pagar; não guarde a URL para depois.
-- **Repetição segura.** A mesma chamada (mesma conta, oferta, nome, e-mail, telefone e retorno) em até 2 minutos, sem
-  pedido ainda, devolve a **mesma** sessão com `200`. Assim um clique duplo ou uma nova tentativa de rede não cria dois
-  links. Mudou algum desses campos, ou passou de 2 minutos: sessão nova, `201`.
+- **Repetição segura.** A mesma chamada em até 2 minutos, enquanto a sessão ainda não tem pedido, devolve a **mesma**
+  sessão com `200`. "A mesma" quer dizer: mesma conta, oferta, nome, e-mail, telefone, retorno **e origem**. A origem é
+  comparada como o funil a guarda (campos vazios ignorados, `fbclid` cortado em 400 caracteres; um `fbc` montado a partir
+  do `fbclid` vale como igual mesmo com a hora diferente). Assim um clique duplo ou uma nova tentativa de rede não cria
+  dois links. Mudou algum desses campos (inclusive outra campanha ou outro clique), ou passou de 2 minutos: sessão nova,
+  `201`.
 
 ### 5.2 Exemplo
 
@@ -331,6 +332,13 @@ Oferta inexistente, desativada ou que não é de app (`404 Not Found`):
 { "erro": { "codigo": "not_found", "mensagem": "Oferta de app não encontrada" } }
 ```
 
+Outras mensagens de `422` neste endpoint: `"Use 3 a 60 caracteres: letras minúsculas, números e hífen"` (`oferta`),
+`"Confira o e-mail"`, `"Nome curto demais"`, `"Nome longo demais"`, `"Celular com DDD, ex.: 11987654321"` (`telefone`) e as
+da `conta` e da `origem` (seção 4).
+
+Este endpoint **não** devolve `409`: sessão vencida, já paga ou preço alterado só aparecem no checkout, para o comprador
+(seção 5.3). Do lado do app, o que importa é o aviso de pagamento.
+
 `retorno` fora dos hosts configurados (`422 Unprocessable Entity`):
 
 ```json
@@ -356,24 +364,45 @@ Com a resposta em mãos, o app manda o navegador para a `url` (redirecionamento 
   formulário.
 
 **Sessão inválida.** Se a sessão venceu (mais de 60 minutos), já foi paga, é de outra oferta ou de outra loja, o
-checkout não mostra o formulário e diz: "Este link de pagamento venceu. Volte ao app e tente de novo." Se a pessoa
-tentar pagar com uma sessão que ficou inválida no meio do caminho, o funil recusa sem criar pedido (internamente, um
-`409` com `detalhes.code` = `SESSION_INVALID`, que só o checkout vê). Do lado do app, basta oferecer o botão de pagar
-de novo: ele cria uma sessão nova.
+checkout não mostra o formulário e diz: "Este link de pagamento venceu. Volte ao app e tente de novo." Se ela ficar
+inválida com a página aberta, o funil recusa o envio sem criar pedido e o checkout mostra a mesma mensagem. Esse
+`SESSION_INVALID` é um erro interno do checkout: a API do app nunca o devolve. Do lado do app, basta oferecer o botão de
+pagar de novo, que cria uma sessão nova.
 
-**Pix e cartão na mesma sessão.** A pessoa pode gerar um Pix e, antes de pagar, desistir e pagar com cartão: a página
-do Pix tem o link "Pagar com cartão", que continua na mesma sessão. Cada tentativa é um pedido do funil.
+**Preço alterado.** Se o preço da oferta mudar enquanto a página do checkout está aberta, o funil não cobra o valor
+antigo: recusa o envio sem criar pedido e o checkout mostra "O valor mudou: confira o resumo". A pessoa confere e
+confirma de novo.
 
-**Uma liberação por sessão.** Se a pessoa acabar pagando duas vezes na mesma sessão (por exemplo, pagou com cartão e
-depois pagou também o Pix que tinha gerado), **só o primeiro pagamento gera `pagamento.confirmado`**. O segundo vira um
-alerta para o vendedor devolver o dinheiro; o app não precisa fazer nada. Pagamentos em sessões diferentes são compras
-diferentes: cada uma tem o seu `pedido` e o seu `pagamento.confirmado`.
+**Pix e cartão na mesma sessão.** A pessoa pode gerar um Pix e, antes de pagar, desistir e pagar com cartão: enquanto a
+sessão vale, a página do Pix tem o link "Pagar com cartão", que continua na mesma sessão. Cada forma de pagamento vira
+um pedido do funil; duas abas com a mesma forma e os mesmos dados reaproveitam o mesmo pedido pendente.
+
+**Uma liberação por sessão.** Uma sessão libera no app **uma única compra**. Se a pessoa acabar pagando duas vezes na
+mesma sessão (por exemplo, pagou com cartão e depois pagou também o Pix que tinha gerado em outra aba), o primeiro
+pagamento confirmado é o que vale: só ele gera avisos ao app. O outro pedido **nunca gera aviso nenhum**: nem
+`pagamento.confirmado`, nem reembolso, contestação, restabelecimento ou reembolso parcial. O vendedor recebe o alerta
+"Pagamento em dobro no mesmo link do app" e reembolsa esse pedido pelo painel, sem mexer na compra liberada. O app não
+precisa fazer nada. Isso vale também para um cartão aprovado depois de o pedido ter vencido: o dinheiro entrou, então
+conta como pagamento e entra na mesma regra (se for o primeiro, libera; se não, é o duplicado). Pagamentos em sessões
+diferentes são compras diferentes: cada uma tem o seu `pedido` e o seu `pagamento.confirmado`.
 
 ### 5.4 O retorno
 
-Depois que o pagamento se confirma, o checkout mostra a página de obrigado ("O acesso é liberado no app") com o botão
-**Voltar ao app**, que leva para o `retorno` exatamente como o app mandou (o funil não acrescenta parâmetros). Sem
-`retorno`, a página só pede para a pessoa voltar ao app.
+O botão **Voltar ao app** leva para o `retorno` exatamente como o app mandou (o funil não acrescenta parâmetros). Ele
+aparece na página do pedido do funil:
+
+- **pagamento confirmado:** página de obrigado, "O acesso é liberado no app";
+- **sessão encerrada com o pedido ainda pendente** (ex.: a pessoa volta à aba de um Pix que não pagou): "Pagamento já
+  concluído" (outro pedido da sessão foi pago; a página diz para não pagar de novo) ou "Link de pagamento vencido"
+  (a sessão passou de 60 minutos). Essas telas não mostram mais QR Code nem botões de pagar;
+- **exceção, cartão em análise:** se o pedido é de cartão e o banco ainda não respondeu, a página continua em "Estamos
+  confirmando o pagamento" com "Não pague de novo", mesmo com a sessão vencida, porque a cobrança pode ter passado.
+
+Sem `retorno`, essas páginas só pedem para a pessoa voltar ao app.
+
+O checkout aberto com `?s=` e a página do pedido mandam `Referrer-Policy: strict-origin`: ao clicar em **Voltar ao
+app**, o navegador informa no máximo a origem do funil, nunca o caminho nem a sessão. O app não deve depender do
+`Referer` para nada.
 
 Na página de retorno, o app **não libera nada**: ela só mostra o estado que o app já conhece (ex.: "Pagamento
 confirmado, seu plano está ativo" se o aviso já chegou, ou "Estamos confirmando o pagamento" e atualiza sozinha até o
@@ -531,7 +560,8 @@ Tipos:
 | `ping` | Só pelo botão **Enviar teste** do painel. `dados` vazio; não tem novas tentativas. |
 
 Todo aviso de um pedido vem depois do `pagamento.confirmado` dele: o funil garante que a confirmação exista antes de
-qualquer reembolso ou contestação.
+qualquer reembolso ou contestação. Por isso, qualquer aviso de um pedido prova que aquele pagamento foi confirmado e é
+a compra liberável da sessão: o pagamento em dobro de uma sessão (seção 5.3) não gera aviso nenhum.
 
 Exemplos completos de `dados` em cada tipo (mesmo pedido):
 
@@ -758,6 +788,16 @@ Cada aviso aplicado leva o pedido a um estado; o app faz só o que falta para ch
 
 `retirado` é final: nenhum aviso depois do reembolso total devolve o que foi retirado.
 
+Pedido que o app nunca liberou e recebe um aviso só (a confirmação falhou em todas as tentativas e não foi reenviada):
+
+- `pagamento.reembolsado`: nada a retirar; o pedido fica `retirado`.
+- `pagamento.contestado`: nada a suspender; o pedido continua `nada`. Se depois vier `pagamento.restabelecido`, libera.
+- `pagamento.restabelecido`: libera, porque o pagamento voltou a valer.
+- `pagamento.reembolso_parcial`: libera, porque o funil só manda esse aviso com o pedido pago.
+
+Isso é seguro porque o funil só avisa a compra liberável de cada sessão (seção 5.3): qualquer aviso prova que aquele
+pagamento foi confirmado.
+
 O que fazer em cada passagem:
 
 | De → para | Pacote de créditos | Plano anual |
@@ -898,7 +938,7 @@ App:
 - [ ] Origem guardada na primeira entrada (UTMs, `fbclid`, `ref`) e cookies `_fbc`/`_fbp` lidos no cadastro.
 - [ ] `POST /pagamentos` chamado a cada clique em pagar, com a mesma `conta`; a `url` não é guardada nem registrada em
       log; `404` e `422` mostram uma mensagem útil à pessoa.
-- [ ] Nenhuma liberação pelo retorno do navegador; a página de retorno só mostra o estado.
+- [ ] Nenhuma liberação pelo retorno do navegador; a página de retorno só mostra o estado e não depende do `Referer`.
 - [ ] Recebedor do webhook: confere a assinatura com o corpo cru, recusa `t` fora de 5 minutos, responde em menos de 10
       segundos, `2xx` só depois de gravar.
 - [ ] Dedupe pelo `id` (chave única) e descarte por `sequencia` menor, na mesma transação da liberação.
