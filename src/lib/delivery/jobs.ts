@@ -294,6 +294,15 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
         ],
       };
     }
+    case "pagamento_duplicado_app":
+      return {
+        subject: `Pagamento em dobro no mesmo link do app${pedido}`,
+        heading: "O comprador pagou duas vezes",
+        paragraphs: [
+          `O comprador pagou duas vezes pelo mesmo link de pagamento do app. O app recebeu só o primeiro pagamento; este${pedido} não liberou nada.`,
+          "Abra o pedido no painel e use “Reembolsar” para devolver o valor. O reembolso deste pedido não mexe na compra que o app liberou.",
+        ],
+      };
     case "disjuntor_cartao":
       return {
         subject: "Muitas recusas de cartão na sua loja",

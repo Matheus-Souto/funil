@@ -29,6 +29,17 @@ export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean
   ].join("; ");
 }
 
+/**
+ * Páginas com segredo na URL não mandam o endereço adiante (Referer) para nenhum recurso ou link: o checkout aberto
+ * pela sessão do app (`/c/<slug>?s=<id>`: o `s` dá acesso ao nome e ao e-mail da sessão) e a página do pedido
+ * (`/o/<publicId>`, que no pedido de app leva o link de volta ao checkout da sessão). `null`: política padrão.
+ */
+export function buyerReferrerPolicy(pathname: string, search: URLSearchParams): "no-referrer" | null {
+  if (pathname.startsWith("/o/")) return "no-referrer";
+  if (pathname.startsWith("/c/") && search.has("s")) return "no-referrer";
+  return null;
+}
+
 export function proxy(request: NextRequest): NextResponse {
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
   const csp = buyerCsp(nonce, {
@@ -40,6 +51,8 @@ export function proxy(request: NextRequest): NextResponse {
   requestHeaders.set("content-security-policy", csp);
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("content-security-policy", csp);
+  const referrer = buyerReferrerPolicy(request.nextUrl.pathname, request.nextUrl.searchParams);
+  if (referrer) response.headers.set("referrer-policy", referrer);
   return response;
 }
 

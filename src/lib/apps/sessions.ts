@@ -163,6 +163,23 @@ async function allowedReturnHosts(ctx: Ctx, storeHost: string): Promise<Set<stri
   return hosts;
 }
 
+/** Toques iguais campo a campo (o jsonb do banco não guarda a ordem das chaves). */
+function sameTouch(a: TouchRecord | null, b: TouchRecord | null): boolean {
+  if (a === null || b === null) return a === b;
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((k) => a[k] === b[k]);
+}
+
+/**
+ * `fbc` gravado bate com a origem nova: o enviado pelo app é comparado direto; sem ele, o derivado do `fbclid` leva a
+ * hora da criação, então basta terminar no mesmo `fbclid` (o próprio `fbclid` já está no toque comparado).
+ */
+function sameFbc(stored: string | null, og: z.infer<typeof appOriginSchema> | undefined): boolean {
+  if (og?.fbc) return stored === og.fbc;
+  if (og?.fbclid) return stored !== null && stored.startsWith("fb.1.") && stored.endsWith(`.${og.fbclid}`);
+  return stored === null;
+}
+
 type CreateOutput = { url: string; expira_em: string; criado: boolean };
 
 export const createPayment = defineAction({
@@ -194,8 +211,17 @@ export const createPayment = defineAction({
     // Chamadas simultâneas da mesma conta e oferta esperam aqui (até o commit): a segunda enxerga a sessão da primeira.
     await ctx.tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`app_session:${ctx.storeId}:${input.conta}:${o.id}`}, 0))`);
     const now = new Date();
-    const [recent] = await ctx.tx
-      .select({ id: appCheckoutSession.id, expiresAt: appCheckoutSession.expiresAt })
+    const og = input.origem;
+    const touch = originTouch(og);
+    const candidates = await ctx.tx
+      .select({
+        id: appCheckoutSession.id,
+        expiresAt: appCheckoutSession.expiresAt,
+        touch: appCheckoutSession.touch,
+        ref: appCheckoutSession.ref,
+        fbc: appCheckoutSession.fbc,
+        fbp: appCheckoutSession.fbp,
+      })
       .from(appCheckoutSession)
       .where(
         and(
@@ -210,13 +236,19 @@ export const createPayment = defineAction({
           sql`${appCheckoutSession.returnUrl} is not distinct from ${retorno}`,
         ),
       )
-      .orderBy(desc(appCheckoutSession.createdAt))
-      .limit(1);
+      .orderBy(desc(appCheckoutSession.createdAt));
+    // A mesma origem também (normalizada como é gravada): outra campanha ou outro clique é outra sessão.
+    const recent = candidates.find(
+      (c) =>
+        sameTouch(c.touch as TouchRecord | null, touch) &&
+        c.ref === (og?.ref ?? null) &&
+        c.fbp === (og?.fbp ?? null) &&
+        sameFbc(c.fbc, og),
+    );
     if (recent) return { url: urlOf(recent.id), expira_em: recent.expiresAt.toISOString(), criado: false };
 
     const id = randomUUID();
     const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
-    const og = input.origem;
     await ctx.tx.insert(appCheckoutSession).values({
       id,
       storeId: ctx.storeId,
@@ -225,7 +257,7 @@ export const createPayment = defineAction({
       buyerName: input.nome,
       buyerEmail: input.email,
       buyerPhone: phone,
-      touch: originTouch(og),
+      touch,
       ref: og?.ref ?? null,
       fbc: og?.fbc ?? fbcFromFbclid(og?.fbclid, now.getTime()) ?? null,
       fbp: og?.fbp ?? null,

@@ -94,6 +94,10 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
   const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.id, input.offerId), eq(offer.active, true))).for("share");
   if (!o) throw new ActionError("not_found", "Oferta não encontrada");
   if (!methodAllowed(input.method, o.methods, o.pixMode, input.asaasPixFallback)) throw new ActionError("invalid_input", "Método de pagamento indisponível nesta oferta");
+  // Pedido de app (com a conta da sessão) só em oferta de app, e oferta de app só com a sessão: a entrega relida aqui, sob
+  // a trava, tem de bater com a que o chamador decidiu (senão sairia pedido sem itens numa oferta de download, ou um
+  // pedido de app entregue por e-mail).
+  if ((o.delivery === "app") !== (input.app !== undefined)) throw new ActionError("conflict", "A oferta mudou. Atualize a página.");
 
   const { main, bump } = await orderParts(ctx.tx, o, input.withBump);
   const subtotal = o.priceCents + (bump?.priceCents ?? 0);
@@ -189,6 +193,7 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     ...items("main", main, o.priceCents - discount.mainDiscountCents),
     ...(bump ? items("bump", bump.products, bump.priceCents - discount.bumpDiscountCents) : []),
   ];
+  if (rows.length === 0 && o.delivery !== "app") throw new ActionError("not_found", "Oferta não encontrada");
   if (rows.length > 0) await ctx.tx.insert(orderItem).values(rows);
   // O contato guardado antes da compra (mesmo e-mail na loja ou mesma chave da página) vira "comprou" e perde e-mail e celular.
   await convertLeads(ctx.tx, ctx.storeId, { email, leadKey: input.leadKey, orderId: order.id });

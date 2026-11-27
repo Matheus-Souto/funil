@@ -239,11 +239,11 @@ function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPubli
       </p>
       <p className={s.foot}>
         Pedido #{order.code}
-        {order.offer.methods.includes("card") && (!app || order.app?.sessionId) ? (
+        {order.offer.methods.includes("card") && retryHref(order, true) ? (
           <>
             {" · "}
-            {/* Pelo app, o cartão abre na mesma sessão (o checkout de app não abre sem ela). */}
-            <Link href={`/c/${order.offer.slug}?${order.app?.sessionId ? `s=${order.app.sessionId}&` : ""}metodo=cartao`}>Pagar com cartão</Link>
+            {/* Pelo app, o cartão abre na mesma sessão (só enquanto ela serve; o checkout de app não abre sem ela). */}
+            <Link href={retryHref(order, true)!}>Pagar com cartão</Link>
           </>
         ) : null}
       </p>
@@ -353,7 +353,38 @@ function ThankYou({ order, storeName, publicId }: { order: OrderPublic; storeNam
   );
 }
 
+/**
+ * Link de nova tentativa no checkout. Pedido de app: só com a sessão ainda utilizável (`?s=`); senão `null`, e a página
+ * orienta reabrir o pagamento pelo app. Pedido de download: o checkout da oferta, como antes.
+ */
+function retryHref(order: OrderPublic, card = false): string | null {
+  const q = new URLSearchParams();
+  if (order.offer.delivery === "app") {
+    if (!order.app?.sessionId) return null;
+    q.set("s", order.app.sessionId);
+  }
+  if (card) q.set("metodo", "cartao");
+  const qs = q.toString();
+  return `/c/${order.offer.slug}${qs ? `?${qs}` : ""}`;
+}
+
+/** Pedido de app sem sessão utilizável: nova tentativa só pelo app (com o botão de volta quando o app mandou o retorno). */
+function BackToApp({ order }: { order: OrderPublic }) {
+  return (
+    <>
+      <p className={`${s.p0} ${s.muted}`}>Para pagar de novo, abra o pagamento outra vez pelo app.</p>
+      {order.app?.returnUrl ? (
+        <a className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={order.app.returnUrl}>
+          Voltar ao app
+        </a>
+      ) : null}
+    </>
+  );
+}
+
 function Expired({ order }: { order: OrderPublic }) {
+  const pixAgain = retryHref(order);
+  const cardAgain = order.offer.methods.includes("card") ? retryHref(order, true) : null;
   return (
     <main className={`${s.main} ${s.mainCenter}`}>
       <div className={s.hero}>
@@ -372,12 +403,16 @@ function Expired({ order }: { order: OrderPublic }) {
             <b className={s.money}>{brl(i.priceCents)}</b>
           </div>
         ))}
-        <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={`/c/${order.offer.slug}`}>
-          <Icon name="refresh-cw" size={20} />
-          Gerar novo Pix
-        </Link>
-        {order.offer.methods.includes("card") ? (
-          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.btnSecondary}`} href={`/c/${order.offer.slug}?metodo=cartao`}>
+        {pixAgain ? (
+          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={pixAgain}>
+            <Icon name="refresh-cw" size={20} />
+            Gerar novo Pix
+          </Link>
+        ) : (
+          <BackToApp order={order} />
+        )}
+        {cardAgain ? (
+          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.btnSecondary}`} href={cardAgain}>
             <Icon name="credit-card" size={20} />
             Pagar com cartão
           </Link>
@@ -411,9 +446,13 @@ function Closed({ order }: { order: OrderPublic }) {
       </div>
       {order.status === "declined" ? (
         <section className={`${s.card} ${s.actions}`}>
-          <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={`/c/${order.offer.slug}`}>
-            Tentar de novo
-          </Link>
+          {retryHref(order) ? (
+            <Link className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={retryHref(order)!}>
+              Tentar de novo
+            </Link>
+          ) : (
+            <BackToApp order={order} />
+          )}
         </section>
       ) : null}
       <p className={s.foot}>Pedido #{order.code}</p>

@@ -20,7 +20,7 @@
 // - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
 //   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
 import { createHash } from "node:crypto";
-import { and, count, eq, gt, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
@@ -56,6 +56,7 @@ export const APP_SESSION_REQUIRED_MESSAGE = "Abra o pagamento pelo app";
 /** Cupom ou acréscimo no pagamento pelo app (fase 1: o preço do app é o da oferta). */
 export const APP_NO_COUPON_MESSAGE = "Cupom não vale no pagamento pelo app";
 export const APP_NO_BUMP_MESSAGE = "Acréscimo não vale no pagamento pelo app";
+const EXPECTED_TOTAL_MESSAGE = "Informe o total mostrado no checkout";
 export const ASAAS_LIMIT_MESSAGE = "Muitas compras seguidas. Aguarde alguns minutos e tente de novo.";
 export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
 export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
@@ -149,7 +150,7 @@ const startInput = z.object({
     if (v.customer.phone === undefined) ctx.addIssue({ code: "custom", path: ["customer", "phone"], message: PHONE_MESSAGE });
   }
   if (v.couponCode !== undefined && v.expectedTotalCents === undefined) {
-    ctx.addIssue({ code: "custom", path: ["expectedTotalCents"], message: "Informe o total mostrado no checkout" });
+    ctx.addIssue({ code: "custom", path: ["expectedTotalCents"], message: EXPECTED_TOTAL_MESSAGE });
   }
 });
 export type CheckoutStartInput = z.input<typeof startInput>;
@@ -242,7 +243,9 @@ export const checkoutStart = defineAction({
     if (limits.email !== null) await hitRateLimit(asaasEmailKey(call.storeId, limits.email), HOUR);
   },
   async run(ctx, input, limits, server?: CheckoutServer): Promise<StartOutput> {
-    const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
+    // FOR SHARE já na primeira leitura: a entrega (download ou app), o preço e os produtos não mudam até o commit (um
+    // `offers.update` no meio espera), então a decisão de exigir a sessão vale para o pedido criado.
+    const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true))).for("share");
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
     // Oferta de app só vende pela sessão de pagamento que o app cria (conta, nome e e-mail vêm dela). Lock na linha da
     // sessão até o commit: pedidos da mesma sessão saem um por vez, cada um relendo se já há pedido pago.
@@ -254,6 +257,10 @@ export const checkoutStart = defineAction({
       if (!appSession || appSession.offerId !== o.id) throw sessionInvalid();
       if (input.couponCode !== undefined) throw new ActionError("invalid_input", APP_NO_COUPON_MESSAGE, [{ path: ["couponCode"], message: APP_NO_COUPON_MESSAGE }]);
       if (input.withBump) throw new ActionError("invalid_input", APP_NO_BUMP_MESSAGE, [{ path: ["withBump"], message: APP_NO_BUMP_MESSAGE }]);
+      // Todo pedido de app confere o total que o comprador viu (o preço da oferta pode mudar com a página aberta).
+      if (input.expectedTotalCents === undefined) {
+        throw new ActionError("invalid_input", EXPECTED_TOTAL_MESSAGE, [{ path: ["expectedTotalCents"], message: EXPECTED_TOTAL_MESSAGE }]);
+      }
     }
     if (!o.methods.includes(input.method)) {
       throw new ActionError("invalid_input", "Forma de pagamento indisponível nesta oferta", [{ path: ["method"] }]);
@@ -290,6 +297,37 @@ export const checkoutStart = defineAction({
       }
       return createOrder(ctx, { ...base, method, customer: withCpf ? { ...buyer, cpf: withCpf } : buyer, asaasPixFallback: fallback });
     };
+
+    // Duas abas da mesma sessão pelo mesmo método: reaproveita o pedido pendente (ainda válido e com o preço de agora)
+    // em vez de criar outro que também poderia ser pago. Sob a trava da sessão (FOR UPDATE acima).
+    if (appSession) {
+      const method = input.method === "card" ? "card_asaas" : "pix_asaas";
+      if (method === "card_asaas" ? !asaasOn : o.pixMode !== "asaas" || !asaasOn) {
+        throw new ActionError("conflict", method === "card_asaas" ? CARD_UNAVAILABLE_MESSAGE : PIX_UNAVAILABLE_MESSAGE);
+      }
+      requireCpf(cpf);
+      const now = server?.now ?? new Date();
+      const [open] = await ctx.tx
+        .select()
+        .from(orders)
+        .where(
+          and(
+            eq(orders.storeId, ctx.storeId),
+            eq(orders.appSessionId, appSession.id),
+            eq(orders.method, method),
+            eq(orders.status, "pending"),
+            eq(orders.totalCents, o.priceCents),
+            or(isNull(orders.expiresAt), gt(orders.expiresAt, now)),
+          ),
+        )
+        .orderBy(desc(orders.createdAt))
+        .limit(1);
+      if (open) {
+        if (open.totalCents !== input.expectedTotalCents) throw priceChanged(open.totalCents);
+        await ctx.tx.update(appCheckoutSession).set({ orderId: open.id }).where(and(eq(appCheckoutSession.storeId, ctx.storeId), eq(appCheckoutSession.id, appSession.id)));
+        return { publicId: open.publicId, method, orderId: open.id, totalCents: open.totalCents, maxInstallments: installmentsFor(o.maxInstallments, open.totalCents, { discounted: false }), acceptCnpj };
+      }
+    }
 
     let order: Order;
     if (input.method === "card") {
@@ -676,11 +714,14 @@ const orderPublicView = defineAction({
       buyerName = c?.name ?? "";
     }
     const pixelId = await pixelIdFor(ctx.tx, ctx.storeId, of?.pixelId);
-    // Pedido pelo app: o endereço de volta (retorno da sessão) e, enquanto pendente, a sessão para trocar para o cartão.
+    // Pedido pelo app: o endereço de volta (retorno da sessão, com o host conferido na criação) e, só enquanto a sessão
+    // ainda serve (não venceu nem tem pedido pago), o id dela para tentar de novo no checkout (outro método, Pix vencido,
+    // cartão recusado). Sessão que não serve mais: a página orienta voltar ao app.
     let app: OrderPublic["app"];
     if (o.appSessionId) {
       const [sess] = await ctx.tx.select({ returnUrl: appCheckoutSession.returnUrl }).from(appCheckoutSession).where(eq(appCheckoutSession.id, o.appSessionId));
-      app = { returnUrl: sess?.returnUrl ?? null, sessionId: o.status === "pending" ? o.appSessionId : null };
+      const usable = await loadCheckoutSession(ctx.tx, ctx.storeId, o.appSessionId);
+      app = { returnUrl: sess?.returnUrl ?? null, sessionId: usable ? o.appSessionId : null };
     }
     return { o, offer: of!, items, manual, asaas, pixelId, app, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
@@ -707,7 +748,8 @@ export interface OrderPublic {
   offer: { slug: string; name: string; methods: string[]; delivery: "download" | "app" };
   /**
    * Pedido feito pela sessão do app: `returnUrl` é o retorno que o app mandou (host conferido na criação da sessão);
-   * `sessionId` só com o pedido pendente (o "Pagar com cartão" volta ao checkout da mesma sessão).
+   * `sessionId` só enquanto a sessão ainda serve (não vencida e sem pedido pago): as tentativas diretas voltam ao
+   * checkout da mesma sessão; sem ele, a página orienta reabrir pelo app.
    */
   app?: { returnUrl: string | null; sessionId: string | null };
   pix?: {

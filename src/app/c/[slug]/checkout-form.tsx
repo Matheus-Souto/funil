@@ -440,6 +440,13 @@ export function CheckoutForm(props: {
   const sessionField = appSession ? { sessionId: appSession.sessionId } : {};
 
   function handleStartError(r: Extract<StartResult, { ok: false }>) {
+    if (r.priceChanged && appSession) {
+      // Pelo app não há cupom: o preço da oferta mudou com a página aberta. Recarrega os dados do servidor (o resumo
+      // passa a mostrar o valor novo) e pede nova confirmação; nunca reenvia sozinho.
+      setFormError(r.message);
+      router.refresh();
+      return;
+    }
     if (r.priceChanged || r.fields?.couponCode !== undefined) {
       // Valor ou cupom divergente: refaz a prévia e mostra o resumo novo. Nunca reenvia sozinho.
       const id = ++couponSeq.current;
@@ -473,7 +480,7 @@ export function CheckoutForm(props: {
 
   async function payPix() {
     checkoutTracking.onAddPaymentInfo("pix", total);
-    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), ...sessionField, ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
+    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), ...sessionField, ...submitCoupon(coupon, total, { alwaysTotal: appSession !== null }), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
     if (r.ok) {
       router.push(`/o/${r.publicId}`);
       return;
@@ -500,7 +507,7 @@ export function CheckoutForm(props: {
       sig,
       ...(sentToken ? { turnstileToken: sentToken } : {}),
       now: () => Date.now(),
-      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), ...sessionField, ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
+      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), ...sessionField, ...submitCoupon(coupon, total, { alwaysTotal: appSession !== null }), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
       renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });

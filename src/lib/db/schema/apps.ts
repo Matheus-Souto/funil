@@ -51,6 +51,11 @@ export const appCheckoutSession = pgTable(
     returnUrl: text("return_url"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     orderId: uuid("order_id"),
+    /**
+     * O único pedido desta sessão que libera algo no app (o primeiro a gerar aviso, eleito sob `FOR UPDATE` da sessão em
+     * `enqueueAppNotice`). Outro pedido pago da mesma sessão é duplicado: sem aviso ao app e com alerta de reembolso.
+     */
+    releasedOrderId: uuid("released_order_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   // A anotação preserva a inferência dos tipos apesar das FKs nos dois sentidos entre sessão e pedido.
@@ -58,6 +63,7 @@ export const appCheckoutSession = pgTable(
     unique("app_checkout_session_store_id_id_unique").on(t.storeId, t.id),
     foreignKey({ columns: [t.storeId, t.offerId], foreignColumns: [offer.storeId, offer.id], name: "app_checkout_session_offer_fk" }),
     foreignKey({ columns: [t.storeId, t.orderId], foreignColumns: [orders.storeId, orders.id], name: "app_checkout_session_order_fk" }),
+    foreignKey({ columns: [t.storeId, t.releasedOrderId], foreignColumns: [orders.storeId, orders.id], name: "app_checkout_session_released_order_fk" }),
     index("app_checkout_session_order_idx").on(t.orderId).where(sql`${t.orderId} is not null`),
     check("app_checkout_session_account_check", sql`char_length(${t.account}) between 1 and 64`),
   ],

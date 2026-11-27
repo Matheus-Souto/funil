@@ -18,7 +18,8 @@ export type AlertReason =
   | "disjuntor_cartao"
   | "monitor_pagina_pagamento"
   | "telegram_falhou"
-  | "app_webhook_falhou";
+  | "app_webhook_falhou"
+  | "pagamento_duplicado_app";
 
 /** Detalhes do aviso: só códigos e números (nunca texto de provedor nem dado de comprador). */
 export interface AlertExtra {
@@ -104,6 +105,11 @@ export function alertText(
       return {
         title: `O app não confirmou o aviso${pedido}${typeof detail.httpStatus === "number" ? ` (HTTP ${detail.httpStatus})` : ""}`,
         body: "O app não respondeu com sucesso a nenhuma das tentativas de aviso. Confira a URL e o segredo do webhook em Conexões e use “Reenviar aviso ao app” no pedido.",
+      };
+    case "pagamento_duplicado_app":
+      return {
+        title: `Pagamento em dobro no mesmo link do app${pedido}`,
+        body: "O comprador pagou duas vezes pelo mesmo link de pagamento do app. O app recebeu só o primeiro pagamento; este não liberou nada. Use “Reembolsar” neste pedido.",
       };
     case "disjuntor_cartao":
       return {

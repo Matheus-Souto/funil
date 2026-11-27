@@ -4,8 +4,9 @@
 // de contato não guarda nada na oferta de app; e a retenção (`sweep_app_trials`) limpa as sessões vencidas.
 // Nenhum literal com o formato do token: tudo montado em tempo de execução.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor } from "@/lib/actions/core";
 import {
   APP_OFFER_NOT_FOUND_MESSAGE,
@@ -30,6 +31,14 @@ import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
 import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { recoveryEmailHash } from "@/lib/recovery/rules";
 import { POST } from "@/app/api/integracao/v1/pagamentos/route";
+import { appGate } from "@/app/c/[slug]/app-gate";
+import { submitCoupon } from "@/app/c/[slug]/coupon-logic";
+import { enqueueAppNotice } from "@/lib/apps/events";
+import { PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
+import { appWebhookDelivery, storeAlert } from "@/lib/db/schema";
+import { createOrder } from "@/lib/orders/create";
+import { transitionOrder } from "@/lib/orders/state";
+import { buyerReferrerPolicy, proxy } from "@/proxy";
 import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
 import { createFakeAsaas } from "./fakes/asaas";
 
@@ -48,6 +57,7 @@ const api = (storeId: string) => ({ storeId, actor: { kind: "token", tokenId: ra
 const pub = (storeId: string, now?: Date) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const, ...(now ? { server: { now } } : {}) });
 
 const CPF = "52998224725";
+const PRICES: Record<string, number> = { "start-anual": 49_700, "plus-anual": 99_700, guia: 990 };
 const DOMAIN = "checkout.peticionaaqui.com.br";
 let ipSeq = 0;
 const nextIp = () => `198.51.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
@@ -91,6 +101,8 @@ function sessionStart(slug: string, sessionId: string, over: Record<string, unkn
     withBump: false,
     method: "pix",
     customer: { phone: "(11) 98765-4321", cpf: CPF, ...c },
+    // Todo pedido de app manda o total que a tela mostrou (o preço da oferta).
+    expectedTotalCents: PRICES[slug] ?? 990,
     touch: { first: null, last: { utm_source: "navegador" } },
     eventId: randomUUID(),
     clientIp: nextIp(),
@@ -473,5 +485,175 @@ describe("retenção das sessões (sweep_app_trials)", () => {
     // Repetir não muda nada.
     await sweepAppTrialsJob(noJob, new AbortController().signal);
     expect((await sessionsOf(s.storeId)).length).toBe(rows.size);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Correções da revisão de segurança do PR #43
+
+const ctxOf = (storeId: string, tx: Parameters<Parameters<typeof withStore>[1]>[0]) => ({ storeId, actor: { kind: "system" } as Actor, origin: "system" as const, tx });
+const move = (storeId: string, orderId: string, to: "paid" | "refunded" | "disputed") =>
+  withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), orderId, to, "teste"));
+const deliveriesOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(appWebhookDelivery));
+const duplicateAlerts = (storeId: string) =>
+  withStore(storeId, (tx) => tx.select().from(storeAlert).where(eq(storeAlert.kind, "pagamento_duplicado_app")));
+
+describe("uma liberação por sessão (pagamento em dobro)", () => {
+  test("Pix e cartão da mesma sessão confirmados ao mesmo tempo: um aviso ao app, um alerta; estornar o duplicado não avisa nem mexe no válido", async () => {
+    const s = await seedAppStore();
+    const r = await runAction(createPayment, api(s.storeId), payment({ conta: "dobro" }));
+    const id = sessionIdOf(r.url);
+    const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    expect(pix.orderId).not.toBe(card.orderId);
+
+    await Promise.all([move(s.storeId, pix.orderId, "paid"), move(s.storeId, card.orderId, "paid")]);
+
+    const [session] = await sessionsOf(s.storeId);
+    const valid = session!.releasedOrderId!;
+    const dup = valid === pix.orderId ? card.orderId : pix.orderId;
+    expect([pix.orderId, card.orderId]).toContain(valid);
+    const notices = await deliveriesOf(s.storeId);
+    expect(notices.map((d) => [d.orderId, d.eventType])).toEqual([[valid, "pagamento.confirmado"]]);
+    const alerts = await duplicateAlerts(s.storeId);
+    expect(alerts.map((a) => a.orderId)).toEqual([dup]);
+
+    // O worker do cartão (deliver_order) chamando de novo para o duplicado: nada de aviso nem de segundo alerta.
+    expect(await withStore(s.storeId, (tx) => enqueueAppNotice(tx, s.storeId, dup, "pagamento.confirmado"))).toBe(false);
+    expect(await duplicateAlerts(s.storeId)).toHaveLength(1);
+
+    // Estorno do duplicado: nenhum aviso ao app; a compra válida continua paga e liberada.
+    await move(s.storeId, dup, "refunded");
+    expect((await deliveriesOf(s.storeId)).map((d) => [d.orderId, d.eventType])).toEqual([[valid, "pagamento.confirmado"]]);
+    const byId = new Map((await ordersOf(s.storeId)).map((o) => [o.id, o.status]));
+    expect([byId.get(valid), byId.get(dup)]).toEqual(["paid", "refunded"]);
+    expect((await sessionsOf(s.storeId))[0]!.releasedOrderId).toBe(valid);
+
+    // Já o reembolso da compra válida avisa o app normalmente.
+    await move(s.storeId, valid, "refunded");
+    expect((await deliveriesOf(s.storeId)).map((d) => d.eventType).sort()).toEqual(["pagamento.confirmado", "pagamento.reembolsado"]);
+  });
+
+  test("duas abas pelo mesmo método reaproveitam o pedido pendente (um pedido por método)", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "abas" }))).url);
+    const [a, b] = await Promise.all([
+      runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id)),
+      runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id)),
+    ]);
+    expect(a.orderId).toBe(b.orderId);
+    const c1 = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    const c2 = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    expect(c1.orderId).toBe(c2.orderId);
+    expect(await ordersOf(s.storeId)).toHaveLength(2);
+    expect((await sessionsOf(s.storeId))[0]!.orderId).toBe(c2.orderId);
+    // Pedido que não está mais pendente (Pix vencido) não é reaproveitado.
+    await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, a.orderId));
+    const again = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    expect(again.orderId).not.toBe(a.orderId);
+  });
+});
+
+describe("trava da oferta e entrega", () => {
+  test("createOrder recusa pedido de app em oferta de download e oferta de app sem a sessão", async () => {
+    const s = await seedAppStore();
+    const base = { withBump: false, method: "pix_asaas" as const, customer: { name: "Ana Souza", email: "a@exemplo.com", phone: "11987654321", cpf: CPF }, touch: { first: null, last: null }, clientIp: nextIp(), userAgent: "t" };
+    const sid = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "trava" }))).url);
+    const errOf = (offerId: string, app?: { account: string; sessionId: string }) =>
+      withStore(s.storeId, (tx) => createOrder({ storeId: s.storeId, actor: { kind: "public" }, origin: "public", tx }, { ...base, offerId, ...(app ? { app } : {}) })).then(
+        () => "ok",
+        (e: ActionError) => e.code,
+      );
+    expect(await errOf(s.download.id, { account: "trava", sessionId: sid })).toBe("conflict");
+    expect(await errOf(s.start.id)).toBe("conflict");
+    // Oferta de download sem produtos (lista esvaziada) nunca vira pedido sem itens.
+    await t.ownerDb.execute(sql`delete from offer_product where offer_id = ${s.download.id}`);
+    expect(await errOf(s.download.id)).toBe("not_found");
+    expect(await ordersOf(s.storeId)).toEqual([]);
+  });
+
+  test("oferta virou download depois da sessão: o checkout com a sessão é recusado e nada é criado", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "virou" }))).url);
+    await t.ownerDb.update(offer).set({ delivery: "download", appCode: null }).where(eq(offer.id, s.start.id));
+    const e = await failOf(runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id)));
+    expect(e.details).toEqual({ code: "SESSION_INVALID" });
+    expect(await ordersOf(s.storeId)).toEqual([]);
+  });
+});
+
+describe("privacidade do link (?s=)", () => {
+  test("appGate: download com s → link vencido (sem formulário nem Pixel); download sem s → checkout normal; app sem s → abrir pelo app", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "gate" }))).url);
+    expect(await appGate(s.storeId, "guia", "download", id)).toEqual({ blocked: SESSION_INVALID_MESSAGE });
+    expect(await appGate(s.storeId, "guia", "download", "")).toEqual({ blocked: SESSION_INVALID_MESSAGE });
+    expect(await appGate(s.storeId, "guia", "download", undefined)).toBeNull();
+    expect(await appGate(s.storeId, "start-anual", "app", undefined)).toEqual({ blocked: "Abra o pagamento pelo app" });
+    expect(await appGate(s.storeId, "start-anual", "app", "lixo")).toEqual({ blocked: SESSION_INVALID_MESSAGE });
+    expect(await appGate(s.storeId, "start-anual", "app", id, new Date(Date.now() + 61 * 60_000))).toEqual({ blocked: SESSION_INVALID_MESSAGE });
+    expect(await appGate(s.storeId, "start-anual", "app", id)).toMatchObject({ session: { sessionId: id, name: "Ana Souza" } });
+  });
+
+  test("Referrer-Policy: no-referrer no /c com s e em /o; checkout comum sem a política", () => {
+    const q = (x: string) => new URLSearchParams(x);
+    expect(buyerReferrerPolicy("/c/start-anual", q("s=abc"))).toBe("no-referrer");
+    expect(buyerReferrerPolicy("/o/pedido", q(""))).toBe("no-referrer");
+    expect(buyerReferrerPolicy("/c/guia", q("utm_source=ig"))).toBeNull();
+    expect(proxy(new NextRequest("http://127.0.0.1:3000/c/start-anual?s=abc")).headers.get("referrer-policy")).toBe("no-referrer");
+    expect(proxy(new NextRequest("http://127.0.0.1:3000/o/abc")).headers.get("referrer-policy")).toBe("no-referrer");
+    expect(proxy(new NextRequest("http://127.0.0.1:3000/c/guia")).headers.get("referrer-policy")).toBeNull();
+  });
+});
+
+describe("preço conferido no pedido de app", () => {
+  test("sem expectedTotalCents → invalid_input; total diferente do preço atual → PRICE_CHANGED com a mensagem de nova confirmação", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "preco" }))).url);
+    const missing: Record<string, unknown> = sessionStart("start-anual", id);
+    delete missing.expectedTotalCents;
+    const e1 = await failOf(runAction(checkoutStart, pub(s.storeId), missing));
+    expect([e1.code, e1.details]).toEqual(["invalid_input", [expect.objectContaining({ path: ["expectedTotalCents"] })]]);
+    // O preço subiu com a página aberta: nenhum pedido pelo valor novo sem o comprador ver.
+    await t.ownerDb.update(offer).set({ priceCents: 59_700 }).where(eq(offer.id, s.start.id));
+    const e2 = await failOf(runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" })));
+    expect([e2.code, e2.message, (e2.details as { code?: string }).code]).toEqual(["conflict", PRICE_CHANGED_MESSAGE, "PRICE_CHANGED"]);
+    expect(await ordersOf(s.storeId)).toEqual([]);
+    // Um pendente do preço antigo não é reaproveitado depois da mudança.
+    expect((await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { expectedTotalCents: 59_700 }))).totalCents).toBe(59_700);
+  });
+
+  test("submitCoupon: com alwaysTotal (app) o total vai mesmo sem cupom", () => {
+    const closed = { kind: "closed" } as Parameters<typeof submitCoupon>[0];
+    expect(submitCoupon(closed, 49_700)).toEqual({});
+    expect(submitCoupon(closed, 49_700, { alwaysTotal: true })).toEqual({ expectedTotalCents: 49_700 });
+  });
+});
+
+describe("repetição em 2 min compara a origem", () => {
+  test("mesma origem (com fbclid) → mesma sessão; outra campanha ou outro clique → sessão nova", async () => {
+    const s = await seedAppStore();
+    const o1 = { utm_campaign: "black", fbclid: "IwAR1" };
+    const a = await runAction(createPayment, api(s.storeId), payment({ conta: "origem", origem: o1 }));
+    const b = await runAction(createPayment, api(s.storeId), payment({ conta: "origem", origem: { fbclid: "IwAR1", utm_campaign: "black" } }));
+    expect(b).toMatchObject({ url: a.url, criado: false });
+    const c = await runAction(createPayment, api(s.storeId), payment({ conta: "origem", origem: { utm_campaign: "outra", fbclid: "IwAR1" } }));
+    const d = await runAction(createPayment, api(s.storeId), payment({ conta: "origem", origem: { utm_campaign: "black", fbclid: "IwAR2" } }));
+    const e = await runAction(createPayment, api(s.storeId), payment({ conta: "origem" }));
+    expect([c.criado, d.criado, e.criado]).toEqual([true, true, true]);
+    expect(new Set([a.url, c.url, d.url, e.url]).size).toBe(4);
+  });
+});
+
+describe("tentativa direta só com a sessão utilizável", () => {
+  test("Pix vencido com a sessão ainda válida: link com s; sessão vencida ou com pedido pago: sem s (voltar ao app)", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "de-novo", retorno: `https://${s.domain}/app` }))).url);
+    const out = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    const [o] = await ordersOf(s.storeId);
+    await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, out.orderId));
+    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: id });
+    await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id));
+    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: null });
   });
 });

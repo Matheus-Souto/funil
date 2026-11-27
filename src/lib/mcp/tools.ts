@@ -33,13 +33,15 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "products.completeUpload": "chamada pela URL de upload",
   "products.file": "devolve o PDF inteiro; só para o visualizador do painel",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
-  "apps.registerTrial": "API de integração do app (só a chave integration)",
+  // API de integração do app (`/api/integracao/v1`): só a chave `integration`. Texto curto: vai nas instruções do MCP,
+  // limitadas a 1500 caracteres.
+  "apps.registerTrial": "API do app",
   "apps.resendNotice": "reenvio do aviso ao app: só pelo painel do pedido",
   // Devolvem o segredo do webhook do app: nem pela fila de aprovação (pedido e resposta ao alcance do agente).
   "connections.saveAppWebhook": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
   "connections.rotateAppWebhookSecret": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
   "connections.testAppWebhook": "teste do webhook do app: só junto da configuração, no painel",
-  "apps.createPayment": "API de integração do app (só a chave integration)",
+  "apps.createPayment": "API do app",
 };
 
 /** Prefixo da descrição das ferramentas que passam pela fila de aprovação. */

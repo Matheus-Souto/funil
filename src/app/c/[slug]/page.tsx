@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
-import { SESSION_INVALID_MESSAGE, checkoutAppSession } from "@/lib/apps/sessions";
 import { checkoutOffer } from "@/lib/catalog/checkout-offer";
 import { getPublicOffer } from "@/lib/catalog/offers";
-import { APP_SESSION_REQUIRED_MESSAGE, checkoutMethods } from "@/lib/checkout";
+import { checkoutMethods } from "@/lib/checkout";
 import { clientIpFrom } from "@/lib/client-ip";
 import { cardServiceConfigured, env } from "@/lib/env";
 import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import { parseTouch } from "@/lib/tracking/touch";
 import { BuyerShell } from "../../(design)/shell";
-import { AppSessionBlocked, CheckoutForm, type AppSession } from "./checkout-form";
+import { appGate } from "./app-gate";
+import { AppSessionBlocked, CheckoutForm } from "./checkout-form";
 import { initialCoupon } from "./initial-coupon";
 import { CheckoutPixel } from "./pixel";
 
@@ -32,21 +32,6 @@ function urlOf(slug: string, sp: Search): URL {
 
 const firstParam = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
 
-/**
- * Oferta de app: só abre com a sessão de pagamento válida (`?s=`, criada pelo app). Devolve os dados travados da
- * sessão ou a mensagem da tela sem formulário (sem `s`: abrir pelo app; `s` vencido, pago ou de outra oferta: venceu).
- */
-async function appSessionFor(storeId: string, slug: string, s: string | undefined): Promise<{ session: AppSession } | { blocked: string }> {
-  if (!s) return { blocked: APP_SESSION_REQUIRED_MESSAGE };
-  try {
-    const r = await runAction(checkoutAppSession, { storeId, actor: { kind: "public" }, origin: "public" }, { slug, sessionId: s });
-    return { session: { sessionId: s, name: r.buyerName, email: r.buyerEmail, hasPhone: r.hasPhone } };
-  } catch (e) {
-    if (e instanceof ActionError && (e.code === "conflict" || e.code === "invalid_input")) return { blocked: SESSION_INVALID_MESSAGE };
-    throw e;
-  }
-}
-
 /** Checkout público de uma oferta. Só resolve a loja e a oferta; a regra de negócio fica em `checkout.start`. */
 export default async function CheckoutPage({ params, searchParams }: { params: Promise<{ slug: string }>; searchParams: Promise<Search> }) {
   const { slug } = await params;
@@ -62,7 +47,8 @@ export default async function CheckoutPage({ params, searchParams }: { params: P
     throw e;
   }
   const brandColor = await getStoreBrandColor(store.id);
-  const app = offer.delivery === "app" ? await appSessionFor(store.id, slug, firstParam(sp.s)) : null;
+  // `?s=` decide a tela antes de qualquer formulário ou analytics (app-gate.ts).
+  const app = await appGate(store.id, slug, offer.delivery, firstParam(sp.s));
   if (app && "blocked" in app) {
     return (
       <BuyerShell storeName={store.name} brandColor={brandColor}>

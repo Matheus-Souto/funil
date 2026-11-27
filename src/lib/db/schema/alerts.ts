@@ -23,7 +23,7 @@ export const storeAlert = pgTable(
   (t) => [
     check(
       "store_alert_kind_check",
-      sql`${t.kind} in ('chave_asaas_invalida','evento_conta_asaas_anterior','estorno_cancelado','estorno_falhou','estorno_parcial','disjuntor_cartao','monitor_pagina_pagamento','telegram_falhou','app_webhook_falhou')`,
+      sql`${t.kind} in ('chave_asaas_invalida','evento_conta_asaas_anterior','estorno_cancelado','estorno_falhou','estorno_parcial','disjuntor_cartao','monitor_pagina_pagamento','telegram_falhou','app_webhook_falhou','pagamento_duplicado_app')`,
     ),
     index("store_alert_open_idx").on(t.storeId, t.createdAt).where(sql`${t.acknowledgedAt} is null`),
   ],

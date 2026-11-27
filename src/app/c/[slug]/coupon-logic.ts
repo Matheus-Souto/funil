@@ -74,9 +74,17 @@ export function displayTotal(parts: { priceCents: number; bumpCents: number | nu
   return st.withBump === withBump ? st.totalCents : full - st.discountCents;
 }
 
-/** O que o envio acrescenta: com cupom aplicado, o código e o total que a tela mostra. */
-export function submitCoupon(st: CouponState, shownTotalCents: number): { couponCode?: string; expectedTotalCents?: number } {
-  return st.kind === "applied" ? { couponCode: st.code, expectedTotalCents: shownTotalCents } : {};
+/**
+ * O que o envio acrescenta: com cupom aplicado, o código e o total que a tela mostra. `alwaysTotal` (pagamento pelo
+ * app): o total vai sempre, para o servidor recusar se o preço da oferta mudou com a página aberta.
+ */
+export function submitCoupon(
+  st: CouponState,
+  shownTotalCents: number,
+  opts: { alwaysTotal?: boolean } = {},
+): { couponCode?: string; expectedTotalCents?: number } {
+  if (st.kind === "applied") return { couponCode: st.code, expectedTotalCents: shownTotalCents };
+  return opts.alwaysTotal ? { expectedTotalCents: shownTotalCents } : {};
 }
 
 /** O pedaço do `StartResult` de erro que importa aqui. */

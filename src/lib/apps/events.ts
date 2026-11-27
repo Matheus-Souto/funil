@@ -1,9 +1,10 @@
 // Eventos do aviso ao app: o id estável e o registro do aviso na fila. Módulo leve de propósito: a máquina de estados
 // (`orders/state.ts`) o importa e ela entra no bundle do serviço de cartão, que não leva o envio (`apps/webhook.ts`).
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { alertSeller } from "@/lib/alerts";
 import { sha256 } from "@/lib/crypto";
 import type { Tx } from "@/lib/db/client";
-import { appWebhookDelivery } from "@/lib/db/schema";
+import { appCheckoutSession, appWebhookDelivery, orders, storeAlert } from "@/lib/db/schema";
 import { enqueue } from "@/lib/jobs";
 
 export type AppPaymentEventType =
@@ -30,6 +31,41 @@ export function appEventId(orderId: string, type: AppEventType, seq: number): st
 const CONFIRMED = "pagamento.confirmado" as const;
 
 /**
+ * Uma liberação por sessão de pagamento: dois pedidos da mesma sessão podem ser pagos (Pix pendente e cartão, duas
+ * abas), mas só um libera no app. Sob `FOR UPDATE` da sessão, o primeiro pedido que gera aviso é gravado em
+ * `released_order_id`; outro pedido da mesma sessão é `duplicate` e nunca avisa o app (nem confirmação, nem reembolso,
+ * contestação, restabelecimento ou estorno parcial): reembolsá-lo não mexe na compra válida. Pedido sem sessão: `ok`.
+ */
+async function releaseOf(tx: Tx, storeId: string, orderId: string): Promise<"ok" | "duplicate"> {
+  const [o] = await tx.select({ sessionId: orders.appSessionId }).from(orders).where(eq(orders.id, orderId));
+  if (!o?.sessionId) return "ok";
+  const [session] = await tx
+    .select({ released: appCheckoutSession.releasedOrderId })
+    .from(appCheckoutSession)
+    .where(and(eq(appCheckoutSession.storeId, storeId), eq(appCheckoutSession.id, o.sessionId)))
+    .for("update");
+  if (!session) return "ok";
+  if (session.released === null) {
+    await tx
+      .update(appCheckoutSession)
+      .set({ releasedOrderId: orderId })
+      .where(and(eq(appCheckoutSession.storeId, storeId), eq(appCheckoutSession.id, o.sessionId)));
+    return "ok";
+  }
+  return session.released === orderId ? "ok" : "duplicate";
+}
+
+/** Pagamento duplicado de uma sessão: um alerta por pedido, pedindo o reembolso (o app não é avisado). */
+async function alertDuplicate(tx: Tx, storeId: string, orderId: string): Promise<void> {
+  const [seen] = await tx
+    .select({ id: storeAlert.id })
+    .from(storeAlert)
+    .where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.orderId, orderId), eq(storeAlert.kind, "pagamento_duplicado_app")))
+    .limit(1);
+  if (!seen) await alertSeller(tx, storeId, "pagamento_duplicado_app", { orderId });
+}
+
+/**
  * Registra o aviso (`app_webhook_delivery`, `pending`) e enfileira o `notify_app` na transação `tx`: os dois existem
  * ou nenhum. Quem chama já segura a linha do pedido (o UPDATE do estado ou um `FOR UPDATE`), então a contagem da
  * ocorrência e da sequência não corre. Devolve se criou.
@@ -43,6 +79,8 @@ const CONFIRMED = "pagamento.confirmado" as const;
  * `pagamento.reembolso_parcial`: `refundedCents` é a soma devolvida até agora, gravada na linha (o envio e as
  * retentativas mandam esse valor, não o do momento do envio). Só há ocorrência nova quando a soma AUMENTA: o mesmo
  * valor de novo, ou um valor menor vindo de uma reconsulta fora de ordem, não gera aviso.
+ *
+ * Pedido duplicado de uma sessão (ver `releaseOf`): nenhum aviso; na confirmação, o alerta `pagamento_duplicado_app`.
  */
 export async function enqueueAppNotice(
   tx: Tx,
@@ -51,6 +89,10 @@ export async function enqueueAppNotice(
   type: AppPaymentEventType,
   opts: { refundedCents?: number } = {},
 ): Promise<boolean> {
+  if ((await releaseOf(tx, storeId, orderId)) === "duplicate") {
+    if (type === CONFIRMED) await alertDuplicate(tx, storeId, orderId);
+    return false;
+  }
   const insert = async (eventType: AppPaymentEventType, occurrence: number, sequence: number, refundedCents: number | null, idempotent: boolean) => {
     const q = tx.insert(appWebhookDelivery).values({
       storeId,
