@@ -20,7 +20,7 @@
 // - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
 //   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
 import { createHash } from "node:crypto";
-import { and, count, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
@@ -191,6 +191,8 @@ type StartOutput = {
   acceptCnpj: boolean;
   /** Pedido pendente da sessão do app reaproveitado (nenhum pedido novo: não conta nos limites de pedidos). */
   reused?: boolean;
+  /** Pix reaproveitado com o QR já guardado: a página do pedido o mostra sem chamar o Asaas de novo. */
+  qrReady?: boolean;
 };
 
 export const checkoutStart = defineAction({
@@ -337,6 +339,14 @@ export const checkoutStart = defineAction({
         .limit(1);
       if (open) {
         if (open.totalCents !== input.expectedTotalCents) throw priceChanged(open.totalCents);
+        const [qr] =
+          method === "pix_asaas"
+            ? await ctx.tx
+                .select({ id: payment.id })
+                .from(payment)
+                .where(and(eq(payment.orderId, open.id), eq(payment.provider, "asaas"), eq(payment.status, "PENDING"), isNotNull(payment.pixCopyPaste)))
+                .limit(1)
+            : [];
         return {
           publicId: open.publicId,
           method,
@@ -345,6 +355,7 @@ export const checkoutStart = defineAction({
           maxInstallments: installmentsFor(o.maxInstallments, open.totalCents, { discounted: false }),
           acceptCnpj,
           reused: true,
+          qrReady: qr !== undefined,
         };
       }
     }
@@ -482,7 +493,7 @@ export async function startCheckout(
     );
     return { publicId: out.publicId, method: out.method, cardTicket };
   }
-  if (out.method === "pix_asaas") {
+  if (out.method === "pix_asaas" && !out.qrReady) {
     try {
       await startAsaasPix(call, out.orderId);
     } catch (e) {
@@ -698,10 +709,25 @@ export const regenerateOrderPix = defineAction({
   audit: false,
   async prepare(call, { publicId }) {
     const [o] = await withStore(call.storeId, (tx) =>
-      tx.select({ id: orders.id, method: orders.method, status: orders.status }).from(orders).where(eq(orders.publicId, publicId)),
+      tx
+        .select({ id: orders.id, method: orders.method, status: orders.status, appSessionId: orders.appSessionId })
+        .from(orders)
+        .where(eq(orders.publicId, publicId)),
     );
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
     if (o.method !== "pix_asaas" || o.status !== "pending") throw new ActionError("conflict", "Este pedido não aceita um novo código Pix");
+    // Pedido de app: só com a sessão ainda servindo. Vencida ou já paga (outro pedido dela), o pedido pendente é
+    // encerrado (expirado, numa transação própria que já fica gravada) e o comprador volta ao app.
+    const sessionId = o.appSessionId;
+    if (sessionId) {
+      const closed = await withStore(call.storeId, async (tx) => {
+        if (await loadCheckoutSession(tx, call.storeId, sessionId)) return false;
+        await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, o.id)).for("update");
+        await transitionOrder({ storeId: call.storeId, actor: { kind: "public" }, origin: "public", tx }, o.id, "expired", "sessão do app encerrada");
+        return true;
+      });
+      if (closed) throw sessionInvalid();
+    }
     if (!(await checkRateLimit(`checkout:pix_regen:${call.storeId}:${publicId}`, PIX_REGEN_PER_HOUR, HOUR))) {
       throw new ActionError("rate_limited", "Você já pediu vários códigos. Aguarde alguns minutos.");
     }

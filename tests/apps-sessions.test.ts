@@ -19,7 +19,10 @@ import {
 } from "@/lib/apps/sessions";
 import { registerTrial, sweepAppTrialsJob } from "@/lib/apps/trials";
 import { createOffer } from "@/lib/catalog/offers";
-import { ASAAS_LIMITS, checkoutStart, getOrderPublic, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { ASAAS_LIMITS, checkoutStart, getOrderPublic, regenerateOrderPix, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { notifyAppJob } from "@/lib/apps/webhook";
+import { enqueue } from "@/lib/jobs";
+import { payWithCard } from "@/lib/payments/asaas/card";
 import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { appCheckoutSession, auditLog, checkoutLead, customer, integration, mcpToken, offer, orders, store } from "@/lib/db/schema";
@@ -35,7 +38,7 @@ import { appGate } from "@/app/c/[slug]/app-gate";
 import { submitCoupon } from "@/app/c/[slug]/coupon-logic";
 import { enqueueAppNotice } from "@/lib/apps/events";
 import { PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
-import { appWebhookDelivery, storeAlert } from "@/lib/db/schema";
+import { appWebhookDelivery, job, payment as paymentRow, storeAlert } from "@/lib/db/schema";
 import { createOrder } from "@/lib/orders/create";
 import { transitionOrder } from "@/lib/orders/state";
 import { buyerReferrerPolicy, proxy } from "@/proxy";
@@ -77,7 +80,7 @@ async function seedAppStore(name = "PeticionaAqui") {
   const plus = await app("plus-anual", "plus_anual", 99_700);
   const main = await seedProduct(storeId, "Guia");
   const download = await runAction(createOffer, call, { slug: "guia", name: "Guia", productIds: [main.id], priceCents: 990, methods: ["pix"], pixMode: "asaas" });
-  return { storeId, domain, start, plus, download };
+  return { storeId, domain, start, plus, download, fake };
 }
 
 const payment = (over: Record<string, unknown> = {}) => ({
@@ -753,5 +756,154 @@ describe("oferta na auditoria", () => {
     await failOf(runAction(createPayment, api(s.storeId), payment({ oferta: "nao-existe" })));
     const after = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "apps.createPayment")));
     expect(after.map((a) => (a.input as { oferta?: string } | null)?.oferta).filter(Boolean)).toEqual(["nao-existe"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Correções da 3ª rodada do PR #43
+
+const tick = () => new Promise<void>((r) => setImmediate(r));
+/** Volta quando alguma conexão deste banco está esperando uma trava (sem espera fixa: olha a cada volta do laço). */
+async function someoneWaitsForLock(): Promise<void> {
+  for (;;) {
+    const rows = (await t.ownerDb.execute(
+      sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+    )) as unknown as { n: number }[];
+    if ((rows[0]?.n ?? 0) > 0) return;
+    await tick();
+  }
+}
+
+/** Segura o POST /payments (cobrança do cartão) até `release()`; `arrived` resolve quando ele chega ao "Asaas". */
+function gateCardCharge(fake: ReturnType<typeof createFakeAsaas>) {
+  let release!: () => void;
+  let reached!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const arrived = new Promise<void>((r) => (reached = r));
+  setAsaasFetchForTests((async (i: string, init?: RequestInit) => {
+    if (init?.method === "POST" && String(i).endsWith("/payments") && String(init.body ?? "").includes("CREDIT_CARD")) {
+      reached();
+      await gate;
+    }
+    return fake.fetch(i, init);
+  }) as unknown as typeof fetch);
+  return { release, arrived };
+}
+
+const cardInput = (publicId: string) => ({
+  orderPublicId: publicId,
+  idempotencyKey: randomUUID(),
+  installments: 1,
+  card: { holderName: "TITULAR UNICO ZETA", number: "4444444444444444", expiryMonth: "08", expiryYear: "2034", ccv: "987" },
+  holder: { cpf: CPF, postalCode: "01310-100", addressNumber: "100" },
+  clientIp: nextIp(),
+});
+
+describe("cartão aprovado em pedido de app que expirou no meio da cobrança", () => {
+  for (const caso of ["pix pago", "sessão vencida"] as const) {
+    test(`${caso}: a aprovação vira pagamento real e a eleição da sessão decide`, async () => {
+      const s = await seedAppStore();
+      const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: `tarde-${caso}` }))).url);
+      const card = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id, { method: "card" }), { cardTicketKey: KEY });
+      const [cardOrder] = (await ordersOf(s.storeId)).filter((o) => o.publicId === card.publicId);
+      const gate = gateCardCharge(s.fake);
+      const charging = payWithCard({ storeId: s.storeId }, cardInput(card.publicId), { wait: tick });
+      await gate.arrived;
+      // Enquanto o Asaas cobra (fora da trava), a renovação do bilhete encerra o pedido de cartão.
+      let pixId: string | null = null;
+      let now: Date | undefined;
+      if (caso === "pix pago") {
+        const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+        await move(s.storeId, pix.orderId, "paid");
+        pixId = pix.orderId;
+      } else now = new Date(Date.now() + 61 * 60_000);
+      await failOf(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY, now));
+      expect((await ordersOf(s.storeId)).find((o) => o.id === cardOrder!.id)!.status).toBe("expired");
+      gate.release();
+      expect(await charging).toEqual({ status: "approved" });
+
+      const rows = new Map((await ordersOf(s.storeId)).map((o) => [o.id, o]));
+      expect(rows.get(cardOrder!.id)!.status).toBe("paid");
+      const [p] = await withStore(s.storeId, (tx) => tx.select().from(paymentRow).where(eq(paymentRow.orderId, cardOrder!.id)));
+      expect((p!.raw as { duplicate?: boolean } | null)?.duplicate).toBeUndefined();
+      const notices = (await deliveriesOf(s.storeId)).map((d) => [d.orderId, d.eventType]);
+      const alerts = (await duplicateAlerts(s.storeId)).map((a) => a.orderId);
+      if (caso === "pix pago") {
+        // O Pix liberou; o cartão é o duplicado: sem aviso ao app, com alerta de reembolso.
+        expect(notices).toEqual([[pixId, "pagamento.confirmado"]]);
+        expect(alerts).toEqual([cardOrder!.id]);
+      } else {
+        // Só a sessão venceu: o cartão pago libera no app.
+        expect(notices).toEqual([[cardOrder!.id, "pagamento.confirmado"]]);
+        expect(alerts).toEqual([]);
+        expect((await sessionsOf(s.storeId))[0]!.releasedOrderId).toBe(cardOrder!.id);
+      }
+    });
+  }
+});
+
+describe("ordem de travas: reenvio do aviso × aviso anterior abandonado", () => {
+  test("com o pedido travado pelo reenvio, o job do aviso seguinte espera o pedido antes de mexer no anterior (sem impasse)", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "reenvio" }))).url);
+    const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    await move(s.storeId, pix.orderId, "paid");
+    await move(s.storeId, pix.orderId, "refunded");
+    const byType = new Map((await deliveriesOf(s.storeId)).map((d) => [d.eventType, d]));
+    const confirmed = byType.get("pagamento.confirmado")!;
+    const refunded = byType.get("pagamento.reembolsado")!;
+    // O aviso anterior ficou pendente sem job (abandonado): o job do seguinte o daria como falho, com alerta.
+    await t.ownerDb.delete(job).where(sql`${job.type} = 'notify_app' and ${job.payload}->>'deliveryId' = ${confirmed.id}`);
+
+    const { running } = await withStore(s.storeId, async (tx) => {
+      // Como o "Reenviar": trava o pedido...
+      await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, pix.orderId)).for("update");
+      const running = notifyAppJob({ id: randomUUID(), storeId: s.storeId, type: "notify_app", payload: { deliveryId: refunded.id } } as unknown as Job, new AbortController().signal);
+      await someoneWaitsForLock();
+      // ...e reabre o aviso anterior com um job novo.
+      await tx.update(appWebhookDelivery).set({ status: "pending", attempts: 0 }).where(eq(appWebhookDelivery.id, confirmed.id));
+      await enqueue(tx, { storeId: s.storeId, type: "notify_app", payload: { deliveryId: confirmed.id } });
+      return { running };
+    });
+    await running;
+    const after = new Map((await deliveriesOf(s.storeId)).map((d) => [d.eventType, d.status]));
+    // O reenvio venceu: o anterior segue pendente (com job) e o seguinte espera por ele; nenhum alerta de falha.
+    expect([after.get("pagamento.confirmado"), after.get("pagamento.reembolsado")]).toEqual(["pending", "pending"]);
+    const failedAlerts = await withStore(s.storeId, (tx) => tx.select().from(storeAlert).where(eq(storeAlert.kind, "app_webhook_falhou")));
+    expect(failedAlerts).toEqual([]);
+  });
+});
+
+describe("Gerar novo código Pix depois de a sessão fechar", () => {
+  test("sessão vencida ou já paga: recusa (SESSION_INVALID) e o pedido pendente expira; a página não oferece o botão", async () => {
+    const s = await seedAppStore();
+    for (const caso of ["vencida", "paga"] as const) {
+      const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: `regerar-${caso}` }))).url);
+      const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+      const [o] = (await ordersOf(s.storeId)).filter((x) => x.id === pix.orderId);
+      if (caso === "vencida") await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id));
+      else {
+        const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+        await move(s.storeId, card.orderId, "paid");
+      }
+      // A página (antes do clique) já não oferece um novo código: a sessão não serve mais.
+      expect((await getOrderPublic(s.storeId, o!.publicId))!.app?.sessionId).toBeNull();
+      const e = await failOf(runAction(regenerateOrderPix, pub(s.storeId), { publicId: o!.publicId }));
+      expect([caso, e.code, e.details]).toEqual([caso, "conflict", { code: "SESSION_INVALID" }]);
+      expect((await ordersOf(s.storeId)).find((x) => x.id === pix.orderId)!.status).toBe("expired");
+    }
+  });
+});
+
+describe("retomar o Pix com o QR guardado", () => {
+  test("a segunda aba no mesmo Pix não busca o QR no Asaas de novo", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "qr" }))).url);
+    const qrCalls = () => s.fake.calls.filter((c) => c.method === "GET" && c.path.endsWith("/pixQrCode")).length;
+    const first = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id));
+    expect(qrCalls()).toBe(1);
+    const again = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id));
+    expect(again.publicId).toBe(first.publicId);
+    expect(qrCalls()).toBe(1);
   });
 });

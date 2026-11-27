@@ -197,13 +197,18 @@ function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPubli
                   : "O código Pix não ficou pronto. Toque abaixo para gerar um novo."}
               </span>
             </p>
-            {/* POST (server action): nunca é disparado por um simples GET da página. */}
-            <form action={regeneratePixAction.bind(null, publicId)}>
-              <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`}>
-                <Icon name="refresh-cw" size={20} />
-                Gerar novo código Pix
-              </button>
-            </form>
+            {/* POST (server action): nunca é disparado por um simples GET da página. Pedido de app com a sessão encerrada
+                (vencida ou já paga): sem novo código; o comprador volta ao app. */}
+            {app && !order.app?.sessionId ? (
+              <BackToApp order={order} />
+            ) : (
+              <form action={regeneratePixAction.bind(null, publicId)}>
+                <button type="submit" className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`}>
+                  <Icon name="refresh-cw" size={20} />
+                  Gerar novo código Pix
+                </button>
+              </form>
+            )}
           </>
         )}
       </section>

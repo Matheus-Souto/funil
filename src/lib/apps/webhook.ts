@@ -295,6 +295,11 @@ const OPEN_JOB = ["queued", "running"];
  */
 async function waitForEarlier(tx: Tx, storeId: string, d: Delivery, at: Date): Promise<Date | null> {
   if (d.orderId === null || d.sequence === null) return null;
+  // Ordem de travas igual à do "Reenviar" (`apps.resendNotice`: pedido FOR UPDATE, depois o aviso): pedido antes de
+  // qualquer aviso. Sem isto, este job travaria o aviso anterior (UPDATE) e só depois o pedido (a FK do alerta pede
+  // KEY SHARE), enquanto o reenvio segura o pedido e espera o aviso: impasse. KEY SHARE basta para esperar o reenvio
+  // (FOR UPDATE) sem bloquear a mudança de estado do pedido pelo webhook.
+  await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, d.orderId)).for("key share");
   const floor = at.getTime() + APP_WEBHOOK_ORDER_WAIT_SECONDS * 1000;
   // Cada volta resolve um anterior ou termina; o teto é só defesa contra uma corrida que não se desfaz.
   for (let i = 0; i < 100; i++) {
