@@ -126,9 +126,11 @@ Cada coisa que o app vende vira uma **oferta de app** no funil (entrega "app", e
 Combine com quem administra a loja a lista de ofertas, endereços, códigos e preços: o app precisa da mesma tabela de
 `app_code` (seção 8).
 
-O `app_code` que vai em cada aviso é lido da oferta **na hora do envio**. Por isso, **nunca mude nem reaproveite o
-código de uma oferta que já vendeu**: um reembolso de uma compra antiga sairia com o código novo. Para outro produto,
-crie outra oferta.
+O `app_code` que vai em cada aviso é lido da oferta **na hora do envio**. Por isso o código não muda depois da primeira
+venda: o painel não deixa trocar o código no app (nem a entrega) de uma oferta que já tem pedido ("O código no app não
+pode mudar depois da primeira venda. Crie outra oferta para outro produto."), e o mesmo código não pode estar em duas
+ofertas da loja. Para outro produto, crie outra oferta. Mesmo assim, o app guarda o que liberou em cada pedido e usa
+esse registro local nas reversões (seção 8.4).
 
 ---
 
@@ -882,7 +884,7 @@ não reaproveite um código para outro produto no catálogo do app.
 maior que zero e dentro do limite que a sua função de crédito aceita, e que produto de plano tem período. O catálogo só
 é consultado na transição que **concede pela primeira vez** (`nada` → `liberado`): ali, um `app_code` desconhecido ou
 inválido falha o aviso (`5xx`), e o funil tenta de novo enquanto o catálogo é corrigido. Reembolso, contestação,
-restabelecimento e reembolso parcial de um pedido já registrado usam só o registro local, mesmo que o `app_code`
+restabelecimento e reembolso parcial de um pedido que já teve uma concessão usam só o registro local, mesmo que o `app_code`
 recebido seja desconhecido.
 
 ### 8.5 Rotina de aplicação (pseudocódigo)
