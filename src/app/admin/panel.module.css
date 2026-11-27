@@ -2019,6 +2019,32 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* App (integração): subtítulos, quadro interno, segredo revelado e a linha de criar chave. */
+.connSubhead {
+  margin-bottom: 12px;
+}
+.connInset {
+  margin-top: 16px;
+  background: var(--color-bg);
+}
+.connInsetStack {
+  gap: 10px;
+}
+.connReveal {
+  margin-bottom: 16px;
+  outline: none;
+}
+.connFull {
+  width: 100%;
+}
+.connNote {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+.connKeyInput {
+  flex: 1 1 180px;
+  min-height: 36px;
+}
 /* Dobrado para vencer a largura padrão (440px) do Dialog do Arc. */
 .connDialog.connDialog {
   width: min(600px, calc(100vw - 32px));

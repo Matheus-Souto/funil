@@ -110,6 +110,12 @@ interface Destination {
  * o env só a aceita com `BASE_URL` em loopback) um destino inteiro em loopback também vale, em `http` ou `https`.
  */
 async function destinationOf(raw: string): Promise<Destination | null> {
+  const d = await checkDestination(raw);
+  return d === "unresolved" ? null : d;
+}
+
+/** Como `destinationOf`, mas distingue o nome que não resolveu (`"unresolved"`) do destino recusado (`null`). */
+async function checkDestination(raw: string): Promise<Destination | "unresolved" | null> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -126,7 +132,7 @@ async function destinationOf(raw: string): Promise<Destination | null> {
     addresses = [];
   }
   addresses = addresses.map(unmapV4);
-  if (addresses.length === 0) return null;
+  if (addresses.length === 0) return "unresolved";
   const address = addresses[0]!;
   if (allowLoopback() && addresses.every(isLoopbackAddress)) return { url, address };
   if (url.protocol !== "https:") return null;
@@ -136,6 +142,12 @@ async function destinationOf(raw: string): Promise<Destination | null> {
 /** O destino seria aceito agora? (A configuração do webhook no painel usa a mesma regra do envio.) */
 export async function appWebhookDestinationAllowed(url: string): Promise<boolean> {
   return (await destinationOf(url)) !== null;
+}
+
+/** Por que o destino não seria aceito agora: `null` (aceito), `"unresolved"` (o nome não resolveu) ou `"blocked"`. */
+export async function appWebhookDestinationProblem(url: string): Promise<null | "unresolved" | "blocked"> {
+  const d = await checkDestination(url);
+  return d === "unresolved" ? "unresolved" : d === null ? "blocked" : null;
 }
 
 // ---- envio -----------------------------------------------------------------------------------------------------

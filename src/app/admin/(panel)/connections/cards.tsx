@@ -3,8 +3,8 @@
 // Conexões (P14): cada integração é uma linha (logo, nome, status) e o botão abre um modal com o formulário. Salvar
 // qualquer conexão é sensível: sempre passa por um diálogo de confirmação. Segredos nunca chegam aqui (só
 // "configurado"); o token do webhook do Asaas aparece para quem pode alterar conexões.
-import { useState, type ReactNode } from "react";
-import { Mail } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Mail, Plug } from "lucide-react";
 import { Dialog as ArcDialog, DialogContent } from "@/components/arc/dialog/dialog";
 import { Badge } from "../../blocks";
 import { CONNECTION_BRANDS } from "../../brand-icons";
@@ -12,6 +12,11 @@ import { PIcon } from "../../icons";
 import s from "../../panel.module.css";
 import { CopyField, Dialog, Live, SecretField, useActionRunner } from "../../ui";
 import {
+  createIntegrationKeyAction,
+  revokeIntegrationKeyAction,
+  rotateAppWebhookSecretAction,
+  saveAppWebhookAction,
+  testAppWebhookAction,
   saveAsaasAction,
   saveMetaAction,
   savePixManualAction,
@@ -28,16 +33,18 @@ import {
 
 type Runner = ReturnType<typeof useActionRunner>;
 
-type Logo = keyof typeof CONNECTION_BRANDS | "smtp";
+type Logo = keyof typeof CONNECTION_BRANDS | "smtp" | "app";
 
-/** Logo da integração (Simple Icons; SMTP é genérico). */
+/** Logo da integração (Simple Icons; SMTP e o app da loja são genéricos). */
 function ConnLogo({ name }: { name: Logo }) {
-  if (name === "smtp")
+  if (name === "smtp" || name === "app") {
+    const Icon = name === "smtp" ? Mail : Plug;
     return (
       <span className={s.connLogo}>
-        <Mail size={18} strokeWidth={1.75} aria-hidden="true" />
+        <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
       </span>
     );
+  }
   const b = CONNECTION_BRANDS[name];
   // Logo preto (Resend) segue a cor do texto, para aparecer no tema escuro; o Asaas usa o ícone deles (A branco no azul).
   const color = b.hex === "#000000" ? "var(--color-text)" : b.hex;
@@ -66,6 +73,8 @@ function ConnItem({
   onLabel,
   warn = false,
   canWrite,
+  locked = false,
+  onClosed,
   children,
 }: {
   id: string;
@@ -78,6 +87,10 @@ function ConnItem({
   onLabel?: string;
   warn?: boolean;
   canWrite: boolean;
+  /** true: Esc, clique fora e X não fecham o modal (ex.: um segredo na tela que não aparece de novo). */
+  locked?: boolean;
+  /** Chamado quando o modal fecha (ex.: esquecer um segredo mostrado). */
+  onClosed?: () => void;
   children: ReactNode;
 }) {
   // Link direto (ex.: /admin/connections#meta, dos Primeiros passos) já abre o modal dessa conexão. O portal do modal
@@ -95,8 +108,23 @@ function ConnItem({
       <button type="button" className={`${s.btn} ${s.btnSm} ${canWrite && !on ? s.btnPrimary : ""}`} onClick={() => setOpen(true)} aria-label={`${action} ${name}`}>
         {action}
       </button>
-      <ArcDialog open={open} onOpenChange={setOpen}>
-        <DialogContent id={id} title={title} description={sub} className={`${s.themeVars} ${s.connDialog}`}>
+      <ArcDialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!next && locked) return;
+          setOpen(next);
+          if (!next) onClosed?.();
+        }}
+      >
+        <DialogContent
+          id={id}
+          title={title}
+          description={sub}
+          className={`${s.themeVars} ${s.connDialog}`}
+          showClose={!locked}
+          onEscapeKeyDown={(e) => locked && e.preventDefault()}
+          onPointerDownOutside={(e) => locked && e.preventDefault()}
+        >
           {children}
         </DialogContent>
       </ArcDialog>
@@ -1095,6 +1123,368 @@ export function MetaCard({
           {f.token || data?.accessToken ? " (o token é conferido no Meta antes de salvar)" : ""}.
         </p>
       </ConfirmSave>
+    </ConnItem>
+  );
+}
+
+// ---- App (integração) -------------------------------------------------------------------------------------------
+
+export interface AppConnectionData {
+  /** `null` para quem não vê a URL (token MCP); no painel, a URL salva. */
+  url: string | null;
+  returnHosts: string[];
+  publicOrigin: string | null;
+  secret: "configured" | "unreadable" | null;
+}
+
+export interface IntegrationKeyRow {
+  id: string;
+  name: string;
+  last4: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** Segredo ou chave que acabou de aparecer: vive só no estado do cartão e some ao fechar o modal ou em "Já copiei". */
+type Reveal = { kind: "secret" | "key"; title: string; value: string };
+
+const hostsText = (hosts: string[]) => hosts.join("\n");
+const hostsOf = (text: string) =>
+  text
+    .split(/[\s,;]+/)
+    .map((h) => h.trim())
+    .filter(Boolean);
+const hostOfUrl = (url: string | null) => {
+  if (!url) return null;
+  try {
+    return new URL(url).host;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Cartão do app com conta de usuário (§7.6): o webhook que recebe os avisos de pagamento, os hosts para onde o checkout
+ * pode voltar, a origem pública do app (evento de início de teste no Meta), o segredo da assinatura e as chaves da API
+ * de integração. O segredo e a chave aparecem uma única vez (no estado deste componente, nunca em URL, cookie ou
+ * armazenamento); depois só "configurado". Os runners ficam montados fora dos ramos condicionais: a mensagem de sucesso
+ * sobrevive ao refresh que muda o estado do cartão (padrão do `UseProvider`).
+ */
+export function AppCard({
+  data,
+  canWrite,
+  canManageKeys,
+  keys,
+  apiBaseUrl,
+}: {
+  data: AppConnectionData | null;
+  canWrite: boolean;
+  /** Criar, listar e revogar chaves (team.manage, só o dono). */
+  canManageKeys: boolean;
+  keys: IntegrationKeyRow[];
+  apiBaseUrl: string;
+}) {
+  const configured = Boolean(data?.url);
+  const [editing, setEditing] = useState(!configured);
+  const [f, setF] = useState({ url: data?.url ?? "", hosts: hostsText(data?.returnHosts ?? []), origin: data?.publicOrigin ?? "" });
+  const [confirm, setConfirm] = useState<"save" | "rotate" | null>(null);
+  const [reveal, setReveal] = useState<Reveal | null>(null);
+  const [keyName, setKeyName] = useState("");
+  const [revoking, setRevoking] = useState<IntegrationKeyRow | null>(null);
+  const save = useActionRunner();
+  const rotate = useActionRunner();
+  const test = useActionRunner();
+  const keyRun = useActionRunner();
+  const revoke = useActionRunner();
+  const [last, setLast] = useState<"save" | "rotate">("save");
+  const revealBox = useRef<HTMLDivElement>(null);
+  // Leitor de tela e teclado: o foco vai para o quadro assim que o segredo ou a chave aparece (é a única chance de copiar).
+  useEffect(() => {
+    if (reveal) revealBox.current?.focus();
+  }, [reveal]);
+  const active = keys.filter((k) => !k.revokedAt);
+  const unreadable = data?.secret === "unreadable";
+
+  return (
+    <ConnItem
+      id="app"
+      logo="app"
+      name="App (integração)"
+      title="App (integração)"
+      sub="Cobra o app com conta de usuário e avisa o app de cada pagamento"
+      summary={hostOfUrl(data?.url ?? null)}
+      on={configured}
+      onLabel={unreadable ? "Segredo ilegível" : "Conectado"}
+      warn={unreadable}
+      canWrite={canWrite}
+      locked={reveal !== null}
+      onClosed={() => setReveal(null)}
+    >
+      {reveal ? (
+        <div className={`${s.stack} ${s.connReveal}`} ref={revealBox} tabIndex={-1}>
+          <p role="alert" className={s.tokenWarn}>
+            Copie agora: {reveal.kind === "secret" ? "o segredo" : "a chave"} não aparece de novo.
+          </p>
+          <div className={s.field}>
+            <span className={s.label}>{reveal.title}</span>
+            <CopyField text={reveal.value} />
+            {reveal.kind === "secret" ? (
+              <span className={s.hint}>
+                Guarde no app: ele confere o cabeçalho <code className={s.mono}>Funil-Assinatura</code> de cada aviso com este segredo.
+              </span>
+            ) : (
+              <span className={s.hint}>
+                O app chama <code className={s.mono}>{apiBaseUrl}</code> com o cabeçalho <code className={s.mono}>Authorization: Bearer &lt;chave&gt;</code>.
+              </span>
+            )}
+          </div>
+          <div className={s.formActions}>
+            <button type="button" className={`${s.btn} ${s.btnPrimary}`} onClick={() => setReveal(null)}>
+              Já copiei
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      <h3 className={`${s.h2} ${s.connSubhead}`}>
+        Webhook do app
+      </h3>
+      {editing && canWrite ? (
+        <form
+          className={s.stack}
+          onSubmit={(e) => {
+            e.preventDefault();
+            // https, host público e sem credencial: conferidos no servidor, com a mesma regra do envio.
+            setConfirm("save");
+          }}
+        >
+          <div className={s.field}>
+            <label className={s.field}>
+              <span className={s.label}>URL do webhook</span>
+              <input
+                className={`${s.input} ${s.mono}`}
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                value={f.url}
+                required
+                maxLength={2000}
+                placeholder="https://seu-app.com.br/api/funil/webhook"
+                onChange={(e) => setF({ ...f, url: e.target.value })}
+              />
+            </label>
+            <span className={s.hint}>Recebe pagamento confirmado, reembolso e contestação. Só https, em endereço público.</span>
+          </div>
+          <div className={s.field}>
+            <label className={s.field}>
+              <span className={s.label}>Hosts de retorno</span>
+              <textarea
+                className={`${s.input} ${s.mono}`}
+                rows={3}
+                value={f.hosts}
+                placeholder={"app.exemplo.com.br"}
+                onChange={(e) => setF({ ...f, hosts: e.target.value })}
+              />
+            </label>
+            <span className={s.hint}>Para onde o checkout pode voltar depois do pagamento. Um por linha, só o nome (sem https://). Até 10.</span>
+          </div>
+          <div className={s.field}>
+            <label className={s.field}>
+              <span className={s.label}>Endereço público do app (opcional)</span>
+              <input
+                className={`${s.input} ${s.mono}`}
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                value={f.origin}
+                placeholder="https://app.exemplo.com.br"
+                onChange={(e) => setF({ ...f, origin: e.target.value })}
+              />
+            </label>
+            <span className={s.hint}>Onde a pessoa se cadastra. Vai ao Meta como página do evento de início do teste.</span>
+          </div>
+          <div className={s.formActions}>
+            {configured ? (
+              <button type="button" className={s.btn} onClick={() => setEditing(false)}>
+                Cancelar
+              </button>
+            ) : null}
+            <button type="submit" className={`${s.btn} ${s.btnPrimary}`} disabled={reveal !== null}>
+              {configured ? "Salvar alterações" : "Salvar webhook"}
+            </button>
+          </div>
+        </form>
+      ) : configured && data ? (
+        <div className={`${s.rows} ${s.factRows}`}>
+          <Row k="URL do webhook">
+            <span className={s.mono}>{data.url}</span>
+          </Row>
+          <Row k="Hosts de retorno">{data.returnHosts.length > 0 ? <span className={s.mono}>{data.returnHosts.join(", ")}</span> : "nenhum"}</Row>
+          <Row k="Endereço público">{data.publicOrigin ? <span className={s.mono}>{data.publicOrigin}</span> : "o da loja"}</Row>
+          <Row k="Segredo da assinatura">{unreadable ? "ilegível: gere um segredo novo" : data.secret ? <Configured /> : "—"}</Row>
+        </div>
+      ) : (
+        <p className={s.muted}>Ainda não configurado.</p>
+      )}
+      <Live msg={confirm ? null : last === "rotate" ? rotate.msg : save.msg} />
+      {canWrite && configured ? (
+        <div className={s.cardFoot}>
+          <button type="button" className={s.btn} disabled={test.pending || unreadable} onClick={() => void test.run(() => testAppWebhookAction(), { refresh: false })}>
+            {test.pending ? "Enviando…" : "Enviar teste"}
+          </button>
+          {!editing ? (
+            <button type="button" className={s.btn} onClick={() => setEditing(true)}>
+              Editar
+            </button>
+          ) : null}
+          <button type="button" className={s.btn} disabled={reveal !== null} onClick={() => setConfirm("rotate")}>
+            Gerar segredo novo
+          </button>
+          <div className={s.connFull}>
+            <Live msg={test.msg} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className={`${s.card} ${s.connInset}`}>
+        <h3 className={`${s.h2} ${s.connSubhead}`}>
+          Chaves da API
+        </h3>
+        {canManageKeys ? (
+          <div className={`${s.stack} ${s.connInsetStack}`}>
+            {active.length > 0 ? (
+              <div className={`${s.rows} ${s.factRows}`}>
+                {active.map((k) => (
+                  <div key={k.id} className={s.row}>
+                    <span>
+                      {k.name} <span className={s.mono}>…{k.last4}</span>
+                    </span>
+                    <span className={s.headActions}>
+                      <small className={s.muted}>{k.lastUsedAt ? `usada em ${k.lastUsedAt}` : `criada em ${k.createdAt}, nunca usada`}</small>
+                      <button type="button" className={s.linkBtn} onClick={() => setRevoking(k)} aria-label={`Revogar a chave ${k.name}`}>
+                        Revogar
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className={s.connNote}>
+                Nenhuma chave ativa. O app precisa de uma para registrar testes e criar pagamentos.
+              </p>
+            )}
+            <form
+              className={s.headActions}
+              onSubmit={async (e) => {
+                e.preventDefault();
+                await keyRun.run(() => createIntegrationKeyAction(keyName.trim()), {
+                  onOk: (d) => {
+                    const created = d as { token: string; name: string };
+                    setReveal({ kind: "key", title: `Chave “${created.name}”`, value: created.token });
+                    setKeyName("");
+                  },
+                });
+              }}
+            >
+              <label className={s.srOnly} htmlFor="app-key-name">
+                Nome da chave
+              </label>
+              <input
+                id="app-key-name"
+                className={`${s.input} ${s.connKeyInput}`}
+                value={keyName}
+                required
+                maxLength={60}
+                placeholder="Nome da chave (ex.: PeticionaAqui produção)"
+                onChange={(e) => setKeyName(e.target.value)}
+              />
+              {/* Com um segredo ou chave na tela, outro "copie agora" o apagaria antes de ser copiado. */}
+              <button type="submit" className={s.btn} disabled={keyRun.pending || keyName.trim() === "" || reveal !== null}>
+                {keyRun.pending ? "Criando…" : "Criar chave"}
+              </button>
+            </form>
+            <Live msg={revoking ? null : (revoke.msg ?? keyRun.msg)} />
+          </div>
+        ) : (
+          <p className={s.connNote}>
+            Só o dono da loja cria e revoga as chaves da API.
+          </p>
+        )}
+      </div>
+
+      <ConfirmSave
+        open={confirm === "save"}
+        onClose={() => setConfirm(null)}
+        title="Salvar o webhook do app?"
+        run={save}
+        label="Salvar"
+        pendingLabel="Salvando…"
+        onConfirm={async () => {
+          setLast("save");
+          const r = await save.run(() =>
+            saveAppWebhookAction({ url: f.url.trim(), returnHosts: hostsOf(f.hosts), publicOrigin: f.origin.trim() ? f.origin.trim() : null }),
+          );
+          if (r.ok) {
+            setConfirm(null);
+            setEditing(false);
+            const out = r.data as { returnHosts: string[]; publicOrigin: string | null; secret?: string };
+            setF((x) => ({ ...x, hosts: hostsText(out.returnHosts), origin: out.publicOrigin ?? "" }));
+            if (out.secret) setReveal({ kind: "secret", title: "Segredo da assinatura", value: out.secret });
+          }
+        }}
+      >
+        <p>
+          Os avisos de pagamento da loja passam a ir para <b className={s.mono}>{hostOfUrl(f.url.trim()) ?? f.url.trim()}</b>, assinados com o segredo.
+          {configured ? "" : " O segredo aparece uma única vez, logo depois de salvar."}
+        </p>
+      </ConfirmSave>
+      <ConfirmSave
+        open={confirm === "rotate"}
+        onClose={() => setConfirm(null)}
+        title="Gerar um segredo novo?"
+        run={rotate}
+        label="Gerar segredo novo"
+        pendingLabel="Gerando…"
+        onConfirm={async () => {
+          setLast("rotate");
+          const r = await rotate.run(() => rotateAppWebhookSecretAction());
+          if (r.ok) {
+            setConfirm(null);
+            setReveal({ kind: "secret", title: "Segredo da assinatura", value: (r.data as { secret: string }).secret });
+          }
+        }}
+      >
+        <p>O segredo atual para de valer na hora: os avisos seguintes só conferem com o novo. Atualize o app logo em seguida.</p>
+      </ConfirmSave>
+      <Dialog
+        open={revoking !== null}
+        onClose={() => setRevoking(null)}
+        tone="danger"
+        title={`Revogar a chave “${revoking?.name ?? ""}”?`}
+        footer={
+          <>
+            <button type="button" className={s.btn} onClick={() => setRevoking(null)} data-autofocus>
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className={`${s.btn} ${s.btnDanger}`}
+              disabled={revoke.pending}
+              onClick={async () => {
+                if (!revoking) return;
+                const r = await revoke.run(() => revokeIntegrationKeyAction(revoking.id));
+                if (r.ok) setRevoking(null);
+              }}
+            >
+              {revoke.pending ? "Revogando…" : "Revogar chave"}
+            </button>
+          </>
+        }
+      >
+        <p>O app que usa esta chave deixa de registrar testes e criar pagamentos na hora.</p>
+        {revoke.msg?.tone === "error" ? <Live msg={revoke.msg} /> : null}
+      </Dialog>
     </ConnItem>
   );
 }

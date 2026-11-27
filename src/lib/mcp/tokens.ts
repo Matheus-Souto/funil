@@ -2,7 +2,7 @@
 // Só o sha256 do token inteiro é guardado; o token aparece uma vez, no retorno de `mcpTokens.create` (nunca na
 // auditoria nem na lista). A autenticação tira a loja do próprio token e consulta SÓ dentro do RLS dela: token com o
 // storeId de uma loja e o segredo de outra não acha linha (o hash é do token inteiro).
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
@@ -83,11 +83,12 @@ export const createMcpToken = defineAction({
 
 export const listMcpTokens = defineAction({
   name: "mcpTokens.list",
-  description: "Tokens MCP da loja (nome, papel, 4 últimos caracteres, criado por, último uso, revogado em), sem o token nem o hash.",
-  input: z.object({}),
+  description:
+    "Tokens da loja (nome, papel, 4 últimos caracteres, criado por, último uso, revogado em), sem o token nem o hash. `kind`: `mcp` (padrão, tela de Tokens MCP) lista os de agente; `integration`, só as chaves da API de integração (cartão do app em Conexões).",
+  input: z.object({ kind: z.enum(["mcp", "integration"]).default("mcp") }),
   permission: "team.manage",
   audit: false,
-  run: (ctx) =>
+  run: (ctx, { kind }) =>
     ctx.tx
       .select({
         id: mcpToken.id,
@@ -101,6 +102,7 @@ export const listMcpTokens = defineAction({
       })
       .from(mcpToken)
       .leftJoin(users, eq(users.id, mcpToken.createdBy))
+      .where(kind === "integration" ? eq(mcpToken.role, "integration") : ne(mcpToken.role, "integration"))
       .orderBy(desc(mcpToken.createdAt), desc(mcpToken.id)),
 });
 
@@ -126,12 +128,17 @@ export async function revokeToken(tx: Tx, id: string): Promise<boolean> {
 
 export const revokeMcpToken = defineAction({
   name: "mcpTokens.revoke",
-  description: "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados).",
-  input: z.object({ id: z.uuid() }),
+  description:
+    "Revoga um token MCP da loja (deixa de autenticar na hora e os pedidos de aprovação pendentes dele são cancelados). `onlyRole: integration`: só revoga se for uma chave da API de integração (senão, não encontrado).",
+  input: z.object({ id: z.uuid(), onlyRole: z.literal("integration").optional() }),
   permission: "team.manage",
   sensitive: true,
-  async run(ctx, { id }) {
+  async run(ctx, { id, onlyRole }) {
     await requireCurrentManager(ctx.tx, ctx.storeId, ctx.actor);
+    if (onlyRole) {
+      const [row] = await ctx.tx.select({ role: mcpToken.role }).from(mcpToken).where(eq(mcpToken.id, id));
+      if (!row || row.role !== onlyRole) throw new ActionError("not_found", "Chave não encontrada");
+    }
     if (await revokeToken(ctx.tx, id)) return { revoked: true };
     const [found] = await ctx.tx.select({ id: mcpToken.id }).from(mcpToken).where(eq(mcpToken.id, id));
     if (!found) throw new ActionError("not_found", "Token não encontrado");
