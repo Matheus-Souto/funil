@@ -95,7 +95,7 @@ async function setup(priceCents = 990, maxInstallments = 1) {
 }
 
 /** Segura o POST /payments até `release()`; `arrived` resolve quando a chamada chega ao "Asaas". */
-function gatePayments(fake: FakeAsaas) {
+function gatePayments(fake: FakeAsaas, beforeResponse?: () => Promise<void>) {
   let release!: () => void;
   let reached!: () => void;
   const gate = new Promise<void>((r) => (release = r));
@@ -104,6 +104,9 @@ function gatePayments(fake: FakeAsaas) {
     if (init?.method === "POST" && String(i).endsWith("/payments")) {
       reached();
       await gate;
+      const response = await fake.fetch(i, init);
+      await beforeResponse?.();
+      return response;
     }
     return fake.fetch(i, init);
   }) as unknown as typeof fetch);
@@ -202,6 +205,46 @@ describe("payWithCard: aprovação", () => {
     const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
     expect(jobs.map((j) => j.type)).toContain("deliver_order");
   });
+
+  for (const webhookFirst of [true, false]) {
+    test(`cartão de download aprovado durante a expiração libera uma vez com webhook ${webhookFirst ? "antes" : "depois"} da resposta`, async () => {
+      const { fake, call, storeId, offerId, webhookToken } = await setup();
+      const o = await newCardOrder(storeId, offerId, email());
+      const inp = input(o.publicId);
+      const sendWebhook = async () => {
+        const charged = [...fake.payments.values()].find((p) => p.externalReference === o.id)!;
+        const result = await handleAsaasWebhook(storeId, new Headers({ "asaas-access-token": webhookToken }), {
+          event: "PAYMENT_CONFIRMED",
+          payment: { id: charged.id },
+        });
+        expect(result.status).toBe(200);
+      };
+      const gate = gatePayments(fake, webhookFirst ? sendWebhook : undefined);
+      const charging = payWithCard(call, inp, fastDeps);
+      try {
+        await gate.arrived;
+        // O pedido expira enquanto o POST está fora da transação.
+        await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, o.id));
+      } finally {
+        gate.release();
+      }
+      expect(await charging).toEqual({ status: "approved" });
+      const settled = await orderRow(storeId, o.id);
+      expect(settled.status).toBe("paid");
+      expect(settled.appAccount).toBeNull();
+      if (!webhookFirst) await sendWebhook();
+      await sendWebhook(); // Reenvio do mesmo evento.
+      expect(await payWithCard(call, inp, fastDeps)).toEqual({ status: "approved" });
+
+      expect((await orderRow(storeId, o.id)).status).toBe("paid");
+      expect(paymentPosts(fake)).toHaveLength(1);
+      const pays = await withStore(storeId, (tx) => tx.select().from(payment).where(eq(payment.orderId, o.id)));
+      expect(pays).toHaveLength(1);
+      expect(pays[0]).toMatchObject({ status: "CONFIRMED", raw: null });
+      const jobs = await t.ownerDb.select().from(job).where(eq(job.storeId, storeId));
+      expect(jobs.map((j) => j.type).sort()).toEqual(["deliver_order", "meta_event", "notify_seller", "notify_telegram"]);
+    });
+  }
 
   test("cartão com cupom → bilhete com totalCents 891; payWithCard cobra 8,91 no Asaas falso", async () => {
     const { fake, call, storeId, offerId } = await setup(990);

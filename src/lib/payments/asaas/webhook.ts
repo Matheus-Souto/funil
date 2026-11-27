@@ -225,7 +225,7 @@ export const applyAsaasPayment = defineAction({
       return { applied: false, reason: "valor_menor" };
     }
     try {
-      // Asaas confirmou (reconsultado): um Pix pago depois de expirar o prazo local ainda libera o pedido.
+      // O Asaas confirmou a cobrança: Pix e cartão ainda liquidam o pedido após a expiração local.
       const r = await transitionOrder(ctx, o.id, target, `asaas ${p.status}`, { allowFromExpired: target === "paid" });
       return { applied: r.changed, reason: r.changed ? "ok" : "ja_processado" };
     } catch (e) {
