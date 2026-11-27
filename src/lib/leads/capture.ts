@@ -129,8 +129,13 @@ export const checkoutSaveLead = defineAction({
   async run(ctx, input): Promise<SaveOutput> {
     const [s] = await ctx.tx.select({ on: store.leadCapture, privacyEmail: store.privacyEmail }).from(store).where(eq(store.id, ctx.storeId));
     if (!s?.on || !s.privacyEmail) throw new ActionError("conflict", "Captura de contato desligada");
-    const [o] = await ctx.tx.select({ id: offer.id }).from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
+    const [o] = await ctx.tx
+      .select({ id: offer.id, delivery: offer.delivery })
+      .from(offer)
+      .where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
+    // Oferta de app: o comprador já é conhecido pela sessão do app (e o app fala com ele); nada é guardado nem avisado.
+    if (o.delivery === "app") return { created: false, leadId: null };
 
     // Limites na transação (contagem atômica; rollback desfaz linha, job e contagem). A chave conta toda gravação, mas
     // só depois de conferir captura e oferta: chave inventada em loja sem captura não enche `rate_limit`.

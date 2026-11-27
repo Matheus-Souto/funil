@@ -39,6 +39,7 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "connections.saveAppWebhook": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
   "connections.rotateAppWebhookSecret": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
   "connections.testAppWebhook": "teste do webhook do app: só junto da configuração, no painel",
+  "apps.createPayment": "API de integração do app (só a chave integration)",
 };
 
 /** Prefixo da descrição das ferramentas que passam pela fila de aprovação. */

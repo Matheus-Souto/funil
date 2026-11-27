@@ -13,6 +13,9 @@
 //   recusas da loja (o envio recusado soma nele, em `startCheckout`) e confere o cupom sob o lock dele. Total
 //   recalculado diferente do que o comprador viu -> `conflict` PRICE_CHANGED e nenhum pedido; isso vale também sem
 //   cupom, quando o checkout manda `expectedTotalCents`.
+// - Oferta de app (`delivery = 'app'`) só vende pela sessão de pagamento do app (`sessionId`, src/lib/apps/sessions.ts):
+//   nome, e-mail, conta e origem vêm da sessão (o que o navegador mandar é ignorado), sem cupom nem bump. Sessão
+//   vencida, já paga, de outra oferta ou de outra loja -> `conflict` SESSION_INVALID e nenhum pedido.
 // - `startCheckout` roda `checkout.start` e, no Pix do Asaas, já cria a cobrança e guarda o QR (fora da transação).
 // - `getOrderPublic` é o que a página do pedido mostra: só dados guardados (nunca chama o Asaas num GET) e nunca
 //   e-mail, CPF, celular ou ids internos. QR faltando: `orders.regeneratePix` (POST, 3 por hora por pedido).
@@ -21,12 +24,13 @@ import { and, count, eq, gt, or, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
+import { loadCheckoutSession, sessionInvalid, sessionOrigin, type CheckoutSession } from "@/lib/apps/sessions";
 import { UNKNOWN_IP } from "@/lib/client-ip";
 import { couponInvalid, isCouponRefusal, resolveCoupon } from "@/lib/coupons/apply";
 import { COUPON_INVALID_MESSAGE, COUPON_LIMIT_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
 import { withStore } from "@/lib/db/client";
-import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product, store } from "@/lib/db/schema";
+import { appCheckoutSession, checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product, store } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { BUMP_UNAVAILABLE, createOrder, orderParts, type Order } from "@/lib/orders/create";
@@ -49,6 +53,9 @@ export { CARD_UNAVAILABLE_MESSAGE };
 export const NEEDS_CPF = "needs_cpf";
 /** Oferta de app aberta sem a sessão de pagamento do app: nenhum pedido sai sem a conta do app. */
 export const APP_SESSION_REQUIRED_MESSAGE = "Abra o pagamento pelo app";
+/** Cupom ou acréscimo no pagamento pelo app (fase 1: o preço do app é o da oferta). */
+export const APP_NO_COUPON_MESSAGE = "Cupom não vale no pagamento pelo app";
+export const APP_NO_BUMP_MESSAGE = "Acréscimo não vale no pagamento pelo app";
 export const ASAAS_LIMIT_MESSAGE = "Muitas compras seguidas. Aguarde alguns minutos e tente de novo.";
 export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
 export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
@@ -90,24 +97,34 @@ const couponCode = z
   .transform((v) => (v?.trim() ? v : undefined));
 const cents = z.number().int().min(1).max(100_000_000);
 
+const NAME_MESSAGE = "Informe seu nome completo";
+const EMAIL_MESSAGE = "Confira o e-mail";
+const PHONE_MESSAGE = "Informe um celular com DDD, ex.: (11) 98765-4321";
+
 const startInput = z.object({
   slug,
   withBump: z.boolean(),
   method: z.enum(["pix", "card"]),
+  /**
+   * Sessão de pagamento do app (`?s=` da página). Com ela, nome e e-mail vêm da sessão (o navegador não precisa
+   * mandar) e o telefone também, se o app mandou. Sem ela, nome, e-mail e telefone são obrigatórios.
+   */
+  sessionId: z.uuid().optional(),
   customer: z.object({
-    name: z.string().trim().min(2, "Informe seu nome completo").max(120, "Nome longo demais"),
-    email: z.string().trim().toLowerCase().max(254).refine(validEmail, "Confira o e-mail"),
+    name: z.string().trim().min(2, NAME_MESSAGE).max(120, "Nome longo demais").optional(),
+    email: z.string().trim().toLowerCase().max(254).refine(validEmail, EMAIL_MESSAGE).optional(),
     phone: z
       .string()
       .max(30)
       .transform((p, ctx) => {
         const n = normalizeBrMobile(p);
         if (n === null) {
-          ctx.addIssue({ code: "custom", message: "Informe um celular com DDD, ex.: (11) 98765-4321" });
+          ctx.addIssue({ code: "custom", message: PHONE_MESSAGE });
           return z.NEVER;
         }
         return n;
-      }),
+      })
+      .optional(),
     cpf: z.string().max(20).transform(onlyDigits).optional(),
   }),
   touch: touchSchema,
@@ -126,6 +143,11 @@ const startInput = z.object({
   clientIp: z.string().min(1).max(64),
   userAgent: z.string().max(500),
 }).superRefine((v, ctx) => {
+  if (v.sessionId === undefined) {
+    if (v.customer.name === undefined) ctx.addIssue({ code: "custom", path: ["customer", "name"], message: NAME_MESSAGE });
+    if (v.customer.email === undefined) ctx.addIssue({ code: "custom", path: ["customer", "email"], message: EMAIL_MESSAGE });
+    if (v.customer.phone === undefined) ctx.addIssue({ code: "custom", path: ["customer", "phone"], message: PHONE_MESSAGE });
+  }
   if (v.couponCode !== undefined && v.expectedTotalCents === undefined) {
     ctx.addIssue({ code: "custom", path: ["expectedTotalCents"], message: "Informe o total mostrado no checkout" });
   }
@@ -174,11 +196,12 @@ export const checkoutStart = defineAction({
   permission: "public",
   // LGPD: sem CPF, celular, nome nem e-mail em claro na auditoria. O código do cupom não é dado pessoal; só sai
   // normalizado (A-Z 0-9 _ -), e a auditoria de sucesso só existe com um cupom válido da loja.
+  // Pelo app: sem o id da sessão (é o segredo da URL) e sem o e-mail que o navegador mandou (vale o da sessão).
   auditInput: (i) => ({
     slug: i.slug,
     method: i.method,
     hasBump: i.withBump,
-    emailHash: sha256(i.customer.email),
+    ...(i.sessionId !== undefined ? { viaApp: true } : i.customer.email !== undefined ? { emailHash: sha256(i.customer.email) } : {}),
     ...(i.couponCode !== undefined ? { coupon: normalizeCode(i.couponCode) } : {}),
   }),
   /**
@@ -199,28 +222,39 @@ export const checkoutStart = defineAction({
       }
     }
     const knownIp = input.clientIp !== UNKNOWN_IP;
+    // O limite por e-mail usa o e-mail do pedido: pela sessão do app, o da sessão (não o que o navegador mandou).
+    const email = input.sessionId !== undefined ? ((await sessionEmail(call.storeId, input.sessionId)) ?? null) : (input.customer.email ?? null);
     const [manualIpOk, asaasIpOk, asaasEmailOk] = await Promise.all([
       knownIp ? peekRateLimit(manualIpKey(input.clientIp), PIX_MANUAL_LIMITS.perIpPerHour, HOUR) : true,
       knownIp ? peekRateLimit(asaasIpKey(input.clientIp), ASAAS_LIMITS.perIpPerHour, HOUR) : true,
-      peekRateLimit(asaasEmailKey(call.storeId, input.customer.email), ASAAS_LIMITS.perEmailPerHour, HOUR),
+      email !== null ? peekRateLimit(asaasEmailKey(call.storeId, email), ASAAS_LIMITS.perEmailPerHour, HOUR) : true,
     ]);
-    return { manualIpOk, asaasOk: asaasIpOk && asaasEmailOk };
+    return { manualIpOk, asaasOk: asaasIpOk && asaasEmailOk, email };
   },
   /** Conta o pedido criado (melhor esforço; falha só vai para o log). */
-  async afterCommit(call, input, out: StartOutput) {
+  async afterCommit(call, input, out: StartOutput, limits) {
     const knownIp = input.clientIp !== UNKNOWN_IP;
     if (out.method === "pix_manual") {
       if (knownIp) await hitRateLimit(manualIpKey(input.clientIp), HOUR);
       return;
     }
     if (knownIp) await hitRateLimit(asaasIpKey(input.clientIp), HOUR);
-    await hitRateLimit(asaasEmailKey(call.storeId, input.customer.email), HOUR);
+    if (limits.email !== null) await hitRateLimit(asaasEmailKey(call.storeId, limits.email), HOUR);
   },
   async run(ctx, input, limits, server?: CheckoutServer): Promise<StartOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
-    // Oferta de app só vende pela sessão de pagamento que o app cria (conta, nome e e-mail vêm dela).
-    if (o.delivery === "app") throw new ActionError("invalid_input", APP_SESSION_REQUIRED_MESSAGE);
+    // Oferta de app só vende pela sessão de pagamento que o app cria (conta, nome e e-mail vêm dela). Lock na linha da
+    // sessão até o commit: pedidos da mesma sessão saem um por vez, cada um relendo se já há pedido pago.
+    let appSession: CheckoutSession | null = null;
+    if (o.delivery === "app" || input.sessionId !== undefined) {
+      if (o.delivery !== "app") throw sessionInvalid();
+      if (input.sessionId === undefined) throw new ActionError("invalid_input", APP_SESSION_REQUIRED_MESSAGE);
+      appSession = await loadCheckoutSession(ctx.tx, ctx.storeId, input.sessionId, { now: server?.now, lock: true });
+      if (!appSession || appSession.offerId !== o.id) throw sessionInvalid();
+      if (input.couponCode !== undefined) throw new ActionError("invalid_input", APP_NO_COUPON_MESSAGE, [{ path: ["couponCode"], message: APP_NO_COUPON_MESSAGE }]);
+      if (input.withBump) throw new ActionError("invalid_input", APP_NO_BUMP_MESSAGE, [{ path: ["withBump"], message: APP_NO_BUMP_MESSAGE }]);
+    }
     if (!o.methods.includes(input.method)) {
       throw new ActionError("invalid_input", "Forma de pagamento indisponível nesta oferta", [{ path: ["method"] }]);
     }
@@ -228,7 +262,8 @@ export const checkoutStart = defineAction({
     const asaasOn = Boolean(asaas?.secret);
     const acceptCnpj = await storeAcceptsCnpj(ctx);
     const requireCpf = (doc: string | undefined) => requireTaxId(doc, { acceptCnpj });
-    const { cpf, ...buyer } = input.customer;
+    const { cpf, ...typed } = input.customer;
+    const buyer = buyerOf(typed, appSession);
     // Cupom conferido sob o lock dele (vai até o commit: cobre a contagem de usos e o insert do pedido).
     let couponRef: { id: string } | undefined;
     if (input.couponCode !== undefined) {
@@ -237,17 +272,17 @@ export const checkoutStart = defineAction({
       if ("invalid" in r) throw couponInvalid();
       couponRef = { id: r.coupon.id };
     }
+    // Pelo app, a origem vem da sessão (ou do teste da conta), nunca da URL do checkout; sem captura de contato.
+    const origin = appSession ? await sessionOrigin(ctx.tx, ctx.storeId, appSession) : { touch: input.touch, ref: input.ref, fbc: input.fbc, fbp: input.fbp };
     const base = {
       coupon: couponRef,
       offerId: o.id,
       withBump: input.withBump,
-      touch: input.touch,
-      ref: input.ref,
-      fbc: input.fbc,
-      fbp: input.fbp,
+      ...origin,
       clientIp: input.clientIp,
       userAgent: input.userAgent,
-      leadKey: input.leadKey,
+      leadKey: appSession ? undefined : input.leadKey,
+      app: appSession ? { account: appSession.account, sessionId: appSession.id } : undefined,
     };
     const create = (method: "pix_manual" | "pix_asaas" | "card_asaas", withCpf?: string, fallback = false) => {
       if (method === "pix_manual" ? !limits.manualIpOk : !limits.asaasOk) {
@@ -288,6 +323,8 @@ export const checkoutStart = defineAction({
     }
     // Nunca um pedido com valor que o comprador não viu: o erro desfaz a transação inteira (pedido, itens, avisos).
     if (input.expectedTotalCents !== undefined && order.totalCents !== input.expectedTotalCents) throw priceChanged(order.totalCents);
+    // A sessão aponta para o pedido mais recente dela (Pix pendente e depois cartão: o do cartão).
+    if (appSession) await ctx.tx.update(appCheckoutSession).set({ orderId: order.id }).where(and(eq(appCheckoutSession.storeId, ctx.storeId), eq(appCheckoutSession.id, appSession.id)));
     // Pedido criado: InitiateCheckout do servidor com o id do navegador (na mesma transação: só sai se o pedido existir).
     await enqueueInitiateCheckout(ctx.tx, ctx.storeId, order.id, input.eventId);
     return {
@@ -302,6 +339,31 @@ export const checkoutStart = defineAction({
     };
   },
 });
+
+/**
+ * Comprador do pedido: pela sessão do app, nome e e-mail da sessão e o telefone dela (ou, se o app não mandou, o do
+ * navegador); senão, o que o navegador mandou (o schema já exigiu os três).
+ */
+function buyerOf(
+  typed: { name?: string; email?: string; phone?: string },
+  s: CheckoutSession | null,
+): { name: string; email: string; phone: string } {
+  if (!s) return { name: typed.name!, email: typed.email!, phone: typed.phone! };
+  const phone = s.buyerPhone ?? typed.phone;
+  if (!phone) throw new ActionError("invalid_input", PHONE_MESSAGE, [{ path: ["customer", "phone"], message: PHONE_MESSAGE }]);
+  return { name: s.buyerName, email: s.buyerEmail, phone };
+}
+
+/** E-mail da sessão do app para o limite por e-mail (fora da transação da ação; sessão inválida é recusada no `run`). */
+async function sessionEmail(storeId: string, sessionId: string): Promise<string | undefined> {
+  const [row] = await withStore(storeId, (tx) =>
+    tx
+      .select({ email: appCheckoutSession.buyerEmail })
+      .from(appCheckoutSession)
+      .where(and(eq(appCheckoutSession.storeId, storeId), eq(appCheckoutSession.id, sessionId))),
+  );
+  return row?.email || undefined;
+}
 
 /** No máximo 3 Pix manuais pendentes ou reservados (expirados há menos de 48 h) por e-mail na loja. */
 async function enforceEmailLimit(ctx: Ctx, email: string): Promise<void> {
@@ -614,7 +676,13 @@ const orderPublicView = defineAction({
       buyerName = c?.name ?? "";
     }
     const pixelId = await pixelIdFor(ctx.tx, ctx.storeId, of?.pixelId);
-    return { o, offer: of!, items, manual, asaas, pixelId, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
+    // Pedido pelo app: o endereço de volta (retorno da sessão) e, enquanto pendente, a sessão para trocar para o cartão.
+    let app: OrderPublic["app"];
+    if (o.appSessionId) {
+      const [sess] = await ctx.tx.select({ returnUrl: appCheckoutSession.returnUrl }).from(appCheckoutSession).where(eq(appCheckoutSession.id, o.appSessionId));
+      app = { returnUrl: sess?.returnUrl ?? null, sessionId: o.status === "pending" ? o.appSessionId : null };
+    }
+    return { o, offer: of!, items, manual, asaas, pixelId, app, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
 });
 
@@ -636,7 +704,12 @@ export interface OrderPublic {
   items: { name: string; priceCents: number }[];
   thankYouText: string | null;
   buyerFirstName: string;
-  offer: { slug: string; name: string; methods: string[] };
+  offer: { slug: string; name: string; methods: string[]; delivery: "download" | "app" };
+  /**
+   * Pedido feito pela sessão do app: `returnUrl` é o retorno que o app mandou (host conferido na criação da sessão);
+   * `sessionId` só com o pedido pendente (o "Pagar com cartão" volta ao checkout da mesma sessão).
+   */
+  app?: { returnUrl: string | null; sessionId: string | null };
   pix?: {
     copyPaste: string;
     /** Pix manual: QR gerado aqui (SVG). */
@@ -657,7 +730,13 @@ export interface OrderPublic {
  * de cada PDF. Grupo de 1 produto mostra o nome dele (como antes); principal com N mostra o nome da oferta; bump com N,
  * o rótulo do bump.
  */
-function summaryLines(items: { name: string; priceCents: number; kind: string }[], of: { name: string; bumpLabel: string | null }): OrderPublic["items"] {
+function summaryLines(
+  items: { name: string; priceCents: number; kind: string }[],
+  of: { name: string; bumpLabel: string | null },
+  totalCents: number,
+): OrderPublic["items"] {
+  // Pedido de app não tem itens (nenhum PDF): uma linha com o nome da oferta e o total.
+  if (items.length === 0) return [{ name: of.name, priceCents: totalCents }];
   return groupItems(items).map((g) => ({
     name: g.names.length === 1 ? g.names[0]! : g.kind === "main" ? of.name : (of.bumpLabel ?? g.names.join(" · ")),
     priceCents: g.priceCents,
@@ -686,11 +765,12 @@ export async function getOrderPublic(storeId: string, publicId: string): Promise
     createdAt: o.createdAt.toISOString(),
     paidAt: o.paidAt?.toISOString() ?? null,
     expiresAt: o.expiresAt?.toISOString() ?? null,
-    items: summaryLines(v.items, v.offer),
+    items: summaryLines(v.items, v.offer, o.totalCents),
     thankYouText: v.offer.thankYouText,
     buyerFirstName: v.buyerFirstName,
-    offer: { slug: v.offer.slug, name: v.offer.name, methods: v.offer.methods },
+    offer: { slug: v.offer.slug, name: v.offer.name, methods: v.offer.methods, delivery: v.offer.delivery as "download" | "app" },
     pixelId: v.pixelId,
+    ...(v.app ? { app: v.app } : {}),
   };
   if (v.manual) {
     const qrSvg = await QRCode.toString(v.manual.copyPaste, { type: "svg", margin: 0, errorCorrectionLevel: "M" });

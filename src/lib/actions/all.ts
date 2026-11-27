@@ -2,6 +2,7 @@
 // Todo módulo com ações entra aqui (tests/mcp-tools.test.ts varre src/ pelos módulos que definem ações e falha se faltar algum).
 import "@/lib/alerts";
 import "@/lib/apps/connection";
+import "@/lib/apps/sessions";
 import "@/lib/apps/trials";
 import "@/lib/apps/webhook";
 import "@/lib/auth/account";

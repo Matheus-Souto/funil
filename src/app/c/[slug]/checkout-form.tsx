@@ -169,6 +169,34 @@ function Turnstile({ siteKey, onToken }: { siteKey: string; onToken: (t: string)
   return <div ref={ref} className={s.turnstile} />;
 }
 
+/**
+ * Sessão de pagamento do app (`?s=`): nome e e-mail vêm dela e aparecem travados (texto, não campo); o telefone só é
+ * pedido se o app não mandou. Sem cupom, bump nem captura de contato.
+ */
+export interface AppSession {
+  sessionId: string;
+  name: string;
+  email: string;
+  hasPhone: boolean;
+}
+
+/** Oferta de app aberta sem sessão válida: só a mensagem (sem formulário, nenhum pedido possível). */
+export function AppSessionBlocked({ offerName, message }: { offerName: string; message: string }) {
+  return (
+    <main className={`${s.main} ${s.mainCenter}`}>
+      <div className={s.hero}>
+        <div className={s.heroIcon} data-tone="neutral">
+          <Icon name="smartphone" size={28} />
+        </div>
+        <h1 className={`${s.heroTitle} ${s.heroTitleSm}`}>{offerName}</h1>
+        <p className={s.heroText} role="alert">
+          {message}
+        </p>
+      </div>
+    </main>
+  );
+}
+
 // ---- formulário ----
 const noop = () => () => {};
 /** `false` no HTML do servidor e antes de hidratar; `true` depois (sem setState em efeito). */
@@ -185,6 +213,8 @@ export function CheckoutForm(props: {
   eventId: string;
   /** Captura do contato ligada na loja: chave desta visita e e-mail de privacidade do aviso; `null` = desligada. */
   lead: { key: string; privacyEmail: string } | null;
+  /** Pagamento aberto pelo app (oferta de app com `?s=` válido); `null` nas demais. */
+  appSession?: AppSession | null;
   turnstileSiteKey: string | null;
   /** Cor da loja (#RRGGBB): vai no `config` do iframe do cartão, que a aplica nos campos dele. */
   brandColor: string | null;
@@ -192,6 +222,9 @@ export function CheckoutForm(props: {
   cardFrame: { origin: string; src: string } | null;
 }) {
   const { offer, storeName, touch, refCode, eventId, lead, turnstileSiteKey, cardFrame } = props;
+  const appSession = props.appSession ?? null;
+  // Pelo app, o telefone só é pedido se a sessão não trouxe.
+  const askPhone = !appSession?.hasPhone;
   const router = useRouter();
   const hydrated = useHydrated();
   const [method, setMethod] = useState<Method>(props.initialMethod);
@@ -374,9 +407,11 @@ export function CheckoutForm(props: {
 
   function validate(m: Method): Partial<Record<FieldKey, string>> {
     const e: Partial<Record<FieldKey, string>> = {};
-    if (v.name.trim().length < 2) e.name = "Informe seu nome completo.";
-    if (!validEmail(v.email)) e.email = "Confira o e-mail.";
-    if (!normalizeBrMobile(v.phone)) e.phone = "Informe um celular com DDD, ex.: (11) 98765-4321.";
+    if (!appSession) {
+      if (v.name.trim().length < 2) e.name = "Informe seu nome completo.";
+      if (!validEmail(v.email)) e.email = "Confira o e-mail.";
+    }
+    if (askPhone && !normalizeBrMobile(v.phone)) e.phone = "Informe um celular com DDD, ex.: (11) 98765-4321.";
     const needCpf = m === "card" || asaasPix || needsCpf;
     if (needCpf) {
       if (!onlyDigits(v.cpf)) e.cpf = `Informe o ${docLabel}.`;
@@ -396,12 +431,13 @@ export function CheckoutForm(props: {
   /** Assinatura dos dados pessoais e do bump: muda -> pedido novo (nova tentativa de cartão reaproveita o pedido). */
   const orderSig = () => JSON.stringify([v.name.trim(), v.email.trim().toLowerCase(), onlyDigits(v.phone), onlyDigits(v.cpf), withBump, coupon.kind === "applied" ? coupon.code : null, total]);
 
+  // Pelo app, nome e e-mail não vão (o servidor usa os da sessão) e o telefone só quando a sessão não trouxe.
   const customerPayload = (m: Method) => ({
-    name: v.name.trim(),
-    email: v.email.trim(),
-    phone: v.phone,
+    ...(appSession ? {} : { name: v.name.trim(), email: v.email.trim() }),
+    ...(askPhone ? { phone: v.phone } : {}),
     ...(m === "card" || asaasPix || needsCpf ? { cpf: onlyDigits(v.cpf) } : {}),
   });
+  const sessionField = appSession ? { sessionId: appSession.sessionId } : {};
 
   function handleStartError(r: Extract<StartResult, { ok: false }>) {
     if (r.priceChanged || r.fields?.couponCode !== undefined) {
@@ -437,7 +473,7 @@ export function CheckoutForm(props: {
 
   async function payPix() {
     checkoutTracking.onAddPaymentInfo("pix", total);
-    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
+    const r = await startCheckoutAction({ slug: offer.slug, withBump, method: "pix", customer: customerPayload("pix"), ...sessionField, ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) });
     if (r.ok) {
       router.push(`/o/${r.publicId}`);
       return;
@@ -464,7 +500,7 @@ export function CheckoutForm(props: {
       sig,
       ...(sentToken ? { turnstileToken: sentToken } : {}),
       now: () => Date.now(),
-      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
+      start: () => startCheckoutAction({ slug: offer.slug, withBump, method: "card", customer: customerPayload("card"), ...sessionField, ...submitCoupon(coupon, total), touch, ref: refCode, eventId, ...(lead ? { leadKey: lead.key } : {}) }),
       renew: (o) => renewCardTicketAction(o),
       pay: (a) => ctrl.pay({ ...a, buyerCpf }),
     });
@@ -594,19 +630,46 @@ export function CheckoutForm(props: {
           <section className={s.card}>
             <h2 className={s.sec}>Seus dados</h2>
             <div className={s.stack}>
-              <Field id="name" label="Nome completo" value={v.name} onChange={set("name")} error={errors.name} autoComplete="name" maxLength={120} />
-              <Field
-                id="email"
-                label="E-mail"
-                value={v.email}
-                onChange={set("email")}
-                onBlur={() => captureLead("email")}
-                error={errors.email}
-                hint={emailHint(offer.delivery)}
-                inputMode="email"
-                autoComplete="email"
-                maxLength={254}
-              />
+              {appSession ? (
+                <>
+                  <div className={s.field}>
+                    <span className={s.label}>
+                      Nome completo
+                    </span>
+                    <p className={s.locked}>
+                      {appSession.name}
+                    </p>
+                  </div>
+                  <div className={s.field}>
+                    <span className={s.label}>
+                      E-mail
+                    </span>
+                    <p className={s.locked}>
+                      {appSession.email}
+                    </p>
+                  </div>
+                  <p className={s.lockNote}>
+                    <Icon name="lock" size={16} />
+                    <span>Dados da sua conta no app. Para trocar, volte ao app.</span>
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Field id="name" label="Nome completo" value={v.name} onChange={set("name")} error={errors.name} autoComplete="name" maxLength={120} />
+                  <Field
+                    id="email"
+                    label="E-mail"
+                    value={v.email}
+                    onChange={set("email")}
+                    onBlur={() => captureLead("email")}
+                    error={errors.email}
+                    hint={emailHint(offer.delivery)}
+                    inputMode="email"
+                    autoComplete="email"
+                    maxLength={254}
+                  />
+                </>
+              )}
               {lead ? (
                 <div className={s.leadNotice} data-done={optedOut ? "true" : undefined}>
                   {optedOut ? (
@@ -638,18 +701,20 @@ export function CheckoutForm(props: {
                   )}
                 </div>
               ) : null}
-              <Field
-                id="phone"
-                label="WhatsApp"
-                value={v.phone}
-                onChange={set("phone", maskPhone)}
-                onBlur={() => captureLead("phone")}
-                error={errors.phone}
-                hint="Só para avisos sobre este pedido."
-                inputMode="tel"
-                autoComplete="tel-national"
-                placeholder="(11) 98765-4321"
-              />
+              {askPhone ? (
+                <Field
+                  id="phone"
+                  label="WhatsApp"
+                  value={v.phone}
+                  onChange={set("phone", maskPhone)}
+                  onBlur={() => captureLead("phone")}
+                  error={errors.phone}
+                  hint="Só para avisos sobre este pedido."
+                  inputMode="tel"
+                  autoComplete="tel-national"
+                  placeholder="(11) 98765-4321"
+                />
+              ) : null}
             </div>
           </section>
 
@@ -734,59 +799,62 @@ export function CheckoutForm(props: {
                 </span>
               </label>
             ) : null}
-            <div className={s.coupon}>
-              {/* Região viva presente desde o início: o leitor de tela anuncia o resultado da prévia quando o texto muda. */}
-              <p className={s.srOnly} role="status" aria-live="polite">
-                {coupon.kind === "applied" ? `Cupom ${coupon.code} aplicado. Desconto de ${brl(coupon.discountCents)}.` : coupon.kind === "open" ? (coupon.message ?? "") : ""}
-              </p>
-              {coupon.kind === "closed" ? (
-                <button
-                  id="coupon-open"
-                  type="button"
-                  className={s.leadLink}
-                  style={{ alignSelf: "flex-start" }}
-                  onClick={() => {
-                    couponFocus.current = "coupon";
-                    setCoupon(openCoupon(coupon));
-                  }}
-                >
-                  Tenho um cupom
-                </button>
-              ) : null}
-              {coupon.kind === "open" ? (
-                <div className={s.couponRow}>
-                  <Field
-                    id="coupon"
-                    label="Cupom"
-                    value={couponText}
-                    onChange={(x) => {
-                      setCouponText(x);
-                      if (coupon.message) setCoupon({ ...coupon, message: null });
+            {/* Pelo app, sem cupom: o preço é o da oferta. */}
+            {appSession ? null : (
+              <div className={s.coupon}>
+                {/* Região viva presente desde o início: o leitor de tela anuncia o resultado da prévia quando o texto muda. */}
+                <p className={s.srOnly} role="status" aria-live="polite">
+                  {coupon.kind === "applied" ? `Cupom ${coupon.code} aplicado. Desconto de ${brl(coupon.discountCents)}.` : coupon.kind === "open" ? (coupon.message ?? "") : ""}
+                </p>
+                {coupon.kind === "closed" ? (
+                  <button
+                    id="coupon-open"
+                    type="button"
+                    className={s.leadLink}
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => {
+                      couponFocus.current = "coupon";
+                      setCoupon(openCoupon(coupon));
                     }}
-                    onKeyDown={(e) => {
-                      // Enter no cupom aplica o cupom; nunca envia o pedido.
-                      if (e.key !== "Enter") return;
-                      e.preventDefault();
-                      if (!couponBusy) onApplyCoupon();
-                    }}
-                    error={coupon.message ?? undefined}
-                    autoComplete="off"
-                    maxLength={64}
-                  />
-                  <button type="button" className={`${s.btn} ${s.btnSecondary} ${s.couponApply}`} onClick={onApplyCoupon} disabled={couponBusy || !hydrated}>
-                    {couponBusy ? "Conferindo…" : "Aplicar"}
+                  >
+                    Tenho um cupom
                   </button>
-                </div>
-              ) : null}
-              {coupon.kind === "applied" ? (
-                <div className={s.couponApplied}>
-                  <span>Cupom {coupon.code} aplicado</span>
-                  <button id="coupon-remove" type="button" className={s.leadLink} aria-label={`Remover cupom ${coupon.code}`} onClick={onRemoveCoupon} disabled={couponBusy}>
-                    Remover
-                  </button>
-                </div>
-              ) : null}
-            </div>
+                ) : null}
+                {coupon.kind === "open" ? (
+                  <div className={s.couponRow}>
+                    <Field
+                      id="coupon"
+                      label="Cupom"
+                      value={couponText}
+                      onChange={(x) => {
+                        setCouponText(x);
+                        if (coupon.message) setCoupon({ ...coupon, message: null });
+                      }}
+                      onKeyDown={(e) => {
+                        // Enter no cupom aplica o cupom; nunca envia o pedido.
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        if (!couponBusy) onApplyCoupon();
+                      }}
+                      error={coupon.message ?? undefined}
+                      autoComplete="off"
+                      maxLength={64}
+                    />
+                    <button type="button" className={`${s.btn} ${s.btnSecondary} ${s.couponApply}`} onClick={onApplyCoupon} disabled={couponBusy || !hydrated}>
+                      {couponBusy ? "Conferindo…" : "Aplicar"}
+                    </button>
+                  </div>
+                ) : null}
+                {coupon.kind === "applied" ? (
+                  <div className={s.couponApplied}>
+                    <span>Cupom {coupon.code} aplicado</span>
+                    <button id="coupon-remove" type="button" className={s.leadLink} aria-label={`Remover cupom ${coupon.code}`} onClick={onRemoveCoupon} disabled={couponBusy}>
+                      Remover
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
             <section className={s.totals} aria-label="Total">
               <div className={s.line}>
                 <span>{offer.productName}</span>
@@ -817,7 +885,7 @@ export function CheckoutForm(props: {
               </button>
             </section>
           </div>
-          <TrustSeals />
+          <TrustSeals app={offer.delivery === "app"} />
         </aside>
       </form>
     </main>

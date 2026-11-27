@@ -7,6 +7,7 @@ import { getStoreBrandColor, resolveStore } from "@/lib/stores";
 import s from "../../(design)/buyer.module.css";
 import { Icon } from "../../(design)/icons";
 import { BuyerShell } from "../../(design)/shell";
+import { APP_ACCESS_TEXT } from "../../c/[slug]/texts";
 import { regeneratePixAction } from "./actions";
 import { PurchasePixel } from "./pixel";
 import { CopyPixButton, OrderLive } from "./status";
@@ -168,6 +169,7 @@ function ManualPix({ order, storeName }: { order: OrderPublic; storeName: string
 
 function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   const pix = order.pix;
+  const app = order.offer.delivery === "app";
   return (
     <main className={s.main}>
       <div className={s.banner} role="status" aria-live="polite">
@@ -230,15 +232,18 @@ function AsaasPix({ order, storeName, publicId, pixNotice }: { order: OrderPubli
       </section>
       {pix ? <QrCard pix={pix} amount={order.totalCents} size={184} /> : null}
       <p className={s.mailNote}>
-        <Icon name="mail" />
-        <span>Assim que o pagamento for confirmado, enviamos o acesso para o e-mail que você informou. Pode fechar esta página.</span>
+        <Icon name={app ? "smartphone" : "mail"} />
+        <span>
+          {app ? APP_ACCESS_TEXT : "Assim que o pagamento for confirmado, enviamos o acesso para o e-mail que você informou."} Pode fechar esta página.
+        </span>
       </p>
       <p className={s.foot}>
         Pedido #{order.code}
-        {order.offer.methods.includes("card") ? (
+        {order.offer.methods.includes("card") && (!app || order.app?.sessionId) ? (
           <>
             {" · "}
-            <Link href={`/c/${order.offer.slug}?metodo=cartao`}>Pagar com cartão</Link>
+            {/* Pelo app, o cartão abre na mesma sessão (o checkout de app não abre sem ela). */}
+            <Link href={`/c/${order.offer.slug}?${order.app?.sessionId ? `s=${order.app.sessionId}&` : ""}metodo=cartao`}>Pagar com cartão</Link>
           </>
         ) : null}
       </p>
@@ -257,7 +262,10 @@ function CardPending({ order }: { order: OrderPublic }) {
       <section className={`${s.card} ${s.center}`}>
         <p className={s.lead}>Estamos confirmando o pagamento de</p>
         <p className={`${s.bigAmount} ${s.money}`}>{brl(order.totalCents)}</p>
-        <p className={s.heroText}>Não pague de novo: assim que o banco responder, esta página mostra o resultado e o acesso chega no seu e-mail.</p>
+        <p className={s.heroText}>
+          Não pague de novo: assim que o banco responder, esta página mostra o resultado
+          {order.offer.delivery === "app" ? ". O acesso é liberado no app." : " e o acesso chega no seu e-mail."}
+        </p>
       </section>
       <p className={s.foot}>Pedido #{order.code}</p>
     </main>
@@ -278,22 +286,43 @@ function ThankYou({ order, storeName, publicId }: { order: OrderPublic; storeNam
           Obrigado pela compra{order.buyerFirstName ? `, ${order.buyerFirstName}` : ""}.
         </p>
       </div>
-      <section className={`${s.card} ${s.accessCard}`}>
-        <div className={s.accessTop}>
-          <span className={s.accessIcon}>
-            <Icon name="mail-check" size={22} />
-          </span>
-          <div>
-            <p className={s.accessTitle}>Enviamos o acesso para seu e-mail</p>
-            <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
-              No e-mail que você informou na compra.
-            </p>
+      {order.offer.delivery === "app" ? (
+        <section className={`${s.card} ${s.accessCard}`}>
+          <div className={s.accessTop}>
+            <span className={s.accessIcon}>
+              <Icon name="smartphone" size={22} />
+            </span>
+            <div>
+              <p className={s.accessTitle}>O acesso é liberado no app</p>
+              <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
+                Volte ao app para usar o que você comprou.
+              </p>
+            </div>
           </div>
-        </div>
-        <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 14, fontSize: 14 }}>
-          Não chegou em 5 minutos? Procure em <b style={{ color: "var(--color-text)" }}>Spam</b> ou <b style={{ color: "var(--color-text)" }}>Promoções</b>.
-        </p>
-      </section>
+          {order.app?.returnUrl ? (
+            <a className={`${s.btn} ${s.btnLg} ${s.btnFull} ${s.mt12}`} href={order.app.returnUrl}>
+              Voltar ao app
+            </a>
+          ) : null}
+        </section>
+      ) : (
+        <section className={`${s.card} ${s.accessCard}`}>
+          <div className={s.accessTop}>
+            <span className={s.accessIcon}>
+              <Icon name="mail-check" size={22} />
+            </span>
+            <div>
+              <p className={s.accessTitle}>Enviamos o acesso para seu e-mail</p>
+              <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 4, fontSize: 15 }}>
+                No e-mail que você informou na compra.
+              </p>
+            </div>
+          </div>
+          <p className={`${s.p0} ${s.muted}`} style={{ marginTop: 14, fontSize: 14 }}>
+            Não chegou em 5 minutos? Procure em <b style={{ color: "var(--color-text)" }}>Spam</b> ou <b style={{ color: "var(--color-text)" }}>Promoções</b>.
+          </p>
+        </section>
+      )}
       {order.thankYouText ? (
         <section className={s.card}>
           <p className={s.eyebrow}>Uma mensagem da {storeName}</p>

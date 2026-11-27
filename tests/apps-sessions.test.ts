@@ -1,0 +1,477 @@
+// Sessão de pagamento do app (src/lib/apps/sessions.ts, Task 7 do plano de cobrança de apps): `apps.createPayment` cria
+// a sessão (URL sem dado pessoal), `checkout.start` com `sessionId` usa nome, e-mail e conta da sessão e recusa sessão
+// vencida, de outra oferta/loja ou já paga (`SESSION_INVALID`); a página lê a sessão por `checkout.appSession`; a captura
+// de contato não guarda nada na oferta de app; e a retenção (`sweep_app_trials`) limpa as sessões vencidas.
+// Nenhum literal com o formato do token: tudo montado em tempo de execução.
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { ActionError, runAction, type Actor } from "@/lib/actions/core";
+import {
+  APP_OFFER_NOT_FOUND_MESSAGE,
+  SESSION_INVALID_MESSAGE,
+  SESSION_RETENTION_DAYS,
+  SESSION_TTL_MS,
+  checkoutAppSession,
+  createPayment,
+  loadCheckoutSession,
+} from "@/lib/apps/sessions";
+import { registerTrial, sweepAppTrialsJob } from "@/lib/apps/trials";
+import { createOffer } from "@/lib/catalog/offers";
+import { checkoutStart, getOrderPublic } from "@/lib/checkout";
+import { sha256 } from "@/lib/crypto";
+import { withStore } from "@/lib/db/client";
+import { appCheckoutSession, auditLog, checkoutLead, customer, integration, mcpToken, offer, orders, store } from "@/lib/db/schema";
+import type { Job } from "@/lib/jobs";
+import { checkoutSaveLead } from "@/lib/leads/capture";
+import { MCP_EXCLUDED } from "@/lib/mcp/tools";
+import { mintMcpToken } from "@/lib/mcp/tokens";
+import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
+import { saveAsaas } from "@/lib/payments/asaas/pix";
+import { recoveryEmailHash } from "@/lib/recovery/rules";
+import { POST } from "@/app/api/integracao/v1/pagamentos/route";
+import { createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { createFakeAsaas } from "./fakes/asaas";
+
+let t: TestDb;
+beforeAll(async () => {
+  t = await createTestDb();
+});
+afterAll(async () => {
+  setAsaasFetchForTests();
+  await t.drop();
+});
+afterEach(() => setAsaasFetchForTests());
+
+const owner: Actor = { kind: "user", userId: randomUUID(), role: "owner" };
+const api = (storeId: string) => ({ storeId, actor: { kind: "token", tokenId: randomUUID(), role: "integration" } as Actor, origin: "api" as const });
+const pub = (storeId: string, now?: Date) => ({ storeId, actor: { kind: "public" } as const, origin: "public" as const, ...(now ? { server: { now } } : {}) });
+
+const CPF = "52998224725";
+const DOMAIN = "checkout.peticionaaqui.com.br";
+let ipSeq = 0;
+const nextIp = () => `198.51.${Math.floor(++ipSeq / 250)}.${ipSeq % 250}`;
+
+/** Loja do app com domínio próprio, Asaas (fake) e duas ofertas de app; uma oferta de download para comparar. */
+async function seedAppStore(name = "PeticionaAqui") {
+  const fake = createFakeAsaas();
+  const { storeId } = await seedStore(name);
+  const domain = `${randomUUID().slice(0, 8)}.${DOMAIN}`;
+  await t.ownerDb.update(store).set({ domain }).where(eq(store.id, storeId));
+  const call = { storeId, actor: owner, origin: "panel" as const };
+  setAsaasFetchForTests(fake.fetch);
+  await runAction(saveAsaas, call, { env: "sandbox", apiKey: fake.apiKey });
+  const app = (slug: string, appCode: string, priceCents: number) =>
+    runAction(createOffer, call, { slug, name: `Plano ${slug}`, delivery: "app", appCode, productIds: [], priceCents, methods: ["pix", "card"], pixMode: "asaas" });
+  const start = await app("start-anual", "start_anual", 49_700);
+  const plus = await app("plus-anual", "plus_anual", 99_700);
+  const main = await seedProduct(storeId, "Guia");
+  const download = await runAction(createOffer, call, { slug: "guia", name: "Guia", productIds: [main.id], priceCents: 990, methods: ["pix"], pixMode: "asaas" });
+  return { storeId, domain, start, plus, download };
+}
+
+const payment = (over: Record<string, unknown> = {}) => ({
+  conta: "tenant-77",
+  oferta: "start-anual",
+  email: "Ana.Souza@Escritorio.com.br",
+  nome: "Ana Souza",
+  ...over,
+});
+
+const sessionIdOf = (url: string) => new URL(url).searchParams.get("s")!;
+const sessionsOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(appCheckoutSession));
+const ordersOf = (storeId: string) => withStore(storeId, (tx) => tx.select().from(orders));
+
+/** Entrada do `checkout.start` pela página da sessão: sem nome nem e-mail (vêm da sessão). */
+function sessionStart(slug: string, sessionId: string, over: Record<string, unknown> & { customer?: Record<string, unknown> } = {}) {
+  const { customer: c, ...rest } = over;
+  return {
+    slug,
+    sessionId,
+    withBump: false,
+    method: "pix",
+    customer: { phone: "(11) 98765-4321", cpf: CPF, ...c },
+    touch: { first: null, last: { utm_source: "navegador" } },
+    eventId: randomUUID(),
+    clientIp: nextIp(),
+    userAgent: "bun-test",
+    ...rest,
+  };
+}
+
+const failOf = (p: Promise<unknown>) =>
+  p.then(
+    () => {
+      throw new Error("esperava erro");
+    },
+    (e: unknown) => e as ActionError,
+  );
+
+describe("apps.createPayment", () => {
+  test("cria a sessão: URL da loja sem e-mail, nome nem conta; expira em 60 min; auditoria sem dado pessoal", async () => {
+    const s = await seedAppStore();
+    const before = Date.now();
+    const r = await runAction(createPayment, api(s.storeId), payment({ telefone: "(11) 98765-4321", origem: { utm_campaign: "black", fbclid: "IwAR77" } }));
+    expect(r.criado).toBe(true);
+    const url = new URL(r.url);
+    expect(url.origin).toBe(`https://${s.domain}`);
+    expect(url.pathname).toBe("/c/start-anual");
+    expect([...url.searchParams.keys()]).toEqual(["s"]);
+    for (const needle of ["ana", "souza", "escritorio", "tenant-77", "987654321"]) expect([needle, r.url.toLowerCase().includes(needle)]).toEqual([needle, false]);
+    const expires = new Date(r.expira_em).getTime();
+    expect(expires).toBeGreaterThanOrEqual(before + SESSION_TTL_MS - 1000);
+    expect(expires).toBeLessThanOrEqual(Date.now() + SESSION_TTL_MS);
+    expect(SESSION_TTL_MS).toBe(60 * 60_000);
+
+    const [row] = await sessionsOf(s.storeId);
+    expect(row).toMatchObject({
+      id: sessionIdOf(r.url),
+      offerId: s.start.id,
+      account: "tenant-77",
+      buyerName: "Ana Souza",
+      buyerEmail: "ana.souza@escritorio.com.br",
+      buyerPhone: "11987654321",
+      touch: { utm_campaign: "black", fbclid: "IwAR77" },
+      orderId: null,
+    });
+    expect(row!.fbc).toMatch(/^fb\.1\.\d+\.IwAR77$/);
+
+    const [audit] = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "apps.createPayment")));
+    expect(audit!.input).toEqual({ oferta: "start-anual", conta_hash: sha256("tenant-77"), emailHash: recoveryEmailHash("Ana.Souza@Escritorio.com.br") });
+    const dump = JSON.stringify(audit).toLowerCase();
+    for (const needle of ["tenant-77", "ana souza", "escritorio", sessionIdOf(r.url)]) expect([needle, dump.includes(needle)]).toEqual([needle, false]);
+  });
+
+  test("oferta inexistente, inativa ou de download → not_found 'Oferta de app não encontrada'", async () => {
+    const s = await seedAppStore();
+    await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.plus.id));
+    for (const oferta of ["nao-existe", "plus-anual", "guia"]) {
+      const e = await failOf(runAction(createPayment, api(s.storeId), payment({ oferta })));
+      expect([oferta, e.code, e.message]).toEqual([oferta, "not_found", APP_OFFER_NOT_FOUND_MESSAGE]);
+    }
+    // Oferta de app de outra loja não aparece (RLS).
+    const other = await seedAppStore("Outra");
+    await t.ownerDb.update(offer).set({ active: false }).where(eq(offer.id, s.start.id));
+    expect(await runAction(createPayment, api(other.storeId), payment()).then((r) => r.criado)).toBe(true);
+    expect((await failOf(runAction(createPayment, api(s.storeId), payment()))).code).toBe("not_found");
+    expect(await sessionsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("retorno: só https no domínio da loja ou num host de config.returnHosts do app_webhook", async () => {
+    const s = await seedAppStore();
+    const code = (retorno: string, conta = randomUUID()) =>
+      runAction(createPayment, api(s.storeId), payment({ conta, retorno })).then(
+        () => "ok",
+        (e: ActionError) => e.code,
+      );
+    expect(await code(`https://${s.domain}/obrigado`)).toBe("ok");
+    expect(await code(`https://${s.domain.toUpperCase()}/obrigado?x=1`)).toBe("ok");
+    expect(await code("https://app.peticionaaqui.com.br/pagamento/ok")).toBe("invalid_input");
+    expect(await code(`http://${s.domain}/obrigado`)).toBe("invalid_input");
+    expect(await code(`https://${s.domain}.evil.com/`)).toBe("invalid_input");
+    expect(await code(`https://user:pw@${s.domain}/`)).toBe("invalid_input");
+    expect(await code("javascript:alert(1)")).toBe("invalid_input");
+    // Hosts do app configurados na integração (`app_webhook`, Task 10): passam a valer.
+    await t.ownerDb.insert(integration).values({ storeId: s.storeId, kind: "app_webhook", config: { url: "https://app.peticionaaqui.com.br/webhook", returnHosts: ["app.peticionaaqui.com.br"] } });
+    expect(await code("https://app.peticionaaqui.com.br/pagamento/ok")).toBe("ok");
+    expect(await code("https://outro.peticionaaqui.com.br/")).toBe("invalid_input");
+    const rows = await sessionsOf(s.storeId);
+    expect(rows.map((r) => r.returnUrl).sort()).toEqual(
+      [`https://${s.domain}/obrigado`, `https://${s.domain}/obrigado?x=1`, "https://app.peticionaaqui.com.br/pagamento/ok"].sort(),
+    );
+  });
+
+  test("nova tentativa do app (mesmo pedido, em paralelo ou logo depois) devolve a mesma sessão", async () => {
+    const s = await seedAppStore();
+    const results = await Promise.all([0, 1, 2, 3].map(() => runAction(createPayment, api(s.storeId), payment())));
+    expect(new Set(results.map((r) => r.url)).size).toBe(1);
+    expect(results.filter((r) => r.criado)).toHaveLength(1);
+    const again = await runAction(createPayment, api(s.storeId), payment());
+    expect(again).toMatchObject({ url: results[0]!.url, criado: false });
+    // Outro e-mail, outra oferta ou outra conta: sessão nova.
+    await runAction(createPayment, api(s.storeId), payment({ email: "outro@escritorio.com.br" }));
+    await runAction(createPayment, api(s.storeId), payment({ oferta: "plus-anual" }));
+    await runAction(createPayment, api(s.storeId), payment({ conta: "tenant-78" }));
+    expect(await sessionsOf(s.storeId)).toHaveLength(4);
+  });
+
+  test("entrada inválida → invalid_input (conta com @, e-mail, nome, telefone, origem longa)", async () => {
+    const s = await seedAppStore();
+    const cases: Record<string, unknown> = {
+      "conta com @": payment({ conta: "ana@x.com" }),
+      "conta longa": payment({ conta: "x".repeat(65) }),
+      "e-mail": payment({ email: "nao-e-email" }),
+      "sem nome": payment({ nome: undefined }),
+      "nome curto": payment({ nome: "A" }),
+      telefone: payment({ telefone: "1234" }),
+      "utm longa": payment({ origem: { utm_source: "x".repeat(501) } }),
+      "sem oferta": payment({ oferta: "" }),
+    };
+    for (const [label, input] of Object.entries(cases)) {
+      const code = await runAction(createPayment, api(s.storeId), input).then(
+        () => "ok",
+        (e: ActionError) => e.code,
+      );
+      expect([label, code]).toEqual([label, "invalid_input"]);
+    }
+    expect(await sessionsOf(s.storeId)).toHaveLength(0);
+  });
+
+  test("só a chave integration: painel e token MCP → forbidden; fora do MCP", async () => {
+    const s = await seedAppStore();
+    await expect(runAction(createPayment, { storeId: s.storeId, actor: owner, origin: "panel" }, payment())).rejects.toMatchObject({ code: "forbidden" });
+    await expect(
+      runAction(createPayment, { storeId: s.storeId, actor: { kind: "token", tokenId: randomUUID(), role: "owner" }, origin: "mcp" }, payment()),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    expect(MCP_EXCLUDED["apps.createPayment"]).toBeDefined();
+  });
+});
+
+describe("POST /api/integracao/v1/pagamentos", () => {
+  test("201 { url, expira_em } na sessão nova, 200 na repetida; 404 oferta; 422 com o campo", async () => {
+    const s = await seedAppStore();
+    const { token, hash, last4 } = mintMcpToken(s.storeId);
+    await t.ownerDb.insert(mcpToken).values({ storeId: s.storeId, name: "App", role: "integration", tokenHash: hash, last4 });
+    const call = (body: unknown) =>
+      POST(new Request("http://localhost:3000/api/integracao/v1/pagamentos", { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) }));
+    const first = await call(payment());
+    expect(first.status).toBe(201);
+    const body = (await first.json()) as { url: string; expira_em: string };
+    expect(Object.keys(body).sort()).toEqual(["expira_em", "url"]);
+    expect(body.url).toStartWith(`https://${s.domain}/c/start-anual?s=`);
+    const again = await call(payment());
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual(body);
+    const missing = await call(payment({ oferta: "nao-existe" }));
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ erro: { codigo: "not_found", mensagem: APP_OFFER_NOT_FOUND_MESSAGE } });
+    const bad = await call(payment({ email: undefined }));
+    expect(bad.status).toBe(422);
+    expect(await bad.json()).toMatchObject({ erro: { codigo: "invalid_input", detalhes: [{ campo: "email" }] } });
+  });
+});
+
+describe("checkout.start com a sessão do app", () => {
+  async function session(s: Awaited<ReturnType<typeof seedAppStore>>, over: Record<string, unknown> = {}) {
+    const r = await runAction(createPayment, api(s.storeId), payment({ conta: `conta-${randomUUID().slice(0, 8)}`, ...over }));
+    return sessionIdOf(r.url);
+  }
+
+  test("pedido grava app_account e app_session_id e usa nome e e-mail da sessão, mesmo com outros no corpo", async () => {
+    const s = await seedAppStore();
+    const id = await session(s, { conta: "tenant-1" });
+    const out = await runAction(
+      checkoutStart,
+      pub(s.storeId),
+      sessionStart("start-anual", id, { customer: { name: "Outra Pessoa", email: "intruso@exemplo.com" } }),
+    );
+    expect(out.method).toBe("pix_asaas");
+    const [o] = await ordersOf(s.storeId);
+    expect(o).toMatchObject({ id: out.orderId, appAccount: "tenant-1", appSessionId: id, buyerName: "Ana Souza", totalCents: 49_700, hasBump: false, couponId: null });
+    const [c] = await withStore(s.storeId, (tx) => tx.select().from(customer).where(eq(customer.id, o!.customerId)));
+    expect(c!.email).toBe("ana.souza@escritorio.com.br");
+    const [row] = await sessionsOf(s.storeId);
+    expect(row!.orderId).toBe(out.orderId);
+    // Auditoria do checkout sem o id da sessão (é o segredo da URL) nem dado pessoal.
+    const audits = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "checkout.start")));
+    const dump = JSON.stringify(audits);
+    for (const needle of [id, "Ana Souza", "escritorio", "intruso"]) expect([needle, dump.includes(needle)]).toEqual([needle, false]);
+  });
+
+  test("oferta de app sem sessão → invalid_input 'Abra o pagamento pelo app'", async () => {
+    const s = await seedAppStore();
+    const input: Record<string, unknown> = sessionStart("start-anual", randomUUID(), { customer: { name: "Ana Souza", email: "a@exemplo.com" } });
+    delete input.sessionId;
+    const e = await failOf(runAction(checkoutStart, pub(s.storeId), input));
+    expect([e.code, e.message]).toEqual(["invalid_input", "Abra o pagamento pelo app"]);
+    expect(await ordersOf(s.storeId)).toEqual([]);
+  });
+
+  test("sessão vencida (61 min), de outra oferta, de outra loja, inexistente ou numa oferta de download → SESSION_INVALID", async () => {
+    const s = await seedAppStore();
+    const other = await seedAppStore("Outra loja");
+    const id = await session(s);
+    const expect409 = async (label: string, storeId: string, slug: string, sid: string, now?: Date) => {
+      const e = await failOf(runAction(checkoutStart, pub(storeId, now), sessionStart(slug, sid, slug === "guia" ? { customer: { name: "Ana Souza", email: "a@exemplo.com" } } : {})));
+      expect([label, e.code, e.message, e.details]).toEqual([label, "conflict", SESSION_INVALID_MESSAGE, { code: "SESSION_INVALID" }]);
+    };
+    await expect409("vencida", s.storeId, "start-anual", id, new Date(Date.now() + 61 * 60_000));
+    await expect409("outra oferta", s.storeId, "plus-anual", id);
+    await expect409("outra loja", other.storeId, "start-anual", id);
+    await expect409("inexistente", s.storeId, "start-anual", randomUUID());
+    await expect409("download", s.storeId, "guia", id);
+    expect(await ordersOf(s.storeId)).toEqual([]);
+    // Dentro dos 60 min (relógio injetado em 59 min) a mesma sessão vale.
+    const ok = await runAction(checkoutStart, pub(s.storeId, new Date(Date.now() + 59 * 60_000)), sessionStart("start-anual", id));
+    expect(ok.method).toBe("pix_asaas");
+  });
+
+  test("sessão com pedido pago (ou pago e reembolsado) → SESSION_INVALID; nenhum pedido novo", async () => {
+    const s = await seedAppStore();
+    for (const status of ["paid", "refunded"] as const) {
+      const id = await session(s);
+      const first = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+      await t.ownerDb.update(orders).set({ status, paidAt: new Date() }).where(eq(orders.id, first.orderId));
+      const e = await failOf(runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" })));
+      expect([status, e.code, e.details]).toEqual([status, "conflict", { code: "SESSION_INVALID" }]);
+      await withStore(s.storeId, async (tx) => expect(await loadCheckoutSession(tx, s.storeId, id)).toBeNull());
+    }
+    expect(await ordersOf(s.storeId)).toHaveLength(2);
+  });
+
+  test("Pix pendente e depois cartão na mesma sessão: dois pedidos, a sessão aponta para o último", async () => {
+    const s = await seedAppStore();
+    const id = await session(s);
+    const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    expect(card.method).toBe("card_asaas");
+    const rows = await ordersOf(s.storeId);
+    expect(rows.map((o) => o.id).sort()).toEqual([pix.orderId, card.orderId].sort());
+    expect(rows.every((o) => o.appSessionId === id)).toBe(true);
+    expect((await sessionsOf(s.storeId))[0]!.orderId).toBe(card.orderId);
+  });
+
+  test("cupom ou bump com sessão → invalid_input, sem pedido", async () => {
+    const s = await seedAppStore();
+    const id = await session(s);
+    const coupon = await failOf(runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { couponCode: "PROMO10", expectedTotalCents: 44_730 })));
+    expect(coupon.code).toBe("invalid_input");
+    const bump = await failOf(runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { withBump: true })));
+    expect(bump.code).toBe("invalid_input");
+    expect(await ordersOf(s.storeId)).toEqual([]);
+  });
+
+  test("telefone: o da sessão vale quando o navegador não manda; sem nenhum → invalid_input no campo", async () => {
+    const s = await seedAppStore();
+    const withPhone = await session(s, { telefone: "(21) 99812-3044" });
+    const noPhone: Record<string, unknown> = { ...sessionStart("start-anual", withPhone).customer };
+    delete noPhone.phone;
+    const out = await runAction(checkoutStart, pub(s.storeId), { ...sessionStart("start-anual", withPhone), customer: noPhone });
+    const [o] = (await ordersOf(s.storeId)).filter((x) => x.id === out.orderId);
+    expect(o!.buyerPhone).toBe("21998123044");
+    const without = await session(s);
+    const e = await failOf(runAction(checkoutStart, pub(s.storeId), { ...sessionStart("start-anual", without), customer: noPhone }));
+    expect(e.code).toBe("invalid_input");
+    expect(e.details).toEqual([expect.objectContaining({ path: ["customer", "phone"] })]);
+  });
+
+  test("toque do pedido: da sessão quando ela trouxe origem; senão do teste da conta; nunca da URL do checkout", async () => {
+    const s = await seedAppStore();
+    await runAction(registerTrial, api(s.storeId), { conta: "conta-trial", email: "t@exemplo.com", origem: { utm_source: "facebook", utm_campaign: "teste-gratis", ref: "parceiro", fbc: "fb.1.1.trial", fbp: "fb.1.1.fbp-trial" } });
+    const fromTrial = await session(s, { conta: "conta-trial" });
+    const a = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", fromTrial, { ref: "url", fbc: "fb.1.1.url", fbp: "fb.1.1.url" }));
+    const fromSession = await session(s, { conta: "conta-trial", oferta: "plus-anual", origem: { utm_source: "google", utm_campaign: "pagar", fbp: "fb.1.1.fbp-sessao" } });
+    const b = await runAction(checkoutStart, pub(s.storeId), sessionStart("plus-anual", fromSession));
+    const byId = new Map((await ordersOf(s.storeId)).map((o) => [o.id, o]));
+    expect(byId.get(a.orderId)).toMatchObject({
+      firstTouch: { utm_source: "facebook", utm_campaign: "teste-gratis" },
+      lastTouch: { utm_source: "facebook", utm_campaign: "teste-gratis" },
+      ref: "parceiro",
+      fbc: "fb.1.1.trial",
+      fbp: "fb.1.1.fbp-trial",
+    });
+    expect(byId.get(b.orderId)).toMatchObject({
+      firstTouch: { utm_source: "google", utm_campaign: "pagar" },
+      lastTouch: { utm_source: "google", utm_campaign: "pagar" },
+      ref: null,
+      fbc: null,
+      fbp: "fb.1.1.fbp-sessao",
+    });
+    // Conta sem teste e sessão sem origem: pedido sem toque (o da URL é ignorado).
+    const bare = await session(s, { conta: "sem-teste", oferta: "start-anual", email: "x@exemplo.com" });
+    const c = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", bare));
+    expect((await ordersOf(s.storeId)).find((o) => o.id === c.orderId)).toMatchObject({ firstTouch: null, lastTouch: null, ref: null, fbc: null, fbp: null });
+  });
+});
+
+describe("página do pedido de app (getOrderPublic)", () => {
+  test("pendente: sessão para o cartão; pago: retorno do app, sem a sessão; uma linha com a oferta e sem dado pessoal", async () => {
+    const s = await seedAppStore();
+    const r = await runAction(createPayment, api(s.storeId), payment({ conta: "pagina", retorno: `https://${s.domain}/voltar` }));
+    const id = sessionIdOf(r.url);
+    const out = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    const [o] = await ordersOf(s.storeId);
+    const pending = (await getOrderPublic(s.storeId, o!.publicId))!;
+    expect(pending.offer.delivery).toBe("app");
+    expect(pending.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: id });
+    expect(pending.items).toEqual([{ name: "Plano start-anual", priceCents: 49_700 }]);
+    await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, out.orderId));
+    const paid = (await getOrderPublic(s.storeId, o!.publicId))!;
+    expect(paid.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: null });
+    const dump = JSON.stringify(paid);
+    for (const needle of ["escritorio", "pagina", id]) expect([needle, dump.includes(needle)]).toEqual([needle, false]);
+  });
+});
+
+describe("checkout.appSession (página /c/<slug>?s=<id>)", () => {
+  test("sessão válida → nome, e-mail e se já tem telefone; inválida → SESSION_INVALID", async () => {
+    const s = await seedAppStore();
+    const r = await runAction(createPayment, api(s.storeId), payment({ telefone: "(11) 98765-4321" }));
+    const id = sessionIdOf(r.url);
+    expect(await runAction(checkoutAppSession, pub(s.storeId), { slug: "start-anual", sessionId: id })).toEqual({
+      buyerName: "Ana Souza",
+      buyerEmail: "ana.souza@escritorio.com.br",
+      hasPhone: true,
+    });
+    for (const [label, slug, sid, now] of [
+      ["outra oferta", "plus-anual", id, undefined],
+      ["inexistente", "start-anual", randomUUID(), undefined],
+      ["vencida", "start-anual", id, new Date(Date.now() + 61 * 60_000)],
+    ] as const) {
+      const e = await failOf(runAction(checkoutAppSession, pub(s.storeId, now), { slug, sessionId: sid }));
+      expect([label, e.code, e.details]).toEqual([label, "conflict", { code: "SESSION_INVALID" }]);
+    }
+    expect((await failOf(runAction(checkoutAppSession, pub(s.storeId), { slug: "start-anual", sessionId: "nao-e-uuid" }))).code).toBe("invalid_input");
+  });
+});
+
+describe("captura de contato na oferta de app", () => {
+  test("checkout.saveLead não guarda contato nem agenda aviso numa oferta de app", async () => {
+    const s = await seedAppStore();
+    await t.ownerDb.update(store).set({ leadCapture: true, privacyEmail: "privacidade@exemplo.com" }).where(eq(store.id, s.storeId));
+    const out = await runAction(checkoutSaveLead, pub(s.storeId), { slug: "start-anual", leadKey: randomUUID(), email: "lead@exemplo.com", phone: "(11) 98765-4321", clientIp: nextIp() });
+    expect(out).toEqual({ created: false, leadId: null });
+    expect(await withStore(s.storeId, (tx) => tx.select().from(checkoutLead))).toEqual([]);
+    // A oferta de download da mesma loja continua capturando.
+    expect((await runAction(checkoutSaveLead, pub(s.storeId), { slug: "guia", leadKey: randomUUID(), email: "lead@exemplo.com", clientIp: nextIp() })).created).toBe(true);
+  });
+});
+
+describe("retenção das sessões (sweep_app_trials)", () => {
+  const noJob = { id: randomUUID(), storeId: null, type: "sweep_app_trials", payload: {} } as unknown as Job;
+  const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000);
+
+  test("sem pedido: apagada 7 dias depois de vencer; com pedido: fica, sem nome/e-mail/telefone depois de vencer", async () => {
+    expect(SESSION_RETENTION_DAYS).toBe(7);
+    const s = await seedAppStore();
+    const mk = async (conta: string, expiresAt: Date) => {
+      const r = await runAction(createPayment, api(s.storeId), payment({ conta, telefone: "(11) 98765-4321" }));
+      const id = sessionIdOf(r.url);
+      return { id, expiresAt };
+    };
+    const live = await mk("ativa", new Date());
+    const recent = await mk("vencida-ha-6-dias", daysAgo(6));
+    const old = await mk("vencida-ha-8-dias", daysAgo(8));
+    const paidLive = await mk("com-pedido-ativa", new Date());
+    const paidOld = await mk("com-pedido-vencida", daysAgo(1));
+    for (const x of [paidLive, paidOld]) await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", x.id));
+    for (const x of [recent, old, paidOld]) await t.ownerDb.update(appCheckoutSession).set({ expiresAt: x.expiresAt }).where(eq(appCheckoutSession.id, x.id));
+
+    await sweepAppTrialsJob(noJob, new AbortController().signal);
+
+    const rows = new Map((await sessionsOf(s.storeId)).map((r) => [r.id, r]));
+    expect(rows.has(old.id)).toBe(false);
+    expect(rows.get(recent.id)).toMatchObject({ buyerName: "Ana Souza", buyerPhone: "11987654321" });
+    expect(rows.get(live.id)).toMatchObject({ buyerName: "Ana Souza" });
+    expect(rows.get(paidLive.id)).toMatchObject({ buyerName: "Ana Souza", buyerEmail: "ana.souza@escritorio.com.br" });
+    const cleared = rows.get(paidOld.id)!;
+    expect(cleared).toMatchObject({ buyerName: "", buyerEmail: "", buyerPhone: null, account: "com-pedido-vencida" });
+    expect(cleared.orderId).not.toBeNull();
+    // O pedido continua com os dados dele.
+    const [o] = await withStore(s.storeId, (tx) => tx.select().from(orders).where(eq(orders.id, cleared.orderId!)));
+    expect(o!.buyerName).toBe("Ana Souza");
+    // Repetir não muda nada.
+    await sweepAppTrialsJob(noJob, new AbortController().signal);
+    expect((await sessionsOf(s.storeId)).length).toBe(rows.size);
+  });
+});

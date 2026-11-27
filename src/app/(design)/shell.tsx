@@ -27,7 +27,8 @@ export function BuyerShell({ storeName, brandColor, children }: { storeName: str
   );
 }
 
-export function TrustSeals() {
+/** `app`: oferta de app (o acesso é liberado no app, não por e-mail). */
+export function TrustSeals({ app = false }: { app?: boolean }) {
   return (
     <ul className={s.seals}>
       <li>
@@ -35,8 +36,8 @@ export function TrustSeals() {
         <span>Pagamento protegido</span>
       </li>
       <li>
-        <Icon name="mail-check" size={20} />
-        <span>Acesso enviado por e-mail</span>
+        <Icon name={app ? "smartphone" : "mail-check"} size={20} />
+        <span>{app ? "Acesso liberado no app" : "Acesso enviado por e-mail"}</span>
       </li>
       <li>
         <Icon name="rotate-ccw" size={20} />

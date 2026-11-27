@@ -38,6 +38,8 @@ export type CreateOrderInput = {
    * recalculado aqui a partir do cupom no banco; desconto 0 (o piso de R$ 5,00 come tudo) -> cupom inválido.
    */
   coupon?: { id: string };
+  /** Pedido pela sessão de pagamento do app (`checkout.start` com `sessionId`): grava a conta e a sessão no pedido. */
+  app?: { account: string; sessionId: string };
 };
 
 /** Bump marcado que não está mais disponível: o checkout mostra a mensagem como veio (ramo `conflict`). */
@@ -57,13 +59,18 @@ type OfferRow = typeof offer.$inferSelect;
 /**
  * Produtos do pedido de uma oferta: os principais e, com o bump marcado, os do bump com o preço dele. Mesmas recusas do
  * `createOrder` (a prévia do cupom usa esta função para calcular o mesmo total): principal apagado -> `not_found`; bump
- * marcado e indisponível -> `conflict` com `BUMP_UNAVAILABLE`.
+ * marcado e indisponível -> `conflict` com `BUMP_UNAVAILABLE`. Oferta de app (`delivery = 'app'`) não tem produtos nem bump:
+ * o pedido sai sem itens (o app libera o plano ou os créditos pelo `app_code` da oferta).
  */
 export async function orderParts(
   tx: Ctx["tx"],
   o: OfferRow,
   withBump: boolean,
 ): Promise<{ main: ProductRef[]; bump: { products: ProductRef[]; priceCents: number } | null }> {
+  if (o.delivery === "app") {
+    if (withBump) throw new ActionError("conflict", BUMP_UNAVAILABLE);
+    return { main: [], bump: null };
+  }
   const list = (await loadOfferProducts(tx, [o.id])).get(o.id)!;
   const live = (ps: ProductRef[]) => ps.length > 0 && ps.every((p) => p.deletedAt === null);
   if (!live(list.main)) throw new ActionError("not_found", "Oferta não encontrada");
@@ -145,6 +152,8 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
         fbp: input.fbp ?? null,
         clientIp: input.clientIp,
         userAgent: input.userAgent,
+        appAccount: input.app?.account ?? null,
+        appSessionId: input.app?.sessionId ?? null,
       })
       .returning();
     return row!;
@@ -171,16 +180,16 @@ export async function createOrder(ctx: Ctx, input: CreateOrderInput): Promise<Or
     order = await insertOrder(ctx.tx, null);
   }
   const items = (kind: "main" | "bump", products: ProductRef[], priceCents: number) => {
+    if (products.length === 0) return [];
     const prices = splitCents(priceCents, products.length);
     return products.map((p, position) => ({ storeId: ctx.storeId, orderId: order.id, productId: p.id, priceCents: prices[position]!, kind, position }));
   };
-  // Soma dos grupos = (principal - desconto do principal) + (bump - desconto do bump) = total.
-  await ctx.tx
-    .insert(orderItem)
-    .values([
-      ...items("main", main, o.priceCents - discount.mainDiscountCents),
-      ...(bump ? items("bump", bump.products, bump.priceCents - discount.bumpDiscountCents) : []),
-    ]);
+  // Soma dos grupos = (principal - desconto do principal) + (bump - desconto do bump) = total. Oferta de app: sem itens.
+  const rows = [
+    ...items("main", main, o.priceCents - discount.mainDiscountCents),
+    ...(bump ? items("bump", bump.products, bump.priceCents - discount.bumpDiscountCents) : []),
+  ];
+  if (rows.length > 0) await ctx.tx.insert(orderItem).values(rows);
   // O contato guardado antes da compra (mesmo e-mail na loja ou mesma chave da página) vira "comprou" e perde e-mail e celular.
   await convertLeads(ctx.tx, ctx.storeId, { email, leadKey: input.leadKey, orderId: order.id });
   await enqueueTelegramNotices(ctx, order);
