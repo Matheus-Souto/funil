@@ -1,5 +1,9 @@
-/** `reader` só existe para tokens MCP (o `membership_role_check` não o aceita: usuário do painel nunca é leitor). */
-export type Role = "owner" | "admin" | "support" | "traffic" | "reader";
+/**
+ * `reader` e `integration` só existem para tokens (o `membership_role_check` não os aceita: usuário do painel nunca é
+ * leitor nem integração). `integration` é a chave da API de integração da loja (`/api/integracao/v1/*`): não serve
+ * para o MCP, e nenhum outro papel serve para a API.
+ */
+export type Role = "owner" | "admin" | "support" | "traffic" | "reader" | "integration";
 
 export type Permission =
   | "products.read"
@@ -26,7 +30,9 @@ export type Permission =
   | "approvals.decide"
   /** Contatos de quem não finalizou a compra (checkout_lead): dono, admin e suporte. Nunca um token (TOKEN_DENIED). */
   | "leads.read"
-  | "leads.write";
+  | "leads.write"
+  /** API de integração de apps (`/api/integracao/v1/*`): só o papel `integration`, fora de ALL e do MCP. */
+  | "integration.use";
 
 const ALL: Permission[] = [
   "products.read",
@@ -72,6 +78,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   // nem a própria conta (um token não tem conta). `approvals.request`: pedir pela fila (a ação-alvo ainda exige a
   // permissão dela) e ler os próprios pedidos.
   reader: ["products.read", "offers.read", "metrics.read", "orders.report", "approvals.request"],
+  // Só a chave da API de integração: nada do painel nem do MCP (nem a fila de aprovação).
+  integration: ["integration.use"],
 };
 
 export function hasPermission(role: Role, permission: Permission): boolean {

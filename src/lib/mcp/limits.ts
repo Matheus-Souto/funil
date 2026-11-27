@@ -8,6 +8,20 @@ const DAY_SEC = 86_400;
 
 export type LimitRule = { key: string; limit: number; windowSec: number };
 
+/** Falhas de autenticação por IP e por minuto; sem IP conhecido (`TRUST_PROXY=0` ou sem cabeçalho do proxy), num balde global. */
+const UNAUTH_IP_LIMIT = 30;
+const UNAUTH_GLOBAL_KEY = "mcp:unauth";
+const UNAUTH_GLOBAL_LIMIT = 600;
+
+/**
+ * Balde de falhas de autenticação por token (chave e limite por minuto): por IP (`ipRateKey`) ou, sem IP conhecido,
+ * global. O mesmo no MCP e na API de integração (src/lib/apps/http.ts): quem varre tokens num endpoint não ganha outra
+ * cota no outro.
+ */
+export function unauthBucket(ipKey: string | null): [key: string, limit: number] {
+  return ipKey ? [`mcp:unauth:ip:${ipKey}`, UNAUTH_IP_LIMIT] : [UNAUTH_GLOBAL_KEY, UNAUTH_GLOBAL_LIMIT];
+}
+
 /** Aplica as regras só quando o ator é token; a primeira que estourar vira `rate_limited` com `message`. */
 export async function limitToken(actor: Actor, rules: LimitRule[], message: string): Promise<void> {
   if (actor.kind !== "token") return;

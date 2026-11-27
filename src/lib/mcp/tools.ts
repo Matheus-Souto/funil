@@ -16,7 +16,14 @@ import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
 import { requestApproval } from "./approvals";
 
 /** Rótulo do papel do token como o painel de tokens mostra. */
-export const TOKEN_ROLE_LABEL: Record<Role, string> = { reader: "Leitor", traffic: "Tráfego", support: "Suporte", admin: "Admin", owner: "Dono" };
+export const TOKEN_ROLE_LABEL: Record<Role, string> = {
+  reader: "Leitor",
+  traffic: "Tráfego",
+  support: "Suporte",
+  admin: "Admin",
+  owner: "Dono",
+  integration: "Integração",
+};
 
 /** Ações que não saem pelo MCP (nome → motivo). Públicas e de sistema ficam de fora pela permissão. */
 export const MCP_EXCLUDED: Record<string, string> = {

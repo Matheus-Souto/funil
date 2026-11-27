@@ -16,16 +16,13 @@ import { env } from "@/lib/env";
 import { readCapped } from "@/lib/http";
 import { errorFields, log } from "@/lib/log";
 import { checkRateLimit, ipRateKey, peekRateLimit } from "@/lib/payments/ratelimit";
+import { unauthBucket } from "./limits";
 import { authenticateMcpToken } from "./tokens";
 import { callMcpTool, mcpTools, unavailableToolText, unavailableTools } from "./tools";
 
 const MAX_BODY = 256 * 1024;
 const TOKEN_LIMIT = 120;
 const IP_LIMIT = 300;
-/** Falhas de autenticação por IP; sem IP conhecido (`TRUST_PROXY=0` ou sem cabeçalho do proxy), num balde global. */
-const UNAUTH_IP_LIMIT = 30;
-const UNAUTH_GLOBAL_KEY = "mcp:unauth";
-const UNAUTH_GLOBAL_LIMIT = 600;
 const WINDOW_SEC = 60;
 const MAX_ERROR_TEXT = 500;
 /** Requisições em andamento por token (o pool do banco tem 5 conexões): acima disso, 429 com espera curta. */
@@ -163,9 +160,11 @@ export async function handleMcpRequest(req: Request, opts: McpHttpOptions = {}):
 
   // Muitas falhas de autenticação no minuto (do IP; sem IP, de todos): nenhuma transação de autenticação nova até a
   // virada. Com IP conhecido o balde é só do IP: um atacante não bloqueia os tokens válidos de outros IPs.
-  const [unauthKey, unauthLimit] = ipKey ? [`mcp:unauth:ip:${ipKey}`, UNAUTH_IP_LIMIT] : [UNAUTH_GLOBAL_KEY, UNAUTH_GLOBAL_LIMIT];
+  const [unauthKey, unauthLimit] = unauthBucket(ipKey);
   if (!(await peekRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now()))) return tooMany();
-  const auth = await authenticateMcpToken(bearer(req));
+  const found = await authenticateMcpToken(bearer(req));
+  // A chave `integration` só serve para a API de integração (src/lib/apps/http.ts): aqui é uma falha de autenticação.
+  const auth = found?.role === "integration" ? null : found;
   if (!auth) return (await checkRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now())) ? unauthorized() : tooMany();
 
   const running = inFlight.get(auth.tokenId) ?? 0;
