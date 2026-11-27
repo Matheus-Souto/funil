@@ -30,13 +30,15 @@ export function buyerCsp(nonce: string, opts: { dev: boolean; turnstile: boolean
 }
 
 /**
- * Páginas com segredo na URL não mandam o endereço adiante (Referer) para nenhum recurso ou link: o checkout aberto
- * pela sessão do app (`/c/<slug>?s=<id>`: o `s` dá acesso ao nome e ao e-mail da sessão) e a página do pedido
- * (`/o/<publicId>`, que no pedido de app leva o link de volta ao checkout da sessão). `null`: política padrão.
+ * Páginas com segredo na URL não mandam o caminho nem a query adiante (Referer): o checkout aberto pela sessão do app
+ * (`/c/<slug>?s=<id>`: o `s` dá acesso ao nome e ao e-mail da sessão) e a página do pedido (`/o/<publicId>`, que no
+ * pedido de app leva o link de volta ao checkout da sessão). `strict-origin`, e não `no-referrer`: só a origem sai (e só
+ * em HTTPS), e o `Origin` continua no POST nativo da própria página (o Next confere o `Origin` nas Server Actions, como
+ * o "Gerar novo código Pix" do pedido). `null`: política padrão.
  */
-export function buyerReferrerPolicy(pathname: string, search: URLSearchParams): "no-referrer" | null {
-  if (pathname.startsWith("/o/")) return "no-referrer";
-  if (pathname.startsWith("/c/") && search.has("s")) return "no-referrer";
+export function buyerReferrerPolicy(pathname: string, search: URLSearchParams): "strict-origin" | null {
+  if (pathname.startsWith("/o/")) return "strict-origin";
+  if (pathname.startsWith("/c/") && search.has("s")) return "strict-origin";
   return null;
 }
 

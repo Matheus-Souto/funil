@@ -19,7 +19,7 @@ import {
 } from "@/lib/apps/sessions";
 import { registerTrial, sweepAppTrialsJob } from "@/lib/apps/trials";
 import { createOffer } from "@/lib/catalog/offers";
-import { checkoutStart, getOrderPublic } from "@/lib/checkout";
+import { ASAAS_LIMITS, checkoutStart, getOrderPublic, renewCardTicket, startCheckout } from "@/lib/checkout";
 import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { appCheckoutSession, auditLog, checkoutLead, customer, integration, mcpToken, offer, orders, store } from "@/lib/db/schema";
@@ -595,13 +595,13 @@ describe("privacidade do link (?s=)", () => {
     expect(await appGate(s.storeId, "start-anual", "app", id)).toMatchObject({ session: { sessionId: id, name: "Ana Souza" } });
   });
 
-  test("Referrer-Policy: no-referrer no /c com s e em /o; checkout comum sem a política", () => {
+  test("Referrer-Policy: strict-origin no /c com s e em /o (só a origem; o Origin do POST nativo continua); checkout comum sem a política", () => {
     const q = (x: string) => new URLSearchParams(x);
-    expect(buyerReferrerPolicy("/c/start-anual", q("s=abc"))).toBe("no-referrer");
-    expect(buyerReferrerPolicy("/o/pedido", q(""))).toBe("no-referrer");
+    expect(buyerReferrerPolicy("/c/start-anual", q("s=abc"))).toBe("strict-origin");
+    expect(buyerReferrerPolicy("/o/pedido", q(""))).toBe("strict-origin");
     expect(buyerReferrerPolicy("/c/guia", q("utm_source=ig"))).toBeNull();
-    expect(proxy(new NextRequest("http://127.0.0.1:3000/c/start-anual?s=abc")).headers.get("referrer-policy")).toBe("no-referrer");
-    expect(proxy(new NextRequest("http://127.0.0.1:3000/o/abc")).headers.get("referrer-policy")).toBe("no-referrer");
+    expect(proxy(new NextRequest("http://127.0.0.1:3000/c/start-anual?s=abc")).headers.get("referrer-policy")).toBe("strict-origin");
+    expect(proxy(new NextRequest("http://127.0.0.1:3000/o/abc")).headers.get("referrer-policy")).toBe("strict-origin");
     expect(proxy(new NextRequest("http://127.0.0.1:3000/c/guia")).headers.get("referrer-policy")).toBeNull();
   });
 });
@@ -655,5 +655,103 @@ describe("tentativa direta só com a sessão utilizável", () => {
     expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: id });
     await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id));
     expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: null });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Correções da re-revisão do PR #43
+
+const KEY = "k".repeat(32) + "-chave-do-bilhete-de-teste";
+
+describe("ordem das travas: retomar o Pix enquanto o webhook confirma", () => {
+  test("com o pedido travado pelo webhook (FOR UPDATE), a aba que retoma o Pix termina sem esperar e o webhook confirma depois", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "travas" }))).url);
+    const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    // Depois um cartão: a sessão passa a apontar para ele (retomar o Pix mudaria o ponteiro de volta, o caso do impasse).
+    const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    expect((await sessionsOf(s.storeId))[0]!.orderId).toBe(card.orderId);
+    await withStore(s.storeId, async (tx) => {
+      // Como o webhook do Asaas: segura o pedido e, ao mudar o estado, trava a sessão (enqueueAppNotice).
+      await tx.select({ id: orders.id }).from(orders).where(eq(orders.id, pix.orderId)).for("update");
+      const again = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+      expect(again.orderId).toBe(pix.orderId);
+      expect(await transitionOrder(ctxOf(s.storeId, tx), pix.orderId, "paid", "asaas CONFIRMED")).toEqual({ changed: true });
+    });
+    expect((await deliveriesOf(s.storeId)).map((d) => [d.orderId, d.eventType])).toEqual([[pix.orderId, "pagamento.confirmado"]]);
+    expect((await sessionsOf(s.storeId))[0]!.releasedOrderId).toBe(pix.orderId);
+  });
+});
+
+describe("repetição com fbclid longo", () => {
+  test("fbclid de 450 caracteres (o fbc gravado corta em 400): a mesma chamada devolve a mesma sessão", async () => {
+    const s = await seedAppStore();
+    const fbclid = "IwAR" + "x".repeat(446);
+    const a = await runAction(createPayment, api(s.storeId), payment({ conta: "fbclid-longo", origem: { fbclid } }));
+    const b = await runAction(createPayment, api(s.storeId), payment({ conta: "fbclid-longo", origem: { fbclid } }));
+    expect(b).toMatchObject({ url: a.url, criado: false });
+    const [row] = await sessionsOf(s.storeId);
+    expect(row!.fbc!.length).toBeLessThan(fbclid.length);
+    const c = await runAction(createPayment, api(s.storeId), payment({ conta: "fbclid-longo", origem: { fbclid: fbclid.slice(0, 449) + "y" } }));
+    // Diferença só depois do corte de 400 no fbc, mas o toque guarda o fbclid inteiro: é outro clique, outra sessão.
+    expect(c.criado).toBe(true);
+  });
+});
+
+describe("reaproveitamento só com os mesmos dados de cobrança", () => {
+  test("telefone ou CPF/CNPJ corrigidos criam pedido novo; os mesmos dados reaproveitam; reaproveitar não consome a cota", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "cobranca" }))).url);
+    const first = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+    const otherPhone = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { customer: { phone: "(21) 99812-3044" } }));
+    expect(otherPhone.orderId).not.toBe(first.orderId);
+    const otherDoc = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { customer: { cpf: "11144477735" } }));
+    expect(new Set([first.orderId, otherPhone.orderId, otherDoc.orderId]).size).toBe(3);
+    const rows = new Map((await ordersOf(s.storeId)).map((o) => [o.id, o]));
+    expect([rows.get(otherPhone.orderId)!.buyerPhone, rows.get(otherDoc.orderId)!.buyerCpf]).toEqual(["21998123044", "11144477735"]);
+    // Os mesmos dados: o mesmo pedido, quantas vezes for, sem bater no limite por e-mail (5 por hora).
+    const sameDoc = sessionStart("start-anual", id, { customer: { cpf: "11144477735" } });
+    for (let i = 0; i <= ASAAS_LIMITS.perEmailPerHour; i++) {
+      const again = await runAction(checkoutStart, pub(s.storeId), { ...sameDoc, clientIp: nextIp() });
+      expect(again.orderId).toBe(otherDoc.orderId);
+    }
+    expect(await ordersOf(s.storeId)).toHaveLength(3);
+  });
+});
+
+describe("cartão depois do Pix pago na mesma sessão", () => {
+  test("renovar o bilhete com a sessão já paga ou vencida: recusa (SESSION_INVALID) e o pedido de cartão pendente é encerrado", async () => {
+    const s = await seedAppStore();
+    for (const caso of ["pago", "vencida"] as const) {
+      const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: `cartao-${caso}` }))).url);
+      const card = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id, { method: "card" }), { cardTicketKey: KEY });
+      // Com a sessão servindo, a renovação funciona.
+      const fresh = await renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: card.cardTicket }, KEY);
+      expect(fresh.length).toBeGreaterThan(10);
+      let now: Date | undefined;
+      if (caso === "pago") {
+        const pix = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
+        await move(s.storeId, pix.orderId, "paid");
+      } else now = new Date(Date.now() + 61 * 60_000);
+      const e = await failOf(renewCardTicket({ storeId: s.storeId }, { publicId: card.publicId, ticket: fresh }, KEY, now));
+      expect([caso, e.code, e.details]).toEqual([caso, "conflict", { code: "SESSION_INVALID" }]);
+      const [o] = (await ordersOf(s.storeId)).filter((x) => x.publicId === card.publicId);
+      expect([caso, o!.status]).toEqual([caso, "expired"]);
+    }
+  });
+});
+
+describe("oferta na auditoria", () => {
+  test("oferta fora do formato de slug (um e-mail) → invalid_input, e a auditoria não guarda o valor", async () => {
+    const s = await seedAppStore();
+    const e = await failOf(runAction(createPayment, api(s.storeId), payment({ oferta: "ana.souza@escritorio.com.br" })));
+    expect(e.code).toBe("invalid_input");
+    const audits = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "apps.createPayment")));
+    expect(audits.length).toBe(1);
+    expect(JSON.stringify(audits)).not.toContain("escritorio");
+    // Slug válido, mas inexistente: a auditoria guarda só o slug.
+    await failOf(runAction(createPayment, api(s.storeId), payment({ oferta: "nao-existe" })));
+    const after = await withStore(s.storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "apps.createPayment")));
+    expect(after.map((a) => (a.input as { oferta?: string } | null)?.oferta).filter(Boolean)).toEqual(["nao-existe"]);
   });
 });

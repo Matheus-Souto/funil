@@ -18,6 +18,7 @@ import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { sha256 } from "@/lib/crypto";
 import { appCheckoutSession, appTrial, offer, orders, store } from "@/lib/db/schema";
+import { offerSlugSchema } from "@/lib/catalog/offers";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { recoveryEmailHash } from "@/lib/recovery/rules";
 import { fbcFromFbclid, type Touch, type TouchRecord } from "@/lib/tracking/touch";
@@ -135,8 +136,11 @@ const returnUrl = z
 
 const createInput = z.object({
   conta: accountSchema,
-  /** Slug da oferta de app no funil (ex.: `start-anual`). */
-  oferta: z.string().trim().min(1, "Informe a oferta").max(100),
+  /**
+   * Slug da oferta de app no funil (ex.: `start-anual`), no formato do catálogo: assim a auditoria só grava um slug
+   * (um valor fora do formato, como um e-mail, é recusado antes e não chega ao `auditInput`).
+   */
+  oferta: offerSlugSchema,
   email: z.string().trim().toLowerCase().max(254).refine(validEmail, "Confira o e-mail"),
   nome: z.string().trim().min(2, "Nome curto demais").max(120, "Nome longo demais"),
   telefone: z
@@ -172,11 +176,17 @@ function sameTouch(a: TouchRecord | null, b: TouchRecord | null): boolean {
 
 /**
  * `fbc` gravado bate com a origem nova: o enviado pelo app é comparado direto; sem ele, o derivado do `fbclid` leva a
- * hora da criação, então basta terminar no mesmo `fbclid` (o próprio `fbclid` já está no toque comparado).
+ * hora da criação, então compara o resto (o `fbclid` normalizado como na gravação, que corta em 400 caracteres).
  */
 function sameFbc(stored: string | null, og: z.infer<typeof appOriginSchema> | undefined): boolean {
   if (og?.fbc) return stored === og.fbc;
-  if (og?.fbclid) return stored !== null && stored.startsWith("fb.1.") && stored.endsWith(`.${og.fbclid}`);
+  if (og?.fbclid) {
+    // A mesma normalização da gravação (`fbcFromFbclid`: limpa e corta o `fbclid`); só a hora difere entre as chamadas.
+    const derived = fbcFromFbclid(og.fbclid, 0);
+    if (!derived || stored === null) return stored === null && !derived;
+    const id = derived.slice("fb.1.0.".length);
+    return /^fb\.1\.\d+\./.test(stored) && stored.slice(stored.indexOf(".", "fb.1.".length) + 1) === id;
+  }
   return stored === null;
 }
 

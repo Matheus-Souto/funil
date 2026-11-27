@@ -34,6 +34,7 @@ import { appCheckoutSession, checkoutView as checkoutViewTable, customer, offer,
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { BUMP_UNAVAILABLE, createOrder, orderParts, type Order } from "@/lib/orders/create";
+import { transitionOrder } from "@/lib/orders/state";
 import { groupItems, itemOrder } from "@/lib/orders/items";
 import { startAsaasPix } from "@/lib/payments/asaas/pix";
 import { CARD_UNAVAILABLE_MESSAGE } from "@/lib/payments/card-messages";
@@ -188,6 +189,8 @@ type StartOutput = {
   maxInstallments: number;
   /** A loja aceita CNPJ: vai assinado no bilhete do cartão (o serviço `card` não lê a tabela `store` para isso). */
   acceptCnpj: boolean;
+  /** Pedido pendente da sessão do app reaproveitado (nenhum pedido novo: não conta nos limites de pedidos). */
+  reused?: boolean;
 };
 
 export const checkoutStart = defineAction({
@@ -234,6 +237,7 @@ export const checkoutStart = defineAction({
   },
   /** Conta o pedido criado (melhor esforço; falha só vai para o log). */
   async afterCommit(call, input, out: StartOutput, limits) {
+    if (out.reused) return;
     const knownIp = input.clientIp !== UNKNOWN_IP;
     if (out.method === "pix_manual") {
       if (knownIp) await hitRateLimit(manualIpKey(input.clientIp), HOUR);
@@ -298,14 +302,21 @@ export const checkoutStart = defineAction({
       return createOrder(ctx, { ...base, method, customer: withCpf ? { ...buyer, cpf: withCpf } : buyer, asaasPixFallback: fallback });
     };
 
-    // Duas abas da mesma sessão pelo mesmo método: reaproveita o pedido pendente (ainda válido e com o preço de agora)
-    // em vez de criar outro que também poderia ser pago. Sob a trava da sessão (FOR UPDATE acima).
+    // Duas abas da mesma sessão pelo mesmo método: reaproveita o pedido pendente (ainda válido, com o preço de agora e
+    // os mesmos dados de cobrança: telefone e CPF/CNPJ que vão ao Asaas) em vez de criar outro que também poderia ser
+    // pago. Sob a trava da sessão (FOR UPDATE acima).
+    //
+    // Ordem das travas: os avisos ao app travam o PEDIDO e depois a SESSÃO (webhook do Asaas e `deliver_order` seguram o
+    // pedido com FOR UPDATE e, em `enqueueAppNotice`, a sessão). Aqui a sessão está travada, então nada daqui pode
+    // esperar pela trava de um pedido existente: o reaproveitamento só LÊ o pedido e NÃO regrava `order_id` (a FK
+    // pediria KEY SHARE nesse pedido, que o webhook pode estar segurando enquanto espera a sessão: impasse). `order_id`
+    // só muda quando nasce um pedido novo nesta transação.
     if (appSession) {
       const method = input.method === "card" ? "card_asaas" : "pix_asaas";
       if (method === "card_asaas" ? !asaasOn : o.pixMode !== "asaas" || !asaasOn) {
         throw new ActionError("conflict", method === "card_asaas" ? CARD_UNAVAILABLE_MESSAGE : PIX_UNAVAILABLE_MESSAGE);
       }
-      requireCpf(cpf);
+      const doc = requireCpf(cpf);
       const now = server?.now ?? new Date();
       const [open] = await ctx.tx
         .select()
@@ -317,6 +328,8 @@ export const checkoutStart = defineAction({
             eq(orders.method, method),
             eq(orders.status, "pending"),
             eq(orders.totalCents, o.priceCents),
+            eq(orders.buyerPhone, buyer.phone),
+            eq(orders.buyerCpf, doc),
             or(isNull(orders.expiresAt), gt(orders.expiresAt, now)),
           ),
         )
@@ -324,8 +337,15 @@ export const checkoutStart = defineAction({
         .limit(1);
       if (open) {
         if (open.totalCents !== input.expectedTotalCents) throw priceChanged(open.totalCents);
-        await ctx.tx.update(appCheckoutSession).set({ orderId: open.id }).where(and(eq(appCheckoutSession.storeId, ctx.storeId), eq(appCheckoutSession.id, appSession.id)));
-        return { publicId: open.publicId, method, orderId: open.id, totalCents: open.totalCents, maxInstallments: installmentsFor(o.maxInstallments, open.totalCents, { discounted: false }), acceptCnpj };
+        return {
+          publicId: open.publicId,
+          method,
+          orderId: open.id,
+          totalCents: open.totalCents,
+          maxInstallments: installmentsFor(o.maxInstallments, open.totalCents, { discounted: false }),
+          acceptCnpj,
+          reused: true,
+        };
       }
     }
 
@@ -570,7 +590,7 @@ export const checkoutRenewCardTicket = defineAction({
   permission: "public",
   // Anônima e repetível (o bilhete dura 30 min): sem linha de auditoria, como checkout.view.
   audit: false,
-  async run(ctx, input, _prepared: undefined, server?: { ticketKey: string; now?: Date }): Promise<{ ticket: string }> {
+  async run(ctx, input, _prepared: undefined, server?: { ticketKey: string; now?: Date }): Promise<{ ticket: string } | { sessionClosed: true }> {
     if (!server?.ticketKey) throw new Error("checkout.renewCardTicket sem a chave dos bilhetes (call.server.ticketKey)");
     const now = server.now ?? new Date();
     // Só quem tinha um bilhete do MESMO pedido e da MESMA loja (íntegro; vencido há no máximo 24 h): saber o
@@ -586,6 +606,7 @@ export const checkoutRenewCardTicket = defineAction({
         status: orders.status,
         totalCents: orders.totalCents,
         discountCents: orders.discountCents,
+        appSessionId: orders.appSessionId,
         maxInstallments: offer.maxInstallments,
       })
       .from(orders)
@@ -595,6 +616,15 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.method !== "card_asaas") throw new ActionError("conflict", "Pedido não é de cartão");
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
+    // Pedido de app: o cartão só continua enquanto a sessão serve. Se ela venceu ou já tem pedido pago (o Pix da mesma
+    // sessão, por exemplo), nada de bilhete novo, e o pedido pendente é encerrado (expirado) nesta transação: o
+    // comprador não cobra o cartão por cima de um pagamento que já liberou. O serviço `card` (papel sem acesso à sessão)
+    // ainda aceita o bilhete vigente até ele vencer (no máximo 30 min); o que for pago nessa janela vira pagamento
+    // duplicado da sessão (sem aviso ao app, com alerta de reembolso: `enqueueAppNotice`).
+    if (o.appSessionId && !(await loadCheckoutSession(ctx.tx, ctx.storeId, o.appSessionId, { now }))) {
+      await transitionOrder(ctx, o.id, "expired", "sessão do app encerrada");
+      return { sessionClosed: true };
+    }
     const terms = { totalCents: o.totalCents, maxInstallments: installmentsFor(o.maxInstallments, o.totalCents, { discounted: o.discountCents > 0 }) };
     // A opção de CNPJ vale como está agora na loja (desligada depois do pedido: o bilhete novo deixa de aceitar).
     const cnpj = (await storeAcceptsCnpj(ctx)) ? { acceptCnpj: true } : {};
@@ -610,7 +640,10 @@ export async function renewCardTicket(call: { storeId: string }, raw: unknown, k
   const body = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   // Só os dois campos do navegador na entrada; a chave e a hora vão por `server`.
   const input = { publicId: body.publicId, ticket: body.ticket };
-  return (await runAction(checkoutRenewCardTicket, { ...publicCall(call.storeId), server: { ticketKey: key, now } }, input)).ticket;
+  const r = await runAction(checkoutRenewCardTicket, { ...publicCall(call.storeId), server: { ticketKey: key, now } }, input);
+  // Sessão do app encerrada: o pedido já foi expirado (commit feito); o checkout trata como recusa definitiva.
+  if ("sessionClosed" in r) throw sessionInvalid();
+  return r.ticket;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
