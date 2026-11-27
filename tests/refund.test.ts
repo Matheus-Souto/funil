@@ -13,6 +13,7 @@ import { refundOrder } from "@/lib/payments/refund";
 import { classifyInstallmentRefund, classifyRefund, installmentParcels, installmentRefundedCents, refundItems } from "@/lib/payments/asaas/refunds";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { createTestDb, type TestDb } from "./db";
+import { makeAppOrder } from "./apps-helpers";
 import { ctxOf, createFakeAsaas, newAsaasOrder, owner, runRefundJobs, seedAsaasStore } from "./asaas-helpers";
 
 let t: TestDb;
@@ -431,6 +432,37 @@ describe("refund_order: estorno recusado pelo Asaas (4xx permanente)", () => {
     await runRefundJobs(new Date(t0.getTime() + 60_000));
     expect((await payRaw(s.providerId))!.refundPost).toHaveProperty("acceptedAt");
     expect(s.refundCalls()).toBe(1);
+  });
+});
+
+describe("orders.refund: só o total (o painel não faz reembolso parcial)", () => {
+  const refused = async (storeId: string, orderId: string, amountCents: number) => {
+    const e = await runAction(refundOrder, panel(storeId), { orderId, amountCents }).catch((x: unknown) => x);
+    return e instanceof ActionError ? [e.code, e.message] : ["sem erro", ""];
+  };
+
+  test("pedido de app: reembolso parcial → invalid_input, sem job nem marca de estorno; o total continua valendo", async () => {
+    const s = await paidAsaasOrder(); // 9,90
+    await makeAppOrder(s.storeId, (await orderRow(s.order.id)).offerId, s.order.id);
+    expect(await refused(s.storeId, s.order.id, 300)).toEqual(["invalid_input", "Pedido de app só aceita reembolso total."]);
+    expect(await refused(s.storeId, s.order.id, 991)).toEqual(["invalid_input", "Pedido de app só aceita reembolso total."]);
+    expect(await refundJobs(s.order.id)).toHaveLength(0);
+    expect((await orderRow(s.order.id)).refundRequestedAt).toBeNull();
+    expect(s.refundCalls()).toBe(0);
+    // O valor total informado (ou nenhum valor) é o reembolso de sempre.
+    expect(await runAction(refundOrder, panel(s.storeId), { orderId: s.order.id, amountCents: 990 })).toMatchObject({ status: "refund_requested" });
+    await runRefundJobs(later(1));
+    expect(await statusOf(s.order.id)).toBe("refunded");
+    // Reembolso confirmado de pedido de app: o app é avisado; não há link para revogar.
+    const jobsOfOrder = (await t.ownerDb.select().from(job).where(sql`${job.payload}->>'orderId' = ${s.order.id}`)).map((j) => j.type);
+    expect(jobsOfOrder).not.toContain("revoke_downloads");
+  });
+
+  test("pedido de download: valor parcial também é recusado (antes o valor era ignorado e o pedido inteiro, estornado)", async () => {
+    const s = await paidAsaasOrder();
+    expect((await refused(s.storeId, s.order.id, 300))[0]).toBe("invalid_input");
+    expect(await refundJobs(s.order.id)).toHaveLength(0);
+    expect(await statusOf(s.order.id)).toBe("paid");
   });
 });
 

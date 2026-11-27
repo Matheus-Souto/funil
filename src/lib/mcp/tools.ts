@@ -34,6 +34,7 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "products.file": "devolve o PDF inteiro; só para o visualizador do painel",
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
   "apps.registerTrial": "API de integração do app (só a chave integration)",
+  "apps.resendNotice": "reenvio do aviso ao app: só pelo painel do pedido",
 };
 
 /** Prefixo da descrição das ferramentas que passam pela fila de aprovação. */

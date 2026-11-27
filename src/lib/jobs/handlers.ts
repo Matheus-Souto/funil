@@ -2,6 +2,7 @@ import { and, eq, lt } from "drizzle-orm";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { orders, store } from "@/lib/db/schema";
 import { ActionError } from "@/lib/actions/core";
+import { notifyAppJob } from "@/lib/apps/webhook";
 import { log } from "@/lib/log";
 import { transitionOrder } from "@/lib/orders/state";
 import { deliverOrderJob, notifySellerJob, restoreDownloadsJob, revokeDownloadsJob, sweepWatermarksJob } from "@/lib/delivery/jobs";
@@ -77,6 +78,7 @@ const registry: JobHandlers = {
   recovery_send: recoverySendJob,
   backfill_page_count: backfillPageCountJob,
   sweep_app_trials: sweepAppTrialsJob,
+  notify_app: notifyAppJob,
 };
 
 export function registerHandler(type: JobType, handler: JobHandler): void {

@@ -17,7 +17,8 @@ export type AlertReason =
   | "estorno_parcial"
   | "disjuntor_cartao"
   | "monitor_pagina_pagamento"
-  | "telegram_falhou";
+  | "telegram_falhou"
+  | "app_webhook_falhou";
 
 /** Detalhes do aviso: só códigos e números (nunca texto de provedor nem dado de comprador). */
 export interface AlertExtra {
@@ -98,6 +99,11 @@ export function alertText(
       return {
         title: "O Telegram recusou o aviso da loja",
         body: "Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”.",
+      };
+    case "app_webhook_falhou":
+      return {
+        title: `O app não confirmou o aviso${pedido}${typeof detail.httpStatus === "number" ? ` (HTTP ${detail.httpStatus})` : ""}`,
+        body: "O app não respondeu com sucesso a nenhuma das tentativas de aviso. Confira a URL e o segredo do webhook em Conexões e use “Reenviar aviso ao app” no pedido.",
       };
     case "disjuntor_cartao":
       return {

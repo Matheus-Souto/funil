@@ -72,6 +72,7 @@ describe("classificação", () => {
     expect(Object.keys(MCP_EXCLUDED).sort()).toEqual([
       "approvals.request",
       "apps.registerTrial",
+      "apps.resendNotice",
       "orders.export",
       "products.completeUpload",
       "products.create",

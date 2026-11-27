@@ -70,6 +70,9 @@ const schema = z.object({
   // API do Resend e Bot API do Telegram falsas (smoke E2E). Mesma regra do Meta: BASE_URL e destino em loopback.
   RESEND_BASE_URL: z.string().min(1).optional(),
   TELEGRAM_BASE_URL: z.string().min(1).optional(),
+  // Aviso ao app (webhook de saída): 1 libera destino em loopback (app falso dos testes e do smoke E2E). Recusada fora
+  // de BASE_URL em loopback (ver parseEnv); sem ela, o aviso só sai para https em endereço público.
+  APP_WEBHOOK_ALLOW_LOOPBACK: z.enum(["0", "1"]).optional(),
 });
 
 export type Env = z.infer<typeof schema>;
@@ -179,6 +182,9 @@ export function parseEnv(source: Record<string, string | undefined>): Env {
     if (value !== undefined && !(isLoopbackUrl(parsed.data.BASE_URL) && isLoopbackUrl(value))) {
       throw new Error(`Variáveis de ambiente inválidas: ${key} só é aceita com BASE_URL e destino em loopback (${what} do smoke E2E)`);
     }
+  }
+  if (parsed.data.APP_WEBHOOK_ALLOW_LOOPBACK === "1" && !isLoopbackUrl(parsed.data.BASE_URL)) {
+    throw new Error("Variáveis de ambiente inválidas: APP_WEBHOOK_ALLOW_LOOPBACK=1 só é aceita com BASE_URL em loopback (app falso dos testes e do smoke E2E)");
   }
   if (source.NODE_ENV === "production" && cleaned.TRUST_PROXY === undefined && !isLoopbackUrl(parsed.data.BASE_URL)) {
     throw new Error(

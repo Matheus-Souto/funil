@@ -5,12 +5,14 @@ import fc from "fast-check";
 import { ActionError, runAction, type Actor, type Ctx } from "@/lib/actions/core";
 import { createOffer } from "@/lib/catalog/offers";
 import { withStore } from "@/lib/db/client";
-import { emailLog, integration, job, orderItem, orders } from "@/lib/db/schema";
+import { appEventId } from "@/lib/apps/webhook";
+import { appWebhookDelivery, emailLog, integration, job, orderItem, orders } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { createOrder } from "@/lib/orders/create";
 import { getOrderDetail } from "@/lib/orders/panel";
 import { ALLOWED, transitionOrder, type OrderStatus } from "@/lib/orders/state";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { seedAppOffer, seedAppOrder } from "./apps-helpers";
 import { panelCall, seedOrder, seedPanelStore } from "./panel-helpers";
 
 let t: TestDb;
@@ -207,6 +209,53 @@ describe("transitionOrder", () => {
         expect(await jobsOf(o.id, "notify_seller")).toHaveLength(paid);
         expect(await jobsOf(o.id, "revoke_downloads")).toHaveLength(revoke);
         expect(await jobsOf(o.id, "restore_downloads")).toHaveLength(restore);
+      }),
+      { numRuns: 25 },
+    );
+  }, HEAVY_TEST_MS);
+
+  test("propriedade (pedido de app): cada transição real gera um aviso ao app, com id próprio, e nunca entrega nem revogação de link", async () => {
+    const { storeId } = await seedStore();
+    const offer = await seedAppOffer(storeId);
+    const statuses: OrderStatus[] = ["pending", "paid", "refunded", "disputed", "expired", "declined"];
+    await fc.assert(
+      fc.asyncProperty(fc.array(fc.constantFrom(...statuses), { maxLength: 8 }), async (seq) => {
+        const o = await seedAppOrder(storeId, offer.id);
+        let model: OrderStatus = "pending";
+        const expected: string[] = [];
+        const seen: Record<string, number> = {};
+        const notice = (type: "pagamento.confirmado" | "pagamento.reembolsado" | "pagamento.contestado" | "pagamento.restabelecido") => {
+          expected.push(appEventId(o.id, type, seen[type] ?? 0));
+          seen[type] = (seen[type] ?? 0) + 1;
+        };
+        let paid = 0;
+        for (const to of seq) {
+          const r = await transition(storeId, o.id, to).catch((e: unknown) => e);
+          if (to === model) {
+            expect(r).toEqual({ changed: false });
+          } else if (ALLOWED[model].includes(to)) {
+            expect(r).toEqual({ changed: true });
+            const prev = model;
+            model = to;
+            if (to === "paid" && prev === "disputed") notice("pagamento.restabelecido");
+            else if (to === "paid") {
+              paid++;
+              notice("pagamento.confirmado");
+            } else if (to === "refunded") notice("pagamento.reembolsado");
+            else if (to === "disputed") notice("pagamento.contestado");
+          } else {
+            expect((r as ActionError).code).toBe("conflict");
+          }
+        }
+        const deliveries = await t.ownerDb.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.orderId, o.id));
+        expect(deliveries.map((d) => d.eventId).sort()).toEqual([...expected].sort());
+        expect(new Set(expected).size).toBe(expected.length);
+        const notices = (await t.ownerDb.select().from(job).where(eq(job.type, "notify_app"))).map((j) => (j.payload as { deliveryId?: string }).deliveryId);
+        for (const d of deliveries) expect(notices.filter((id) => id === d.id)).toHaveLength(1);
+        // Meta e aviso de venda como em qualquer pedido; nada do que é do PDF.
+        expect(await jobsOf(o.id, "meta_event")).toHaveLength(paid);
+        expect(await jobsOf(o.id, "notify_seller")).toHaveLength(paid);
+        for (const type of ["deliver_order", "revoke_downloads", "restore_downloads"]) expect([type, (await jobsOf(o.id, type)).length]).toEqual([type, 0]);
       }),
       { numRuns: 25 },
     );

@@ -249,16 +249,16 @@ describe("botões do pedido por papel", () => {
   const paid = { status: "paid" as const, method: "card_asaas" as const, refund: { state: "none" as const } };
   const pendingManual = { status: "pending" as const, method: "pix_manual" as const, refund: { state: "none" as const } };
   test("support não vê Reembolsar nem Liberar; vê Reenviar", () => {
-    expect(allowedOrderActions("support", paid)).toEqual({ release: false, resend: true, refund: false });
-    expect(allowedOrderActions("support", pendingManual)).toEqual({ release: false, resend: false, refund: false });
+    expect(allowedOrderActions("support", paid)).toEqual({ release: false, resend: true, resendNotice: false, refund: false });
+    expect(allowedOrderActions("support", pendingManual)).toEqual({ release: false, resend: false, resendNotice: false, refund: false });
   });
   test("owner e admin: Liberar só no Pix manual pendente/expirado; Reembolsar só pago e sem estorno em andamento", () => {
-    expect(allowedOrderActions("owner", pendingManual)).toEqual({ release: true, resend: false, refund: false });
+    expect(allowedOrderActions("owner", pendingManual)).toEqual({ release: true, resend: false, resendNotice: false, refund: false });
     expect(allowedOrderActions("admin", { ...pendingManual, status: "expired" })).toMatchObject({ release: true });
-    expect(allowedOrderActions("owner", paid)).toEqual({ release: false, resend: true, refund: true });
+    expect(allowedOrderActions("owner", paid)).toEqual({ release: false, resend: true, resendNotice: false, refund: true });
     expect(allowedOrderActions("owner", { ...paid, refund: { state: "processing" } })).toMatchObject({ refund: false });
     expect(allowedOrderActions("owner", { ...paid, refund: { state: "stale" } })).toMatchObject({ refund: true });
-    expect(allowedOrderActions("owner", { ...paid, status: "refunded" })).toEqual({ release: false, resend: false, refund: false });
+    expect(allowedOrderActions("owner", { ...paid, status: "refunded" })).toEqual({ release: false, resend: false, resendNotice: false, refund: false });
   });
   test("Liberar no Pix Asaas só com cobrança da conta anterior que teve evento (comprador pode ter pago lá)", () => {
     const asaas = { status: "pending" as const, method: "pix_asaas" as const, refund: { state: "none" as const } };
@@ -271,7 +271,7 @@ describe("botões do pedido por papel", () => {
     expect(allowedOrderActions("support", { ...asaas, payments: [oldPaid] })).toMatchObject({ release: false });
   });
   test("traffic não vê nenhum", () => {
-    expect(allowedOrderActions("traffic", paid)).toEqual({ release: false, resend: false, refund: false });
+    expect(allowedOrderActions("traffic", paid)).toEqual({ release: false, resend: false, resendNotice: false, refund: false });
   });
 });
 
