@@ -408,11 +408,11 @@ describe("página do pedido de app (getOrderPublic)", () => {
     const [o] = await ordersOf(s.storeId);
     const pending = (await getOrderPublic(s.storeId, o!.publicId))!;
     expect(pending.offer.delivery).toBe("app");
-    expect(pending.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: id });
+    expect(pending.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: id, sessionClosed: null });
     expect(pending.items).toEqual([{ name: "Plano start-anual", priceCents: 49_700 }]);
     await t.ownerDb.update(orders).set({ status: "paid", paidAt: new Date() }).where(eq(orders.id, out.orderId));
     const paid = (await getOrderPublic(s.storeId, o!.publicId))!;
-    expect(paid.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: null });
+    expect(paid.app).toEqual({ returnUrl: `https://${s.domain}/voltar`, sessionId: null, sessionClosed: "paid" });
     const dump = JSON.stringify(paid);
     for (const needle of ["escritorio", "pagina", id]) expect([needle, dump.includes(needle)]).toEqual([needle, false]);
   });
@@ -655,9 +655,9 @@ describe("tentativa direta só com a sessão utilizável", () => {
     const out = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id));
     const [o] = await ordersOf(s.storeId);
     await t.ownerDb.update(orders).set({ status: "expired" }).where(eq(orders.id, out.orderId));
-    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: id });
+    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: id, sessionClosed: null });
     await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id));
-    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: null });
+    expect((await getOrderPublic(s.storeId, o!.publicId))!.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: null, sessionClosed: "expired" });
   });
 });
 
@@ -905,5 +905,35 @@ describe("retomar o Pix com o QR guardado", () => {
     const again = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id));
     expect(again.publicId).toBe(first.publicId);
     expect(qrCalls()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Correção da 4ª rodada do PR #43
+
+describe("página do pedido Pix depois de a sessão ser paga", () => {
+  test("Pix com QR guardado e cartão pago na mesma sessão: o pedido Pix não traz QR, código nem novo código; sessão vencida idem", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "pix-depois", retorno: `https://${s.domain}/app` }))).url);
+    const pix = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id));
+    const before = (await getOrderPublic(s.storeId, pix.publicId))!;
+    expect(before.pix?.copyPaste).toBeTruthy();
+    expect(before.app?.sessionClosed).toBeNull();
+
+    const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    await move(s.storeId, card.orderId, "paid");
+    const after = (await getOrderPublic(s.storeId, pix.publicId))!;
+    expect(after.status).toBe("pending");
+    expect(after.app).toEqual({ returnUrl: `https://${s.domain}/app`, sessionId: null, sessionClosed: "paid" });
+    expect(after.pix).toBeUndefined();
+    expect(after.pixUnavailable).toBeUndefined();
+    expect(JSON.stringify(after)).not.toContain(before.pix!.copyPaste);
+
+    // Sessão só vencida (nenhum pedido pago): o mesmo, com o desfecho "expired".
+    const id2 = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "pix-vencido" }))).url);
+    const pix2 = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id2));
+    await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id2));
+    const expired = (await getOrderPublic(s.storeId, pix2.publicId))!;
+    expect([expired.app?.sessionClosed, expired.pix, expired.pixUnavailable]).toEqual(["expired", undefined, undefined]);
   });
 });

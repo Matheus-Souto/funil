@@ -42,6 +42,8 @@ export default async function OrderPage({
 function OrderBody({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   switch (order.status) {
     case "pending":
+      // Pedido de app cuja sessão já foi paga (por outro pedido dela) ou venceu: antes de qualquer meio de pagamento.
+      if (order.app?.sessionClosed) return <AppSessionClosed order={order} closed={order.app.sessionClosed} />;
       if (order.method === "pix_manual") return <ManualPix order={order} storeName={storeName} />;
       if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
       return <CardPending order={order} />;
@@ -384,6 +386,38 @@ function BackToApp({ order }: { order: OrderPublic }) {
         </a>
       ) : null}
     </>
+  );
+}
+
+/** Pedido de app pendente com a sessão encerrada: só o desfecho e "Voltar ao app" (sem QR, código nem botões de pagar). */
+function AppSessionClosed({ order, closed }: { order: OrderPublic; closed: "paid" | "expired" }) {
+  const paid = closed === "paid";
+  return (
+    <main className={`${s.main} ${s.mainCenter}`}>
+      <div className={s.hero}>
+        <div className={s.heroIcon} data-tone="neutral">
+          <Icon name={paid ? "circle-check" : "timer-off"} size={30} />
+        </div>
+        <h1 className={`${s.heroTitle} ${s.heroTitleSm}`}>{paid ? "Pagamento já concluído" : "Link de pagamento vencido"}</h1>
+        <p className={s.heroText}>
+          {paid ? (
+            <>
+              Este link já foi pago em outro pedido. <b>Não pague de novo:</b> o acesso é liberado no app.
+            </>
+          ) : (
+            "Este link de pagamento venceu. Volte ao app e tente de novo."
+          )}
+        </p>
+      </div>
+      {order.app?.returnUrl ? (
+        <section className={`${s.card} ${s.actions}`}>
+          <a className={`${s.btn} ${s.btnLg} ${s.btnFull}`} href={order.app.returnUrl}>
+            Voltar ao app
+          </a>
+        </section>
+      ) : null}
+      <p className={s.foot}>Pedido #{order.code}</p>
+    </main>
   );
 }
 

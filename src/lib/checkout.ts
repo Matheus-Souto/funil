@@ -778,9 +778,23 @@ const orderPublicView = defineAction({
     // cartão recusado). Sessão que não serve mais: a página orienta voltar ao app.
     let app: OrderPublic["app"];
     if (o.appSessionId) {
-      const [sess] = await ctx.tx.select({ returnUrl: appCheckoutSession.returnUrl }).from(appCheckoutSession).where(eq(appCheckoutSession.id, o.appSessionId));
+      const [sess] = await ctx.tx
+        .select({ returnUrl: appCheckoutSession.returnUrl, expiresAt: appCheckoutSession.expiresAt })
+        .from(appCheckoutSession)
+        .where(eq(appCheckoutSession.id, o.appSessionId));
       const usable = await loadCheckoutSession(ctx.tx, ctx.storeId, o.appSessionId);
-      app = { returnUrl: sess?.returnUrl ?? null, sessionId: usable ? o.appSessionId : null };
+      // Sessão que não serve mais, dito explicitamente: "paid" se algum pedido dela foi pago (este ou outro), senão
+      // "expired" (venceu). A página do pedido pendente decide por isso ANTES de mostrar qualquer meio de pagamento.
+      let sessionClosed: "paid" | "expired" | null = null;
+      if (!usable) {
+        const [paidOne] = await ctx.tx
+          .select({ id: orders.id })
+          .from(orders)
+          .where(and(eq(orders.appSessionId, o.appSessionId), isNotNull(orders.paidAt)))
+          .limit(1);
+        sessionClosed = paidOne ? "paid" : "expired";
+      }
+      app = { returnUrl: sess?.returnUrl ?? null, sessionId: usable ? o.appSessionId : null, sessionClosed };
     }
     return { o, offer: of!, items, manual, asaas, pixelId, app, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
@@ -810,7 +824,7 @@ export interface OrderPublic {
    * `sessionId` só enquanto a sessão ainda serve (não vencida e sem pedido pago): as tentativas diretas voltam ao
    * checkout da mesma sessão; sem ele, a página orienta reabrir pelo app.
    */
-  app?: { returnUrl: string | null; sessionId: string | null };
+  app?: { returnUrl: string | null; sessionId: string | null; sessionClosed: "paid" | "expired" | null };
   pix?: {
     copyPaste: string;
     /** Pix manual: QR gerado aqui (SVG). */
@@ -873,6 +887,9 @@ export async function getOrderPublic(storeId: string, publicId: string): Promise
     pixelId: v.pixelId,
     ...(v.app ? { app: v.app } : {}),
   };
+  // Pedido de app com a sessão encerrada (paga por outro pedido dela, ou vencida): nenhum meio de pagamento sai daqui
+  // (nem QR, nem código, nem "Gerar novo código Pix"); a página mostra o desfecho e "Voltar ao app".
+  if (v.app?.sessionClosed && o.status === "pending") return out;
   if (v.manual) {
     const qrSvg = await QRCode.toString(v.manual.copyPaste, { type: "svg", margin: 0, errorCorrectionLevel: "M" });
     out.pix = { ...v.manual, qrSvg };
