@@ -4,8 +4,8 @@ import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql, type SQ
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
-import { APP_WEBHOOK_MAX_ATTEMPTS } from "@/lib/apps/events";
-import { appWebhookDelivery, auditLog, coupon, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
+import { APP_WEBHOOK_MAX_ATTEMPTS, noticeToResend } from "@/lib/apps/events";
+import { auditLog, coupon, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
 import { maskCpf, maskCpfStrict } from "@/lib/privacy";
@@ -155,7 +155,10 @@ const EMAIL_LABEL: Record<string, [string, string]> = {
 /** Lembrete de recuperação de venda (`email_log` kind `recovery`): só na linha do tempo, sem destinatário nem erro. */
 const RECOVERY_LABEL = { sent: "Lembrete de pagamento por e-mail", failed: "Lembrete por e-mail não enviado" } as const;
 
-/** Último aviso ao app de um pedido de app (registro de `app_webhook_delivery`; sem corpo nem resposta do app). */
+/**
+ * O aviso ao app que o painel mostra e "Reenviar" manda: o não entregue mais antigo do pedido ou, com tudo entregue, o
+ * último (registro de `app_webhook_delivery`; sem corpo nem resposta do app).
+ */
 export interface AppNotice {
   eventType: string;
   status: "pending" | "delivered" | "failed";
@@ -235,26 +238,25 @@ export const getOrderDetail = defineAction({
       .orderBy(asc(auditLog.at))
       .limit(100);
 
-    // Pedido de app: a conta, o código que o app recebe e o estado do último aviso (o que "Reenviar" manda de novo).
+    // Pedido de app: a conta, o código que o app recebe e o aviso que "Reenviar" manda: o não entregue mais antigo
+    // (um aviso que falhou não some atrás de um mais novo entregue) ou, com tudo entregue, o último.
     let app: { account: string; appCode: string | null; notice: AppNotice | null } | null = null;
     if (o.appAccount !== null) {
-      const [n] = await ctx.tx
-        .select({
-          eventType: appWebhookDelivery.eventType,
-          status: appWebhookDelivery.status,
-          attempts: appWebhookDelivery.attempts,
-          lastHttpStatus: appWebhookDelivery.lastHttpStatus,
-          createdAt: appWebhookDelivery.createdAt,
-          deliveredAt: appWebhookDelivery.deliveredAt,
-        })
-        .from(appWebhookDelivery)
-        .where(eq(appWebhookDelivery.orderId, o.id))
-        .orderBy(desc(appWebhookDelivery.sequence))
-        .limit(1);
+      const n = await noticeToResend(ctx.tx, o.id);
       app = {
         account: o.appAccount,
         appCode: row.appCode,
-        notice: n ? { ...n, status: n.status as AppNotice["status"], maxAttempts: APP_WEBHOOK_MAX_ATTEMPTS } : null,
+        notice: n
+          ? {
+              eventType: n.eventType,
+              status: n.status as AppNotice["status"],
+              attempts: n.attempts,
+              maxAttempts: APP_WEBHOOK_MAX_ATTEMPTS,
+              lastHttpStatus: n.lastHttpStatus,
+              createdAt: n.createdAt,
+              deliveredAt: n.deliveredAt,
+            }
+          : null,
       };
     }
 

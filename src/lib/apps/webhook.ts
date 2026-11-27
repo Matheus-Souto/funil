@@ -5,8 +5,11 @@
 //
 // Ordem por pedido: cada aviso tem a `sequence` do pedido (no corpo, `dados.sequencia`) e só é enviado quando os
 // anteriores do mesmo pedido já estão `delivered` ou `failed`; antes disso o job volta para a fila. Assim uma
-// confirmação que falhou e ainda vai tentar de novo não chega depois do reembolso. Um aviso `failed` reenviado à mão
-// pode chegar fora de ordem: é para isso que o app tem a `sequencia` (descartar transição antiga).
+// confirmação que falhou e ainda vai tentar de novo não chega depois do reembolso. Um aviso `failed` não segura os
+// seguintes; "Reenviar aviso ao app" manda o não entregue mais antigo do pedido (com tudo entregue, o último), então
+// um `failed` reenviado à mão pode chegar depois de avisos mais novos: é para isso que o app tem a `sequencia`
+// (descartar transição antiga). Um aviso `pending` que ficou sem job (o job dele morreu na fila) não trava a fila do
+// pedido: o próximo aviso o dá como `failed`, com alerta, e segue.
 //
 // Saída para um host escolhido pela loja (SSRF): só `https` em endereço público; o nome é resolvido uma vez, TODOS os
 // endereços são conferidos e a conexão é FIXADA num deles (`node:https` com `lookup` próprio, como o SMTP fixa o IP
@@ -19,7 +22,7 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
-import { and, asc, desc, eq, gt, inArray, lt, min, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, lt, notExists, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { alertSeller } from "@/lib/alerts";
@@ -30,7 +33,7 @@ import { env } from "@/lib/env";
 import { readIntegration } from "@/lib/integrations";
 import { enqueue, type JobHandler, type Timer } from "@/lib/jobs";
 import { log } from "@/lib/log";
-import { APP_WEBHOOK_BACKOFF_SECONDS, type AppEventType } from "./events";
+import { APP_WEBHOOK_BACKOFF_SECONDS, noticeToResend, type AppEventType } from "./events";
 
 export {
   APP_WEBHOOK_BACKOFF_SECONDS,
@@ -267,26 +270,47 @@ async function orderData(tx: Tx, d: Delivery): Promise<Record<string, unknown> |
 const jobsOfDelivery = (storeId: string, deliveryId: string) =>
   and(eq(job.type, "notify_app"), eq(job.storeId, storeId), sql`${job.payload}->>'deliveryId' = ${deliveryId}`);
 
+const OPEN_JOB = ["queued", "running"];
+
 /**
  * Aviso anterior do mesmo pedido ainda sem desfecho (`pending`)? Então este espera: devolve quando olhar de novo (logo
  * depois da próxima tentativa do anterior, e nunca antes de `APP_WEBHOOK_ORDER_WAIT_SECONDS`). Sem anterior pendente,
  * `null`.
+ *
+ * Só espera por um anterior que ainda vai ser tentado, isto é, que tem job na fila ou rodando. Um anterior `pending`
+ * SEM job aberto (o job dele falhou de vez na fila) nunca teria desfecho, e este aviso voltaria à fila para sempre:
+ * ele é dado como `failed`, com o alerta ao vendedor (que pode reenviá-lo), e a conferência segue para o próximo.
  */
 async function waitForEarlier(tx: Tx, storeId: string, d: Delivery, at: Date): Promise<Date | null> {
   if (d.orderId === null || d.sequence === null) return null;
-  const [earlier] = await tx
-    .select({ id: appWebhookDelivery.id })
-    .from(appWebhookDelivery)
-    .where(and(eq(appWebhookDelivery.orderId, d.orderId), lt(appWebhookDelivery.sequence, d.sequence), eq(appWebhookDelivery.status, "pending")))
-    .orderBy(asc(appWebhookDelivery.sequence))
-    .limit(1);
-  if (!earlier) return null;
-  const [next] = await tx
-    .select({ runAt: min(job.runAt) })
-    .from(job)
-    .where(and(jobsOfDelivery(storeId, earlier.id), eq(job.status, "queued")));
   const floor = at.getTime() + APP_WEBHOOK_ORDER_WAIT_SECONDS * 1000;
-  return new Date(Math.max(floor, next?.runAt ? next.runAt.getTime() + 1000 : 0));
+  // Cada volta resolve um anterior ou termina; o teto é só defesa contra uma corrida que não se desfaz.
+  for (let i = 0; i < 100; i++) {
+    const [earlier] = await tx
+      .select({ id: appWebhookDelivery.id, orderId: appWebhookDelivery.orderId })
+      .from(appWebhookDelivery)
+      .where(and(eq(appWebhookDelivery.orderId, d.orderId), lt(appWebhookDelivery.sequence, d.sequence), eq(appWebhookDelivery.status, "pending")))
+      .orderBy(asc(appWebhookDelivery.sequence))
+      .limit(1);
+    if (!earlier) return null;
+    const open = and(jobsOfDelivery(storeId, earlier.id), inArray(job.status, OPEN_JOB));
+    const jobs = await tx.select({ status: job.status, runAt: job.runAt }).from(job).where(open);
+    if (jobs.length > 0) {
+      const next = jobs.filter((x) => x.status === "queued").map((x) => x.runAt.getTime());
+      return new Date(Math.max(floor, next.length > 0 ? Math.min(...next) + 1000 : 0));
+    }
+    // Numa instrução só: continua `pending` E sem job aberto (um job que entrou neste meio-tempo o mantém na fila).
+    const abandoned = await tx
+      .update(appWebhookDelivery)
+      .set({ status: "failed" })
+      .where(and(eq(appWebhookDelivery.id, earlier.id), eq(appWebhookDelivery.status, "pending"), notExists(tx.select({ one: sql`1` }).from(job).where(open))))
+      .returning({ id: appWebhookDelivery.id });
+    if (abandoned.length > 0) {
+      await alertSeller(tx, storeId, "app_webhook_falhou", { orderId: d.orderId });
+      log.warn("aviso ao app pendente sem job na fila; dado como falho para não travar os seguintes", { deliveryId: earlier.id, orderId: d.orderId });
+    }
+  }
+  return new Date(floor);
 }
 
 /** Um aviso teve desfecho (entregue ou falho de vez): os seguintes do pedido que esperavam por ele saem agora. */
@@ -371,7 +395,20 @@ export const notifyAppJob: JobHandler = async (j, signal) => {
       return { skip: "aguardando_aviso_anterior" } as const;
     }
     const dados = d.orderId ? await orderData(tx, d) : {};
-    if (dados === null) return { skip: "pedido_nao_e_de_app" } as const;
+    if (dados === null) {
+      // O pedido do aviso não é (mais) de app: não há o que mandar. O aviso tem desfecho (`failed`, com alerta) em vez
+      // de ficar `pending` sem job, segurando os seguintes do pedido.
+      const closed = await tx
+        .update(appWebhookDelivery)
+        .set({ status: "failed" })
+        .where(and(eq(appWebhookDelivery.id, d.id), eq(appWebhookDelivery.status, "pending")))
+        .returning({ id: appWebhookDelivery.id });
+      if (closed.length > 0) {
+        await alertSeller(tx, storeId, "app_webhook_falhou", { orderId: d.orderId! });
+        await wakeLater(tx, storeId, d, clockNow());
+      }
+      return { skip: "pedido_nao_e_de_app" } as const;
+    }
     const conn = await readIntegration(tx, storeId, "app_webhook");
     const url = typeof conn?.config.url === "string" ? conn.config.url : null;
     const target = url && conn?.secret ? { url, secret: conn.secret } : null;
@@ -396,19 +433,15 @@ export const notifyAppJob: JobHandler = async (j, signal) => {
 
 export const resendAppNotice = defineAction({
   name: "apps.resendNotice",
-  description: "Reenvia ao app o último aviso do pedido, com o mesmo id de evento (o app deduplica por ele).",
+  description:
+    "Reenvia ao app o aviso não entregue mais antigo do pedido (com tudo entregue, o último), com o mesmo id de evento (o app deduplica por ele).",
   input: z.object({ orderId: z.uuid() }),
   permission: "orders.resend",
   async run(ctx, { orderId }) {
     const [o] = await ctx.tx.select({ id: orders.id, appAccount: orders.appAccount }).from(orders).where(eq(orders.id, orderId)).for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
-    const [d] = await ctx.tx
-      .select({ id: appWebhookDelivery.id })
-      .from(appWebhookDelivery)
-      .where(eq(appWebhookDelivery.orderId, o.id))
-      .orderBy(desc(appWebhookDelivery.sequence))
-      .limit(1)
-      .for("update");
+    // O pedido está travado (acima): nenhum aviso novo nasce no meio. Um `failed` que não é o último também é alcançado.
+    const d = await noticeToResend(ctx.tx, o.id);
     if (o.appAccount === null || !d) throw new ActionError("conflict", "Este pedido não tem aviso ao app para reenviar.");
     const open = await ctx.tx
       .select({ id: job.id, status: job.status })

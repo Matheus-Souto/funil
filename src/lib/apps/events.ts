@@ -1,6 +1,6 @@
 // Eventos do aviso ao app: o id estável e o registro do aviso na fila. Módulo leve de propósito: a máquina de estados
 // (`orders/state.ts`) o importa e ela entra no bundle do serviço de cartão, que não leva o envio (`apps/webhook.ts`).
-import { eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { sha256 } from "@/lib/crypto";
 import type { Tx } from "@/lib/db/client";
 import { appWebhookDelivery } from "@/lib/db/schema";
@@ -83,6 +83,22 @@ export async function enqueueAppNotice(
   }
   const sequence = Math.max(1, ...rows.map((r) => r.sequence ?? 0)) + 1;
   return insert(type, same.length, sequence, refundedCents, false);
+}
+
+/**
+ * O aviso do pedido que "Reenviar aviso ao app" manda (e o que o painel mostra): o NÃO entregue mais antigo (`failed`
+ * ou `pending` de menor sequência), porque é ele que o app ainda não tem; com tudo entregue, o último. Sem aviso, nada.
+ */
+export async function noticeToResend(tx: Tx, orderId: string): Promise<typeof appWebhookDelivery.$inferSelect | undefined> {
+  const [open] = await tx
+    .select()
+    .from(appWebhookDelivery)
+    .where(and(eq(appWebhookDelivery.orderId, orderId), inArray(appWebhookDelivery.status, ["failed", "pending"])))
+    .orderBy(asc(appWebhookDelivery.sequence))
+    .limit(1);
+  if (open) return open;
+  const [last] = await tx.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.orderId, orderId)).orderBy(desc(appWebhookDelivery.sequence)).limit(1);
+  return last;
 }
 
 /**

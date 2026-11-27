@@ -574,6 +574,91 @@ describe("ordem por pedido", () => {
   });
 });
 
+describe("a fila de avisos de um pedido não trava", () => {
+  const allNoticeJobs = async (orderId: string) => {
+    const ids = (await deliveriesOf(orderId)).map((d) => d.id);
+    return (await t.ownerDb.select().from(job).where(eq(job.type, "notify_app"))).filter((j) => ids.includes((j.payload as { deliveryId?: string }).deliveryId ?? ""));
+  };
+  const failedAlerts = (storeId: string) => t.ownerDb.select().from(storeAlert).where(and(eq(storeAlert.storeId, storeId), eq(storeAlert.kind, "app_webhook_falhou")));
+
+  test("anterior pendente sem job aberto (o job dele morreu na fila): vira failed com alerta, e o seguinte sai sem ficar voltando à fila", async () => {
+    const s = await appStore();
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    const [confirmed] = await deliveriesOf(order.id);
+    // O job da confirmação falhou de vez na fila genérica (o handler lançou até esgotar): a linha ficou `pending`, órfã.
+    await t.ownerDb
+      .update(job)
+      .set({ status: "failed", lastError: "falha na consulta ao banco" })
+      .where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    await transition(s.storeId, order.id, "refunded");
+    await runNotices();
+    expect((await deliveriesOf(order.id)).map((d) => [d.eventType, d.status, d.attempts])).toEqual([
+      ["pagamento.confirmado", "failed", 0],
+      ["pagamento.reembolsado", "delivered", 1],
+    ]);
+    expect(app.hitsOf(s.path).map((h) => [bodyOf(h).tipo, bodyOf(h).dados.sequencia])).toEqual([["pagamento.reembolsado", 2]]);
+    expect((await failedAlerts(s.storeId)).map((a) => a.orderId)).toEqual([order.id]);
+    // Nenhum job novo: nem agora, nem depois de um dia de relógio.
+    const before = await allNoticeJobs(order.id);
+    expect(before.filter((j) => j.status === "queued" || j.status === "running")).toHaveLength(0);
+    advance(86_400);
+    await runNotices();
+    expect(await allNoticeJobs(order.id)).toHaveLength(before.length);
+    expect(await failedAlerts(s.storeId)).toHaveLength(1);
+    // O vendedor ainda alcança a confirmação pelo botão.
+    await runAction(resendAppNotice, panelCall(s.storeId), { orderId: order.id });
+    await runNotices();
+    expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual(["pagamento.reembolsado", "pagamento.confirmado"]);
+  });
+
+  test("anterior com job na fila ou rodando continua sendo esperado (não é dado como falho)", async () => {
+    const s = await appStore();
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    const [confirmed] = await deliveriesOf(order.id);
+    // O envio da confirmação está em andamento em outro worker.
+    await t.ownerDb
+      .update(job)
+      .set({ status: "running", lockedAt: clock.now })
+      .where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    await transition(s.storeId, order.id, "refunded");
+    await runNotices();
+    expect((await deliveriesOf(order.id)).map((d) => d.status)).toEqual(["pending", "pending"]);
+    expect(app.hitsOf(s.path)).toHaveLength(0);
+    expect(await failedAlerts(s.storeId)).toHaveLength(0);
+    // O outro worker termina (aqui: o job volta a ficar disponível) e os dois saem, em ordem.
+    await t.ownerDb
+      .update(job)
+      .set({ status: "queued", lockedAt: null })
+      .where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    advance(APP_WEBHOOK_ORDER_WAIT_SECONDS);
+    await runNotices();
+    expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual(["pagamento.confirmado", "pagamento.reembolsado"]);
+  });
+
+  test("aviso de um pedido que deixou de ser de app: failed com alerta (não fica pending sem job), e os seguintes não ficam em laço", async () => {
+    const s = await appStore();
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    await transition(s.storeId, order.id, "refunded");
+    // Dado inconsistente (não acontece pelo fluxo): o pedido perde a conta do app com avisos ainda na fila.
+    await t.ownerDb.update(orders).set({ appAccount: null, appSessionId: null }).where(eq(orders.id, order.id));
+    await runNotices();
+    expect(app.hitsOf(s.path)).toHaveLength(0);
+    expect((await deliveriesOf(order.id)).map((d) => [d.eventType, d.status])).toEqual([
+      ["pagamento.confirmado", "failed"],
+      ["pagamento.reembolsado", "failed"],
+    ]);
+    expect(await failedAlerts(s.storeId)).toHaveLength(2);
+    const before = await allNoticeJobs(order.id);
+    expect(before.filter((j) => j.status === "queued" || j.status === "running")).toHaveLength(0);
+    advance(86_400);
+    await runNotices();
+    expect(await allNoticeJobs(order.id)).toHaveLength(before.length);
+  });
+});
+
 describe("reembolso, contestação e estorno parcial", () => {
   const types = async (orderId: string) => (await deliveriesOf(orderId)).map((d) => d.eventType);
 
@@ -770,7 +855,7 @@ describe("apps.resendNotice (Reenviar aviso ao app)", () => {
     expect(ds[0]).toMatchObject({ status: "delivered", attempts: 1, lastHttpStatus: 200 });
   });
 
-  test("reenvia o ÚLTIMO aviso do pedido (o reembolso, não o pagamento)", async () => {
+  test("com todos os avisos entregues, reenvia o último (o reembolso, não o pagamento)", async () => {
     const s = await paidAppOrder();
     await transition(s.storeId, s.order.id, "refunded");
     await runNotices();
@@ -800,6 +885,42 @@ describe("apps.resendNotice (Reenviar aviso ao app)", () => {
     await runNotices();
     expect(app.hitsOf(s.path)).toHaveLength(3);
     expect((await deliveriesOf(order.id))[0]).toMatchObject({ status: "delivered", attempts: 1, lastHttpStatus: 200 });
+  });
+
+  test("confirmação que falhou de vez e estorno parcial já entregue: reenviar manda a confirmação (o não entregue mais antigo), com o mesmo id", async () => {
+    const s = await paidAppOrder();
+    const [confirmed] = await deliveriesOf(s.order.id);
+    // A confirmação esgotou as tentativas; o estorno parcial, criado depois, foi entregue.
+    await t.ownerDb.update(job).set({ status: "done" }).where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    await t.ownerDb.update(appWebhookDelivery).set({ status: "failed", attempts: 7, lastHttpStatus: 500 }).where(eq(appWebhookDelivery.id, confirmed!.id));
+    await withStore(s.storeId, (tx) => enqueueAppNotice(tx, s.storeId, s.order.id, "pagamento.reembolso_parcial", { refundedCents: 300 }));
+    await runNotices();
+    expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual(["pagamento.reembolso_parcial"]);
+    expect((await deliveriesOf(s.order.id)).map((d) => [d.eventType, d.status])).toEqual([
+      ["pagamento.confirmado", "failed"],
+      ["pagamento.reembolso_parcial", "delivered"],
+    ]);
+    // O painel mostra o aviso que falta (não o mais novo, entregue), e o botão o reenvia.
+    const detail = await runAction(getOrderDetail, panelCall(s.storeId), { id: s.order.id });
+    expect(detail.app!.notice).toMatchObject({ eventType: "pagamento.confirmado", status: "failed", attempts: 7, lastHttpStatus: 500 });
+    expect(allowedOrderActions("support", detail).resendNotice).toBe(true);
+
+    expect(await runAction(resendAppNotice, panelCall(s.storeId, "support"), { orderId: s.order.id })).toEqual({ orderId: s.order.id, queued: true });
+    await runNotices();
+    const hits = app.hitsOf(s.path);
+    expect(hits.map((h) => [bodyOf(h).tipo, bodyOf(h).dados.sequencia, h.headers["funil-evento"]])).toEqual([
+      ["pagamento.reembolso_parcial", 2, appEventId(s.order.id, "pagamento.reembolso_parcial", 0)],
+      ["pagamento.confirmado", 1, appEventId(s.order.id, "pagamento.confirmado", 0)],
+    ]);
+    expect((await deliveriesOf(s.order.id)).map((d) => [d.eventType, d.status, d.attempts])).toEqual([
+      ["pagamento.confirmado", "delivered", 1],
+      ["pagamento.reembolso_parcial", "delivered", 1],
+    ]);
+    // Agora tudo entregue: o painel volta a mostrar o último, e reenviar manda o último.
+    expect((await runAction(getOrderDetail, panelCall(s.storeId), { id: s.order.id })).app!.notice).toMatchObject({ eventType: "pagamento.reembolso_parcial", status: "delivered" });
+    await runAction(resendAppNotice, panelCall(s.storeId), { orderId: s.order.id });
+    await runNotices();
+    expect(bodyOf(app.hitsOf(s.path)[2]!).tipo).toBe("pagamento.reembolso_parcial");
   });
 
   test("job de outra loja com o mesmo aviso no payload não é adiantado nem conta como envio em andamento", async () => {
