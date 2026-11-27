@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, integer, jsonb, pgTable, text, timestamp, unique, uuid, type PgTableExtraConfigValue } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, unique, uuid, type PgTableExtraConfigValue } from "drizzle-orm/pg-core";
 import { offer } from "./catalog";
 import { store } from "./core";
 import { orders } from "./orders";
@@ -58,6 +58,8 @@ export const appCheckoutSession = pgTable(
     unique("app_checkout_session_store_id_id_unique").on(t.storeId, t.id),
     foreignKey({ columns: [t.storeId, t.offerId], foreignColumns: [offer.storeId, offer.id], name: "app_checkout_session_offer_fk" }),
     foreignKey({ columns: [t.storeId, t.orderId], foreignColumns: [orders.storeId, orders.id], name: "app_checkout_session_order_fk" }),
+    index("app_checkout_session_order_idx").on(t.orderId).where(sql`${t.orderId} is not null`),
+    check("app_checkout_session_account_check", sql`char_length(${t.account}) between 1 and 64`),
   ],
 );
 
@@ -79,10 +81,12 @@ export const appWebhookDelivery = pgTable(
   },
   (t) => [
     foreignKey({ columns: [t.storeId, t.orderId], foreignColumns: [orders.storeId, orders.id], name: "app_webhook_delivery_order_fk" }),
+    index("app_webhook_delivery_order_idx").on(t.orderId).where(sql`${t.orderId} is not null`),
     check(
       "app_webhook_delivery_event_type_check",
       sql`${t.eventType} in ('pagamento.confirmado','pagamento.reembolsado','pagamento.reembolso_parcial','pagamento.contestado','pagamento.restabelecido','ping')`,
     ),
     check("app_webhook_delivery_status_check", sql`${t.status} in ('pending','delivered','failed')`),
+    check("app_webhook_delivery_event_order_check", sql`(${t.eventType} = 'ping') = (${t.orderId} is null)`),
   ],
 );

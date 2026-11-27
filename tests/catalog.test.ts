@@ -6,7 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { ActionError, runAction, type Actor, type Origin } from "@/lib/actions/core";
 import { listActions } from "@/lib/actions/registry";
 import { createStorage, storage } from "@/lib/storage";
-import { auditLog, job, offer, offerProduct, product, store } from "@/lib/db/schema";
+import { appCheckoutSession, appWebhookDelivery, auditLog, customer, job, offer, offerProduct, orders, product, store } from "@/lib/db/schema";
 import { withStore } from "@/lib/db/client";
 import { BUSY_WAIT_MS, NEXT_ROUND_MS, backfillPageCounts, PAGE_COUNT_UNKNOWN, scheduleNextRound } from "@/lib/catalog/page-count";
 import { pdfLimiter } from "@/lib/pdf/sandbox";
@@ -51,6 +51,12 @@ const pdfBytes = () => VALID_PDF;
 const call = <I, O>(a: Parameters<typeof runAction<I, O>>[0], storeId: string, actor: Actor, raw: unknown, origin: Origin = "panel") =>
   runAction(a, { storeId, actor, origin }, raw);
 const code = async (p: Promise<unknown>) => ((await p.catch((e) => e)) as ActionError).code;
+
+async function expectCheckViolation(query: Promise<unknown>, constraint: string) {
+  const error = await query.catch((cause: unknown) => cause);
+  expect(error).toHaveProperty("cause.code", "23514");
+  expect(error).toHaveProperty("cause.constraint_name", constraint);
+}
 
 async function mkProduct(storeId: string, name = "Produto") {
   return call(createProduct, storeId, owner, { name, fileName: `${name}.pdf`, file: pdfBytes() });
@@ -386,14 +392,57 @@ describe("colunas antigas da oferta", () => {
 });
 
 describe("offers", () => {
-  test("check do banco impede oferta de app com três parcelas", async () => {
+  test.each([
+    { scenario: "com três parcelas", changes: { maxInstallments: 3 }, constraint: "offer_app_checkout_check" },
+    { scenario: "com bump", changes: { bumpPriceCents: 500 }, constraint: "offer_app_checkout_check" },
+    { scenario: "com Pix manual", changes: { pixMode: "manual" }, constraint: "offer_app_checkout_check" },
+    { scenario: "sem app_code", changes: { appCode: null }, constraint: "offer_app_code_required_check" },
+  ])("o banco recusa oferta de app $scenario", async ({ changes, constraint }) => {
     const { storeId } = await seedStore();
-    const error = await withStore(storeId, (tx) => tx.execute(sql`
-      insert into offer (store_id, slug, name, price_cents, methods, pix_mode, max_installments, delivery, app_code)
-      values (${storeId}, 'plano', 'Plano', 990, array['pix', 'card'], 'asaas', 3, 'app', 'plano')
-    `)).catch((cause: unknown) => cause);
-    expect(error).toHaveProperty("cause.code", "23514");
-    expect(error).toHaveProperty("cause.constraint_name", "offer_app_checkout_check");
+    await expectCheckViolation(withStore(storeId, (tx) => tx.insert(offer).values({
+      storeId, slug: "plano", name: "Plano", priceCents: 990, methods: ["pix", "card"],
+      pixMode: "asaas", delivery: "app", appCode: "plano", ...changes,
+    })), constraint);
+  });
+
+  test("o banco valida as contas de app e os vínculos de pedidos, sessões e webhooks", async () => {
+    const { storeId } = await seedStore();
+    const account = "a".repeat(64);
+    const { sessionId, orderId } = await withStore(storeId, async (tx) => {
+      const [plan] = await tx.insert(offer).values({
+        storeId, slug: "plano", name: "Plano", priceCents: 990, methods: ["pix"], pixMode: "asaas",
+        delivery: "app", appCode: "plano",
+      }).returning({ id: offer.id });
+      const [buyer] = await tx.insert(customer).values({
+        storeId, email: "teste@example.com", name: "Pessoa Teste", phone: "00000000000",
+      }).returning({ id: customer.id });
+      const [session] = await tx.insert(appCheckoutSession).values({
+        storeId, offerId: plan!.id, account, buyerName: "Pessoa Teste", buyerEmail: "teste@example.com",
+        expiresAt: new Date(),
+      }).returning({ id: appCheckoutSession.id });
+      const [order] = await tx.insert(orders).values({
+        storeId, publicId: "pedido-app-check", offerId: plan!.id, customerId: buyer!.id,
+        method: "pix_asaas", subtotalCents: 990, totalCents: 990, clientIp: "192.0.2.1", userAgent: "teste",
+        appAccount: account, appSessionId: session!.id,
+      }).returning({ id: orders.id });
+      return { sessionId: session!.id, orderId: order!.id };
+    });
+
+    for (const invalid of ["", "a".repeat(65)]) {
+      await expectCheckViolation(withStore(storeId, (tx) => tx.update(appCheckoutSession)
+        .set({ account: invalid }).where(eq(appCheckoutSession.id, sessionId))), "app_checkout_session_account_check");
+      await expectCheckViolation(withStore(storeId, (tx) => tx.update(orders)
+        .set({ appAccount: invalid }).where(eq(orders.id, orderId))), "orders_app_account_check");
+    }
+    for (const changes of [{ appAccount: null }, { appSessionId: null }]) {
+      await expectCheckViolation(withStore(storeId, (tx) => tx.update(orders)
+        .set(changes).where(eq(orders.id, orderId))), "orders_app_account_session_check");
+    }
+    for (const event of [{ eventType: "ping", orderId }, { eventType: "pagamento.confirmado", orderId: null }]) {
+      await expectCheckViolation(withStore(storeId, (tx) => tx.insert(appWebhookDelivery).values({
+        storeId, eventId: "webhook-invalido", status: "pending", ...event,
+      })), "app_webhook_delivery_event_order_check");
+    }
   });
 
   test("caso do dono: R$ 9,90 com bump de R$ 17,10 lido por getPublic", async () => {

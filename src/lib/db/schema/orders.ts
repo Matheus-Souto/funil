@@ -77,6 +77,8 @@ export const orders = pgTable(
     check("orders_method_check", sql`${t.method} in ('pix_manual','pix_asaas','card_asaas')`),
     check("orders_amounts_check", sql`${t.subtotalCents} > 0 and ${t.totalCents} > 0`),
     check("orders_discount_nonneg_check", sql`${t.discountCents} >= 0`),
+    check("orders_app_account_session_check", sql`(${t.appAccount} is null) = (${t.appSessionId} is null)`),
+    check("orders_app_account_check", sql`char_length(${t.appAccount}) between 1 and 64`),
     check(
       "orders_discount_check",
       sql`${t.totalCents} = ${t.subtotalCents} - ${t.discountCents} and (${t.couponId} is null) = (${t.discountCents} = 0)`,
@@ -85,6 +87,7 @@ export const orders = pgTable(
     foreignKey({ columns: [t.storeId, t.couponId], foreignColumns: [coupon.storeId, coupon.id], name: "orders_coupon_fk" }),
     foreignKey({ columns: [t.storeId, t.appSessionId], foreignColumns: [appCheckoutSession.storeId, appCheckoutSession.id], name: "orders_app_session_fk" }),
     index("orders_coupon_idx").on(t.couponId).where(sql`${t.couponId} is not null`),
+    index("orders_app_session_idx").on(t.appSessionId).where(sql`${t.appSessionId} is not null`),
     index("orders_store_status_idx").on(t.storeId, t.status),
     // Valor único do Pix manual: dois pendentes da mesma loja nunca compartilham o mesmo valor.
     uniqueIndex("orders_manual_amount_pending_unique")

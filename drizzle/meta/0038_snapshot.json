@@ -1634,6 +1634,22 @@
           "method": "btree",
           "with": {}
         },
+        "orders_app_session_idx": {
+          "name": "orders_app_session_idx",
+          "columns": [
+            {
+              "expression": "app_session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"orders\".\"app_session_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "orders_store_status_idx": {
           "name": "orders_store_status_idx",
           "columns": [
@@ -1833,6 +1849,14 @@
         "orders_discount_nonneg_check": {
           "name": "orders_discount_nonneg_check",
           "value": "\"orders\".\"discount_cents\" >= 0"
+        },
+        "orders_app_account_session_check": {
+          "name": "orders_app_account_session_check",
+          "value": "(\"orders\".\"app_account\" is null) = (\"orders\".\"app_session_id\" is null)"
+        },
+        "orders_app_account_check": {
+          "name": "orders_app_account_check",
+          "value": "char_length(\"orders\".\"app_account\") between 1 and 64"
         },
         "orders_discount_check": {
           "name": "orders_discount_check",
@@ -4735,7 +4759,24 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "app_checkout_session_order_idx": {
+          "name": "app_checkout_session_order_idx",
+          "columns": [
+            {
+              "expression": "order_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"app_checkout_session\".\"order_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "app_checkout_session_store_id_store_id_fk": {
           "name": "app_checkout_session_store_id_store_id_fk",
@@ -4793,7 +4834,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "app_checkout_session_account_check": {
+          "name": "app_checkout_session_account_check",
+          "value": "char_length(\"app_checkout_session\".\"account\") between 1 and 64"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.app_trial": {
@@ -4999,7 +5045,24 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "app_webhook_delivery_order_idx": {
+          "name": "app_webhook_delivery_order_idx",
+          "columns": [
+            {
+              "expression": "order_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"app_webhook_delivery\".\"order_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "app_webhook_delivery_store_id_store_id_fk": {
           "name": "app_webhook_delivery_store_id_store_id_fk",
@@ -5049,6 +5112,10 @@
         "app_webhook_delivery_status_check": {
           "name": "app_webhook_delivery_status_check",
           "value": "\"app_webhook_delivery\".\"status\" in ('pending','delivered','failed')"
+        },
+        "app_webhook_delivery_event_order_check": {
+          "name": "app_webhook_delivery_event_order_check",
+          "value": "(\"app_webhook_delivery\".\"event_type\" = 'ping') = (\"app_webhook_delivery\".\"order_id\" is null)"
         }
       },
       "isRLSEnabled": false

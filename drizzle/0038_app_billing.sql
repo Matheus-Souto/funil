@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 CREATE TABLE "app_checkout_session" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"store_id" uuid NOT NULL,
@@ -14,7 +16,8 @@ CREATE TABLE "app_checkout_session" (
 	"expires_at" timestamp with time zone NOT NULL,
 	"order_id" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "app_checkout_session_store_id_id_unique" UNIQUE("store_id","id")
+	CONSTRAINT "app_checkout_session_store_id_id_unique" UNIQUE("store_id","id"),
+	CONSTRAINT "app_checkout_session_account_check" CHECK (char_length("app_checkout_session"."account") between 1 and 64)
 );
 --> statement-breakpoint
 CREATE TABLE "app_trial" (
@@ -50,7 +53,8 @@ CREATE TABLE "app_webhook_delivery" (
 	"delivered_at" timestamp with time zone,
 	CONSTRAINT "app_webhook_delivery_event_id_unique" UNIQUE("event_id"),
 	CONSTRAINT "app_webhook_delivery_event_type_check" CHECK ("app_webhook_delivery"."event_type" in ('pagamento.confirmado','pagamento.reembolsado','pagamento.reembolso_parcial','pagamento.contestado','pagamento.restabelecido','ping')),
-	CONSTRAINT "app_webhook_delivery_status_check" CHECK ("app_webhook_delivery"."status" in ('pending','delivered','failed'))
+	CONSTRAINT "app_webhook_delivery_status_check" CHECK ("app_webhook_delivery"."status" in ('pending','delivered','failed')),
+	CONSTRAINT "app_webhook_delivery_event_order_check" CHECK (("app_webhook_delivery"."event_type" = 'ping') = ("app_webhook_delivery"."order_id" is null))
 );
 --> statement-breakpoint
 ALTER TABLE "integration" DROP CONSTRAINT "integration_kind_check";--> statement-breakpoint
@@ -74,6 +78,11 @@ ALTER TABLE "orders" ADD CONSTRAINT "orders_app_session_fk" FOREIGN KEY ("store_
 ALTER TABLE "conversion" ADD CONSTRAINT "conversion_trial_fk" FOREIGN KEY ("store_id","trial_id") REFERENCES "public"."app_trial"("store_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "offer" ADD CONSTRAINT "offer_store_app_code_unique" UNIQUE("store_id","app_code");--> statement-breakpoint
 ALTER TABLE "conversion" ADD CONSTRAINT "conversion_trial_event_unique" UNIQUE("trial_id","event");--> statement-breakpoint
+CREATE INDEX "app_checkout_session_order_idx" ON "app_checkout_session" USING btree ("order_id") WHERE "app_checkout_session"."order_id" is not null;--> statement-breakpoint
+CREATE INDEX "app_webhook_delivery_order_idx" ON "app_webhook_delivery" USING btree ("order_id") WHERE "app_webhook_delivery"."order_id" is not null;--> statement-breakpoint
+CREATE INDEX "orders_app_session_idx" ON "orders" USING btree ("app_session_id") WHERE "orders"."app_session_id" is not null;--> statement-breakpoint
+ALTER TABLE "orders" ADD CONSTRAINT "orders_app_account_session_check" CHECK (("orders"."app_account" is null) = ("orders"."app_session_id" is null));--> statement-breakpoint
+ALTER TABLE "orders" ADD CONSTRAINT "orders_app_account_check" CHECK (char_length("orders"."app_account") between 1 and 64);--> statement-breakpoint
 ALTER TABLE "offer" ADD CONSTRAINT "offer_delivery_check" CHECK ("offer"."delivery" in ('download','app'));--> statement-breakpoint
 ALTER TABLE "offer" ADD CONSTRAINT "offer_app_code_check" CHECK ("offer"."app_code" ~ '^[a-z0-9_]{1,40}$');--> statement-breakpoint
 ALTER TABLE "offer" ADD CONSTRAINT "offer_app_code_required_check" CHECK (("offer"."delivery" = 'app') = ("offer"."app_code" is not null));--> statement-breakpoint
