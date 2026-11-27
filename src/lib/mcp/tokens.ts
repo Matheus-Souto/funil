@@ -11,8 +11,8 @@ import { withStore, type Tx } from "@/lib/db/client";
 import { approvalRequest, mcpToken, users } from "@/lib/db/schema";
 import { requireCurrentManager } from "@/lib/team/lock";
 
-/** Papéis que um token pode ter (o `reader` só existe para tokens). */
-export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader"] as const satisfies readonly Role[];
+/** Papéis que um token pode ter (`reader` e `integration` só existem para tokens; `integration` não serve para o MCP). */
+export const TOKEN_ROLES = ["owner", "admin", "support", "traffic", "reader", "integration"] as const satisfies readonly Role[];
 
 const PREFIX = "fnl_";
 const TOKEN_RE = /^fnl_([0-9a-f]{32})_[A-Za-z0-9_-]{43}$/;

@@ -54,7 +54,9 @@ describe("constantes", () => {
 
 describe("canGrant", () => {
   // Esperado: as permissões do papel-alvo cabem nas do ator.
-  const expected: Record<Role, Record<Role, boolean>> = {
+  // Papéis de membro e o leitor (a chave `integration` não é papel de membro: nenhum outro a contém).
+  type R = (typeof ROLES)[number];
+  const expected: Record<R, Record<R, boolean>> = {
     owner: { owner: true, admin: true, support: true, traffic: true, reader: true },
     admin: { owner: false, admin: true, support: true, traffic: true, reader: true },
     support: { owner: false, admin: false, support: true, traffic: false, reader: false },

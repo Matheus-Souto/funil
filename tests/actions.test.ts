@@ -267,10 +267,22 @@ test("rejeição pré-run de usuário audita só as chaves, nunca valores", asyn
   const [row] = await auditRows(storeId);
   expect(row!.ok).toBe(false);
   expect(row!.error).toContain("forbidden");
-  const input = row!.input as { omitted: string; keys: string[] };
-  expect(input.omitted).toBe("forbidden");
-  expect(input.keys).toEqual(["cpf", "blob", "k".repeat(64)]);
+  // O schema (vazio) não declara nenhuma das chaves: só contadas, nunca nomeadas.
+  expect(row!.input).toEqual({ omitted: "forbidden", keys: [], extraKeys: 3 });
   expect(JSON.stringify(row!.input)).not.toContain("123.456");
+});
+
+test("rejeição audita só as chaves que o schema declara; chave livre (ex.: um e-mail) só é contada", async () => {
+  const { storeId } = await seedStore();
+  const strict = defineAction(
+    { name: "t.keys", description: "x", input: z.object({ nome: z.string(), conta: z.string().optional() }).transform((v) => v), permission: "products.read", run: async () => 1 },
+    def,
+  );
+  const body = { nome: 1, "ana.souza@exemplo.com": true, outra: "x" };
+  expect((await runAction(strict, { storeId, actor: owner, origin: "panel" }, body).catch((e) => e)).code).toBe("invalid_input");
+  const [row] = await auditRows(storeId);
+  expect(row!.input).toEqual({ omitted: "invalid_input", keys: ["nome"], extraKeys: 2 });
+  expect(JSON.stringify(row)).not.toContain("ana.souza");
 });
 
 test("rejeições pré-execução de ator público (forbidden, invalid_input, approval_required) não gravam audit_log", async () => {

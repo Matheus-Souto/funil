@@ -85,4 +85,11 @@ export function allowedOrderActions(
   };
 }
 
-export const ROLE_LABEL: Record<Role, string> = { owner: "Você é dono", admin: "Administrador", support: "Atendimento", traffic: "Tráfego", reader: "Leitor" };
+export const ROLE_LABEL: Record<Role, string> = {
+  owner: "Você é dono",
+  admin: "Administrador",
+  support: "Atendimento",
+  traffic: "Tráfego",
+  reader: "Leitor",
+  integration: "Integração",
+};

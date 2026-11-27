@@ -105,6 +105,20 @@ describe("ações do painel", () => {
     }
   });
 
+  test("create aceita o papel integration (chave da API de integração da loja)", async () => {
+    const { storeId, panel } = await ownerStore();
+    const created = await runAction(createMcpToken, panel, { name: "App", role: "integration" });
+    expect(created.role).toBe("integration");
+    expect(await authenticateMcpToken(created.token)).toMatchObject({ storeId, tokenId: created.id, role: "integration" });
+  });
+
+  test("integration.use só existe no papel integration, que só tem ela", () => {
+    expect(ROLE_PERMISSIONS.integration).toEqual(["integration.use"]);
+    for (const [role, perms] of Object.entries(ROLE_PERMISSIONS)) {
+      if (role !== "integration") expect([role, perms.includes("integration.use")]).toEqual([role, false]);
+    }
+  });
+
   test("revoke marca revogado (só na loja dele); id desconhecido ou de outra loja: not_found", async () => {
     const a = await ownerStore("A");
     const b = await ownerStore("B");

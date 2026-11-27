@@ -1,7 +1,9 @@
 // Meta: conexão (Pixel ID + token da API de Conversões), dados do comprador em hash e o job `meta_event`, que manda
 // `Purchase` e `InitiateCheckout` à API de Conversões com o MESMO event id do Pixel no navegador (o Meta deduplica):
 //   - InitiateCheckout: `eventId` gerado na página do checkout (enviado em `checkout.start`);
-//   - Purchase: `purchase:<publicId>` (nunca o id interno do pedido: a página pública também dispara com este id).
+//   - Purchase: `purchase:<publicId>` (nunca o id interno do pedido: a página pública também dispara com este id);
+//   - StartTrial: início do teste de um app (`apps.registerTrial`), com o `event_id` do registro de teste
+//     (`trial:<id>` ou o que o app mandou para deduplicar com o Pixel dele); marca em `conversion` por `trial_id`.
 // Reembolso não é enviado ao Meta. Nenhuma chamada ao Meta dentro de transação do banco.
 //
 // Versão da Graph API: v27.0 (a mais recente em 18/11/2026, lançada em 4/11/2026; fonte:
@@ -16,7 +18,7 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { withStore, type Tx } from "@/lib/db/client";
-import { conversion, customer, integration, offer, orderItem, orders, store } from "@/lib/db/schema";
+import { appTrial, conversion, customer, integration, offer, orderItem, orders, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
 import { env } from "@/lib/env";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
@@ -30,10 +32,14 @@ export const META_GRAPH_VERSION = "v27.0";
 const GRAPH_BASE_URL = "https://graph.facebook.com";
 export const PIXEL_ID_RE = /^\d{5,20}$/;
 const TIMEOUT_MS = 15_000;
-/** O Meta recusa a requisição inteira se `event_time` tiver mais de 7 dias. */
-const MAX_EVENT_AGE_S = 7 * 24 * 3600 - 300;
+/**
+ * O Meta recusa a requisição inteira se `event_time` tiver mais de 7 dias: o job descarta o que passar de 7 dias menos
+ * 5 min de margem. Compartilhado com a API do app (`iniciado_em` mais antigo que isto é recusado na entrada).
+ */
+export const META_MAX_EVENT_AGE_MS = (7 * 24 * 3600 - 300) * 1000;
+const MAX_EVENT_AGE_S = META_MAX_EVENT_AGE_MS / 1000;
 
-export type MetaEventName = "Purchase" | "InitiateCheckout";
+export type MetaEventName = "Purchase" | "InitiateCheckout" | "StartTrial";
 export const purchaseEventId = (publicId: string): string => `purchase:${publicId}`;
 
 let fetchOverride: typeof fetch | undefined;
@@ -292,21 +298,29 @@ export const testMeta = defineAction({
  */
 export async function enqueueInitiateCheckout(tx: Tx, storeId: string, orderId: string, eventId: string | undefined): Promise<void> {
   if (!eventId || !META_EVENT_ID_RE.test(eventId)) return;
+  if (!(await metaConnected(tx, storeId))) return;
+  await enqueue(tx, { storeId, type: "meta_event", payload: { event: "InitiateCheckout", orderId, eventId } });
+}
+
+/** A loja tem token da API de Conversões guardado? (só a linha; não abre o segredo) */
+export async function metaConnected(tx: Tx, storeId: string): Promise<boolean> {
   const [row] = await tx
     .select({ kind: integration.kind })
     .from(integration)
     .where(and(eq(integration.storeId, storeId), eq(integration.kind, "meta"), isNotNull(integration.secret)));
-  if (!row) return;
-  await enqueue(tx, { storeId, type: "meta_event", payload: { event: "InitiateCheckout", orderId, eventId } });
+  return row !== undefined;
 }
 
-const payloadSchema = z
+const orderPayloadSchema = z
   .object({
     event: z.enum(["Purchase", "InitiateCheckout"]),
     orderId: z.uuid(),
     eventId: z.string().regex(META_EVENT_ID_RE).optional(),
   })
   .refine((p) => p.event === "Purchase" || p.eventId !== undefined, "InitiateCheckout sem eventId");
+/** StartTrial: só o id do registro de teste (o e-mail já está nele em sha256; nada pessoal no payload do job). */
+const trialPayloadSchema = z.object({ event: z.literal("StartTrial"), trialId: z.uuid() });
+const payloadSchema = z.union([trialPayloadSchema, orderPayloadSchema]);
 
 type Prepared =
   | { skip: string }
@@ -331,6 +345,7 @@ export const metaEventJob: JobHandler = async (j, signal) => {
     return;
   }
   const storeId = j.storeId;
+  if (parsed.data.event === "StartTrial") return startTrialJob(storeId, parsed.data.trialId, signal);
   const p = parsed.data;
   if (signal.aborted) throw abortError(signal);
 
@@ -427,3 +442,80 @@ export const metaEventJob: JobHandler = async (j, signal) => {
   );
   log.info("meta_event enviado", { orderId: p.orderId, event: p.event });
 };
+
+/**
+ * `StartTrial` do registro de teste: mesmo fluxo do pedido (lê numa transação curta, envia fora dela, marca
+ * `conversion` por `trial_id`). Quando o envio termina (enviado, recusado de vez ou nada a enviar) o registro perde ip e
+ * user agent, que só existiam para o Meta (§7.3); erro transitório mantém os dois para a nova tentativa.
+ */
+async function startTrialJob(storeId: string, trialId: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw abortError(signal);
+  const forgetClient = (tx: Tx) => tx.update(appTrial).set({ clientIp: null, userAgent: null }).where(eq(appTrial.id, trialId));
+
+  const prep: Prepared = await withStore(storeId, async (tx) => {
+    const [tr] = await tx.select().from(appTrial).where(eq(appTrial.id, trialId));
+    if (!tr) return { skip: "teste_inexistente" };
+    const [sent] = await tx
+      .select({ id: conversion.id })
+      .from(conversion)
+      .where(and(eq(conversion.trialId, tr.id), eq(conversion.event, "StartTrial")));
+    if (sent) return { skip: "ja_enviado" };
+    // Nunca no futuro (a entrada já grava min(iniciado_em, agora); aqui só por defesa).
+    const eventTime = Math.floor(Math.min(tr.startedAt.getTime(), Date.now()) / 1000);
+    const conn = await getIntegration(tx, storeId, "meta");
+    const pixelId = validPixel((conn?.config as MetaConfig | undefined)?.pixelId);
+    const skip = Date.now() / 1000 - eventTime > MAX_EVENT_AGE_S ? "evento_antigo" : !conn?.secret ? "sem_conexao" : !pixelId ? "sem_pixel" : null;
+    if (skip) {
+      await forgetClient(tx);
+      return { skip };
+    }
+    const [s] = await tx.select({ domain: store.domain, slug: store.slug }).from(store).where(eq(store.id, storeId));
+    if (!s) throw new Error("teste sem loja");
+    const userData: MetaUserData = { em: [tr.emailHash], external_id: [sha256(tr.account)] };
+    if (tr.clientIp) userData.client_ip_address = tr.clientIp;
+    if (tr.userAgent) userData.client_user_agent = tr.userAgent;
+    if (tr.fbc) userData.fbc = tr.fbc;
+    if (tr.fbp) userData.fbp = tr.fbp;
+    const event = {
+      event_name: "StartTrial",
+      event_time: eventTime,
+      event_id: tr.eventId,
+      action_source: "website",
+      // O cadastro aconteceu no site do app, que o funil não conhece: vale a origem pública da loja (exigida no website).
+      event_source_url: `${storeBaseUrl(s)}/`,
+      user_data: userData,
+      custom_data: { value: 0, currency: "BRL" },
+    };
+    return { pixelId: pixelId!, token: conn!.secret!, testEventCode: (conn!.config as MetaConfig).testEventCode ?? null, body: event, eventId: tr.eventId };
+  });
+
+  if ("skip" in prep) {
+    log.info("meta_event: nada a enviar", { trialId, event: "StartTrial", reason: prep.skip });
+    return;
+  }
+  if (signal.aborted) throw abortError(signal);
+  const mark = (status: "sent" | "failed", errorCode: number | null = null) =>
+    withStore(storeId, async (tx) => {
+      await tx.insert(conversion).values({ storeId, trialId, event: "StartTrial", eventId: prep.eventId, status, errorCode }).onConflictDoNothing();
+      await forgetClient(tx);
+    });
+  try {
+    await graph("POST", `${prep.pixelId}/events`, {
+      token: prep.token,
+      body: { data: [prep.body], ...(prep.testEventCode ? { test_event_code: prep.testEventCode } : {}) },
+      signal,
+    });
+  } catch (e) {
+    if (!(e instanceof MetaApiError)) throw e;
+    const info = { trialId, event: "StartTrial", status: e.status, code: e.code, subcode: e.subcode };
+    if (!isPermanentMetaError(e)) {
+      log.warn("API de Conversões do Meta falhou; a fila re-tenta", info);
+      throw e;
+    }
+    log.error("API de Conversões do Meta recusou o evento (permanente); não será re-tentado", info);
+    await mark("failed", e.code);
+    return;
+  }
+  await mark("sent");
+  log.info("meta_event enviado", { trialId, event: "StartTrial" });
+}

@@ -24,7 +24,9 @@ import { MCP_EXCLUDED, mcpTools } from "@/lib/mcp/tools";
 import { createTestDb, HEAVY_TEST_MS, type TestDb } from "./db";
 import { seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
-const ROLES = Object.keys(ROLE_PERMISSIONS) as Role[];
+/** Papéis que autenticam no MCP (a chave `integration` só serve para a API de integração). */
+type McpRole = Exclude<Role, "integration">;
+const ROLES = (Object.keys(ROLE_PERMISSIONS) as Role[]).filter((r): r is McpRole => r !== "integration");
 
 let t: TestDb;
 beforeAll(async () => {
@@ -133,6 +135,15 @@ describe("autenticação", () => {
     // E o token certo passa.
     const ok = await handleMcpRequest(rpc("tools/list", {}, { token: tokA.token }), BASE);
     expect(ok.status).toBe(200);
+  });
+
+  test("chave integration (API de integração) não serve para o MCP: 401 com o mesmo corpo", async () => {
+    const s = await seedPanelStore();
+    const integ = await mkToken(s.storeId, "integration");
+    const res = await handleMcpRequest(rpc("tools/list", {}, { token: integ.token }), BASE);
+    expect(res.status).toBe(401);
+    const none = await handleMcpRequest(rpc("tools/list", {}, {}), BASE);
+    expect(await res.text()).toBe(await none.text());
   });
 
   test("GET e DELETE (sem sessão) respondem 405 sem quebrar", async () => {
@@ -412,7 +423,7 @@ describe("equipe fora do MCP", () => {
     const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
     const argsOf = (tool: string): Record<string, unknown> =>
       ({ orders_get: { id: order.id }, offers_get: { id: s.offerId }, metrics_summary: range, metrics_breakdown: range, orders_paidReport: range })[tool] ?? {};
-    const minOk: Record<Role, number> = { owner: 3, admin: 3, support: 3, traffic: 3, reader: 3 };
+    const minOk: Record<McpRole, number> = { owner: 3, admin: 3, support: 3, traffic: 3, reader: 3 };
     for (const role of ROLES) {
       const tok = await mkToken(s.storeId, role);
       const reads = mcpTools(role).filter((x) => !x.approval && registry.get(x.action)?.audit === false);

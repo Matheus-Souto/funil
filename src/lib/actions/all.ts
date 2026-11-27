@@ -1,6 +1,7 @@
 // Registro completo das ações: importar este arquivo garante que `registry` tem todas (o catálogo do MCP depende disso).
 // Todo módulo com ações entra aqui (tests/mcp-tools.test.ts varre src/ pelos módulos que definem ações e falha se faltar algum).
 import "@/lib/alerts";
+import "@/lib/apps/trials";
 import "@/lib/auth/account";
 import "@/lib/catalog/offers";
 import "@/lib/catalog/products";
