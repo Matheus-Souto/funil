@@ -126,6 +126,10 @@ Cada coisa que o app vende vira uma **oferta de app** no funil (entrega "app", e
 Combine com quem administra a loja a lista de ofertas, endereços, códigos e preços: o app precisa da mesma tabela de
 `app_code` (seção 8).
 
+O `app_code` que vai em cada aviso é lido da oferta **na hora do envio**. Por isso, **nunca mude nem reaproveite o
+código de uma oferta que já vendeu**: um reembolso de uma compra antiga sairia com o código novo. Para outro produto,
+crie outra oferta.
+
 ---
 
 ## 3. Como chamar a API
@@ -174,7 +178,8 @@ um corpo que não é JSON (ex.: uma página de erro de proxy) como falha tempor�
 
 Repetir depois de uma falha de rede ou `5xx`:
 
-- `POST /testes` pode ser repetido a qualquer momento: é uma vez por conta (seção 4).
+- `POST /testes`: a repetição é segura enquanto o `iniciado_em` estiver dentro da janela e o registro não tiver sido
+  apagado pela retenção: é uma vez por conta (seção 4).
 - `POST /pagamentos` só devolve a **mesma** sessão se a repetição vier em até 2 minutos, com exatamente os mesmos
   campos (inclusive a origem) e antes de a sessão ter pedido (seção 5.1). Fora disso, cria outra sessão, e duas
   sessões podem virar duas compras válidas. Repita só enquanto a pessoa ainda está esperando o redirecionamento; não
@@ -337,7 +342,7 @@ Sessão nova (`201 Created`):
 }
 ```
 
-A mesma chamada em até 2 minutos (`200 OK`): o mesmo corpo, com a mesma `url`.
+A mesma chamada em até 2 minutos, enquanto a sessão ainda não tem pedido (`200 OK`): o mesmo corpo, com a mesma `url`.
 
 Oferta inexistente, desativada ou que não é de app (`404 Not Found`):
 
@@ -404,7 +409,8 @@ diferentes são compras diferentes: cada uma tem o seu `pedido` e o seu `pagamen
 
 ### 5.4 O retorno
 
-O botão **Voltar ao app** leva para o `retorno` exatamente como o app mandou (o funil não acrescenta parâmetros). Ele
+O botão **Voltar ao app** leva para o `retorno` normalizado (ex.: `:443` some, o host vai para minúsculas), sem
+parâmetros acrescentados pelo funil. Ele
 aparece na página do pedido do funil:
 
 - **pagamento confirmado:** página de obrigado, "O acesso é liberado no app";
@@ -553,7 +559,7 @@ Todo aviso tem a mesma forma:
 |---|---|---|
 | `conta` | texto | A `conta` que o app mandou no `POST /pagamentos`. |
 | `pedido` | texto | Id público do pedido no funil. É a chave da liberação no app. |
-| `app_code` | texto | O código no app da oferta paga (seção 2.3). |
+| `app_code` | texto | O código no app da oferta paga (seção 2.3), **lido da oferta no momento de cada envio**: não é um retrato do momento da compra. |
 | `valor_centavos` | inteiro | Valor total do pedido em centavos. |
 | `metodo` | texto | `pix` ou `cartao`. |
 | `pago_em` | texto ou `null` | Quando o pagamento se confirmou (ISO 8601). |
@@ -799,8 +805,10 @@ create table pedidos_funil (             -- regra 2 da seção 7.5 e o que foi l
   liberado_app_code  text,
   liberado_tipo      text,
   liberado_quantidade integer,           -- créditos efetivamente creditados
+  liberado_plano     text,               -- plano concedido por este pedido
   liberado_meses     integer,            -- período que este pedido contribui ao plano
-  debitado           integer not null default 0,  -- créditos efetivamente retirados até agora
+  pago_em            timestamptz,        -- dados.pago_em do pedido: início da contribuição no recálculo
+  debitado           integer not null default 0,  -- créditos retirados e ainda não devolvidos
   pendente           integer not null default 0,  -- créditos que faltaram retirar (saldo insuficiente)
   estornado_centavos integer not null default 0   -- último total do reembolso parcial
 );
@@ -836,10 +844,11 @@ do estado atual e chegar nele:
 
 ### 8.4 Liberar e reverter
 
-**O que foi liberado é gravado no pedido.** Na primeira vez que o pedido vai para `liberado`, grave nele o `app_code` e o
-que ele significava naquele momento (tipo, quantidade de créditos, meses de plano). Toda reversão e devolução usa esse
-registro, nunca o `app_code` do aviso nem o catálogo de agora: o catálogo pode mudar entre a compra e o reembolso. Não
-dependa de o funil impedir a troca de `app_code` de uma oferta.
+**O que foi liberado é gravado no pedido.** O `app_code` do aviso é lido da oferta no momento de cada envio (seção 7.3),
+não no momento da compra. Na primeira vez que o pedido vai para `liberado`, grave nele o `app_code` e o que ele
+significava naquele momento (tipo, quantidade de créditos, meses de plano, `pago_em`). Toda reversão e devolução usa
+esse registro, nunca o `app_code` do aviso nem o catálogo de agora. Preserve o significado dos códigos que já venderam:
+não reaproveite um código para outro produto no catálogo do app.
 
 **Créditos.**
 
@@ -849,8 +858,10 @@ dependa de o funil impedir a troca de `app_code` de uma oferta.
   transação**, ligados ao `id` do aviso que causou a retirada. Se o saldo não cobre tudo, debite o que dá e registre o
   resto em `pendente` (para descontar de créditos futuros ou para a sua equipe decidir). Nunca "zere" o saldo para
   esconder a diferença.
-- Devolver (restabelecimento): credite de volta exatamente o que foi **efetivamente** debitado (`debitado`) e cancele o
-  `pendente`. Nunca devolva mais do que foi retirado.
+- Devolver (restabelecimento): na mesma transação, credite de volta `debitado` (o débito ainda não devolvido), cancele o
+  `pendente` e **zere `debitado`**; o histórico fica no extrato. Assim uma segunda contestação e um segundo
+  restabelecimento do mesmo pedido (o funil permite pago → contestado → pago → contestado → pago) nunca devolvem mais
+  do que foi retirado.
 - Reembolso depois de contestação: a contestação já retirou; o reembolso só confirma (`pendente` continua valendo).
 
 **Plano.**
@@ -858,17 +869,21 @@ dependa de o funil impedir a troca de `app_code` de uma oferta.
 - Cada pedido de plano é uma **contribuição**: o período que ele cobre (`liberado_meses`). O direito do cliente ao plano
   é calculado a partir das contribuições ativas (pedidos em `liberado`), empilhadas em ordem de pagamento: a primeira
   começa no `pago_em` dela, e cada uma seguinte começa no fim da anterior ou no próprio `pago_em`, o que for depois.
-- Toda mudança (liberar, suspender, devolver, retirar) recalcula esse direito **sob uma trava comum aos pedidos daquela
-  conta** (ex.: `select ... for update` na linha da conta), para dois avisos simultâneos de pedidos diferentes não
-  calcularem em cima de um estado velho. Reembolsar ou contestar um pedido tira só a contribuição dele.
+- Toda mudança (liberar, suspender, devolver, retirar) **primeiro grava o novo estado do pedido** e só então recalcula
+  esse direito, a partir do `pago_em`, do plano e dos meses gravados em cada pedido, **sob uma trava comum aos pedidos
+  daquela conta** (ex.: `select ... for update` na linha da conta), para dois avisos simultâneos de pedidos diferentes
+  não calcularem em cima de um estado velho. Reembolsar ou contestar um pedido tira só a contribuição dele.
 - O direito efetivo, aquilo que o app consulta para liberar o recurso (a sua tabela de assinatura, um campo de
   validade), é atualizado na mesma transação e respeita a expiração: quando o fim da cadeia passa, o recurso para de
   valer (comparando com a hora atual na consulta, ou por uma rotina que expira).
 - Ativar o plano não recria nem reinicia o período de teste da conta.
 
 **Catálogo.** No cadastro dos produtos do app (`produtos_funil` acima), valide que produto de créditos tem quantidade
-maior que zero e dentro do limite que a sua função de crédito aceita, e que produto de plano tem período. Um `app_code`
-desconhecido ou inválido deve falhar o aviso (`5xx`): o funil tenta de novo e dá tempo de corrigir o catálogo.
+maior que zero e dentro do limite que a sua função de crédito aceita, e que produto de plano tem período. O catálogo só
+é consultado na transição que **concede pela primeira vez** (`nada` → `liberado`): ali, um `app_code` desconhecido ou
+inválido falha o aviso (`5xx`), e o funil tenta de novo enquanto o catálogo é corrigido. Reembolso, contestação,
+restabelecimento e reembolso parcial de um pedido já registrado usam só o registro local, mesmo que o `app_code`
+recebido seja desconhecido.
 
 ### 8.5 Rotina de aplicação (pseudocódigo)
 
@@ -879,13 +894,21 @@ aplicar_aviso_funil(aviso):                        -- uma transação; só o pap
   trava a conta aviso.dados.conta                   -- trava comum aos pedidos da conta (plano)
   se aviso.dados.sequencia < p.ultima_sequencia:
     grava aviso.id (aplicado = false); retorna "antigo"
-  alvo := estado pedido pelo aviso (tabela 8.3), considerando p.estado
-  se p.estado = 'nada' e alvo = 'liberado':        grava o que libera (8.4) e libera
-  se p.estado = 'liberado' e alvo = 'suspenso':    retira com o registro do pedido (crédito: débito + pendência; plano: recalcula)
-  se p.estado = 'suspenso' e alvo = 'liberado':    devolve o efetivamente retirado (plano: recalcula)
-  se p.estado em ('liberado', 'suspenso') e alvo = 'retirado':  retira o que ainda não saiu (plano: recalcula)
-  se aviso.tipo = 'pagamento.reembolso_parcial':   p.estornado_centavos := aviso.dados.valor_estornado_centavos
-  p.estado := alvo; p.ultima_sequencia := aviso.dados.sequencia
+  anterior := p.estado
+  alvo := estado pedido pelo aviso (tabela 8.3), considerando anterior
+  se anterior = 'nada' e alvo = 'liberado':
+    consulta o catálogo (só aqui; código desconhecido → falha, 5xx)
+    grava no pedido o que libera (app_code, tipo, quantidade, plano, meses, pago_em)
+    créditos: credita com o pedido como chave
+  se anterior = 'liberado' e alvo = 'suspenso':  créditos: débito + pendência (registro do pedido)
+  se anterior = 'suspenso' e alvo = 'liberado':  créditos: devolve debitado, cancela pendente, zera debitado
+  se anterior = 'liberado' e alvo = 'retirado':  créditos: débito + pendência (registro do pedido)
+  se anterior = 'suspenso' e alvo = 'retirado':  nada a debitar (a contestação já retirou)
+  se aviso.tipo = 'pagamento.reembolso_parcial': p.estornado_centavos := aviso.dados.valor_estornado_centavos
+  p.estado := alvo; p.ultima_sequencia := aviso.dados.sequencia      -- grava o estado novo ANTES do recálculo
+  se p.liberado_tipo = 'plano' e anterior <> alvo:
+    recalcula o direito da conta a partir dos pedidos dela em 'liberado' (pago_em, plano, meses),
+    já sob a trava da conta, e atualiza o direito efetivo que o app consulta
   grava aviso.id (aplicado = true); retorna "aplicado"
 ```
 
