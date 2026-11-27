@@ -103,7 +103,7 @@ export function alertText(
     case "app_webhook_falhou":
       return {
         title: `O app não confirmou o aviso${pedido}${typeof detail.httpStatus === "number" ? ` (HTTP ${detail.httpStatus})` : ""}`,
-        body: "Tentamos avisar o app por 2 dias e ele não respondeu com sucesso. Confira a URL e o segredo do webhook em Conexões e use “Reenviar aviso ao app” no pedido.",
+        body: "O app não respondeu com sucesso a nenhuma das tentativas de aviso. Confira a URL e o segredo do webhook em Conexões e use “Reenviar aviso ao app” no pedido.",
       };
     case "disjuntor_cartao":
       return {

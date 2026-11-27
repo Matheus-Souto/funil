@@ -76,11 +76,24 @@ export const appWebhookDelivery = pgTable(
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     lastHttpStatus: integer("last_http_status"),
+    /**
+     * Ordem do aviso dentro do pedido (1 = `pagamento.confirmado`, depois 2, 3...): vai no corpo como `dados.sequencia`
+     * para o app descartar transição antiga, e é a ordem de entrega (um aviso só sai com os anteriores resolvidos).
+     */
+    sequence: integer("sequence"),
+    /** `pagamento.reembolso_parcial`: soma devolvida até a ocorrência, fixada na criação (as retentativas a repetem). */
+    refundedCents: integer("refunded_cents"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   },
   (t) => [
     foreignKey({ columns: [t.storeId, t.orderId], foreignColumns: [orders.storeId, orders.id], name: "app_webhook_delivery_order_fk" }),
+    unique("app_webhook_delivery_order_sequence_unique").on(t.orderId, t.sequence),
+    check("app_webhook_delivery_sequence_check", sql`(${t.orderId} is null) = (${t.sequence} is null) and ${t.sequence} >= 1`),
+    check(
+      "app_webhook_delivery_refunded_check",
+      sql`(${t.eventType} = 'pagamento.reembolso_parcial') = (${t.refundedCents} is not null) and ${t.refundedCents} > 0`,
+    ),
     index("app_webhook_delivery_order_idx").on(t.orderId).where(sql`${t.orderId} is not null`),
     check(
       "app_webhook_delivery_event_type_check",

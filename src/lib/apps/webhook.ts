@@ -3,21 +3,28 @@
 // deduplica por ele. Novas tentativas pelo backoff próprio do aviso (1 min ... 24 h); esgotado, o aviso fica `failed`,
 // o vendedor é avisado e o painel oferece "Reenviar aviso ao app".
 //
-// Saída para um host escolhido pela loja (SSRF): só `https` em endereço público, conferido logo antes de conectar;
-// redirecionamento nunca é seguido; o corpo da resposta nunca é lido, guardado nem logado (só o código HTTP). O que
-// sobra: entre a conferência e a conexão o nome pode resolver para outro endereço (o `fetch` resolve de novo). Com
-// `https` obrigatório, o destino trocado ainda precisaria apresentar um certificado válido para o nome da URL.
-// Segredo, assinatura, URL e corpo nunca vão para log nem para erro. O corpo não leva e-mail, nome, telefone nem
-// CPF/CNPJ: o app já conhece a conta.
+// Ordem por pedido: cada aviso tem a `sequence` do pedido (no corpo, `dados.sequencia`) e só é enviado quando os
+// anteriores do mesmo pedido já estão `delivered` ou `failed`; antes disso o job volta para a fila. Assim uma
+// confirmação que falhou e ainda vai tentar de novo não chega depois do reembolso. Um aviso `failed` reenviado à mão
+// pode chegar fora de ordem: é para isso que o app tem a `sequencia` (descartar transição antiga).
+//
+// Saída para um host escolhido pela loja (SSRF): só `https` em endereço público; o nome é resolvido uma vez, TODOS os
+// endereços são conferidos e a conexão é FIXADA num deles (`node:https` com `lookup` próprio, como o SMTP fixa o IP
+// em `pinSmtpTarget`): o nome original segue no `Host`, no SNI e na validação do certificado, e não há segunda
+// resolução para um DNS trocar o destino no meio. Redirecionamento nunca é seguido; o corpo da resposta nunca é lido,
+// guardado nem logado (só o código HTTP). Segredo, assinatura, URL e corpo nunca vão para log nem para erro. O corpo
+// não leva e-mail, nome, telefone nem CPF/CNPJ: o app já conhece a conta.
 import { createHmac } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { isIP } from "node:net";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
+import { and, asc, desc, eq, gt, inArray, lt, min, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { alertSeller } from "@/lib/alerts";
 import { withStore, type Tx } from "@/lib/db/client";
-import { appWebhookDelivery, job, offer, orders, payment } from "@/lib/db/schema";
+import { appWebhookDelivery, job, offer, orders } from "@/lib/db/schema";
 import { isPublicAddress } from "@/lib/delivery/mailer";
 import { env } from "@/lib/env";
 import { readIntegration } from "@/lib/integrations";
@@ -36,6 +43,8 @@ export {
 
 /** O app precisa responder 2xx neste prazo (resolução do nome incluída). */
 export const APP_WEBHOOK_TIMEOUT_MS = 10_000;
+/** Aviso que espera um anterior do mesmo pedido volta à fila por pelo menos isto (ou até a próxima tentativa do anterior). */
+export const APP_WEBHOOK_ORDER_WAIT_SECONDS = 30;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -51,12 +60,13 @@ interface TestOverrides {
   /** No lugar de `APP_WEBHOOK_ALLOW_LOOPBACK` (o `env` é lido uma vez por processo). */
   allowLoopback?: boolean;
   lookup?: Lookup;
-  fetch?: typeof fetch;
+  /** No lugar da conexão de verdade (`pinnedPost`): recebe a URL e o endereço já conferido. */
+  transport?: Transport;
   now?: () => Date;
   timer?: Timer;
 }
 let overrides: TestOverrides = {};
-/** Só para testes: troca a resolução de nomes, o `fetch`, o relógio e o tempo-limite (sem argumento, volta ao padrão). */
+/** Só para testes: troca a resolução de nomes, a conexão, o relógio e o tempo-limite (sem argumento, volta ao padrão). */
 export function setAppWebhookForTests(o: TestOverrides = {}): void {
   overrides = o;
 }
@@ -85,12 +95,18 @@ function unmapV4(ip: string): string {
 
 const isLoopbackAddress = (ip: string): boolean => ip === "::1" || (isIP(ip) === 4 && ip.startsWith("127."));
 
+interface Destination {
+  url: URL;
+  /** O endereço conferido em que a conexão é fixada. */
+  address: string;
+}
+
 /**
- * A URL pronta para o envio, ou `null` se o destino não é aceito: precisa ser `https` sem credencial, e TODOS os
- * endereços do nome precisam ser públicos (`isPublicAddress`). Com `APP_WEBHOOK_ALLOW_LOOPBACK=1` (só testes; o env só
- * a aceita com `BASE_URL` em loopback) um destino inteiro em loopback também vale, em `http` ou `https`.
+ * A URL e o endereço prontos para o envio, ou `null` se o destino não é aceito: precisa ser `https` sem credencial, e
+ * TODOS os endereços do nome precisam ser públicos (`isPublicAddress`). Com `APP_WEBHOOK_ALLOW_LOOPBACK=1` (só testes;
+ * o env só a aceita com `BASE_URL` em loopback) um destino inteiro em loopback também vale, em `http` ou `https`.
  */
-async function destinationOf(raw: string): Promise<URL | null> {
+async function destinationOf(raw: string): Promise<Destination | null> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -108,9 +124,10 @@ async function destinationOf(raw: string): Promise<URL | null> {
   }
   addresses = addresses.map(unmapV4);
   if (addresses.length === 0) return null;
-  if (allowLoopback() && addresses.every(isLoopbackAddress)) return url;
+  const address = addresses[0]!;
+  if (allowLoopback() && addresses.every(isLoopbackAddress)) return { url, address };
   if (url.protocol !== "https:") return null;
-  return addresses.every(isPublicAddress) ? url : null;
+  return addresses.every(isPublicAddress) ? { url, address } : null;
 }
 
 /** O destino seria aceito agora? (A configuração do webhook no painel usa a mesma regra do envio.) */
@@ -126,6 +143,37 @@ export interface AppWebhookResult {
   httpStatus: number | null;
   reason: "ok" | "http" | "blocked" | "network" | "timeout" | "not_configured";
 }
+
+type Transport = (req: { url: URL; address: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<number>;
+
+/**
+ * POST com a conexão fixada em `address`: o `lookup` do socket devolve só o endereço já conferido (nenhuma consulta de
+ * DNS acontece aqui), e o nome da URL continua valendo para o `Host`, o SNI e o certificado. Sem agente compartilhado
+ * (conexão nova a cada envio, nunca um socket reaproveitado de outro destino). Não segue redirecionamento (o
+ * `node:http` não segue) e descarta o corpo da resposta sem ler: devolve só o código HTTP.
+ */
+const pinnedPost: Transport = ({ url, address, headers, body, signal }) =>
+  new Promise<number>((resolve, reject) => {
+    const family = isIP(address) === 6 ? 6 : 4;
+    const lookup: LookupFunction = (_hostname, options, callback) => {
+      if (options.all) callback(null, [{ address, family }]);
+      else callback(null, address, family);
+    };
+    const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
+      url,
+      { method: "POST", agent: false, lookup, signal, headers: { ...headers, "Content-Length": String(Buffer.byteLength(body)) } },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        res.destroy();
+        resolve(status);
+      },
+    );
+    const onAbort = () => req.destroy(new Error("cancelado"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    req.on("close", () => signal.removeEventListener("abort", onAbort));
+    req.on("error", reject);
+    req.end(body);
+  });
 
 /** Rejeita quando `signal` aborta (a resolução de nomes não é cancelável). */
 function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -151,10 +199,11 @@ export async function sendAppWebhook(target: { url: string; secret: string }, ev
   });
   const all = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal;
   try {
-    const url = await untilAbort(destinationOf(target.url), all);
-    if (!url) return { ok: false, httpStatus: null, reason: "blocked" };
-    const res = await (overrides.fetch ?? fetch)(url, {
-      method: "POST",
+    const dest = await untilAbort(destinationOf(target.url), all);
+    if (!dest) return { ok: false, httpStatus: null, reason: "blocked" };
+    const status = await (overrides.transport ?? pinnedPost)({
+      url: dest.url,
+      address: dest.address,
       headers: {
         "Content-Type": "application/json",
         "User-Agent": "funil-webhook/1",
@@ -162,14 +211,10 @@ export async function sendAppWebhook(target: { url: string; secret: string }, ev
         "Funil-Assinatura": signAppWebhook(target.secret, event.body, Math.floor(clockNow().getTime() / 1000)),
       },
       body: event.body,
-      // Nunca seguir: o destino de um redirecionamento não passou pela conferência de endereço.
-      redirect: "manual",
       signal: all,
     });
-    // O corpo da resposta não interessa: descartado sem ler.
-    await res.body?.cancel().catch(() => undefined);
-    const ok = res.status >= 200 && res.status < 300;
-    return { ok, httpStatus: res.status, reason: ok ? "ok" : "http" };
+    const ok = status >= 200 && status < 300;
+    return { ok, httpStatus: status, reason: ok ? "ok" : "http" };
   } catch {
     if (signal?.aborted && !timedOut) throw signal.reason instanceof Error ? signal.reason : new Error("job cancelado");
     return { ok: false, httpStatus: null, reason: timedOut ? "timeout" : "network" };
@@ -185,7 +230,10 @@ type Delivery = typeof appWebhookDelivery.$inferSelect;
 /** O método como o app o vê: sem o nome do provedor. */
 const METHOD: Record<string, string> = { pix_asaas: "pix", pix_manual: "pix", card_asaas: "cartao" };
 
-/** Dados do pedido para o corpo: só a conta, o pedido público, o código do app, o valor, o método e quando pagou. */
+/**
+ * Dados do pedido para o corpo: só a conta, o pedido público, o código do app, o valor, o método, quando pagou e a
+ * sequência. Não dependem do estado de agora (uma confirmação enviada depois do reembolso é a mesma confirmação).
+ */
 async function orderData(tx: Tx, d: Delivery): Promise<Record<string, unknown> | null> {
   const [row] = await tx
     .select({
@@ -207,14 +255,60 @@ async function orderData(tx: Tx, d: Delivery): Promise<Record<string, unknown> |
     valor_centavos: row.totalCents,
     metodo: METHOD[row.method] ?? row.method,
     pago_em: row.paidAt ? row.paidAt.toISOString() : null,
+    // Ordem do aviso dentro do pedido: o app descarta um aviso com sequência menor que a última que aplicou.
+    sequencia: d.sequence,
   };
-  if (d.eventType === "pagamento.reembolso_parcial") {
-    // Soma já devolvida ao comprador, como o webhook do Asaas a registrou (`notePartialRefund`).
-    const pays = await tx.select({ raw: payment.raw }).from(payment).where(eq(payment.orderId, d.orderId!));
-    const back = pays.map((p) => (p.raw as { partialRefundCents?: unknown } | null)?.partialRefundCents).filter((v): v is number => typeof v === "number" && Number.isInteger(v));
-    dados.valor_estornado_centavos = back.length > 0 ? Math.max(...back) : 0;
-  }
+  // Soma devolvida até esta ocorrência, gravada na linha quando ela nasceu: as novas tentativas mandam o mesmo valor.
+  if (d.eventType === "pagamento.reembolso_parcial") dados.valor_estornado_centavos = d.refundedCents;
   return dados;
+}
+
+/** Jobs `notify_app` abertos (da loja) de um aviso. O `job` não tem RLS por loja: o filtro de loja é explícito. */
+const jobsOfDelivery = (storeId: string, deliveryId: string) =>
+  and(eq(job.type, "notify_app"), eq(job.storeId, storeId), sql`${job.payload}->>'deliveryId' = ${deliveryId}`);
+
+/**
+ * Aviso anterior do mesmo pedido ainda sem desfecho (`pending`)? Então este espera: devolve quando olhar de novo (logo
+ * depois da próxima tentativa do anterior, e nunca antes de `APP_WEBHOOK_ORDER_WAIT_SECONDS`). Sem anterior pendente,
+ * `null`.
+ */
+async function waitForEarlier(tx: Tx, storeId: string, d: Delivery, at: Date): Promise<Date | null> {
+  if (d.orderId === null || d.sequence === null) return null;
+  const [earlier] = await tx
+    .select({ id: appWebhookDelivery.id })
+    .from(appWebhookDelivery)
+    .where(and(eq(appWebhookDelivery.orderId, d.orderId), lt(appWebhookDelivery.sequence, d.sequence), eq(appWebhookDelivery.status, "pending")))
+    .orderBy(asc(appWebhookDelivery.sequence))
+    .limit(1);
+  if (!earlier) return null;
+  const [next] = await tx
+    .select({ runAt: min(job.runAt) })
+    .from(job)
+    .where(and(jobsOfDelivery(storeId, earlier.id), eq(job.status, "queued")));
+  const floor = at.getTime() + APP_WEBHOOK_ORDER_WAIT_SECONDS * 1000;
+  return new Date(Math.max(floor, next?.runAt ? next.runAt.getTime() + 1000 : 0));
+}
+
+/** Um aviso teve desfecho (entregue ou falho de vez): os seguintes do pedido que esperavam por ele saem agora. */
+async function wakeLater(tx: Tx, storeId: string, d: Delivery, at: Date): Promise<void> {
+  if (d.orderId === null || d.sequence === null) return;
+  const later = await tx
+    .select({ id: appWebhookDelivery.id })
+    .from(appWebhookDelivery)
+    .where(and(eq(appWebhookDelivery.orderId, d.orderId), gt(appWebhookDelivery.sequence, d.sequence), eq(appWebhookDelivery.status, "pending")));
+  if (later.length === 0) return;
+  await tx
+    .update(job)
+    .set({ runAt: at })
+    .where(
+      and(
+        eq(job.type, "notify_app"),
+        eq(job.storeId, storeId),
+        eq(job.status, "queued"),
+        gt(job.runAt, at),
+        inArray(sql`${job.payload}->>'deliveryId'`, later.map((x) => x.id)),
+      ),
+    );
 }
 
 /**
@@ -230,7 +324,9 @@ async function recordAttempt(tx: Tx, storeId: string, d: Delivery, r: AppWebhook
       .set({ status: "delivered", attempts, lastHttpStatus: r.httpStatus, deliveredAt: at })
       .where(pending)
       .returning({ id: appWebhookDelivery.id });
-    return done.length > 0 ? "delivered" : "stale";
+    if (done.length === 0) return "stale";
+    await wakeLater(tx, storeId, d, at);
+    return "delivered";
   }
   const wait = APP_WEBHOOK_BACKOFF_SECONDS[d.attempts];
   const failed = await tx
@@ -244,6 +340,7 @@ async function recordAttempt(tx: Tx, storeId: string, d: Delivery, r: AppWebhook
       ...(d.orderId ? { orderId: d.orderId } : {}),
       ...(r.httpStatus !== null ? { httpStatus: r.httpStatus } : {}),
     });
+    await wakeLater(tx, storeId, d, at);
     return "failed";
   }
   await enqueue(tx, { storeId, type: "notify_app", payload: { deliveryId: d.id }, runAt: new Date(at.getTime() + wait * 1000) });
@@ -253,7 +350,8 @@ async function recordAttempt(tx: Tx, storeId: string, d: Delivery, r: AppWebhook
 /**
  * Job `notify_app` {deliveryId}. At-least-once e idempotente: só envia um aviso `pending`; o `id` do evento é o da linha
  * (estável), então um envio repetido é deduplicado pelo app. HTTP fora de transação. Falha do app (ou loja sem a conexão
- * configurada) não lança: conta a tentativa na linha e agenda a próxima pelo backoff do aviso.
+ * configurada) não lança: conta a tentativa na linha e agenda a próxima pelo backoff do aviso. Em ordem por pedido: com
+ * um aviso anterior ainda pendente, este volta para a fila sem contar tentativa.
  */
 export const notifyAppJob: JobHandler = async (j, signal) => {
   const storeId = j.storeId;
@@ -266,6 +364,12 @@ export const notifyAppJob: JobHandler = async (j, signal) => {
     const [d] = await tx.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.id, deliveryId));
     if (!d) return { skip: "inexistente" } as const;
     if (d.status !== "pending") return { skip: d.status } as const;
+    const again = await waitForEarlier(tx, storeId, d, clockNow());
+    if (again) {
+      // Não é uma tentativa: o aviso só troca de job (este termina, o próximo olha de novo).
+      await enqueue(tx, { storeId, type: "notify_app", payload: { deliveryId: d.id }, runAt: again });
+      return { skip: "aguardando_aviso_anterior" } as const;
+    }
     const dados = d.orderId ? await orderData(tx, d) : {};
     if (dados === null) return { skip: "pedido_nao_e_de_app" } as const;
     const conn = await readIntegration(tx, storeId, "app_webhook");
@@ -302,14 +406,15 @@ export const resendAppNotice = defineAction({
       .select({ id: appWebhookDelivery.id })
       .from(appWebhookDelivery)
       .where(eq(appWebhookDelivery.orderId, o.id))
-      .orderBy(desc(appWebhookDelivery.createdAt), desc(appWebhookDelivery.id))
+      .orderBy(desc(appWebhookDelivery.sequence))
       .limit(1)
       .for("update");
     if (o.appAccount === null || !d) throw new ActionError("conflict", "Este pedido não tem aviso ao app para reenviar.");
     const open = await ctx.tx
       .select({ id: job.id, status: job.status })
       .from(job)
-      .where(and(eq(job.type, "notify_app"), inArray(job.status, ["queued", "running"]), sql`${job.payload}->>'deliveryId' = ${d.id}`));
+      // Só jobs DESTA loja: um job de outra loja com o mesmo `deliveryId` no payload nunca é adiantado nem conta.
+      .where(and(jobsOfDelivery(ctx.storeId, d.id), inArray(job.status, ["queued", "running"])));
     // Um envio em andamento grava o próprio resultado: não mexe no aviso por baixo dele.
     if (open.some((x) => x.status === "running")) return { orderId: o.id, queued: false };
     // Mesma linha, mesmo id de evento; as tentativas recomeçam.
@@ -322,7 +427,7 @@ export const resendAppNotice = defineAction({
         ? await ctx.tx
             .update(job)
             .set({ runAt: now })
-            .where(and(inArray(job.id, open.map((x) => x.id)), eq(job.status, "queued")))
+            .where(and(inArray(job.id, open.map((x) => x.id)), eq(job.storeId, ctx.storeId), eq(job.status, "queued")))
             .returning({ id: job.id })
         : [];
     if (advanced.length === 0) await enqueue(ctx.tx, { storeId: ctx.storeId, type: "notify_app", payload: { deliveryId: d.id }, runAt: now });

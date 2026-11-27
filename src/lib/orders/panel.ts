@@ -249,7 +249,7 @@ export const getOrderDetail = defineAction({
         })
         .from(appWebhookDelivery)
         .where(eq(appWebhookDelivery.orderId, o.id))
-        .orderBy(desc(appWebhookDelivery.createdAt), desc(appWebhookDelivery.id))
+        .orderBy(desc(appWebhookDelivery.sequence))
         .limit(1);
       app = {
         account: o.appAccount,

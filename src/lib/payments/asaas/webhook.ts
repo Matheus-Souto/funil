@@ -258,10 +258,11 @@ async function notePartialRefund(ctx: Ctx, orderId: string, pay: PaymentRow, cen
   if ((pay.raw as { partialRefundCents?: unknown } | null)?.partialRefundCents === cents) return;
   await ctx.tx.update(payment).set({ raw: mergeRaw({ partialRefundCents: cents }) }).where(eq(payment.id, pay.id));
   await alertSeller(ctx.tx, ctx.storeId, "estorno_parcial", { orderId, refundedCents: cents });
-  // Pedido de app: o app também fica sabendo (`valor_estornado_centavos` = a soma devolvida até agora) e decide o que
-  // fazer. Um evento por valor novo, na mesma transação da marca acima (o mesmo valor não avisa de novo).
+  // Pedido de app: o app também fica sabendo e decide o que fazer. A soma devolvida fica gravada no próprio aviso
+  // (`valor_estornado_centavos` não muda entre as tentativas) e só uma soma MAIOR que a já avisada gera aviso novo:
+  // uma reconsulta fora de ordem com valor menor é ignorada.
   const [o] = await ctx.tx.select({ appAccount: orders.appAccount }).from(orders).where(eq(orders.id, orderId));
-  if (o && o.appAccount !== null) await enqueueAppNotice(ctx.tx, ctx.storeId, orderId, "pagamento.reembolso_parcial");
+  if (o && o.appAccount !== null) await enqueueAppNotice(ctx.tx, ctx.storeId, orderId, "pagamento.reembolso_parcial", { refundedCents: cents });
   log.warn("estorno parcial no Asaas; o pedido continua pago", { orderId, refundedCents: cents });
 }
 

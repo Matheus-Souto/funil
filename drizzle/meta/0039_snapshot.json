@@ -1,5 +1,5 @@
 {
-  "id": "25c05af0-f9a1-48e1-b47f-51695fa16eb2",
+  "id": "53c0d79c-5841-4bab-9d5e-b76d2d3729e9",
   "prevId": "8ac4c868-976c-467d-b422-e1f6537dc238",
   "version": "7",
   "dialect": "postgresql",
@@ -5031,6 +5031,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "sequence": {
+          "name": "sequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "refunded_cents": {
+          "name": "refunded_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5101,10 +5113,26 @@
           "columns": [
             "event_id"
           ]
+        },
+        "app_webhook_delivery_order_sequence_unique": {
+          "name": "app_webhook_delivery_order_sequence_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "order_id",
+            "sequence"
+          ]
         }
       },
       "policies": {},
       "checkConstraints": {
+        "app_webhook_delivery_sequence_check": {
+          "name": "app_webhook_delivery_sequence_check",
+          "value": "(\"app_webhook_delivery\".\"order_id\" is null) = (\"app_webhook_delivery\".\"sequence\" is null) and \"app_webhook_delivery\".\"sequence\" >= 1"
+        },
+        "app_webhook_delivery_refunded_check": {
+          "name": "app_webhook_delivery_refunded_check",
+          "value": "(\"app_webhook_delivery\".\"event_type\" = 'pagamento.reembolso_parcial') = (\"app_webhook_delivery\".\"refunded_cents\" is not null) and \"app_webhook_delivery\".\"refunded_cents\" > 0"
+        },
         "app_webhook_delivery_event_type_check": {
           "name": "app_webhook_delivery_event_type_check",
           "value": "\"app_webhook_delivery\".\"event_type\" in ('pagamento.confirmado','pagamento.reembolsado','pagamento.reembolso_parcial','pagamento.contestado','pagamento.restabelecido','ping')"

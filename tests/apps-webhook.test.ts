@@ -8,8 +8,10 @@ import { ActionError, runAction, type Ctx } from "@/lib/actions/core";
 import { listAlerts } from "@/lib/alerts";
 import {
   APP_WEBHOOK_BACKOFF_SECONDS,
+  APP_WEBHOOK_ORDER_WAIT_SECONDS,
   APP_WEBHOOK_TIMEOUT_MS,
   appEventId,
+  enqueueAppNotice,
   appWebhookDestinationAllowed,
   resendAppNotice,
   setAppWebhookForTests,
@@ -84,7 +86,7 @@ const ctxOf = (storeId: string, tx: Ctx["tx"]): Ctx => ({ storeId, actor: { kind
 const transition = (storeId: string, orderId: string, to: OrderStatus) =>
   withStore(storeId, (tx) => transitionOrder(ctxOf(storeId, tx), orderId, to, "teste"));
 const deliveriesOf = (orderId: string) =>
-  t.ownerDb.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.orderId, orderId)).orderBy(asc(appWebhookDelivery.createdAt), asc(appWebhookDelivery.id));
+  t.ownerDb.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.orderId, orderId)).orderBy(asc(appWebhookDelivery.sequence));
 const jobsOf = (orderId: string, type: string) =>
   t.ownerDb
     .select()
@@ -194,6 +196,7 @@ describe("pedido de app pago", () => {
         valor_centavos: 49_700,
         metodo: "pix",
         pago_em: o!.paidAt!.toISOString(),
+        sequencia: 1,
       },
     });
     const lower = hit.body.toLowerCase();
@@ -326,6 +329,8 @@ describe("novas tentativas", () => {
     const listed = await runAction(listAlerts, panelCall(s.storeId), {});
     expect(listed.alerts.map((a) => [a.kind, a.title])).toEqual([["app_webhook_falhou", `O app não confirmou o aviso (pedido #${code}) (HTTP 503)`]]);
     expect(listed.alerts[0]!.body).toContain("Reenviar aviso ao app");
+    // As tentativas levam cerca de 32 h e o reenvio pode antecipar: o texto não promete prazo.
+    for (const text of [listed.alerts[0]!.body, ...noticeFor("app_webhook_falhou", {}, code).paragraphs]) expect(text).not.toMatch(/2 dias|dois dias/i);
     const mail = noticeFor("app_webhook_falhou", { httpStatus: 503 }, code);
     expect(mail.subject).toBe(`O app não confirmou o aviso do pedido #${code}`);
     expect(mail.paragraphs.join(" ")).toContain("HTTP 503");
@@ -391,10 +396,10 @@ describe("destino do aviso (o funil nunca fala com host privado)", () => {
         lookups.push(host);
         return ["10.0.0.1"];
       },
-      fetch: (async () => {
+      transport: async () => {
         fetched++;
-        return new Response(null, { status: 200 });
-      }) as unknown as typeof fetch,
+        return 200;
+      },
     });
     const order = await seedAppOrder(s.storeId, s.offer.id);
     await transition(s.storeId, order.id, "paid");
@@ -402,6 +407,57 @@ describe("destino do aviso (o funil nunca fala com host privado)", () => {
     expect(lookups).toEqual(["app.exemplo.test"]);
     expect(fetched).toBe(0);
     expect((await deliveriesOf(order.id))[0]).toMatchObject({ status: "pending", attempts: 1, lastHttpStatus: null });
+  });
+
+  test("a conexão é fixada no endereço conferido: o nome é resolvido uma vez, e Host leva o nome original", async () => {
+    // `app.exemplo.test` não existe no DNS de verdade: a requisição só chega ao app falso porque a conexão usa o
+    // endereço que a conferência aprovou (se o runtime resolvesse o nome de novo, falharia).
+    const s = await appStore({ connect: false });
+    const port = new URL(app.base).port;
+    await connectAppWebhook(s.storeId, `http://app.exemplo.test:${port}${s.path}`, SECRET);
+    const lookups: string[] = [];
+    setAppWebhookForTests({
+      allowLoopback: true,
+      now: () => clock.now,
+      lookup: async (host) => {
+        lookups.push(host);
+        return ["127.0.0.1"];
+      },
+    });
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    await runNotices();
+    expect(lookups).toEqual(["app.exemplo.test"]);
+    const hits = app.hitsOf(s.path);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.headers.host).toBe(`app.exemplo.test:${port}`);
+    expect(hits[0]!.headers["funil-assinatura"]).toBe(signAppWebhook(SECRET, hits[0]!.body, Math.floor(clock.now.getTime() / 1000)));
+    expect((await deliveriesOf(order.id))[0]).toMatchObject({ status: "delivered", attempts: 1, lastHttpStatus: 200 });
+  });
+
+  test("o endereço entregue à conexão é o conferido (nunca o nome): público passa, e nome que passa a resolver para IP privado é recusado sem conectar", async () => {
+    const s = await appStore({ connect: false });
+    await connectAppWebhook(s.storeId, "https://app.exemplo.test/hook", SECRET);
+    const answers = [[PUBLIC, "93.184.216.35"], ["10.0.0.1"]];
+    const seen: { host: string; address: string }[] = [];
+    setAppWebhookForTests({
+      allowLoopback: false,
+      now: () => clock.now,
+      lookup: async () => answers.shift() ?? [],
+      transport: async ({ url, address }) => {
+        seen.push({ host: url.hostname, address });
+        return 500;
+      },
+    });
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    await runNotices();
+    expect(seen).toEqual([{ host: "app.exemplo.test", address: PUBLIC }]);
+    // Na nova tentativa o nome "mudou" para a rede interna: recusado antes de conectar.
+    advance(60);
+    await runNotices();
+    expect(seen).toHaveLength(1);
+    expect((await deliveriesOf(order.id))[0]).toMatchObject({ status: "pending", attempts: 2, lastHttpStatus: null });
   });
 
   test("sem a variável de teste: só https em endereço público; loopback, rede privada, credencial na URL e nome que não resolve são recusados", async () => {
@@ -454,6 +510,70 @@ describe("destino do aviso (o funil nunca fala com host privado)", () => {
   });
 });
 
+describe("ordem por pedido", () => {
+  test("confirmação com 500 e reembolso em seguida: o reembolso espera; o app recebe confirmado antes de reembolsado, com sequência crescente", async () => {
+    const s = await appStore();
+    app.plan(s.path, [500]);
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    await runNotices();
+    await transition(s.storeId, order.id, "refunded");
+    await runNotices();
+    // O reembolso não saiu: a confirmação ainda vai tentar de novo (em 60 s). Não contou tentativa.
+    expect(app.hitsOf(s.path)).toHaveLength(1);
+    const [confirmed, refunded] = await deliveriesOf(order.id);
+    expect([confirmed!.eventType, confirmed!.sequence, confirmed!.status, confirmed!.attempts]).toEqual(["pagamento.confirmado", 1, "pending", 1]);
+    expect([refunded!.eventType, refunded!.sequence, refunded!.status, refunded!.attempts]).toEqual(["pagamento.reembolsado", 2, "pending", 0]);
+    // Volta a olhar logo depois da próxima tentativa da confirmação; um job só (o que esperou terminou).
+    const waiting = (await noticeJobs(refunded!.id)).filter((j) => j.status === "queued");
+    expect(waiting.map((j) => j.runAt)).toEqual([new Date(clock.now.getTime() + 61_000)]);
+    advance(APP_WEBHOOK_ORDER_WAIT_SECONDS);
+    await runNotices();
+    expect(app.hitsOf(s.path)).toHaveLength(1);
+    advance(60 - APP_WEBHOOK_ORDER_WAIT_SECONDS);
+    await runNotices();
+    const hits = app.hitsOf(s.path).map(bodyOf);
+    expect(hits.map((b) => [b.tipo, b.dados.sequencia])).toEqual([
+      ["pagamento.confirmado", 1],
+      ["pagamento.confirmado", 1],
+      ["pagamento.reembolsado", 2],
+    ]);
+    expect((await deliveriesOf(order.id)).map((d) => [d.status, d.attempts])).toEqual([
+      ["delivered", 2],
+      ["delivered", 1],
+    ]);
+    expect((await noticeJobs(refunded!.id)).filter((j) => j.status === "queued")).toHaveLength(0);
+  });
+
+  test("job do reembolso reivindicado antes do da confirmação (fila fora de ordem): ainda assim a confirmação chega primeiro", async () => {
+    const s = await paidAppOrder();
+    await transition(s.storeId, s.order.id, "refunded");
+    const [confirmed] = await deliveriesOf(s.order.id);
+    // A confirmação fica para depois na fila; o reembolso já está vencido.
+    await t.ownerDb
+      .update(job)
+      .set({ runAt: new Date(clock.now.getTime() + 10_000) })
+      .where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    await runNotices();
+    expect(app.hitsOf(s.path)).toHaveLength(0);
+    advance(10);
+    await runNotices();
+    expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual(["pagamento.confirmado", "pagamento.reembolsado"]);
+  });
+
+  test("confirmação que falhou de vez não segura o reembolso para sempre; reenviada depois, chega com a sequência antiga", async () => {
+    const s = await appStore();
+    const order = await seedAppOrder(s.storeId, s.offer.id);
+    await transition(s.storeId, order.id, "paid");
+    await transition(s.storeId, order.id, "refunded");
+    const [confirmed] = await deliveriesOf(order.id);
+    await t.ownerDb.update(job).set({ status: "done" }).where(and(eq(job.type, "notify_app"), sql`${job.payload}->>'deliveryId' = ${confirmed!.id}`));
+    await t.ownerDb.update(appWebhookDelivery).set({ status: "failed", attempts: 7 }).where(eq(appWebhookDelivery.id, confirmed!.id));
+    await runNotices();
+    expect(app.hitsOf(s.path).map((h) => [bodyOf(h).tipo, bodyOf(h).dados.sequencia])).toEqual([["pagamento.reembolsado", 2]]);
+  });
+});
+
 describe("reembolso, contestação e estorno parcial", () => {
   const types = async (orderId: string) => (await deliveriesOf(orderId)).map((d) => d.eventType);
 
@@ -469,7 +589,8 @@ describe("reembolso, contestação e estorno parcial", () => {
       appEventId(s.order.id, "pagamento.confirmado", 0),
       appEventId(s.order.id, "pagamento.reembolsado", 0),
     ]);
-    expect(bodyOf(hits[1]!).dados).toEqual(bodyOf(hits[0]!).dados);
+    // Mesmos dados do pedido; só a sequência anda.
+    expect(bodyOf(hits[1]!).dados).toEqual({ ...bodyOf(hits[0]!).dados, sequencia: 2 });
   });
 
   test("contestação, contestação revertida e nova contestação: contestado, restabelecido e contestado com outro id", async () => {
@@ -488,17 +609,18 @@ describe("reembolso, contestação e estorno parcial", () => {
         ] as [AppEventType, number][]
       ).map(([type, n]) => [type, appEventId(s.order.id, type, n)]),
     );
+    expect(ds.map((d) => d.sequence)).toEqual([1, 2, 3, 4]);
     expect(await jobsOf(s.order.id, "revoke_downloads")).toHaveLength(0);
     expect(await jobsOf(s.order.id, "restore_downloads")).toHaveLength(0);
     // Contestação revertida não é venda nova: Meta e aviso de venda saíram uma vez só.
     expect(await jobsOf(s.order.id, "meta_event")).toHaveLength(1);
     expect(await jobsOf(s.order.id, "notify_seller")).toHaveLength(1);
     await runNotices();
-    expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual([
-      "pagamento.confirmado",
-      "pagamento.contestado",
-      "pagamento.restabelecido",
-      "pagamento.contestado",
+    expect(app.hitsOf(s.path).map((h) => [bodyOf(h).tipo, bodyOf(h).dados.sequencia])).toEqual([
+      ["pagamento.confirmado", 1],
+      ["pagamento.contestado", 2],
+      ["pagamento.restabelecido", 3],
+      ["pagamento.contestado", 4],
     ]);
   });
 
@@ -539,6 +661,77 @@ describe("reembolso, contestação e estorno parcial", () => {
     await runNotices();
     const partials = app.hitsOf(path).map(bodyOf).filter((b) => b.tipo === "pagamento.reembolso_parcial");
     expect(partials.map((b) => b.dados.valor_estornado_centavos)).toEqual([300, 500]);
+  });
+
+  test("300 e depois 500 antes de qualquer envio: dois eventos, com 300 e com 500 (o valor é o da ocorrência, não o do envio); a retentativa repete o valor", async () => {
+    const fake = createFakeAsaas();
+    const shop = await seedAsaasStore(fake);
+    const path = `/hook/${++seq}`;
+    await connectAppWebhook(shop.storeId, `${app.base}${path}`, SECRET);
+    // confirmado ok; primeiro parcial falha uma vez e é reenviado.
+    app.plan(path, [200, 500]);
+    const order = await newAsaasOrder(shop.storeId, shop.offerId);
+    await startAsaasPix({ storeId: shop.storeId }, order.id);
+    await makeAppOrder(shop.storeId, shop.offerId, order.id);
+    const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    const id = pay!.providerId!;
+    const hook = (event: string) => handleAsaasWebhook(shop.storeId, new Headers({ "asaas-access-token": shop.webhookToken }), { event, payment: { id } });
+    fake.setStatus(id, "RECEIVED");
+    await hook("PAYMENT_RECEIVED");
+    fake.partialRefund(id, 3);
+    await hook("PAYMENT_PARTIALLY_REFUNDED");
+    fake.partialRefund(id, 2);
+    await hook("PAYMENT_PARTIALLY_REFUNDED");
+    expect((await deliveriesOf(order.id)).map((d) => [d.eventType, d.sequence, d.refundedCents])).toEqual([
+      ["pagamento.confirmado", 1, null],
+      ["pagamento.reembolso_parcial", 2, 300],
+      ["pagamento.reembolso_parcial", 3, 500],
+    ]);
+    await runNotices();
+    advance(60);
+    await runNotices();
+    const partials = app.hitsOf(path).map(bodyOf).filter((b) => b.tipo === "pagamento.reembolso_parcial");
+    expect(partials.map((b) => [b.dados.sequencia, b.dados.valor_estornado_centavos])).toEqual([
+      [2, 300],
+      [2, 300],
+      [3, 500],
+    ]);
+  });
+
+  test("reconsulta fora de ordem com valor menor (500 e depois 300) ou igual: nenhum evento novo", async () => {
+    const fake = createFakeAsaas();
+    const shop = await seedAsaasStore(fake);
+    const order = await newAsaasOrder(shop.storeId, shop.offerId);
+    await startAsaasPix({ storeId: shop.storeId }, order.id);
+    await makeAppOrder(shop.storeId, shop.offerId, order.id);
+    const [pay] = await t.ownerDb.select().from(payment).where(eq(payment.orderId, order.id));
+    const id = pay!.providerId!;
+    const hook = () => handleAsaasWebhook(shop.storeId, new Headers({ "asaas-access-token": shop.webhookToken }), { event: "PAYMENT_UPDATED", payment: { id } });
+    fake.setStatus(id, "RECEIVED");
+    await hook();
+    const refunds = (list: number[]) => void (fake.payments.get(id)!.refunds = list.map((value) => ({ status: "DONE", value })));
+    const partialCents = async () => (await deliveriesOf(order.id)).filter((d) => d.eventType === "pagamento.reembolso_parcial").map((d) => d.refundedCents);
+    refunds([5]);
+    await hook();
+    expect(await partialCents()).toEqual([500]);
+    // A resposta antiga do Asaas (só os 3,00 do primeiro estorno) chega depois: ignorada.
+    refunds([3]);
+    await hook();
+    expect(await partialCents()).toEqual([500]);
+    // E a de novo com 5,00 (o valor "voltou" ao que já foi avisado): também não.
+    refunds([5]);
+    await hook();
+    expect(await partialCents()).toEqual([500]);
+    refunds([5, 1]);
+    await hook();
+    expect(await partialCents()).toEqual([500, 600]);
+    // Direto no registro: menor ou igual ao já avisado não cria; sem valor é erro de quem chama.
+    const direct = (cents?: number) =>
+      withStore(shop.storeId, (tx) => enqueueAppNotice(tx, shop.storeId, order.id, "pagamento.reembolso_parcial", cents === undefined ? {} : { refundedCents: cents }));
+    expect(await direct(600)).toBe(false);
+    expect(await direct(1)).toBe(false);
+    await expect(direct()).rejects.toThrow("reembolso parcial sem o valor devolvido");
+    expect(await partialCents()).toEqual([500, 600]);
   });
 
   test("estorno parcial de pedido de download não avisa app nenhum (regressão)", async () => {
@@ -607,6 +800,29 @@ describe("apps.resendNotice (Reenviar aviso ao app)", () => {
     await runNotices();
     expect(app.hitsOf(s.path)).toHaveLength(3);
     expect((await deliveriesOf(order.id))[0]).toMatchObject({ status: "delivered", attempts: 1, lastHttpStatus: 200 });
+  });
+
+  test("job de outra loja com o mesmo aviso no payload não é adiantado nem conta como envio em andamento", async () => {
+    const s = await paidAppOrder();
+    await runNotices();
+    const other = await appStore();
+    const [d] = await deliveriesOf(s.order.id);
+    const far = new Date(clock.now.getTime() + 86_400_000);
+    const [queued] = await t.ownerDb.insert(job).values({ storeId: other.storeId, type: "notify_app", payload: { deliveryId: d!.id }, runAt: far }).returning({ id: job.id });
+    const [running] = await t.ownerDb
+      .insert(job)
+      .values({ storeId: other.storeId, type: "notify_app", payload: { deliveryId: d!.id }, status: "running", lockedAt: new Date(), runAt: far })
+      .returning({ id: job.id });
+    // Com o filtro de loja o job "rodando" da outra loja não bloqueia o reenvio, e o agendado dela não é tocado.
+    expect(await runAction(resendAppNotice, panelCall(s.storeId), { orderId: s.order.id })).toEqual({ orderId: s.order.id, queued: true });
+    const jobs = await noticeJobs(d!.id);
+    expect(jobs.find((j) => j.id === queued!.id)).toMatchObject({ status: "queued", runAt: far, storeId: other.storeId });
+    expect(jobs.find((j) => j.id === running!.id)).toMatchObject({ status: "running", storeId: other.storeId });
+    const own = jobs.filter((j) => j.storeId === s.storeId && j.status === "queued");
+    expect(own).toHaveLength(1);
+    await runNotices();
+    expect(app.hitsOf(s.path)).toHaveLength(2);
+    await t.ownerDb.delete(job).where(eq(job.id, running!.id));
   });
 
   test("pedido sem aviso (download ou app ainda não pago) e pedido de outra loja: recusados; leitor não reenvia", async () => {
@@ -696,5 +912,57 @@ describe("cartão aprovado pelo serviço de cartão (papel `card` do banco, que 
     await runNotices();
     expect(app.hitsOf(s.path).map((h) => bodyOf(h).tipo)).toEqual(["pagamento.confirmado"]);
     expect(bodyOf(app.hitsOf(s.path)[0]!).dados.metodo).toBe("cartao");
+  });
+
+  const runDeliveries = () => runDueJobs({ deliver_order: getHandlers().deliver_order! }, 50, () => clock.now, { types: ["deliver_order"] });
+  const asCard = async <T>(fn: () => Promise<T>): Promise<T> => {
+    await setDbForTests({ appUrl: t.cardUrl, ownerUrl: t.url });
+    try {
+      return await fn();
+    } finally {
+      await setDbForTests({ appUrl: t.appUrl, ownerUrl: t.url });
+    }
+  };
+
+  test("cartão aprovado e reembolso antes do worker pegar o deliver_order: o app recebe confirmado e depois reembolsado", async () => {
+    const s = await appStore();
+    const order = await seedAppOrder(s.storeId, s.offer.id, { method: "card_asaas" });
+    await asCard(() => transition(s.storeId, order.id, "paid"));
+    expect(await deliveriesOf(order.id)).toHaveLength(0);
+    const [paid] = await t.ownerDb.select().from(orders).where(eq(orders.id, order.id));
+    // O reembolso (papel `app`) chega antes do worker: ele mesmo garante a confirmação, na frente.
+    await transition(s.storeId, order.id, "refunded");
+    expect((await deliveriesOf(order.id)).map((d) => [d.eventType, d.sequence])).toEqual([
+      ["pagamento.confirmado", 1],
+      ["pagamento.reembolsado", 2],
+    ]);
+    // O deliver_order atrasado não cria outra confirmação nem manda e-mail.
+    await runDeliveries();
+    expect(await deliveriesOf(order.id)).toHaveLength(2);
+    expect(await t.ownerDb.select().from(emailLog).where(eq(emailLog.orderId, order.id))).toHaveLength(0);
+    await runNotices();
+    const hits = app.hitsOf(s.path).map(bodyOf);
+    expect(hits.map((b) => [b.tipo, b.dados.sequencia])).toEqual([
+      ["pagamento.confirmado", 1],
+      ["pagamento.reembolsado", 2],
+    ]);
+    // A confirmação leva o instante do pagamento, mesmo criada depois do reembolso.
+    expect(hits[0]!.dados.pago_em).toBe(paid!.paidAt!.toISOString());
+  });
+
+  test("deliver_order de um pedido de app que já não está pago (reembolsado ou contestado) ainda cria a confirmação; nunca pago, não", async () => {
+    const s = await appStore();
+    for (const status of ["refunded", "disputed"] as const) {
+      const order = await seedAppOrder(s.storeId, s.offer.id, { method: "card_asaas" });
+      await asCard(() => transition(s.storeId, order.id, "paid"));
+      // Estado mudado por fora da máquina (o pior caso: nada garantiu a confirmação antes do worker).
+      await t.ownerDb.update(orders).set({ status }).where(eq(orders.id, order.id));
+      await runDeliveries();
+      expect([status, (await deliveriesOf(order.id)).map((d) => [d.eventType, d.sequence, d.status])]).toEqual([status, [["pagamento.confirmado", 1, "pending"]]]);
+    }
+    const never = await seedAppOrder(s.storeId, s.offer.id, { method: "card_asaas", status: "expired" });
+    await t.ownerDb.insert(job).values({ storeId: s.storeId, type: "deliver_order", payload: { orderId: never.id } });
+    await runDeliveries();
+    expect(await deliveriesOf(never.id)).toHaveLength(0);
   });
 });
