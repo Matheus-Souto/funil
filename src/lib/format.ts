@@ -100,3 +100,11 @@ export function parseBrl(text: string): number | null {
 
 /** 990 -> "9,90" (campo de preço). */
 export const centsToInput = (cents: number): string => brl(cents).replace("R$ ", "");
+
+/** Pontos-base inteiros em porcentagem, sem ponto flutuante: 2500 -> "25%"; 3333 -> "33,33%"; 50 -> "0,5%"; nulo -> "—". */
+export function bpPercent(bp: number | null): string {
+  if (bp === null) return "—";
+  const whole = Math.floor(bp / 100);
+  const frac = String(bp % 100).padStart(2, "0").replace(/0+$/, "");
+  return `${whole}${frac ? `,${frac}` : ""}%`;
+}

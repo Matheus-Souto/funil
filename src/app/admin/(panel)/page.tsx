@@ -8,8 +8,8 @@ import { listOffers } from "@/lib/catalog/offers";
 import { listProducts } from "@/lib/catalog/products";
 import { connectionsStatus } from "@/lib/connections";
 import { cardServiceConfigured, env } from "@/lib/env";
-import { brl } from "@/lib/format";
-import { leadWindowCovered, metricsBreakdown, metricsSummary } from "@/lib/metrics";
+import { bpPercent, brl } from "@/lib/format";
+import { leadWindowCovered, metricsBreakdown, metricsHasAppOffer, metricsSummary, metricsTrials, type TrialsSummary } from "@/lib/metrics";
 import { METHOD_LABEL, type OrderMethod } from "@/lib/orders/labels";
 import { orderCounts } from "@/lib/orders/panel";
 import { CARD_SETUP_NOTICE, cardSetupNoticeNeeded } from "@/lib/payments/card-messages";
@@ -18,6 +18,7 @@ import { getStoreSettings } from "@/lib/store-settings";
 import { Art, Kpi, Notice, PageHead, deltaOf } from "../blocks";
 import { DonutChart, FunnelChart, RankChart, RevenueChart } from "../charts";
 import { MAX_RANGE_DAYS, parseDashboardRange } from "../date-range";
+import { AppTrialsTable } from "./app-trials-table";
 import { RangePicker } from "./range-picker";
 import { CreditCard, QrCode, Zap } from "lucide-react";
 import { PIcon } from "../icons";
@@ -49,8 +50,11 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   const cur = { from: range.from, to: range.to };
   const lifetime = await runAction(metricsSummary, call, { from: new Date(0), to: now });
   const id = await getPanelIdentity(panel);
+  // Testes do app: só em loja com oferta de app ativa (a loja de PDFs não muda).
+  const trials = (await runAction(metricsHasAppOffer, call, {})).hasAppOffer ? await runAction(metricsTrials, call, cur) : null;
 
-  if (lifetime.orders === 0 && lifetime.views === 0) return <EmptyOverview call={call} storeName={id.storeName} />;
+  // Loja de app com testes e ainda sem visita ao checkout: mostra o painel (com os testes), não os primeiros passos.
+  if (lifetime.orders === 0 && lifetime.views === 0 && !trials?.trials) return <EmptyOverview call={call} storeName={id.storeName} />;
 
   const m = await runAction(metricsSummary, call, cur);
   const prevRange = range.prev;
@@ -60,6 +64,7 @@ export default async function Overview({ searchParams }: { searchParams: Promise
   // Contatos são apagados 30 dias depois da captura: um período que começa antes disso só conta os que sobraram.
   const leadsNote = leadWindowCovered(range.from, now) ? undefined : "Só os últimos 30 dias (contatos são apagados depois disso).";
   const b = await runAction(metricsBreakdown, call, cur);
+  const prevTrials = trials ? await runAction(metricsTrials, call, prevRange) : null;
   const pending = hasPermission(role, "orders.read") ? (await runAction(orderCounts, call, {})).pendingManual : 0;
   const alerts = hasPermission(role, "connections.read") ? await runAction(listAlerts, call, {}) : null;
   const failedDeliveries = alerts?.failedDeliveries ?? (hasPermission(role, "orders.read") ? await runAction(listDeliveryFailures, call, {}) : []);
@@ -165,6 +170,8 @@ export default async function Overview({ searchParams }: { searchParams: Promise
             />
           </section>
         ) : null}
+
+        {trials && prevTrials ? <AppTrials cur={trials} prev={prevTrials} compare={range.compare} /> : null}
 
         <div className={`${s.splitWide} ${s.splitStretch}`}>
           <section className={`${s.card} ${s.funnelCard}`}>
@@ -272,6 +279,26 @@ export default async function Overview({ searchParams }: { searchParams: Promise
         </div>
       </div>
     </>
+  );
+}
+
+/** Testes do app → pagantes no período (loja com oferta de app). Conversão = pagantes dos testes do período / testes. */
+function AppTrials({ cur, prev, compare }: { cur: TrialsSummary; prev: TrialsSummary; compare?: string }) {
+  return (
+    <section className={s.stack} aria-label="Testes do app no período">
+      <div className={s.grid3}>
+        <Kpi label="Testes iniciados" value={String(cur.trials)} delta={deltaOf(cur.trials, prev.trials)} compare={compare} />
+        <Kpi label="Pagantes" value={String(cur.paying)} delta={deltaOf(cur.paying, prev.paying)} compare={compare} note="Contas desses testes que já pagaram." />
+        <Kpi label="Conversão teste → pagante" value={bpPercent(cur.conversionBp)} />
+      </div>
+      <section className={`${s.card} ${s.cardFlush}`} aria-labelledby="testes-campanha">
+        <header className={s.connGroupHead}>
+          <Art name="funil" size={32} className={s.connGroupArt} />
+          <h2 id="testes-campanha">Testes do app por campanha</h2>
+        </header>
+        <AppTrialsTable rows={cur.byCampaign} />
+      </section>
+    </section>
   );
 }
 

@@ -14,6 +14,7 @@ import { ownerDb } from "@/lib/db/client";
 import { approvalRequest, auditLog, checkoutLead, mcpToken, orders, recoveryEmail } from "@/lib/db/schema";
 import { APPROVAL_PREFIX, callMcpTool, MCP_EXCLUDED, mcpTools, type McpTool } from "@/lib/mcp/tools";
 import { getOrderDetail } from "@/lib/orders/panel";
+import { seedAppOffer, seedAppOrder, seedAppTrial } from "./app-fixtures";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
@@ -249,7 +250,7 @@ describe("classificação", () => {
       mcpTools("reader")
         .map((x) => x.name)
         .sort(),
-    ).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    ).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_hasAppOffer", "metrics_summary", "metrics_trials", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
   });
 
   test("traffic não lista pedidos nem ações de connections.write", () => {
@@ -585,6 +586,34 @@ describe("callMcpTool", () => {
       expect(text).not.toContain("@");
       for (const secret of [email, sha(email), "recupera.sigiloso"]) expect(text).not.toContain(secret);
     }
+  });
+
+  test("metrics_trials pelo MCP: só números e campanha; sem conta nem hashes; campanha com cara de dado pessoal vira (oculto)", async () => {
+    const m = await seedPanelStore("Testes do app MCP");
+    const app = await seedAppOffer(m.storeId);
+    const accounts = ["conta-sigilosa-1", "conta-sigilosa-2", "conta-sigilosa-3"];
+    await seedAppTrial(m.storeId, { account: accounts[0]!, email: "teste.sigiloso@exemplo.com", campaign: "Natal | Reels" });
+    await seedAppTrial(m.storeId, { account: accounts[1]!, campaign: "maria.silva@gmail.com" });
+    await seedAppTrial(m.storeId, { account: accounts[2]! });
+    await seedAppOrder(m.storeId, { offerId: app.id, account: accounts[1]!, totalCents: 29_900 });
+    const range = { from: new Date(Date.now() - 86_400_000).toISOString(), to: new Date(Date.now() + 60_000).toISOString() };
+    for (const role of ["reader", "owner"] as const) {
+      const out = (await callMcpTool(tool(role, "metrics_trials"), call(m.storeId, role), range)) as Record<string, unknown>;
+      expect(out).toEqual({
+        trials: 3,
+        paying: 1,
+        conversionBp: 3333,
+        byCampaign: [
+          { campaign: "(oculto)", trials: 1, paying: 1, conversionBp: 10000, revenueCents: 29_900 },
+          { campaign: "(sem campanha)", trials: 1, paying: 0, conversionBp: 0, revenueCents: 0 },
+          { campaign: "Natal | Reels", trials: 1, paying: 0, conversionBp: 0, revenueCents: 0 },
+        ],
+      });
+      const text = JSON.stringify(out);
+      const sha = (v: string) => createHash("sha256").update(v).digest("hex");
+      for (const secret of [...accounts, ...accounts.map(sha), "maria", "@", "sigiloso", "account", "Hash"]) expect([secret, text.includes(secret)]).toEqual([secret, false]);
+    }
+    expect(tool("owner", "metrics_trials").inputSchema).toMatchObject({ type: "object" });
   });
 
   test("token owner chamando leads_list pelo callMcpTool → forbidden (ferramenta montada à mão); o contato não sai", async () => {

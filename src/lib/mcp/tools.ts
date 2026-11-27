@@ -10,7 +10,7 @@ import { hasPermission, type Permission, type Role } from "@/lib/actions/permiss
 import { registry } from "@/lib/actions/registry";
 import type { OfferView } from "@/lib/catalog/offers";
 import type { CouponView } from "@/lib/coupons/actions";
-import { RECOVERY_CASES, type RecoveryCase, type metricsSummary } from "@/lib/metrics";
+import { byTrials, conversionBp, NO_CAMPAIGN, RECOVERY_CASES, type RecoveryCase, type metricsSummary, type TrialsCampaign, type TrialsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
 import { cleanTouch, HIDDEN_LABEL, labelOrHidden, safeLabel } from "@/lib/orders/report";
 import { maskEmailStrict, maskName, maskPhone } from "@/lib/privacy";
@@ -151,9 +151,34 @@ const projectOffer = (o: OfferView) => ({
   bump: o.bump ? { products: projectProducts(o.bump.products), priceCents: o.bump.priceCents, label: o.bump.label } : null,
 });
 
+/**
+ * Campanha digitada no link do anúncio: só passa se parecer rótulo (safeLabel); o resto soma numa linha "(oculto)", com
+ * a conversão recalculada. Nunca a conta nem hashes (lista branca de campos).
+ */
+function projectTrials(d: TrialsSummary) {
+  const merged = new Map<string, TrialsCampaign>();
+  for (const r of d.byCampaign) {
+    const campaign = r.campaign === NO_CAMPAIGN ? NO_CAMPAIGN : (safeLabel(r.campaign) ?? HIDDEN_LABEL);
+    const m = merged.get(campaign) ?? { campaign, trials: 0, paying: 0, conversionBp: null, revenueCents: 0 };
+    m.trials += r.trials;
+    m.paying += r.paying;
+    m.revenueCents += r.revenueCents;
+    merged.set(campaign, m);
+  }
+  return {
+    trials: d.trials,
+    paying: d.paying,
+    conversionBp: d.conversionBp,
+    byCampaign: [...merged.values()]
+      .map((m) => ({ campaign: m.campaign, trials: m.trials, paying: m.paying, conversionBp: conversionBp(m.paying, m.trials), revenueCents: m.revenueCents }))
+      .sort(byTrials),
+  };
+}
+
 const OVERRIDES: Record<string, Override> = {
   "offers.list": { project: (out) => (out as OfferView[]).map(projectOffer) },
   "offers.get": { project: (out) => projectOffer(out as OfferView) },
+  "metrics.trials": { project: (out) => projectTrials(out as TrialsSummary) },
   "coupons.list": { project: (out) => (out as CouponView[]).map(projectCoupon) },
   "coupons.get": { project: (out) => projectCoupon(out as CouponView) },
   "orders.list": {

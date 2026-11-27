@@ -3,10 +3,12 @@
 // Recuperação por e-mail (`recovery`): só números, contando os lembretes `sent` com `sent_at` no período. Recuperado =
 // existe pedido pago, contestado ou reembolsado da mesma oferta, de cliente com o mesmo sha256 do e-mail, com `paid_at`
 // entre `sent_at` e `sent_at + 7 dias`. Receita recuperada = soma de `total_cents` desses pedidos, cada pedido uma vez.
+// Testes do app (`metrics.trials`): testes com `started_at` no período; pagante = conta desses testes com pedido de app
+// `paid` (em qualquer data); receita = pedidos `paid` dessas contas com `paid_at` no período. Só números e a campanha.
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
-import { checkoutLead, checkoutView, coupon, orders } from "@/lib/db/schema";
+import { checkoutLead, checkoutView, coupon, offer, orders } from "@/lib/db/schema";
 import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
 import { WAS_PAID } from "@/lib/recovery/checks";
 import { RECOVERY } from "@/lib/recovery/rules";
@@ -241,5 +243,109 @@ export const metricsBreakdown = defineAction({
           .groupBy(orders.offerId, day);
 
     return { byDay: long ? [] : byDay, bumpPaid: b?.n ?? 0, byOffer: [...offers.values()], byOfferDay };
+  },
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Testes do app → pagantes
+
+export const PERIODS = Object.keys(PERIOD_DAYS) as [Period, ...Period[]];
+/** Campanha do teste sem `utm_campaign` no primeiro toque. */
+export const NO_CAMPAIGN = "(sem campanha)";
+/** Conversão em pontos-base inteiros (10000 = 100%), arredondada para baixo; sem testes, nulo. */
+export const conversionBp = (paying: number, trials: number): number | null => (trials === 0 ? null : Math.floor((paying * 10_000) / trials));
+
+/**
+ * `{ period }` (o mesmo do Dashboard) ou `{ from, to }`. Um objeto só (o MCP exige esquema `type: object`): exatamente
+ * uma das duas formas.
+ */
+const trialsInput = z
+  .object({ period: z.enum(PERIODS).optional(), from: z.coerce.date().optional(), to: z.coerce.date().optional() })
+  .superRefine((v, c) => {
+    const hasRange = v.from !== undefined || v.to !== undefined;
+    if (v.period !== undefined ? hasRange : v.from === undefined || v.to === undefined) {
+      c.addIssue({ code: "custom", message: "Informe period (hoje, 7d ou 30d) ou from e to", path: ["period"] });
+    } else if (v.from && v.to && v.from.getTime() > v.to.getTime()) {
+      c.addIssue({ code: "custom", message: "O início do período deve ser antes do fim", path: ["to"] });
+    }
+  });
+
+export interface TrialsCampaign {
+  campaign: string;
+  trials: number;
+  paying: number;
+  conversionBp: number | null;
+  revenueCents: number;
+}
+export interface TrialsSummary {
+  trials: number;
+  paying: number;
+  conversionBp: number | null;
+  byCampaign: TrialsCampaign[];
+}
+
+/** Mais testes primeiro; empate: mais pagantes, depois o nome. */
+export const byTrials = (a: TrialsCampaign, b: TrialsCampaign) => b.trials - a.trials || b.paying - a.paying || a.campaign.localeCompare(b.campaign);
+
+export const metricsTrials = defineAction({
+  name: "metrics.trials",
+  description:
+    "Testes do app no período (period: hoje, 7d ou 30d; ou from e to): testes iniciados (trials), contas desses testes que pagaram um pedido do app em qualquer data (paying), conversão em pontos-base (conversionBp: 2500 = 25%, nulo sem testes) e os mesmos números por campanha (utm_campaign do primeiro toque do teste ou \"(sem campanha)\"), com a receita em centavos dos pedidos pagos no período (revenueCents). Sem dados das contas.",
+  input: trialsInput,
+  permission: "metrics.read",
+  audit: false,
+  async run(ctx, input): Promise<TrialsSummary> {
+    const { from, to } = input.period ? periodRange(input.period) : { from: input.from!, to: input.to! };
+    capForToken(ctx, from, to);
+    const f = sql`${from.toISOString()}::timestamptz`;
+    const t = sql`${to.toISOString()}::timestamptz`;
+    // Uma linha por conta (app_trial é único por loja e conta). O RLS limita à loja; o store_id explícito amarra o
+    // pedido ao teste da mesma loja.
+    const rows = (await ctx.tx.execute(sql`
+      with tr as (
+        select store_id, account, coalesce(nullif(btrim(first_touch->>'utm_campaign'), ''), ${NO_CAMPAIGN}) as campaign
+        from app_trial
+        where started_at >= ${f} and started_at < ${t}
+      )
+      select tr.campaign,
+        count(*)::int as trials,
+        (count(*) filter (where exists (
+          select 1 from orders o where o.store_id = tr.store_id and o.app_account = tr.account and o.status = 'paid'
+        )))::int as paying,
+        coalesce(sum((
+          select sum(o.total_cents) from orders o
+          where o.store_id = tr.store_id and o.app_account = tr.account and o.status = 'paid' and o.paid_at >= ${f} and o.paid_at < ${t}
+        )), 0)::bigint as revenue
+      from tr
+      group by tr.campaign`)) as unknown as Array<{ campaign: string; trials: number; paying: number; revenue: string | number }>;
+
+    const byCampaign = rows
+      .map((r) => {
+        const trials = Number(r.trials);
+        const paying = Number(r.paying);
+        return { campaign: r.campaign, trials, paying, conversionBp: conversionBp(paying, trials), revenueCents: Number(r.revenue) };
+      })
+      .sort(byTrials)
+      .slice(0, 50);
+    const trials = rows.reduce((a, r) => a + Number(r.trials), 0);
+    const paying = rows.reduce((a, r) => a + Number(r.paying), 0);
+    return { trials, paying, conversionBp: conversionBp(paying, trials), byCampaign };
+  },
+});
+
+/** O Dashboard mostra o bloco "Testes do app" só em loja com oferta de app ativa (a loja de PDFs não muda). */
+export const metricsHasAppOffer = defineAction({
+  name: "metrics.hasAppOffer",
+  description: "A loja tem oferta de app ativa? (com oferta de app, metrics.trials traz os testes e pagantes do app)",
+  input: z.object({}),
+  permission: "metrics.read",
+  audit: false,
+  async run(ctx) {
+    const [row] = await ctx.tx
+      .select({ id: offer.id })
+      .from(offer)
+      .where(and(eq(offer.delivery, "app"), eq(offer.active, true)))
+      .limit(1);
+    return { hasAppOffer: row !== undefined };
   },
 });

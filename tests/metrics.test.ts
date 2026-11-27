@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { checkoutLead, offer, recoveryEmail } from "@/lib/db/schema";
-import { leadWindowCovered, metricsBreakdown, metricsSummary, periodRange } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsHasAppOffer, metricsSummary, metricsTrials, periodRange } from "@/lib/metrics";
+import { bpPercent } from "@/lib/format";
+import { seedAppOffer, seedAppOrder, seedAppTrial } from "./app-fixtures";
 import { createTestDb, type TestDb } from "./db";
 import { panelCall, seedOrder, seedPanelStore, seedViews } from "./panel-helpers";
 
@@ -271,6 +273,113 @@ describe("metrics.breakdown", () => {
       ].sort((x, y) => key(x).localeCompare(key(y))),
     );
     expect(b.byOfferDay.some((r) => r.offerId === other.offerId)).toBe(false);
+  });
+});
+
+describe("metrics.trials (teste do app → pagante)", () => {
+  const DAY = 24 * HOUR;
+  const ago = (ms: number) => new Date(Date.now() - ms);
+
+  test("4 testes no período e 1 pagante: conversionBp 2500; pagante de teste fora do período não conta", async () => {
+    const s = await seedPanelStore();
+    const app = await seedAppOffer(s.storeId);
+    for (const account of ["c1", "c2", "c3", "c4"]) await seedAppTrial(s.storeId, { account, startedAt: ago(2 * HOUR), campaign: "natal" });
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "c1", totalCents: 29_900 });
+    // Teste antigo (fora do período) que pagou agora: nem teste nem pagante do período.
+    await seedAppTrial(s.storeId, { account: "velho", startedAt: ago(10 * DAY), campaign: "natal" });
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "velho", totalCents: 49_900 });
+    const m = await runAction(metricsTrials, panelCall(s.storeId), window());
+    expect(m).toEqual({
+      trials: 4,
+      paying: 1,
+      conversionBp: 2500,
+      byCampaign: [{ campaign: "natal", trials: 4, paying: 1, conversionBp: 2500, revenueCents: 29_900 }],
+    });
+  });
+
+  test("pagante = conta com pedido app pago em qualquer data; pendente, reembolsado e pago antes do período só mudam a receita", async () => {
+    const s = await seedPanelStore();
+    const app = await seedAppOffer(s.storeId);
+    await seedAppTrial(s.storeId, { account: "a", startedAt: ago(HOUR) });
+    await seedAppTrial(s.storeId, { account: "b", startedAt: ago(HOUR) });
+    await seedAppTrial(s.storeId, { account: "c", startedAt: ago(HOUR) });
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "a", totalCents: 1_000, paidAt: ago(3 * DAY) }); // pago fora do período
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "a", totalCents: 2_000 }); // pacote extra no período
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "b", status: "pending" });
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "c", status: "refunded", totalCents: 5_000 });
+    const m = await runAction(metricsTrials, panelCall(s.storeId), window());
+    expect([m.trials, m.paying, m.conversionBp]).toEqual([3, 1, 3333]); // floor(1 * 10000 / 3)
+    expect(m.byCampaign).toEqual([{ campaign: "(sem campanha)", trials: 3, paying: 1, conversionBp: 3333, revenueCents: 2_000 }]);
+  });
+
+  test("agrupa por utm_campaign do primeiro toque, com \"(sem campanha)\"; ordem por testes", async () => {
+    const s = await seedPanelStore();
+    const app = await seedAppOffer(s.storeId);
+    const seed = async (account: string, campaign?: string) => seedAppTrial(s.storeId, { account, startedAt: ago(HOUR), ...(campaign ? { campaign } : {}) });
+    await seed("n1", "natal");
+    await seed("n2", "natal");
+    await seed("n3", "natal");
+    await seed("r1", "reels");
+    await seed("x1");
+    await seed("x2");
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "n2", totalCents: 29_900 });
+    await seedAppOrder(s.storeId, { offerId: app.id, account: "x1", totalCents: 9_900 });
+    const m = await runAction(metricsTrials, panelCall(s.storeId), window());
+    expect(m).toMatchObject({ trials: 6, paying: 2, conversionBp: 3333 });
+    expect(m.byCampaign).toEqual([
+      { campaign: "natal", trials: 3, paying: 1, conversionBp: 3333, revenueCents: 29_900 },
+      { campaign: "(sem campanha)", trials: 2, paying: 1, conversionBp: 5000, revenueCents: 9_900 },
+      { campaign: "reels", trials: 1, paying: 0, conversionBp: 0, revenueCents: 0 },
+    ]);
+  });
+
+  test("loja sem testes: conversionBp null e lista vazia; testes de outra loja não contam", async () => {
+    const a = await seedPanelStore("A");
+    const b = await seedPanelStore("B");
+    const app = await seedAppOffer(b.storeId);
+    await seedAppTrial(b.storeId, { account: "b1", startedAt: ago(HOUR) });
+    await seedAppOrder(b.storeId, { offerId: app.id, account: "b1" });
+    expect(await runAction(metricsTrials, panelCall(a.storeId), window())).toEqual({ trials: 0, paying: 0, conversionBp: null, byCampaign: [] });
+  });
+
+  test("aceita { period } (hoje, 7d, 30d) como o Dashboard; período e intervalo juntos ou nenhum → invalid_input", async () => {
+    const s = await seedPanelStore();
+    await seedAppTrial(s.storeId, { account: "p1", startedAt: ago(3 * DAY) });
+    await seedAppTrial(s.storeId, { account: "p2", startedAt: ago(20 * DAY) });
+    expect((await runAction(metricsTrials, panelCall(s.storeId), { period: "7d" })).trials).toBe(1);
+    expect((await runAction(metricsTrials, panelCall(s.storeId), { period: "30d" })).trials).toBe(2);
+    for (const bad of [{}, { period: "7d", ...window() }, { from: new Date() }, { period: "90d" }]) {
+      const err = await runAction(metricsTrials, panelCall(s.storeId), bad as never).catch((e: unknown) => e);
+      expect([bad, (err as ActionError).code]).toEqual([bad, "invalid_input"]);
+    }
+  });
+
+  test("permissão metrics.read (support não lê) e teto de 400 dias para token", async () => {
+    const s = await seedPanelStore();
+    const err = await runAction(metricsTrials, panelCall(s.storeId, "support"), window()).catch((e: unknown) => e);
+    expect((err as ActionError).code).toBe("forbidden");
+    const token = { storeId: s.storeId, actor: { kind: "token" as const, tokenId: randomUUID(), role: "reader" as const }, origin: "mcp" as const };
+    const long = await runAction(metricsTrials, token, { from: ago(401 * DAY), to: new Date() }).catch((e: unknown) => e);
+    expect((long as ActionError).code).toBe("invalid_input");
+  });
+});
+
+test("bpPercent: pontos-base inteiros em porcentagem sem ponto flutuante", () => {
+  expect([2500, 3333, 10000, 50, 5, 0, 1234, null].map(bpPercent)).toEqual(["25%", "33,33%", "100%", "0,5%", "0,05%", "0%", "12,34%", "—"]);
+});
+
+describe("metrics.hasAppOffer (bloco \"Testes do app\" no Dashboard)", () => {
+  test("só com oferta app ativa: loja de download, oferta app inativa e oferta app de outra loja não contam", async () => {
+    const s = await seedPanelStore();
+    const other = await seedPanelStore("Outra");
+    await seedAppOffer(other.storeId);
+    expect(await runAction(metricsHasAppOffer, panelCall(s.storeId), {})).toEqual({ hasAppOffer: false });
+    await seedAppOffer(s.storeId, { active: false });
+    expect(await runAction(metricsHasAppOffer, panelCall(s.storeId), {})).toEqual({ hasAppOffer: false });
+    await seedAppOffer(s.storeId);
+    expect(await runAction(metricsHasAppOffer, panelCall(s.storeId), {})).toEqual({ hasAppOffer: true });
+    const err = await runAction(metricsHasAppOffer, panelCall(s.storeId, "support"), {}).catch((e: unknown) => e);
+    expect((err as ActionError).code).toBe("forbidden");
   });
 });
 
