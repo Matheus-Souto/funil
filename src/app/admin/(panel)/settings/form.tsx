@@ -16,6 +16,7 @@ import { useLeaveGuard } from "../../leave-guard";
 import s from "../../panel.module.css";
 import { Live, useActionRunner } from "../../ui";
 import { updateSettingsAction } from "../actions";
+import { settingsPayload } from "./payload";
 import { SETTINGS_TABS, type SettingsTab } from "./tabs";
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -137,15 +138,7 @@ export function SettingsPanel({
         setSubmitted(JSON.stringify(f));
         void run
           .run(() =>
-            updateSettingsAction({
-              name: f.name.trim(),
-              notifyEmail: f.notifyEmail.trim() || null,
-              brandColor: f.color ? f.color.toUpperCase() : null,
-              leadCapture: f.leadCapture,
-              privacyEmail: f.privacyEmail.trim() || null,
-              recovery: f.recovery,
-              acceptCnpj: f.acceptCnpj,
-            }),
+            updateSettingsAction(settingsPayload(f, saved)),
           )
           .then((r) => {
             // Erro do servidor num campo de outra aba (ex.: "Conecte o e-mail da loja em Conexões" salvando da aba Loja):

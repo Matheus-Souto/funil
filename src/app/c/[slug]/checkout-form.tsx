@@ -15,6 +15,7 @@ import type { CheckoutMethod as Method, CheckoutOffer } from "@/lib/catalog/chec
 import { brl } from "@/lib/format";
 import { installmentsFor } from "@/lib/payments/installments";
 import { maskTaxId, normalizeBrMobile, onlyDigits, validEmail, validTaxId } from "@/lib/validation/br";
+import { docLabel as docLabelOf, emailHint, needsDocMessage, pixConfirmedText, productSubtitle } from "./texts";
 import s from "../../(design)/buyer.module.css";
 import { Icon, type IconName } from "../../(design)/icons";
 import { TrustSeals } from "../../(design)/shell";
@@ -137,11 +138,11 @@ function MethodOption({ value, current, onSelect, icon, title, sub }: { value: M
   );
 }
 
-function ProductCover({ small }: { small?: boolean }) {
+function ProductCover({ small, app }: { small?: boolean; app?: boolean }) {
   return (
     <div className={`${s.cover} ${small ? s.coverSm : ""}`} aria-hidden="true">
       <Icon name="book-open" size={20} />
-      <span className={s.coverTag}>PDF</span>
+      <span className={s.coverTag}>{app ? "App" : "PDF"}</span>
     </div>
   );
 }
@@ -302,7 +303,7 @@ export function CheckoutForm(props: {
   const maxInstallments = installmentsFor(offer.maxInstallments, total, { discounted: coupon.kind === "applied" });
   /** Loja que aceita CPF ou CNPJ (escritórios pagam pela empresa); sem a opção, só CPF. */
   const acceptCnpj = offer.acceptCnpj;
-  const docLabel = acceptCnpj ? "CPF ou CNPJ" : "CPF";
+  const docLabel = docLabelOf(acceptCnpj);
   const frameConfig = useRef<FrameConfig>({ totalCents: total, maxInstallments, brandColor, acceptCnpj });
   useEffect(() => {
     // Total novo (bump ligado ou desligado): o seletor de parcelas do iframe mostra o valor certo.
@@ -421,7 +422,8 @@ export function CheckoutForm(props: {
     if (r.needsCpf) {
       setNeedsCpf(true);
       setErrors({ cpf: `Informe o ${docLabel} para continuar.` });
-      setFormError(r.message);
+      // A mensagem do servidor não sabe da loja: o aviso usa o mesmo rótulo do campo (CPF ou CPF ou CNPJ).
+      setFormError(needsDocMessage(acceptCnpj));
       return;
     }
     const e: Partial<Record<FieldKey, string>> = {};
@@ -566,11 +568,11 @@ export function CheckoutForm(props: {
 
   const productRow = (small?: boolean): ReactNode => (
     <>
-      <ProductCover small={small} />
+      <ProductCover small={small} app={offer.delivery === "app"} />
       <div className={s.productText}>
         <p className={`${s.p0} ${s.muted} ${s.small}`}>Você está comprando</p>
         <p className={s.productTitle}>{offer.name}</p>
-        <p className={s.productSub}>{offer.includes ?? `${offer.productName} · PDF para baixar`}</p>
+        <p className={s.productSub}>{productSubtitle(offer)}</p>
       </div>
       <p className={`${s.productPrice} ${s.money}`}>{brl(offer.priceCents)}</p>
     </>
@@ -600,7 +602,7 @@ export function CheckoutForm(props: {
                 onChange={set("email")}
                 onBlur={() => captureLead("email")}
                 error={errors.email}
-                hint="É para este e-mail que enviamos o seu acesso."
+                hint={emailHint(offer.delivery)}
                 inputMode="email"
                 autoComplete="email"
                 maxLength={254}
@@ -685,7 +687,7 @@ export function CheckoutForm(props: {
                 <Icon name={asaasPix || needsCpf ? "qr-code" : "info"} />
                 {asaasPix || needsCpf ? (
                   <span>
-                    Na próxima tela aparecem o QR Code e o código <b>copia e cola</b>. Assim que o banco confirmar, o acesso chega no seu e-mail.
+                    Na próxima tela aparecem o QR Code e o código <b>copia e cola</b>. {pixConfirmedText(offer.delivery)}
                   </span>
                 ) : (
                   <span>
