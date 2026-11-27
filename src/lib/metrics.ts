@@ -5,10 +5,13 @@
 // entre `sent_at` e `sent_at + 7 dias`. Receita recuperada = soma de `total_cents` desses pedidos, cada pedido uma vez.
 // Testes do app (`metrics.trials`): testes com `started_at` no período; pagante = conta desses testes com pedido de app
 // `paid` (em qualquer data); receita = pedidos `paid` dessas contas com `paid_at` no período. Só números e a campanha.
+// Testes sem pagamento são apagados com 179 dias (retenção): período que começa antes disso conta menos testes do que
+// houve e infla a conversão (`retentionCovered: false`).
 import { and, count, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { checkoutLead, checkoutView, coupon, offer, orders } from "@/lib/db/schema";
+import { TRIAL_RETENTION_SWEEP_DAYS } from "@/lib/apps/trials";
 import { LEAD_TTL_DAYS } from "@/lib/leads/capture";
 import { WAS_PAID } from "@/lib/recovery/checks";
 import { RECOVERY } from "@/lib/recovery/rules";
@@ -252,6 +255,15 @@ export const metricsBreakdown = defineAction({
 export const PERIODS = Object.keys(PERIOD_DAYS) as [Period, ...Period[]];
 /** Campanha do teste sem `utm_campaign` no primeiro toque. */
 export const NO_CAMPAIGN = "(sem campanha)";
+/** Até quantos dias atrás os testes do app estão todos no banco (o sweep apaga os sem pagamento depois disso). */
+export const TRIAL_WINDOW_DAYS = TRIAL_RETENTION_SWEEP_DAYS;
+/** O período começa dentro da retenção dos testes? `false` = testes e conversão incompletos (como `leadWindowCovered`). */
+export function trialWindowCovered(from: Date, now: Date = new Date()): boolean {
+  return from.getTime() >= now.getTime() - TRIAL_WINDOW_DAYS * DAY_MS;
+}
+/** Quantas campanhas `byCampaign` traz no máximo (as com mais testes). */
+const MAX_CAMPAIGNS = 50;
+
 /** Conversão em pontos-base inteiros (10000 = 100%), arredondada para baixo; sem testes, nulo. */
 export const conversionBp = (paying: number, trials: number): number | null => (trials === 0 ? null : Math.floor((paying * 10_000) / trials));
 
@@ -282,6 +294,8 @@ export interface TrialsSummary {
   paying: number;
   conversionBp: number | null;
   byCampaign: TrialsCampaign[];
+  /** `false`: o período começa antes da retenção dos testes (179 dias); testes e conversão contam menos do que houve. */
+  retentionCovered: boolean;
 }
 
 /** Mais testes primeiro; empate: mais pagantes, depois o nome. */
@@ -290,7 +304,7 @@ export const byTrials = (a: TrialsCampaign, b: TrialsCampaign) => b.trials - a.t
 export const metricsTrials = defineAction({
   name: "metrics.trials",
   description:
-    "Testes do app no período (period: hoje, 7d ou 30d; ou from e to): testes iniciados (trials), contas desses testes que pagaram um pedido do app em qualquer data (paying), conversão em pontos-base (conversionBp: 2500 = 25%, nulo sem testes) e os mesmos números por campanha (utm_campaign do primeiro toque do teste ou \"(sem campanha)\"), com a receita em centavos dos pedidos pagos no período (revenueCents). Sem dados das contas.",
+    "Testes do app no período (period: hoje, 7d ou 30d; ou from e to): testes iniciados (trials), contas desses testes que pagaram um pedido do app em qualquer data (paying), conversão em pontos-base (conversionBp: 2500 = 25%, nulo sem testes) e os mesmos números por campanha (utm_campaign do primeiro toque do teste ou \"(sem campanha)\"), com a receita em centavos dos pedidos pagos no período (revenueCents); byCampaign traz as 50 campanhas com mais testes (os totais contam todas). Testes que não viraram pagamento são apagados com 179 dias: período que começa antes disso conta menos testes do que houve e infla a conversão (retentionCovered: false). Sem dados das contas.",
   input: trialsInput,
   permission: "metrics.read",
   audit: false,
@@ -300,23 +314,26 @@ export const metricsTrials = defineAction({
     const f = sql`${from.toISOString()}::timestamptz`;
     const t = sql`${to.toISOString()}::timestamptz`;
     // Uma linha por conta (app_trial é único por loja e conta). O RLS limita à loja; o store_id explícito amarra o
-    // pedido ao teste da mesma loja.
+    // pedido ao teste da mesma loja. Pedidos pagos agregados por conta numa passada só (pagante = tem linha; receita =
+    // a parte paga no período).
     const rows = (await ctx.tx.execute(sql`
       with tr as (
         select store_id, account, coalesce(nullif(btrim(first_touch->>'utm_campaign'), ''), ${NO_CAMPAIGN}) as campaign
         from app_trial
         where started_at >= ${f} and started_at < ${t}
+      ), paid as (
+        select o.store_id, o.app_account,
+          coalesce(sum(o.total_cents) filter (where o.paid_at >= ${f} and o.paid_at < ${t}), 0) as revenue
+        from orders o
+        where o.status = 'paid' and o.app_account in (select account from tr)
+        group by o.store_id, o.app_account
       )
       select tr.campaign,
         count(*)::int as trials,
-        (count(*) filter (where exists (
-          select 1 from orders o where o.store_id = tr.store_id and o.app_account = tr.account and o.status = 'paid'
-        )))::int as paying,
-        coalesce(sum((
-          select sum(o.total_cents) from orders o
-          where o.store_id = tr.store_id and o.app_account = tr.account and o.status = 'paid' and o.paid_at >= ${f} and o.paid_at < ${t}
-        )), 0)::bigint as revenue
+        count(p.app_account)::int as paying,
+        coalesce(sum(p.revenue), 0)::bigint as revenue
       from tr
+      left join paid p on p.store_id = tr.store_id and p.app_account = tr.account
       group by tr.campaign`)) as unknown as Array<{ campaign: string; trials: number; paying: number; revenue: string | number }>;
 
     const byCampaign = rows
@@ -326,10 +343,10 @@ export const metricsTrials = defineAction({
         return { campaign: r.campaign, trials, paying, conversionBp: conversionBp(paying, trials), revenueCents: Number(r.revenue) };
       })
       .sort(byTrials)
-      .slice(0, 50);
+      .slice(0, MAX_CAMPAIGNS);
     const trials = rows.reduce((a, r) => a + Number(r.trials), 0);
     const paying = rows.reduce((a, r) => a + Number(r.paying), 0);
-    return { trials, paying, conversionBp: conversionBp(paying, trials), byCampaign };
+    return { trials, paying, conversionBp: conversionBp(paying, trials), byCampaign, retentionCovered: trialWindowCovered(from) };
   },
 });
 

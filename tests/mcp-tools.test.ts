@@ -608,6 +608,7 @@ describe("callMcpTool", () => {
           { campaign: "(sem campanha)", trials: 1, paying: 0, conversionBp: 0, revenueCents: 0 },
           { campaign: "Natal | Reels", trials: 1, paying: 0, conversionBp: 0, revenueCents: 0 },
         ],
+        retentionCovered: true,
       });
       const text = JSON.stringify(out);
       const sha = (v: string) => createHash("sha256").update(v).digest("hex");

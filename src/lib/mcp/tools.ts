@@ -172,6 +172,7 @@ function projectTrials(d: TrialsSummary) {
     byCampaign: [...merged.values()]
       .map((m) => ({ campaign: m.campaign, trials: m.trials, paying: m.paying, conversionBp: conversionBp(m.paying, m.trials), revenueCents: m.revenueCents }))
       .sort(byTrials),
+    retentionCovered: d.retentionCovered,
   };
 }
 

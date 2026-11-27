@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { checkoutLead, offer, recoveryEmail } from "@/lib/db/schema";
-import { leadWindowCovered, metricsBreakdown, metricsHasAppOffer, metricsSummary, metricsTrials, periodRange } from "@/lib/metrics";
+import { leadWindowCovered, metricsBreakdown, metricsHasAppOffer, metricsSummary, metricsTrials, periodRange, TRIAL_WINDOW_DAYS, trialWindowCovered } from "@/lib/metrics";
 import { bpPercent } from "@/lib/format";
 import { seedAppOffer, seedAppOrder, seedAppTrial } from "./app-fixtures";
 import { createTestDb, type TestDb } from "./db";
@@ -294,6 +294,7 @@ describe("metrics.trials (teste do app → pagante)", () => {
       paying: 1,
       conversionBp: 2500,
       byCampaign: [{ campaign: "natal", trials: 4, paying: 1, conversionBp: 2500, revenueCents: 29_900 }],
+      retentionCovered: true,
     });
   });
 
@@ -339,7 +340,7 @@ describe("metrics.trials (teste do app → pagante)", () => {
     const app = await seedAppOffer(b.storeId);
     await seedAppTrial(b.storeId, { account: "b1", startedAt: ago(HOUR) });
     await seedAppOrder(b.storeId, { offerId: app.id, account: "b1" });
-    expect(await runAction(metricsTrials, panelCall(a.storeId), window())).toEqual({ trials: 0, paying: 0, conversionBp: null, byCampaign: [] });
+    expect(await runAction(metricsTrials, panelCall(a.storeId), window())).toEqual({ trials: 0, paying: 0, conversionBp: null, byCampaign: [], retentionCovered: true });
   });
 
   test("aceita { period } (hoje, 7d, 30d) como o Dashboard; período e intervalo juntos ou nenhum → invalid_input", async () => {
@@ -352,6 +353,32 @@ describe("metrics.trials (teste do app → pagante)", () => {
       const err = await runAction(metricsTrials, panelCall(s.storeId), bad as never).catch((e: unknown) => e);
       expect([bad, (err as ActionError).code]).toEqual([bad, "invalid_input"]);
     }
+  });
+
+  test("retenção: testes sem pagamento somem com 179 dias; período que começa antes disso sai com retentionCovered false", async () => {
+    const s = await seedPanelStore();
+    expect(TRIAL_WINDOW_DAYS).toBe(179);
+    const now = new Date();
+    expect(trialWindowCovered(new Date(now.getTime() - 179 * DAY + 60_000), now)).toBe(true);
+    expect(trialWindowCovered(new Date(now.getTime() - 180 * DAY), now)).toBe(false);
+    expect((await runAction(metricsTrials, panelCall(s.storeId), { period: "30d" })).retentionCovered).toBe(true);
+    expect((await runAction(metricsTrials, panelCall(s.storeId), { from: ago(200 * DAY), to: new Date() })).retentionCovered).toBe(false);
+  });
+
+  test("a descrição avisa da retenção de 179 dias e do corte de 50 campanhas", () => {
+    expect(metricsTrials.description).toContain("179 dias");
+    expect(metricsTrials.description).toContain("retentionCovered");
+    expect(metricsTrials.description).toContain("50 campanhas");
+  });
+
+  test("mais de 50 campanhas: as 50 com mais testes; totais contam todas", async () => {
+    const s = await seedPanelStore();
+    for (let i = 0; i < 52; i++) await seedAppTrial(s.storeId, { account: `k${i}`, startedAt: ago(HOUR), campaign: `camp-${String(i).padStart(2, "0")}` });
+    await seedAppTrial(s.storeId, { account: "k-extra", startedAt: ago(HOUR), campaign: "camp-00" });
+    const m = await runAction(metricsTrials, panelCall(s.storeId), window());
+    expect(m.trials).toBe(53);
+    expect(m.byCampaign).toHaveLength(50);
+    expect(m.byCampaign[0]).toMatchObject({ campaign: "camp-00", trials: 2 });
   });
 
   test("permissão metrics.read (support não lê) e teto de 400 dias para token", async () => {
