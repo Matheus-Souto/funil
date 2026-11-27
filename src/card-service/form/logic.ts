@@ -11,7 +11,7 @@ import {
   type ResultStatus,
 } from "@/lib/card-frame/protocol";
 import { brl } from "@/lib/format";
-import { cardExpiryValid, onlyDigits, validCpf } from "@/lib/validation/br";
+import { cardExpiryValid, maskTaxId, onlyDigits, validTaxId } from "@/lib/validation/br";
 import { luhnValid, SANDBOX_TEST_CARD } from "@/lib/validation/card-number";
 
 /** Valores dos campos como estão na tela (com máscara). */
@@ -51,10 +51,8 @@ export const maskExpiry = (v: string): string => {
   return d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d;
 };
 export const maskCvv = (v: string): string => onlyDigits(v).slice(0, 4);
-export const maskCpf = (v: string): string => {
-  const d = onlyDigits(v).slice(0, 11);
-  return d.replace(/^(\d{3})(\d)/, "$1.$2").replace(/^(\d{3})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d{1,2})$/, ".$1-$2");
-};
+/** CPF; com a loja que aceita CNPJ (`config.acceptCnpj`), CPF ou CNPJ pelos dígitos. */
+export const maskCpf = (v: string, acceptCnpj = false): string => maskTaxId(v, acceptCnpj);
 export const maskCep = (v: string): string => {
   const d = onlyDigits(v).slice(0, 8);
   return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
@@ -62,7 +60,7 @@ export const maskCep = (v: string): string => {
 export const maskHolderName = (v: string): string => v.toUpperCase();
 
 /** Erros por campo, com as mensagens do checkout, na ordem do formulário. */
-export function fieldErrors(v: CardFields, holderOther: boolean, now: Date = new Date()): Partial<Record<FieldName, string>> {
+export function fieldErrors(v: CardFields, holderOther: boolean, now: Date = new Date(), acceptCnpj = false): Partial<Record<FieldName, string>> {
   const e: Partial<Record<FieldName, string>> = {};
   const num = onlyDigits(v.cardNumber);
   // O cartão de teste do sandbox falha no Luhn: passa aqui e o servidor decide (só a conexão sandbox o aceita).
@@ -73,15 +71,17 @@ export function fieldErrors(v: CardFields, holderOther: boolean, now: Date = new
     e.expiry = mm && yy && /^\d{2}$/.test(yy) && Number(mm) >= 1 && Number(mm) <= 12 ? "Cartão vencido." : "Use o formato MM/AA.";
   }
   if (!/^\d{3,4}$/.test(v.cvv)) e.cvv = "3 ou 4 números no verso.";
-  if (holderOther && !validCpf(onlyDigits(v.holderCpf))) e.holderCpf = "CPF do titular inválido.";
+  if (holderOther && !validTaxId(onlyDigits(v.holderCpf), acceptCnpj)) {
+    e.holderCpf = acceptCnpj ? "CPF ou CNPJ do titular inválido." : "CPF do titular inválido.";
+  }
   if (onlyDigits(v.cep).length !== 8) e.cep = "Confira o CEP.";
   if (!v.addressNumber.trim()) e.addressNumber = "Informe o número.";
   return e;
 }
 
 /** Nomes dos campos com erro, na ordem do formulário. */
-export function validateCardFields(v: CardFields, holderOther: boolean, now: Date = new Date()): string[] {
-  const e = fieldErrors(v, holderOther, now);
+export function validateCardFields(v: CardFields, holderOther: boolean, now: Date = new Date(), acceptCnpj = false): string[] {
+  const e = fieldErrors(v, holderOther, now, acceptCnpj);
   return FIELD_NAMES.filter((k) => e[k] !== undefined);
 }
 

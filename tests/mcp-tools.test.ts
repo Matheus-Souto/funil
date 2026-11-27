@@ -224,6 +224,25 @@ describe("classificação", () => {
     expect(JSON.stringify(list)).not.toMatch(/campoNovo|zuleica|storeId/);
   });
 
+  test("offers_list e offers_get: a projeção é a lista branca, com delivery e appCode (campo novo não sai)", () => {
+    const ref = { id: "p1", name: "PDF", deletedAt: null };
+    const row = {
+      id: "o1", slug: "start-anual", name: "Start anual", priceCents: 49_700, methods: ["pix", "card"], pixMode: "asaas",
+      maxInstallments: 1, delivery: "app", appCode: "start_anual", bumpPriceCents: null, bumpLabel: null, thankYouText: null,
+      pixelId: null, active: true, createdAt: new Date(0), products: [ref], bump: { products: [ref], priceCents: 100, label: null },
+      campoNovo: "zuleica@exemplo.com", storeId: "s",
+    };
+    const keys = [
+      "active", "appCode", "bump", "bumpLabel", "bumpPriceCents", "createdAt", "delivery", "id", "maxInstallments", "methods", "name",
+      "pixMode", "pixelId", "priceCents", "products", "slug", "thankYouText",
+    ];
+    const list = tool("reader", "offers_list").project([row]) as Record<string, unknown>[];
+    expect(Object.keys(list[0]!).sort()).toEqual(keys);
+    expect(list[0]).toMatchObject({ delivery: "app", appCode: "start_anual", products: [ref], bump: { products: [ref], priceCents: 100, label: null } });
+    expect(Object.keys(tool("reader", "offers_get").project(row) as object).sort()).toEqual(keys);
+    expect(JSON.stringify(list)).not.toMatch(/campoNovo|zuleica|storeId/);
+  });
+
   test("reader vê só catálogo, métricas e o relatório de vendas pagas", () => {
     expect(
       mcpTools("reader")

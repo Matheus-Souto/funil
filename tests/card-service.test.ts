@@ -36,7 +36,19 @@ type Order = Awaited<ReturnType<typeof newCardOrder>>;
 let t: TestDb;
 let shop: { storeId: string; offerId: string };
 let other: { storeId: string; offerId: string };
-let o: { approve: Order; decline: Order; foreign: Order; crossed: Order; logs: Order; logsDecline: Order; invalid: Order };
+let o: {
+  approve: Order;
+  decline: Order;
+  foreign: Order;
+  crossed: Order;
+  logs: Order;
+  logsDecline: Order;
+  invalid: Order;
+  cnpj: Order;
+  cnpjOff: Order;
+  cnpjBad: Order;
+};
+let fake: ReturnType<typeof createFakeAsaas>;
 
 const servers: Server[] = [];
 let payCalls = 0;
@@ -48,7 +60,7 @@ const spyPay = (async (call: { storeId: string }, input: CardPaymentInput) => {
 
 beforeAll(async () => {
   t = await createTestDb();
-  const fake = createFakeAsaas();
+  fake = createFakeAsaas();
   shop = await seedAsaasStore(fake, 1000);
   other = await seedAsaasStore(fake, 1000);
   const mk = (s: { storeId: string; offerId: string }) => newCardOrder(s.storeId, s.offerId, `c-${randomUUID()}@example.com`);
@@ -60,6 +72,9 @@ beforeAll(async () => {
     logs: await mk(shop),
     logsDecline: await mk(shop),
     invalid: await mk(shop),
+    cnpj: await mk(shop),
+    cnpjOff: await mk(shop),
+    cnpjBad: await mk(shop),
   };
   setAsaasFetchForTests(fake.fetch);
   // Daqui em diante o `db` do processo é o do papel `card`, como no serviço isolado.
@@ -84,8 +99,8 @@ async function start(over: Partial<CardServerOptions> = {}): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-const ticketFor = (storeId: string, order: Order, now = new Date()) =>
-  issueCardTicket({ storeId, orderId: order.id, publicId: order.publicId, totalCents: 2700, maxInstallments: 1 }, KEY, now);
+const ticketFor = (storeId: string, order: Order, now = new Date(), acceptCnpj = false) =>
+  issueCardTicket({ storeId, orderId: order.id, publicId: order.publicId, totalCents: 2700, maxInstallments: 1, ...(acceptCnpj ? { acceptCnpj } : {}) }, KEY, now);
 
 /** Corpo como o iframe de `/form/<storeId>` manda; `storeId` padrão: a loja `shop`. */
 function cardBody(order: Order, ticket: string, over: Record<string, unknown> = {}) {
@@ -346,6 +361,28 @@ describe("POST /api/card: cobrança com o payWithCard real (papel card)", () => 
     expect(res.status).toBe(200);
     expect((await res.json()).status).toBe("declined");
     expect(await orderStatus(o.decline.id)).toBe("pending");
+  }, HEAVY_TEST_MS);
+
+  test("titular com CNPJ: aceito só com o bilhete de loja que aceita CNPJ (o Asaas recebe o CNPJ); inválido ou sem a opção -> 400 no campo", async () => {
+    const CNPJ = "11222333000181"; // sintético, dígitos verificadores válidos
+    const base = await start();
+    const holder = (cpf: string) => ({ holder: { cpf, postalCode: "01310-100", addressNumber: "100" } });
+    const sentBefore = fake.calls.filter((c) => c.method === "POST" && c.path === "/payments").length;
+    for (const [order, ticket, cpf] of [
+      [o.cnpjOff, ticketFor(shop.storeId, o.cnpjOff), "11.222.333/0001-81"],
+      [o.cnpjBad, ticketFor(shop.storeId, o.cnpjBad, new Date(), true), "11.222.333/0001-82"],
+    ] as const) {
+      const res = await post(base, cardBody(order, ticket, holder(cpf)));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_input", message: "Dados de pagamento inválidos", fields: [["holder", "cpf"]] });
+      expect(await orderStatus(order.id)).toBe("pending");
+    }
+    expect(fake.calls.filter((c) => c.method === "POST" && c.path === "/payments").length).toBe(sentBefore);
+    const res = await post(base, cardBody(o.cnpj, ticketFor(shop.storeId, o.cnpj, new Date(), true), holder(CNPJ)));
+    expect(await res.json()).toEqual({ status: "approved" });
+    expect(await orderStatus(o.cnpj.id)).toBe("paid");
+    const sent = fake.calls.filter((c) => c.method === "POST" && c.path === "/payments").at(-1)!.body as { creditCardHolderInfo: { cpfCnpj: string } };
+    expect(sent.creditCardHolderInfo.cpfCnpj).toBe(CNPJ);
   }, HEAVY_TEST_MS);
 
   test("dados inválidos -> 400 só com os caminhos dos campos, sem ecoar o cartão", async () => {

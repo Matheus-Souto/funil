@@ -210,7 +210,8 @@ export function createCardServer(opts: CardServerOptions): Server {
     try {
       // O IP vem do servidor e sobrescreve qualquer `clientIp` enviado no corpo; a loja vem do bilhete.
       const input = { ...fields, clientIp: clientIpFrom(headers, opts.trustProxy) } as unknown as CardPaymentInput;
-      return json(res, 200, await pay({ storeId: check.storeId }, input));
+      // CNPJ no titular só com o bilhete de loja que aceita (assinado pelo app; o `card` não lê a tabela `store`).
+      return json(res, 200, await pay({ storeId: check.storeId, acceptCnpj: check.acceptCnpj === true }, input));
     } catch (e) {
       const { status, body: out } = cardErrorResponse(e);
       return json(res, status, out);

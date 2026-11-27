@@ -39,7 +39,7 @@ export type ResultStatus = "approved" | "declined" | "unknown" | "unavailable" |
 
 export type ParentMsg =
   /** `brandColor`: cor da loja (#rrggbb), aplicada no iframe como variável CSS. */
-  | { t: "funil-card:config"; totalCents: number; maxInstallments: number; brandColor?: string }
+  | { t: "funil-card:config"; totalCents: number; maxInstallments: number; brandColor?: string; acceptCnpj?: boolean }
   | { t: "funil-card:validate"; id: string }
   /** `turnstileToken`: desafio resolvido no checkout (o Turnstile nunca roda no documento do cartão). */
   | { t: "funil-card:pay"; id: string; orderPublicId: string; ticket: string; buyerCpf: string; turnstileToken?: string };
@@ -103,6 +103,12 @@ export function parseParentMsg(data: unknown): ParentMsg | null {
         if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) return null;
         out.brandColor = color;
       }
+      // A loja aceita CNPJ no titular: só muda o rótulo e a validação no iframe (quem decide é o bilhete assinado).
+      const cnpj = get(d, "acceptCnpj");
+      if (cnpj !== undefined) {
+        if (typeof cnpj !== "boolean") return null;
+        out.acceptCnpj = cnpj;
+      }
       return out;
     }
     case "funil-card:validate": {
@@ -114,7 +120,8 @@ export function parseParentMsg(data: unknown): ParentMsg | null {
       const orderPublicId = str(get(d, "orderPublicId"), 64);
       const ticket = str(get(d, "ticket"), 2048);
       const cpf = get(d, "buyerCpf");
-      const buyerCpf = typeof cpf === "string" && /^[0-9]{11}$/.test(cpf) ? cpf : null;
+      // CPF (11) ou CNPJ (14, na loja que aceita: o servidor confere pelo bilhete).
+      const buyerCpf = typeof cpf === "string" && /^([0-9]{11}|[0-9]{14})$/.test(cpf) ? cpf : null;
       if (id === null || orderPublicId === null || ticket === null || buyerCpf === null) return null;
       const out: Extract<ParentMsg, { t: "funil-card:pay" }> = { t: "funil-card:pay", id, orderPublicId, ticket, buyerCpf };
       const token = get(d, "turnstileToken");

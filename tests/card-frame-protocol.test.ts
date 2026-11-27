@@ -45,6 +45,16 @@ describe("parseParentMsg", () => {
     expect(c("100", 1)).toBeNull();
   });
 
+  test("CPF ou CNPJ: config com acceptCnpj (só booleano); buyerCpf aceita 11 ou 14 dígitos", () => {
+    const config = { t: `${P}config`, totalCents: 1000, maxInstallments: 1 };
+    expect(parseParentMsg({ ...config, acceptCnpj: true })).toEqual({ ...config, acceptCnpj: true } as never);
+    expect(parseParentMsg({ ...config, acceptCnpj: false })).toEqual({ ...config, acceptCnpj: false } as never);
+    expect(parseParentMsg(config)).toEqual(config as never);
+    for (const bad of ["true", 1, null]) expect(parseParentMsg({ ...config, acceptCnpj: bad })).toBeNull();
+    expect(parseParentMsg({ ...pay, buyerCpf: "11222333000181" })).toEqual({ ...pay, buyerCpf: "11222333000181" } as never);
+    for (const bad of ["1122233300018", "112223330001811", "11.222.333/0001-81"]) expect(parseParentMsg({ ...pay, buyerCpf: bad })).toBeNull();
+  });
+
   test("limites de strings do pay", () => {
     expect(parseParentMsg({ ...pay, id: "" })).toBeNull();
     expect(parseParentMsg({ ...pay, id: "a".repeat(65) })).toBeNull();

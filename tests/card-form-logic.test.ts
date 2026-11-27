@@ -61,6 +61,14 @@ describe("validateCardFields", () => {
     expect(validateCardFields({ ...ok, holderCpf: "529.982.247-25" }, true, NOW)).toEqual([]);
   });
 
+  test("CNPJ do titular só vale com a loja que aceita (config.acceptCnpj); a mensagem diz CPF ou CNPJ", () => {
+    const cnpj = { ...ok, holderCpf: "11.222.333/0001-81" };
+    expect(fieldErrors(cnpj, true, NOW).holderCpf).toBe("CPF do titular inválido.");
+    expect(validateCardFields(cnpj, true, NOW, true)).toEqual([]);
+    expect(fieldErrors({ ...ok, holderCpf: "11.222.333/0001-82" }, true, NOW, true).holderCpf).toBe("CPF ou CNPJ do titular inválido.");
+    expect(validateCardFields({ ...ok, holderCpf: "529.982.247-25" }, true, NOW, true)).toEqual([]);
+  });
+
   test("demais campos, na ordem do formulário, com as mensagens do checkout", () => {
     const e = fieldErrors({ cardNumber: "", holderName: " a ", expiry: "", cvv: "12", holderCpf: "", cep: "0131", addressNumber: " " }, true, NOW);
     expect(Object.keys(e)).toEqual(["cardNumber", "holderName", "expiry", "cvv", "holderCpf", "cep", "addressNumber"]);
@@ -669,6 +677,24 @@ describe("formulário no iframe", () => {
       fields: [["cardNumber"], ["cep"]],
     });
     expect(calls).toHaveLength(0);
+  });
+
+  test("loja que aceita CNPJ (config.acceptCnpj): rótulo e máscara de CPF ou CNPJ; o titular CNPJ vai no corpo", async () => {
+    const { fill, pay, next, calls, doc, w, send, type, input } = setup();
+    send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1, acceptCnpj: true });
+    expect(doc.querySelector('label[for="holderCpf"]')!.textContent).toBe("CPF ou CNPJ do titular do cartão");
+    const box = doc.getElementById("holderOther") as unknown as HTMLInputElement;
+    box.checked = true;
+    box.dispatchEvent(new w.Event("change", { bubbles: true }) as unknown as Event);
+    type("holderCpf", "11222333000181");
+    expect(input("holderCpf").value).toBe("11.222.333/0001-81");
+    fill({ holderCpf: "11.222.333/0001-81" });
+    pay("p1", { buyerCpf: "11222333000181" });
+    await next("funil-card:result");
+    expect((calls[0]!.body.holder as { cpf: string }).cpf).toBe("11222333000181");
+    // Config sem a opção (outra loja ou opção desligada): volta ao CPF.
+    send({ t: "funil-card:config", totalCents: 990, maxInstallments: 1 });
+    expect(doc.querySelector('label[for="holderCpf"]')!.textContent).toBe("CPF do titular do cartão");
   });
 
   test("titular é outra pessoa: CPF do titular do campo", async () => {

@@ -26,7 +26,7 @@ import { couponInvalid, isCouponRefusal, resolveCoupon } from "@/lib/coupons/app
 import { COUPON_INVALID_MESSAGE, COUPON_LIMIT_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
 import { COUPON, computeDiscount, normalizeCode } from "@/lib/coupons/rules";
 import { withStore } from "@/lib/db/client";
-import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
+import { checkoutView as checkoutViewTable, customer, offer, orderItem, orders, payment, product, store } from "@/lib/db/schema";
 import { getIntegration } from "@/lib/integrations";
 import { log } from "@/lib/log";
 import { BUMP_UNAVAILABLE, createOrder, orderParts, type Order } from "@/lib/orders/create";
@@ -40,13 +40,15 @@ import { checkRateLimit, hitRateLimit, ipRateKey, peekRateLimit } from "@/lib/pa
 import { resolveStore as defaultResolveStore, type ResolvedStore } from "@/lib/stores";
 import { enqueueInitiateCheckout, pixelIdFor } from "@/lib/tracking/meta";
 import { META_EVENT_ID_RE, touchRecordSchema } from "@/lib/tracking/touch";
-import { normalizeBrMobile, onlyDigits, validCpf, validEmail } from "@/lib/validation/br";
+import { normalizeBrMobile, onlyDigits, validEmail, validTaxId } from "@/lib/validation/br";
 
 export const CHECKOUT_LIMIT_MESSAGE = "Você já tem um Pix aguardando pagamento. Use o código anterior ou aguarde alguns minutos.";
 export const PIX_UNAVAILABLE_MESSAGE = "Pix indisponível no momento, tente em alguns minutos";
 export { CARD_UNAVAILABLE_MESSAGE };
 /** `ActionError("conflict", NEEDS_CPF)`: Pix manual esgotado; o formulário mostra o CPF e reenvia (vira Pix do Asaas). */
 export const NEEDS_CPF = "needs_cpf";
+/** Oferta de app aberta sem a sessão de pagamento do app: nenhum pedido sai sem a conta do app. */
+export const APP_SESSION_REQUIRED_MESSAGE = "Abra o pagamento pelo app";
 export const ASAAS_LIMIT_MESSAGE = "Muitas compras seguidas. Aguarde alguns minutos e tente de novo.";
 export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
 export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
@@ -134,11 +136,22 @@ const priceChanged = (totalCents: number) => new ActionError("conflict", PRICE_C
 
 const cpfError = (message: string) => new ActionError("invalid_input", message, [{ path: ["customer", "cpf"], message }]);
 
-/** CPF obrigatório e válido (pagamento pelo Asaas). */
-function requireCpf(cpf: string | undefined): string {
-  if (!cpf) throw cpfError("Informe o CPF");
-  if (!validCpf(cpf)) throw cpfError("CPF inválido. Confira os 11 números.");
-  return cpf;
+/**
+ * Documento obrigatório e válido (pagamento pelo Asaas): CPF; CNPJ também na loja com `accept_cnpj` (escritórios pagam
+ * pela empresa). Recebe só dígitos (a entrada já passou por `onlyDigits`) e devolve o documento.
+ */
+export function requireTaxId(doc: string | undefined, opts: { acceptCnpj: boolean }): string {
+  if (!doc) throw cpfError(opts.acceptCnpj ? "Informe o CPF ou CNPJ" : "Informe o CPF");
+  if (!validTaxId(doc, opts.acceptCnpj)) {
+    throw cpfError(opts.acceptCnpj ? "CPF ou CNPJ inválido. Confira os números." : "CPF inválido. Confira os 11 números.");
+  }
+  return doc;
+}
+
+/** A loja aceita CNPJ no checkout (`store.accept_cnpj`; a tabela `store` não tem RLS: filtra pela loja do ator). */
+async function storeAcceptsCnpj(ctx: Ctx): Promise<boolean> {
+  const [s] = await ctx.tx.select({ acceptCnpj: store.acceptCnpj }).from(store).where(eq(store.id, ctx.storeId));
+  return s?.acceptCnpj ?? false;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -150,6 +163,8 @@ type StartOutput = {
   orderId: string;
   totalCents: number;
   maxInstallments: number;
+  /** A loja aceita CNPJ: vai assinado no bilhete do cartão (o serviço `card` não lê a tabela `store` para isso). */
+  acceptCnpj: boolean;
 };
 
 export const checkoutStart = defineAction({
@@ -204,11 +219,15 @@ export const checkoutStart = defineAction({
   async run(ctx, input, limits, server?: CheckoutServer): Promise<StartOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
+    // Oferta de app só vende pela sessão de pagamento que o app cria (conta, nome e e-mail vêm dela).
+    if (o.delivery === "app") throw new ActionError("invalid_input", APP_SESSION_REQUIRED_MESSAGE);
     if (!o.methods.includes(input.method)) {
       throw new ActionError("invalid_input", "Forma de pagamento indisponível nesta oferta", [{ path: ["method"] }]);
     }
     const asaas = await getIntegration(ctx.tx, ctx.storeId, "asaas");
     const asaasOn = Boolean(asaas?.secret);
+    const acceptCnpj = await storeAcceptsCnpj(ctx);
+    const requireCpf = (doc: string | undefined) => requireTaxId(doc, { acceptCnpj });
     const { cpf, ...buyer } = input.customer;
     // Cupom conferido sob o lock dele (vai até o commit: cobre a contagem de usos e o insert do pedido).
     let couponRef: { id: string } | undefined;
@@ -279,6 +298,7 @@ export const checkoutStart = defineAction({
       // sobre o total do pedido (com desconto), nenhuma abaixo de R$ 5,00; sem cupom, as da oferta (R-V1).
       totalCents: order.totalCents,
       maxInstallments: installmentsFor(o.maxInstallments, order.totalCents, { discounted: order.discountCents > 0 }),
+      acceptCnpj,
     };
   },
 });
@@ -329,7 +349,14 @@ export async function startCheckout(
   }
   if (out.method === "card_asaas" && opts.cardTicketKey) {
     const cardTicket = issueCardTicket(
-      { storeId: call.storeId, orderId: out.orderId, publicId: out.publicId, totalCents: out.totalCents, maxInstallments: out.maxInstallments },
+      {
+        storeId: call.storeId,
+        orderId: out.orderId,
+        publicId: out.publicId,
+        totalCents: out.totalCents,
+        maxInstallments: out.maxInstallments,
+        ...(out.acceptCnpj ? { acceptCnpj: true } : {}),
+      },
       opts.cardTicketKey,
       opts.now,
     );
@@ -469,7 +496,9 @@ export const checkoutRenewCardTicket = defineAction({
     if (o.status !== "pending") throw new ActionError("conflict", "Pedido não está pendente");
     if (o.id !== prev.orderId) throw new ActionError("forbidden", BAD_TICKET);
     const terms = { totalCents: o.totalCents, maxInstallments: installmentsFor(o.maxInstallments, o.totalCents, { discounted: o.discountCents > 0 }) };
-    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms }, server.ticketKey, now) };
+    // A opção de CNPJ vale como está agora na loja (desligada depois do pedido: o bilhete novo deixa de aceitar).
+    const cnpj = (await storeAcceptsCnpj(ctx)) ? { acceptCnpj: true } : {};
+    return { ticket: issueCardTicket({ storeId: ctx.storeId, orderId: o.id, publicId: o.publicId, ...terms, ...cnpj }, server.ticketKey, now) };
   },
 });
 

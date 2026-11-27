@@ -21,6 +21,7 @@ import { saveAsaas } from "@/lib/payments/asaas/pix";
 import { alertAsaasKeyRejected } from "@/lib/payments/asaas/webhook";
 import { releaseOrder } from "@/lib/payments/manual";
 import { getStoreSettings, updateStoreSettings } from "@/lib/store-settings";
+import { settingsPayload, type SettingsForm } from "@/app/admin/(panel)/settings/payload";
 import { resolveStore } from "@/lib/stores";
 import { inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
@@ -480,6 +481,7 @@ describe("maskCpf", () => {
     expect(maskCpf("52998224725")).toBe("***.982.247-**");
     expect(maskCpf(null)).toBeNull();
     expect(maskCpf("123")).toBe("***");
+    expect(maskCpf("11222333000181")).toBe("**.222.333/****-**");
   });
 });
 
@@ -498,6 +500,50 @@ describe("store.updateSettings / store.getSettings", () => {
     expect(got).toMatchObject({ name: "Maná Kids", notifyEmail: null, brandColor: null });
     expect(got.trackingSnippet).toMatch(/^<script src="http:\/\/localhost:3000\/t\.js" data-checkout="localhost:3000" defer><\/script>$/);
     expect(got.checkoutBaseUrl).toBe("http://localhost:3000");
+  });
+
+  test("CPF ou CNPJ no checkout (acceptCnpj): desligado por padrão; só quem muda configurações liga; omitido mantém", async () => {
+    const s = await seedPanelStore();
+    const base = { name: "Loja", notifyEmail: null };
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ acceptCnpj: false });
+    for (const role of ["admin", "support", "traffic"] as const) {
+      expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId, role), { ...base, acceptCnpj: true }))).toBe("forbidden");
+    }
+    expect(await fails(runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: "sim" }))).toBe("invalid_input");
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: true });
+    expect((await t.ownerDb.select().from(store).where(eq(store.id, s.storeId)))[0]!.acceptCnpj).toBe(true);
+    await runAction(updateStoreSettings, panelCall(s.storeId), base);
+    expect(await runAction(getStoreSettings, panelCall(s.storeId, "traffic"), {})).toMatchObject({ acceptCnpj: true });
+    await runAction(updateStoreSettings, panelCall(s.storeId), { ...base, acceptCnpj: false });
+    expect(await runAction(getStoreSettings, panelCall(s.storeId), {})).toMatchObject({ acceptCnpj: false });
+  });
+
+  test("aba antiga não religa o CNPJ: o formulário só manda acceptCnpj quando o interruptor mudou; salvar só a cor mantém accept_cnpj", async () => {
+    const s = await seedPanelStore();
+    const form: SettingsForm = {
+      name: " Loja ", notifyEmail: "", color: "", leadCapture: false, privacyEmail: "",
+      recovery: { on: false, lead: true, pix: true, card: true }, acceptCnpj: true,
+    };
+    // Outra aba liga a opção pelo interruptor (a página tinha carregado desligada).
+    const toggled = settingsPayload(form, { acceptCnpj: false });
+    expect(toggled).toMatchObject({ name: "Loja", acceptCnpj: true });
+    await runAction(updateStoreSettings, panelCall(s.storeId), toggled);
+    // Aba antiga (carregada com a opção ligada) desliga… e uma aba mais antiga ainda, só com a cor, não muda nada.
+    const off = settingsPayload({ ...form, acceptCnpj: false }, { acceptCnpj: true });
+    expect(off.acceptCnpj).toBe(false);
+    await runAction(updateStoreSettings, panelCall(s.storeId), off);
+    const stale = settingsPayload({ ...form, color: "#2d55c8" }, { acceptCnpj: true });
+    expect(stale).not.toHaveProperty("acceptCnpj");
+    await runAction(updateStoreSettings, panelCall(s.storeId), stale);
+    const [row] = await t.ownerDb.select().from(store).where(eq(store.id, s.storeId));
+    expect({ acceptCnpj: row!.acceptCnpj, brandColor: row!.brandColor }).toEqual({ acceptCnpj: false, brandColor: "#2D55C8" });
+    // E o contrário: com a opção ligada no banco, salvar só a cor numa aba carregada antes (desligada) não a desliga.
+    await runAction(updateStoreSettings, panelCall(s.storeId), settingsPayload({ ...form, acceptCnpj: true }, { acceptCnpj: false }));
+    const colorOnly = settingsPayload({ ...form, acceptCnpj: false, color: "#123456" }, { acceptCnpj: false });
+    expect(colorOnly).not.toHaveProperty("acceptCnpj");
+    await runAction(updateStoreSettings, panelCall(s.storeId), colorOnly);
+    const [after] = await t.ownerDb.select().from(store).where(eq(store.id, s.storeId));
+    expect({ acceptCnpj: after!.acceptCnpj, brandColor: after!.brandColor }).toEqual({ acceptCnpj: true, brandColor: "#123456" });
   });
 
   test("captura de contato: ligar sem privacyEmail -> invalid_input no campo; com e-mail liga; getSettings devolve os dois", async () => {

@@ -5,6 +5,7 @@
 import { cookies, headers } from "next/headers";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { clientIpFrom } from "@/lib/client-ip";
+import { needsDocMessage } from "./texts";
 import { NEEDS_CPF, checkoutPreviewCoupon, checkoutView, previewErrorResult, renewCardTicket, startCheckout } from "@/lib/checkout";
 import { COUPON_INVALID_MESSAGE, COUPON_UNAVAILABLE_MESSAGE } from "@/lib/coupons/messages";
 import { checkoutForgetLead, checkoutSaveLead } from "@/lib/leads/capture";
@@ -21,7 +22,8 @@ export type StartResult =
   | { ok: false; message: string; fields?: Record<string, string>; needsCpf?: boolean; priceChanged?: boolean };
 
 const GENERIC = "Não foi possível continuar agora. Tente de novo em instantes.";
-const NEEDS_CPF_MESSAGE = "O Pix direto da loja está indisponível agora. Informe o CPF para gerar o Pix automático.";
+// O formulário troca pelo texto com o rótulo da loja (`needsDocMessage(acceptCnpj)`); este é o de quem só aceita CPF.
+const NEEDS_CPF_MESSAGE = needsDocMessage(false);
 
 function fieldsOf(details: unknown): Record<string, string> | undefined {
   if (!Array.isArray(details)) return undefined;

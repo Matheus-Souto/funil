@@ -99,6 +99,8 @@ export interface FrameConfig {
   maxInstallments: number;
   /** Cor da loja (#RRGGBB), aplicada no iframe; ausente = cor padrão. */
   brandColor?: string;
+  /** A loja aceita CNPJ: o iframe mostra "CPF ou CNPJ do titular" (o servidor confere pelo bilhete). */
+  acceptCnpj?: boolean;
 }
 
 export interface FrameControllerDeps {
@@ -149,7 +151,7 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
   };
   const sendConfig = (force: boolean) => {
     if (status !== "ready" || config === null) return;
-    const key = `${config.totalCents}/${config.maxInstallments}/${config.brandColor ?? ""}`;
+    const key = `${config.totalCents}/${config.maxInstallments}/${config.brandColor ?? ""}/${config.acceptCnpj ? 1 : 0}`;
     if (!force && key === sentConfig) return;
     sentConfig = key;
     d.post({
@@ -157,6 +159,7 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
       totalCents: config.totalCents,
       maxInstallments: config.maxInstallments,
       ...(config.brandColor ? { brandColor: config.brandColor } : {}),
+      ...(config.acceptCnpj ? { acceptCnpj: true } : {}),
     });
   };
   const settleAll = () => {
@@ -192,7 +195,7 @@ export function createCardFrameController(d: FrameControllerDeps): CardFrameCont
     setConfig(c) {
       // Cor fora de #rrggbb fica de fora: o iframe recusaria o `config` inteiro (e ficaria sem o total).
       const color = c.brandColor !== undefined && BRAND_COLOR.test(c.brandColor) ? { brandColor: c.brandColor } : {};
-      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...color };
+      config = { totalCents: c.totalCents, maxInstallments: c.maxInstallments, ...color, ...(c.acceptCnpj ? { acceptCnpj: true } : {}) };
       sendConfig(false);
     },
     handle(ev) {

@@ -5,7 +5,7 @@ import { orders, payment } from "@/lib/db/schema";
 import { getIntegration, saveIntegration } from "@/lib/integrations";
 import { PIX_MANUAL_RESERVE_MS } from "@/lib/orders/labels";
 import { transitionOrder } from "@/lib/orders/state";
-import { validCpf } from "@/lib/validation/br";
+import { validCnpj, validCpf } from "@/lib/validation/br";
 import { SUPERSEDED, hasOldAccountEvent } from "./asaas/webhook";
 import { PIX_KEY_MAX, buildPixBrCode, sanitizeText } from "./brcode";
 
@@ -104,18 +104,6 @@ export async function manualPixBrCode(
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function validCnpj(d: string): boolean {
-  if (!/^\d{14}$/.test(d) || /^(\d)\1{13}$/.test(d)) return false;
-  for (const n of [12, 13]) {
-    const w = n === 12 ? [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] : [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2];
-    let sum = 0;
-    for (let i = 0; i < n; i++) sum += Number(d[i]) * w[i]!;
-    const r = sum % 11;
-    if ((r < 2 ? 0 : 11 - r) !== Number(d[n])) return false;
-  }
-  return true;
-}
 
 /** Validação frouxa do formato da chave; devolve a forma normalizada ou null. */
 export function normalizePixKey(raw: string): string | null {

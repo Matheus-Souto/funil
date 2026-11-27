@@ -8,6 +8,7 @@ import { z } from "zod";
 import { ActionError, runAction, TOKEN_DENIED, type Action } from "@/lib/actions/core";
 import { hasPermission, type Permission, type Role } from "@/lib/actions/permissions";
 import { registry } from "@/lib/actions/registry";
+import type { OfferView } from "@/lib/catalog/offers";
 import type { CouponView } from "@/lib/coupons/actions";
 import { RECOVERY_CASES, type RecoveryCase, type metricsSummary } from "@/lib/metrics";
 import type { listOrders, OrderDetail } from "@/lib/orders/panel";
@@ -127,7 +128,31 @@ const projectCoupon = (c: CouponView) => ({
   uses: c.uses,
 });
 
+/** Oferta pela lista branca de campos (inclui a entrega e o código no app; campo novo na ação não sai pelo MCP). */
+const projectProducts = (ps: OfferView["products"]) => ps.map((p) => ({ id: p.id, name: p.name, deletedAt: p.deletedAt }));
+const projectOffer = (o: OfferView) => ({
+  id: o.id,
+  slug: o.slug,
+  name: o.name,
+  priceCents: o.priceCents,
+  methods: [...o.methods],
+  pixMode: o.pixMode,
+  maxInstallments: o.maxInstallments,
+  delivery: o.delivery,
+  appCode: o.appCode,
+  bumpPriceCents: o.bumpPriceCents,
+  bumpLabel: o.bumpLabel,
+  thankYouText: o.thankYouText,
+  pixelId: o.pixelId,
+  active: o.active,
+  createdAt: o.createdAt,
+  products: projectProducts(o.products),
+  bump: o.bump ? { products: projectProducts(o.bump.products), priceCents: o.bump.priceCents, label: o.bump.label } : null,
+});
+
 const OVERRIDES: Record<string, Override> = {
+  "offers.list": { project: (out) => (out as OfferView[]).map(projectOffer) },
+  "offers.get": { project: (out) => projectOffer(out as OfferView) },
   "coupons.list": { project: (out) => (out as CouponView[]).map(projectCoupon) },
   "coupons.get": { project: (out) => projectCoupon(out as CouponView) },
   "orders.list": {

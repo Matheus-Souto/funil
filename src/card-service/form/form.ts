@@ -198,7 +198,7 @@ export function mountCardForm(deps: FormDeps): void {
     holderName: maskHolderName,
     expiry: maskExpiry,
     cvv: maskCvv,
-    holderCpf: maskCpf,
+    holderCpf: (v) => maskCpf(v, acceptCnpj),
     cep: maskCep,
   };
   for (const [name, ui] of Object.entries(f) as [FieldName, FieldUi][]) {
@@ -210,6 +210,19 @@ export function mountCardForm(deps: FormDeps): void {
       }
       setInvalid(ui, null);
     });
+  }
+
+  /** Loja que aceita CNPJ no titular (último `config`): rótulo, máscara e validação. O servidor confere pelo bilhete. */
+  let acceptCnpj = false;
+  const holderLabel = f.holderCpf.wrap.querySelector("label")!;
+  function setAcceptCnpj(on: boolean): void {
+    if (on === acceptCnpj) return;
+    acceptCnpj = on;
+    holderLabel.textContent = on ? "CPF ou CNPJ do titular do cartão" : "CPF do titular do cartão";
+    const input = f.holderCpf.control as HTMLInputElement;
+    input.placeholder = on ? "CPF ou CNPJ" : "000.000.000-00";
+    input.value = maskCpf(input.value, on);
+    setInvalid(f.holderCpf, null);
   }
 
   const holderOther = el(doc, "input", { id: "holderOther", type: "checkbox" });
@@ -292,7 +305,7 @@ export function mountCardForm(deps: FormDeps): void {
     if (cfg.storeId === null) return { out: { status: "error", message: GENERIC_MESSAGE }, charged: false };
     const v = readFields();
     const other = holderOther.checked;
-    const local = showErrors(fieldErrors(v, other, now()));
+    const local = showErrors(fieldErrors(v, other, now(), acceptCnpj));
     if (local.length > 0) {
       (f[local[0]!].control as HTMLElement).focus();
       return { out: { status: "error", message: fieldsMessage(local.length), fields: local.map((n) => [n]) }, charged: false };
@@ -386,6 +399,7 @@ export function mountCardForm(deps: FormDeps): void {
       case "funil-card:config": {
         shown = { totalCents: msg.totalCents, maxInstallments: msg.maxInstallments };
         applyBrand(msg.brandColor);
+        setAcceptCnpj(msg.acceptCnpj === true);
         const keep = installments;
         const opts = installmentOptions(msg.totalCents, msg.maxInstallments);
         select.replaceChildren(...opts.map((o) => el(doc, "option", { value: String(o.n) }, o.label)));
@@ -395,7 +409,7 @@ export function mountCardForm(deps: FormDeps): void {
         return;
       }
       case "funil-card:validate": {
-        const names = showErrors(fieldErrors(readFields(), holderOther.checked, now()));
+        const names = showErrors(fieldErrors(readFields(), holderOther.checked, now(), acceptCnpj));
         if (names[0]) (f[names[0]].control as HTMLElement).focus();
         parent.postMessage({ t: "funil-card:validated", id: msg.id, ok: names.length === 0, fields: names }, origin);
         return;
