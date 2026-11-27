@@ -274,6 +274,13 @@
       "when": 1795754600512,
       "tag": "0038_app_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1795760869786,
+      "tag": "0039_app_webhook_alert",
+      "breakpoints": true
     }
   ]
 }

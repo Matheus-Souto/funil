@@ -4,7 +4,8 @@ import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql, type SQ
 import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
-import { auditLog, coupon, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
+import { APP_WEBHOOK_MAX_ATTEMPTS } from "@/lib/apps/events";
+import { appWebhookDelivery, auditLog, coupon, customer, downloadLink, emailLog, offer, orderItem, orders, payment, product } from "@/lib/db/schema";
 import { brl, orderCode } from "@/lib/format";
 import { getIntegration } from "@/lib/integrations";
 import { maskCpf, maskCpfStrict } from "@/lib/privacy";
@@ -145,6 +146,7 @@ const AUDIT_LABEL: Record<string, string> = {
   "orders.release": "Liberado manualmente",
   "orders.refund": "Reembolso solicitado",
   "orders.resend": "Acesso reenviado",
+  "apps.resendNotice": "Aviso ao app reenviado",
 };
 const EMAIL_LABEL: Record<string, [string, string]> = {
   delivery: ["E-mail de acesso enviado", "Falha ao enviar o e-mail de acesso (nova tentativa automática)"],
@@ -152,6 +154,17 @@ const EMAIL_LABEL: Record<string, [string, string]> = {
 };
 /** Lembrete de recuperação de venda (`email_log` kind `recovery`): só na linha do tempo, sem destinatário nem erro. */
 const RECOVERY_LABEL = { sent: "Lembrete de pagamento por e-mail", failed: "Lembrete por e-mail não enviado" } as const;
+
+/** Último aviso ao app de um pedido de app (registro de `app_webhook_delivery`; sem corpo nem resposta do app). */
+export interface AppNotice {
+  eventType: string;
+  status: "pending" | "delivered" | "failed";
+  attempts: number;
+  maxAttempts: number;
+  lastHttpStatus: number | null;
+  createdAt: Date;
+  deliveredAt: Date | null;
+}
 
 export interface TimelineEntry {
   at: Date;
@@ -169,7 +182,7 @@ export const getOrderDetail = defineAction({
   audit: false,
   async run(ctx, { id }) {
     const [row] = await ctx.tx
-      .select({ o: orders, c: customer, offerName: offer.name, offerSlug: offer.slug })
+      .select({ o: orders, c: customer, offerName: offer.name, offerSlug: offer.slug, appCode: offer.appCode })
       .from(orders)
       .innerJoin(customer, eq(customer.id, orders.customerId))
       .innerJoin(offer, eq(offer.id, orders.offerId))
@@ -221,6 +234,29 @@ export const getOrderDetail = defineAction({
       .where(and(eq(auditLog.ok, true), sql`${auditLog.input}->>'orderId' = ${o.id}`))
       .orderBy(asc(auditLog.at))
       .limit(100);
+
+    // Pedido de app: a conta, o código que o app recebe e o estado do último aviso (o que "Reenviar" manda de novo).
+    let app: { account: string; appCode: string | null; notice: AppNotice | null } | null = null;
+    if (o.appAccount !== null) {
+      const [n] = await ctx.tx
+        .select({
+          eventType: appWebhookDelivery.eventType,
+          status: appWebhookDelivery.status,
+          attempts: appWebhookDelivery.attempts,
+          lastHttpStatus: appWebhookDelivery.lastHttpStatus,
+          createdAt: appWebhookDelivery.createdAt,
+          deliveredAt: appWebhookDelivery.deliveredAt,
+        })
+        .from(appWebhookDelivery)
+        .where(eq(appWebhookDelivery.orderId, o.id))
+        .orderBy(desc(appWebhookDelivery.createdAt), desc(appWebhookDelivery.id))
+        .limit(1);
+      app = {
+        account: o.appAccount,
+        appCode: row.appCode,
+        notice: n ? { ...n, status: n.status as AppNotice["status"], maxAttempts: APP_WEBHOOK_MAX_ATTEMPTS } : null,
+      };
+    }
 
     let pix: { key: string; receiver: string; amountCents: number | null } | null = null;
     if (o.method === "pix_manual") {
@@ -295,6 +331,7 @@ export const getOrderDetail = defineAction({
       refund: await refundState(ctx, o, pays),
       attribution: { firstTouch: o.firstTouch as Record<string, string> | null, lastTouch: o.lastTouch as Record<string, string> | null, ref: o.ref, hasFbc: o.fbc !== null },
       pix,
+      app,
       timeline,
     };
   },

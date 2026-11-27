@@ -5,6 +5,7 @@
 import { redirect } from "next/navigation";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { ackAlert } from "@/lib/alerts";
+import { resendAppNotice } from "@/lib/apps/webhook";
 import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { PASSWORD_REFUSALS } from "@/lib/auth/confirm";
 import { destroySession, renewSessionCookie, requirePanelActor, type PanelActor } from "@/lib/auth/session";
@@ -182,6 +183,13 @@ export async function resendOrderAction(orderId: string, renew: boolean) {
   const panel = await requirePanelActor();
   return call(panel, resendOrder, { orderId, renew }, (o) =>
     o.queued ? `Acesso reenviado${o.revoked > 0 ? " com links novos" : ""}. O e-mail sai em instantes.` : "Já há um envio na fila para este pedido.",
+  );
+}
+
+export async function resendAppNoticeAction(orderId: string) {
+  const panel = await requirePanelActor();
+  return call(panel, resendAppNotice, { orderId }, (o) =>
+    o.queued ? "Aviso reenviado. O app recebe em instantes, com o mesmo identificador." : "Já há um envio em andamento para este aviso.",
   );
 }
 

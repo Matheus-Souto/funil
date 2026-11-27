@@ -50,7 +50,7 @@ const CARD_SERVICE = [
   "TURNSTILE_SECRET",
 ];
 // CARD_PORT: o serviço escuta sempre na 3100 em produção; outra porta só no teste do bundle em Node (CARD_PORT=0).
-const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL", "RESEND_BASE_URL", "TELEGRAM_BASE_URL", "CARD_PORT"];
+const TEST_ONLY = ["ASAAS_BASE_URL", "E2E_SEED_ROUTES", "META_GRAPH_BASE_URL", "RESEND_BASE_URL", "TELEGRAM_BASE_URL", "CARD_PORT", "APP_WEBHOOK_ALLOW_LOOPBACK"];
 
 type Compose = {
   services: Record<

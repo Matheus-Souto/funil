@@ -2,8 +2,8 @@ import { notFound } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
 import { requirePanelActor } from "@/lib/auth/session";
 import { brl, dateTimeShortSP, dateTimeSP, splitUniqueAmount, validUntilSP } from "@/lib/format";
-import { METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, paidOnOldAsaasAccount, pixManualExpiry } from "@/lib/orders/labels";
-import { allowedOrderActions, getOrderDetail, type OrderDetail } from "@/lib/orders/panel";
+import { APP_NOTICE_LABEL, METHOD_LABEL, ROLE_LABEL, STATUS_LABEL, paidOnOldAsaasAccount, pixManualExpiry } from "@/lib/orders/labels";
+import { allowedOrderActions, getOrderDetail, type AppNotice, type OrderDetail } from "@/lib/orders/panel";
 import { Badge, PageHead, StatusBadge } from "../../../blocks";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
@@ -21,6 +21,15 @@ const FLAG: Record<string, string> = {
 };
 const REVOKED: Record<string, string> = { order_status: "desativado (reembolso ou contestação)", renewed: "substituído por links novos" };
 const DELIVERY_STATUS_LABEL: Record<string, string> = { delivered: "entregue", bounced: "devolvido", complained: "marcado como spam" };
+
+/** Estado do último aviso ao app: o selo e a linha de apoio (tentativas e último código HTTP; nunca a resposta do app). */
+function noticeState(n: AppNotice): { tone: "success" | "warning" | "danger" | "neutral"; label: string; detail: string } {
+  const http = n.lastHttpStatus !== null ? ` · HTTP ${n.lastHttpStatus}` : "";
+  if (n.status === "delivered") return { tone: "success", label: "Entregue", detail: n.deliveredAt ? dateTimeShortSP(n.deliveredAt) : "" };
+  if (n.status === "failed") return { tone: "danger", label: "Não entregue", detail: `${n.attempts} tentativas${http}` };
+  if (n.attempts === 0) return { tone: "neutral", label: "Na fila", detail: "sai em instantes" };
+  return { tone: "warning", label: "Tentando de novo", detail: `tentativa ${n.attempts} de ${n.maxAttempts}${http}` };
+}
 
 export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {
   const panel = await requirePanelActor();
@@ -42,6 +51,9 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
   const [same, diff] = splitUniqueAmount(d.totalCents, amount);
   const t = d.attribution.lastTouch ?? d.attribution.firstTouch ?? {};
   const phoneDigits = d.buyer.phone.replace(/\D/g, "");
+  const notice = d.app?.notice ?? null;
+  const noticeName = notice ? (APP_NOTICE_LABEL[notice.eventType] ?? notice.eventType) : null;
+  const noticeView = notice ? noticeState(notice) : null;
   const refundLabel =
     d.refund.state === "processing" || d.refund.state === "awaiting_provider" ? "Estorno solicitado" : d.refund.state === "stale" ? "Estorno pendente" : undefined;
 
@@ -67,9 +79,25 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             reservedUntil={late.reservedUntil?.toISOString() ?? null}
             allowed={allowed}
             oldAsaasAccount={paidOnOldAsaasAccount(d)}
+            appNotice={d.app ? (noticeName ?? "") : null}
           />
         }
       />
+
+      {notice?.status === "failed" ? (
+        <div className={s.alerts}>
+          <div className={s.banner} role="alert">
+            <PIcon name="triangle-alert" />
+            <div>
+              <b>O app não confirmou o aviso “{noticeName}”.</b>
+              <p>
+                Ele pode não ter liberado (ou retirado) o plano ou os créditos deste pedido. Confira o webhook do app em Conexões
+                {allowed.resendNotice ? " e use “Reenviar aviso ao app”." : " e peça a quem atende os pedidos para reenviar o aviso."}
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {d.refund.state !== "none" ? (
         <div className={s.alerts}>
@@ -150,6 +178,13 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
               <small>{d.offer.name}</small>
             </div>
             <div className={s.rows}>
+              {/* Pedido de app não tem PDF: a linha é a própria oferta. */}
+              {d.items.length === 0 ? (
+                <div className={s.row}>
+                  <span style={{ color: "var(--color-text)" }}>{d.offer.name}</span>
+                  <span>{brl(d.subtotalCents)}</span>
+                </div>
+              ) : null}
               {d.items.map((g) => (
                 <div key={g.kind} className={s.row}>
                   <span style={{ color: "var(--color-text)" }}>
@@ -292,22 +327,61 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                 <span>Método</span>
                 <span>{METHOD_LABEL[d.method]}</span>
               </div>
-              <div className={s.row}>
-                <span>E-mail de acesso</span>
-                <span>
-                  {d.emails.some((e) => e.kind === "delivery" && e.status === "sent")
-                    ? "enviado"
-                    : d.emails.some((e) => e.kind === "delivery")
-                      ? "falhou (nova tentativa automática)"
-                      : d.status === "paid"
-                        ? "na fila"
-                        : "após o pagamento"}
-                </span>
-              </div>
-              <div className={s.row}>
-                <span>Link pessoal</span>
-                <span>30 dias · 5 downloads</span>
-              </div>
+              {d.app ? (
+                <>
+                  <div className={s.row}>
+                    <span>Conta no app</span>
+                    <span className={s.mono}>{d.app.account}</span>
+                  </div>
+                  <div className={s.row}>
+                    <span>Código do app</span>
+                    <span className={s.mono}>{d.app.appCode ?? "—"}</span>
+                  </div>
+                  <div className={s.row}>
+                    <span>
+                      Aviso ao app
+                      {noticeName ? (
+                        <small className={s.muted} style={{ display: "block" }}>
+                          {noticeName}
+                        </small>
+                      ) : null}
+                    </span>
+                    <span>
+                      {noticeView ? (
+                        <>
+                          <Badge tone={noticeView.tone}>{noticeView.label}</Badge>
+                          {noticeView.detail ? (
+                            <small className={s.muted} style={{ display: "block" }}>
+                              {noticeView.detail}
+                            </small>
+                          ) : null}
+                        </>
+                      ) : (
+                        "após o pagamento"
+                      )}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className={s.row}>
+                    <span>E-mail de acesso</span>
+                    <span>
+                      {d.emails.some((e) => e.kind === "delivery" && e.status === "sent")
+                        ? "enviado"
+                        : d.emails.some((e) => e.kind === "delivery")
+                          ? "falhou (nova tentativa automática)"
+                          : d.status === "paid"
+                            ? "na fila"
+                            : "após o pagamento"}
+                    </span>
+                  </div>
+                  <div className={s.row}>
+                    <span>Link pessoal</span>
+                    <span>30 dias · 5 downloads</span>
+                  </div>
+                </>
+              )}
             </div>
             {d.emails.length > 0 ? (
               <>

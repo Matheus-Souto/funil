@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
-import { auditLog, job, orders, payment } from "@/lib/db/schema";
+import { appEventId } from "@/lib/apps/webhook";
+import { appWebhookDelivery, auditLog, job, orders, payment } from "@/lib/db/schema";
 import { log } from "@/lib/log";
 import { ALLOWED, type OrderStatus } from "@/lib/orders/state";
 import { setAsaasFetchForTests } from "@/lib/payments/asaas/client";
@@ -12,6 +13,7 @@ import { getOrderDetail } from "@/lib/orders/panel";
 import { releaseOrder } from "@/lib/payments/manual";
 import { POST } from "@/app/api/webhooks/asaas/[storeId]/route";
 import { createTestDb, type TestDb } from "./db";
+import { makeAppOrder } from "./apps-helpers";
 import { createFakeAsaas, newAsaasOrder, seedAsaasStore } from "./asaas-helpers";
 
 let t: TestDb;
@@ -523,5 +525,50 @@ describe("chave do Asaas recusada na reconsulta (401/403)", () => {
     s.fake.fail("GET /payments/", 404, "Cobrança não encontrada", "not_found");
     expect((await handleAsaasWebhook(s.storeId, hdr(s.webhookToken), event(s.paymentId))).status).toBe(200);
     expect(await keyAlerts(s.storeId)).toHaveLength(0);
+  });
+});
+
+describe("pedido de app (aviso ao app no lugar da entrega)", () => {
+  const hook = (s: { storeId: string; webhookToken: string; paymentId: string }, ev: string) =>
+    handleAsaasWebhook(s.storeId, hdr(s.webhookToken), { event: ev, payment: { id: s.paymentId } });
+  const deliveries = (orderId: string) => t.ownerDb.select().from(appWebhookDelivery).where(eq(appWebhookDelivery.orderId, orderId));
+
+  test("pagamento confirmado, com o mesmo evento repetido: um pagamento.confirmado só e nenhum deliver_order", async () => {
+    const s = await setup();
+    await makeAppOrder(s.storeId, s.offerId, s.order.id);
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    expect((await hook(s, "PAYMENT_RECEIVED")).status).toBe(200);
+    expect((await hook(s, "PAYMENT_RECEIVED")).status).toBe(200);
+    expect((await hook(s, "PAYMENT_CONFIRMED")).status).toBe(200);
+    expect(await statusOf(s.order.id)).toBe("paid");
+    const ds = await deliveries(s.order.id);
+    expect(ds.map((d) => [d.eventType, d.eventId, d.status])).toEqual([["pagamento.confirmado", appEventId(s.order.id, "pagamento.confirmado", 0), "pending"]]);
+    expect(await jobsOf(s.order.id, "deliver_order")).toHaveLength(0);
+    const notices = (await t.ownerDb.select().from(job)).filter((j) => j.type === "notify_app" && (j.payload as { deliveryId?: string }).deliveryId === ds[0]!.id);
+    expect(notices).toHaveLength(1);
+  });
+
+  test("estorno parcial feito no Asaas: pagamento.reembolso_parcial a cada valor novo; o pedido continua pago; o total depois vira pagamento.reembolsado", async () => {
+    const s = await setup();
+    await makeAppOrder(s.storeId, s.offerId, s.order.id);
+    s.fake.setStatus(s.paymentId, "RECEIVED");
+    await hook(s, "PAYMENT_RECEIVED");
+    s.fake.partialRefund(s.paymentId, 3);
+    await hook(s, "PAYMENT_PARTIALLY_REFUNDED");
+    await hook(s, "PAYMENT_PARTIALLY_REFUNDED");
+    expect(await statusOf(s.order.id)).toBe("paid");
+    const types = async () => (await deliveries(s.order.id)).map((d) => d.eventType).sort();
+    expect(await types()).toEqual(["pagamento.confirmado", "pagamento.reembolso_parcial"]);
+    s.fake.partialRefund(s.paymentId, 2);
+    await hook(s, "PAYMENT_PARTIALLY_REFUNDED");
+    expect((await deliveries(s.order.id)).filter((d) => d.eventType === "pagamento.reembolso_parcial").map((d) => d.eventId).sort()).toEqual(
+      [appEventId(s.order.id, "pagamento.reembolso_parcial", 0), appEventId(s.order.id, "pagamento.reembolso_parcial", 1)].sort(),
+    );
+    // O restante devolvido (soma = total): o pedido vira reembolsado e sai o aviso do reembolso, sem revogar link.
+    s.fake.partialRefund(s.paymentId, 4.9);
+    await hook(s, "PAYMENT_REFUNDED");
+    expect(await statusOf(s.order.id)).toBe("refunded");
+    expect(await types()).toEqual(["pagamento.confirmado", "pagamento.reembolsado", "pagamento.reembolso_parcial", "pagamento.reembolso_parcial"]);
+    expect(await jobsOf(s.order.id, "revoke_downloads")).toHaveLength(0);
   });
 });

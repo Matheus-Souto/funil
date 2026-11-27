@@ -44,13 +44,28 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const refundOrder = defineAction({
   name: "orders.refund",
   description:
-    "Reembolsa um pedido pago (Asaas: solicita o estorno, feito em segundo plano; Pix manual: só marca, a devolução é pelo banco).",
-  input: z.object({ orderId: z.uuid() }),
+    "Reembolsa um pedido pago, sempre o valor total (Asaas: solicita o estorno, feito em segundo plano; Pix manual: só marca, a devolução é pelo banco).",
+  input: z.object({
+    orderId: z.uuid(),
+    // Só o total é reembolsado por aqui. O campo existe para um pedido de valor parcial ser RECUSADO, em vez de o valor
+    // ser ignorado e o pedido inteiro, estornado.
+    amountCents: z.number().int().positive().optional().describe("Opcional. Se informado, precisa ser o total do pedido: reembolso parcial não é feito por aqui."),
+  }),
   permission: "orders.refund",
   sensitive: true,
-  async run(ctx, { orderId }) {
+  async run(ctx, { orderId, amountCents }) {
     const [o] = await ctx.tx.select().from(orders).where(eq(orders.id, orderId)).for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
+    if (amountCents !== undefined && amountCents !== o.totalCents) {
+      // Pedido de app: o app libera plano ou créditos pelo pedido inteiro, então o painel só o desfaz inteiro (um parcial
+      // feito direto no Asaas vira `pagamento.reembolso_parcial`, e o app decide).
+      throw new ActionError(
+        "invalid_input",
+        o.appAccount !== null
+          ? "Pedido de app só aceita reembolso total."
+          : "O painel só faz reembolso total. Para devolver parte do valor, use o painel do Asaas.",
+      );
+    }
     if (o.status !== "paid") throw new ActionError("conflict", `Só pedidos pagos podem ser reembolsados (${o.status})`);
 
     if (o.method === "pix_manual") {

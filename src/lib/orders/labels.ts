@@ -71,16 +71,25 @@ export function paidOnOldAsaasAccount(o: { method: string; payments?: { flags: r
 /**
  * Botões do pedido conforme o papel e o estado (o servidor confere de novo em cada ação).
  * Liberar: pendente ou expirado de Pix manual, ou de Pix Asaas pago na conta Asaas anterior. Reenviar: pago.
- * Reembolsar: pago e sem estorno em andamento (ou parado).
+ * Reembolsar: pago e sem estorno em andamento (ou parado). Pedido de app não tem e-mail de acesso: no lugar de
+ * "Reenviar acesso" entra "Reenviar aviso ao app", quando já existe um aviso (pagamento, reembolso, contestação).
  */
 export function allowedOrderActions(
   role: Role,
-  o: { status: string; method: string; refund: { state: RefundState }; payments?: { flags: readonly string[] }[] },
-): { release: boolean; resend: boolean; refund: boolean } {
+  o: {
+    status: string;
+    method: string;
+    refund: { state: RefundState };
+    payments?: { flags: readonly string[] }[];
+    app?: { notice: object | null } | null;
+  },
+): { release: boolean; resend: boolean; resendNotice: boolean; refund: boolean } {
   const releasable = o.method === "pix_manual" || paidOnOldAsaasAccount(o);
+  const isApp = o.app !== undefined && o.app !== null;
   return {
     release: hasPermission(role, "orders.release") && releasable && (o.status === "pending" || o.status === "expired"),
-    resend: hasPermission(role, "orders.resend") && o.status === "paid",
+    resend: hasPermission(role, "orders.resend") && o.status === "paid" && !isApp,
+    resendNotice: hasPermission(role, "orders.resend") && isApp && o.app!.notice !== null,
     refund: hasPermission(role, "orders.refund") && o.status === "paid" && (o.refund.state === "none" || o.refund.state === "stale"),
   };
 }
@@ -92,4 +101,13 @@ export const ROLE_LABEL: Record<Role, string> = {
   traffic: "Tráfego",
   reader: "Leitor",
   integration: "Integração",
+};
+
+/** Nome de cada aviso ao app, como o painel mostra. */
+export const APP_NOTICE_LABEL: Record<string, string> = {
+  "pagamento.confirmado": "Pagamento confirmado",
+  "pagamento.reembolsado": "Reembolso",
+  "pagamento.reembolso_parcial": "Reembolso parcial",
+  "pagamento.contestado": "Contestação",
+  "pagamento.restabelecido": "Contestação revertida",
 };

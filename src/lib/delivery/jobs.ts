@@ -5,6 +5,7 @@ import { and, eq, gte, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
 import { TELEGRAM_MIGRATED } from "@/lib/alerts";
+import { enqueueAppNotice } from "@/lib/apps/events";
 import { txidOf } from "@/lib/checkout";
 import { db, withStore, type Tx } from "@/lib/db/client";
 import { customer, downloadLink, emailLog, offer, orderItem, orders, product, store } from "@/lib/db/schema";
@@ -61,6 +62,8 @@ const orderCode = (publicId: string) => txidOf(publicId).slice(0, 8);
  * Marca de idempotência: entrega inicial = já existe e-mail `delivery` enviado para o pedido; reenvio
  * (`orders.resend`) = já existe e-mail enviado por ESTE job. Falha no SMTP grava `email_log` `failed` e lança
  * (a fila re-tenta pelo backoff); o pedido continua pago. Depois do envio, deixa os PDFs carimbados no cache.
+ * Pedido de app não tem e-mail de acesso: o job garante o aviso `pagamento.confirmado` ao app e termina. É por aqui que
+ * passa o cartão aprovado pelo serviço de cartão, cujo papel no banco só enfileira `deliver_order` (apps/events.ts).
  */
 export const deliverOrderJob: JobHandler = async (j, signal) => {
   const tg = target(j, true);
@@ -72,6 +75,11 @@ export const deliverOrderJob: JobHandler = async (j, signal) => {
   const prep = await withStore(storeId, async (tx) => {
     const [o] = await tx.select().from(orders).where(eq(orders.id, orderId));
     if (!o || o.status !== "paid") return { skip: o?.status ?? "inexistente" } as const;
+    if (o.appAccount !== null) {
+      // Idempotente: o `pagamento.confirmado` de um pedido é um só (repetir o job não cria outro aviso).
+      const created = await enqueueAppNotice(tx, storeId, o.id, "pagamento.confirmado");
+      return { skip: created ? "pedido_de_app_aviso_enfileirado" : "pedido_de_app" } as const;
+    }
     const marker = resend ? eq(emailLog.jobId, j.id) : and(eq(emailLog.orderId, o.id), eq(emailLog.kind, "delivery"));
     if (await alreadySent(tx, marker)) return { skip: "ja_enviado" } as const;
     const [c] = await tx.select().from(customer).where(eq(customer.id, o.customerId));
@@ -270,6 +278,17 @@ export function noticeFor(reason: string, p: Payload, code: string | null): Noti
         heading: "O Telegram recusou o aviso da loja",
         paragraphs: ["Os avisos pararam de chegar ao Telegram. Confira o token do bot e se ele ainda está no grupo, salve em Conexões e use “Enviar teste”."],
       };
+    case "app_webhook_falhou": {
+      const status = typeof p.httpStatus === "number" ? ` (última resposta: HTTP ${p.httpStatus})` : "";
+      return {
+        subject: `O app não confirmou o aviso${pedido}`,
+        heading: "O aviso ao app não foi entregue",
+        paragraphs: [
+          `Tentamos avisar o app${pedido} por 2 dias e ele não respondeu com sucesso${status}. O app pode não ter liberado (ou retirado) o plano ou os créditos desse pedido.`,
+          "Confira em Conexões a URL e o segredo do webhook do app. Depois, abra o pedido no painel e use “Reenviar aviso ao app”.",
+        ],
+      };
+    }
     case "disjuntor_cartao":
       return {
         subject: "Muitas recusas de cartão na sua loja",
@@ -330,7 +349,8 @@ export const notifySellerJob: JobHandler = async (j, signal) => {
   else {
     // Mesmo critério do assunto do comprador: 1 principal -> o produto; mais de 1 -> a oferta.
     const mains = items!.filter((i) => i.kind === "main");
-    const main = mains.length > 1 ? offerName! : (mains[0]?.name ?? items![0]?.name ?? "pedido");
+    // Pedido de app não tem produto: vale o nome da oferta.
+    const main = mains.length > 1 ? offerName! : (mains[0]?.name ?? items![0]?.name ?? offerName ?? "pedido");
     notice = {
       subject: `Nova venda: ${main} — ${brl(o!.totalCents)}`,
       heading: `Nova venda de ${brl(o!.totalCents)}`,
@@ -432,8 +452,13 @@ export const resendOrder = defineAction({
     await limitResend(call.actor, call.storeId, orderId);
   },
   async run(ctx, { orderId, renew }) {
-    const [o] = await ctx.tx.select({ id: orders.id, status: orders.status }).from(orders).where(eq(orders.id, orderId)).for("update");
+    const [o] = await ctx.tx
+      .select({ id: orders.id, status: orders.status, appAccount: orders.appAccount })
+      .from(orders)
+      .where(eq(orders.id, orderId))
+      .for("update");
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
+    if (o.appAccount !== null) throw new ActionError("conflict", "Pedido de app não tem e-mail de acesso. Use “Reenviar aviso ao app”.");
     if (o.status !== "paid") throw new ActionError("conflict", `Só pedidos pagos têm acesso para reenviar (${o.status})`);
     const revoked = renew ? (await revokeLinks(ctx.tx, o.id, "renewed")).length : 0;
     // Já há entrega na fila: ela sai com os links atuais (ou novos, se renew acabou de revogar).

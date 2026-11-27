@@ -1,13 +1,14 @@
 "use client";
 
 // Botões do pedido (Liberar / Reenviar / Reembolsar) com os diálogos de confirmação do design (P07, P08).
+// Pedido de app: "Reenviar aviso ao app" no lugar de "Reenviar acesso".
 // O que aparece vem de allowedOrderActions (papel + estado); o servidor confere de novo em cada ação.
 import { useState } from "react";
 import { brl, dateTimeSP } from "@/lib/format";
 import { PIcon } from "../../../icons";
 import s from "../../../panel.module.css";
 import { Dialog, Live, useActionRunner } from "../../../ui";
-import { refundOrderAction, releaseOrderAction, resendOrderAction } from "../../actions";
+import { refundOrderAction, releaseOrderAction, resendAppNoticeAction, resendOrderAction } from "../../actions";
 
 export interface OrderActionsProps {
   id: string;
@@ -24,13 +25,15 @@ export interface OrderActionsProps {
   expired: boolean;
   /** Até quando o valor único de um Pix manual vencido fica reservado (48 h depois da validade). */
   reservedUntil: string | null;
-  allowed: { release: boolean; resend: boolean; refund: boolean };
+  allowed: { release: boolean; resend: boolean; resendNotice: boolean; refund: boolean };
+  /** Pedido de app: o nome do último aviso (o que "Reenviar aviso ao app" manda de novo); nulo em pedido de download. */
+  appNotice?: string | null;
   /** Pix Asaas pago numa cobrança da conta Asaas anterior: a conferência é na conta antiga, não no extrato. */
   oldAsaasAccount?: boolean;
 }
 
 export function OrderActions(p: OrderActionsProps) {
-  const [open, setOpen] = useState<null | "release" | "refund" | "resend">(null);
+  const [open, setOpen] = useState<null | "release" | "refund" | "resend" | "notice">(null);
   const [checks, setChecks] = useState({ seen: false, noReceipt: false });
   const [renew, setRenew] = useState(false);
   const { pending, msg, run } = useActionRunner();
@@ -42,7 +45,8 @@ export function OrderActions(p: OrderActionsProps) {
   const expired = p.expired;
   const created = dateTimeSP(new Date(p.createdAt));
   const reserved = p.reservedUntil ? dateTimeSP(new Date(p.reservedUntil)) : null;
-  const any = p.allowed.release || p.allowed.resend || p.allowed.refund;
+  const any = p.allowed.release || p.allowed.resend || p.allowed.resendNotice || p.allowed.refund;
+  const isApp = p.appNotice !== undefined && p.appNotice !== null;
   if (!any) return null;
 
   return (
@@ -52,6 +56,12 @@ export function OrderActions(p: OrderActionsProps) {
           <button type="button" className={s.btn} onClick={() => setOpen("resend")}>
             <PIcon name="send" size={16} />
             Reenviar acesso
+          </button>
+        ) : null}
+        {p.allowed.resendNotice ? (
+          <button type="button" className={s.btn} onClick={() => setOpen("notice")}>
+            <PIcon name="send" size={16} />
+            Reenviar aviso ao app
           </button>
         ) : null}
         {p.allowed.refund ? (
@@ -180,12 +190,47 @@ export function OrderActions(p: OrderActionsProps) {
             </li>
           )}
           <li>
-            <PIcon name="lock" size={16} />
-            <span>O link de download é desativado quando o reembolso se confirma.</span>
+            <PIcon name={isApp ? "send" : "lock"} size={16} />
+            <span>
+              {isApp
+                ? "O app é avisado quando o reembolso se confirma e decide o que fazer com o plano ou os créditos."
+                : "O link de download é desativado quando o reembolso se confirma."}
+            </span>
           </li>
         </ul>
         <p className={s.fieldError} style={{ marginTop: 14 }}>
           Esta ação não pode ser desfeita.
+        </p>
+        {msg?.tone === "error" ? <Live msg={msg} /> : null}
+      </Dialog>
+
+      <Dialog
+        open={open === "notice"}
+        onClose={close}
+        title="Reenviar o aviso ao app?"
+        footer={
+          <>
+            <button type="button" className={s.btn} onClick={close}>
+              Cancelar
+            </button>
+            <button
+              type="button"
+              className={`${s.btn} ${s.btnPrimary}`}
+              data-autofocus
+              disabled={pending}
+              onClick={async () => {
+                const r = await run(() => resendAppNoticeAction(p.id));
+                if (r.ok) close();
+              }}
+            >
+              {pending ? "Enviando…" : "Reenviar aviso"}
+            </button>
+          </>
+        }
+      >
+        <p>
+          O app recebe de novo o aviso{p.appNotice ? ` “${p.appNotice}”` : ""} do pedido #{p.code}, com o mesmo identificador. Se ele já tinha processado esse
+          aviso, nada muda do lado dele.
         </p>
         {msg?.tone === "error" ? <Live msg={msg} /> : null}
       </Dialog>

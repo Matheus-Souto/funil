@@ -108,6 +108,19 @@ test("E2E_SEED_ROUTES=1 só com BASE_URL em loopback (rota só do smoke)", () =>
   expect(() => parseEnv({ ...base, E2E_SEED_ROUTES: "sim" })).toThrow(/E2E_SEED_ROUTES/);
 });
 
+test("APP_WEBHOOK_ALLOW_LOOPBACK=1 só com BASE_URL em loopback (app falso dos testes)", () => {
+  for (const url of ["http://127.0.0.1:3000", "http://localhost:3000", "http://[::1]:3000"]) {
+    expect(parseEnv({ ...base, NODE_ENV: "production", BASE_URL: url, APP_WEBHOOK_ALLOW_LOOPBACK: "1" }).APP_WEBHOOK_ALLOW_LOOPBACK).toBe("1");
+  }
+  for (const url of ["https://loja.example.com", "http://127.0.0.1.evil.com"]) {
+    expect(() => parseEnv({ ...base, BASE_URL: url, TRUST_PROXY: "1", APP_WEBHOOK_ALLOW_LOOPBACK: "1" })).toThrow(/APP_WEBHOOK_ALLOW_LOOPBACK.*loopback/);
+  }
+  // Desligada (0) ou ausente vale em qualquer instalação.
+  expect(parseEnv({ ...base, BASE_URL: "https://loja.example.com", TRUST_PROXY: "1", APP_WEBHOOK_ALLOW_LOOPBACK: "0" }).APP_WEBHOOK_ALLOW_LOOPBACK).toBe("0");
+  expect(parseEnv(base).APP_WEBHOOK_ALLOW_LOOPBACK).toBeUndefined();
+  expect(() => parseEnv({ ...base, APP_WEBHOOK_ALLOW_LOOPBACK: "sim" })).toThrow(/APP_WEBHOOK_ALLOW_LOOPBACK/);
+});
+
 test("isLoopbackUrl: 127.0.0.1, localhost e ::1 (com ou sem colchetes)", async () => {
   const { isLoopbackUrl } = await import("@/lib/env");
   for (const u of ["http://127.0.0.1:1", "http://localhost", "http://[::1]:3000", "::1", "127.0.0.1", "localhost:4010"]) expect(isLoopbackUrl(u)).toBe(true);
