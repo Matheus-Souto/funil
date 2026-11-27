@@ -461,6 +461,14 @@ describe("meta_event StartTrial (início do teste do app)", () => {
     expect(await trialRow(shop.storeId, r.id)).toMatchObject({ clientIp: null, userAgent: null });
   });
 
+  test("iniciado_em até 60 s no futuro: event_time nunca passa do relógio do funil", async () => {
+    const shop = await seedShop();
+    const r = await runAction(registerTrial, integ(shop.storeId), { conta: "c-fut", email: "fut@exemplo.com", iniciado_em: new Date(Date.now() + 30_000).toISOString() });
+    await runTrialJobs(r.id);
+    expect(meta.events).toHaveLength(1);
+    expect(meta.events[0]!.event.event_time as number).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+  });
+
   test("event_id enviado pelo app vai ao Meta (dedup com o Pixel do navegador)", async () => {
     const shop = await seedShop();
     const r = await runAction(registerTrial, integ(shop.storeId), { conta: "c-px", email: "px@exemplo.com", event_id: "pixel-do-app-0123456789" });

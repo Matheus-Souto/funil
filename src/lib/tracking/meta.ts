@@ -32,8 +32,12 @@ export const META_GRAPH_VERSION = "v27.0";
 const GRAPH_BASE_URL = "https://graph.facebook.com";
 export const PIXEL_ID_RE = /^\d{5,20}$/;
 const TIMEOUT_MS = 15_000;
-/** O Meta recusa a requisição inteira se `event_time` tiver mais de 7 dias. */
-const MAX_EVENT_AGE_S = 7 * 24 * 3600 - 300;
+/**
+ * O Meta recusa a requisição inteira se `event_time` tiver mais de 7 dias: o job descarta o que passar de 7 dias menos
+ * 5 min de margem. Compartilhado com a API do app (`iniciado_em` mais antigo que isto é recusado na entrada).
+ */
+export const META_MAX_EVENT_AGE_MS = (7 * 24 * 3600 - 300) * 1000;
+const MAX_EVENT_AGE_S = META_MAX_EVENT_AGE_MS / 1000;
 
 export type MetaEventName = "Purchase" | "InitiateCheckout" | "StartTrial";
 export const purchaseEventId = (publicId: string): string => `purchase:${publicId}`;
@@ -456,7 +460,8 @@ async function startTrialJob(storeId: string, trialId: string, signal: AbortSign
       .from(conversion)
       .where(and(eq(conversion.trialId, tr.id), eq(conversion.event, "StartTrial")));
     if (sent) return { skip: "ja_enviado" };
-    const eventTime = Math.floor(tr.startedAt.getTime() / 1000);
+    // Nunca no futuro (a entrada já grava min(iniciado_em, agora); aqui só por defesa).
+    const eventTime = Math.floor(Math.min(tr.startedAt.getTime(), Date.now()) / 1000);
     const conn = await getIntegration(tx, storeId, "meta");
     const pixelId = validPixel((conn?.config as MetaConfig | undefined)?.pixelId);
     const skip = Date.now() / 1000 - eventTime > MAX_EVENT_AGE_S ? "evento_antigo" : !conn?.secret ? "sem_conexao" : !pixelId ? "sem_pixel" : null;

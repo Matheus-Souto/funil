@@ -77,28 +77,31 @@ export async function handleIntegrationRequest(
 ): Promise<Response> {
   if (req.method !== "POST") return fail(405, "method_not_allowed", "Método não permitido", { headers: { allow: "POST" } });
   const now = opts.now ?? (() => new Date());
-
-  const raw = await readCapped(req, MAX_BODY);
-  if (raw === null) return fail(413, "payload_too_large", "Requisição grande demais (máximo de 32 KB)");
-
-  const ip = clientIpFrom(req.headers, opts.trustProxy ?? env.TRUST_PROXY);
-  const [unauthKey, unauthLimit] = unauthBucket(ip === UNKNOWN_IP ? null : ipRateKey(ip));
-  if (!(await peekRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now()))) return tooMany();
-  const found = await authenticateMcpToken(bearer(req));
-  // Token MCP de qualquer outro papel não serve aqui (e a chave `integration` não serve no MCP).
-  const auth = found?.role === "integration" ? found : null;
-  if (!auth) return (await checkRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now())) ? unauthorized() : tooMany();
-
-  if (!(await checkRateLimit(`apps:${auth.tokenId}`, KEY_LIMIT, WINDOW_SEC, now()))) return tooMany();
-
-  let body: unknown;
+  // Tudo dentro do `try`: falha de infraestrutura na leitura do corpo, nos limites ou na autenticação (ex.: banco fora)
+  // também sai no envelope `{ erro }`, sem pilha nem mensagem crua.
+  let tokenId: string | undefined;
   try {
-    body = JSON.parse(raw);
-  } catch {
-    return fail(400, "invalid_json", "Corpo não é um JSON válido");
-  }
+    const raw = await readCapped(req, MAX_BODY);
+    if (raw === null) return fail(413, "payload_too_large", "Requisição grande demais (máximo de 32 KB)");
 
-  try {
+    const ip = clientIpFrom(req.headers, opts.trustProxy ?? env.TRUST_PROXY);
+    const [unauthKey, unauthLimit] = unauthBucket(ip === UNKNOWN_IP ? null : ipRateKey(ip));
+    if (!(await peekRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now()))) return tooMany();
+    const found = await authenticateMcpToken(bearer(req));
+    // Token MCP de qualquer outro papel não serve aqui (e a chave `integration` não serve no MCP).
+    const auth = found?.role === "integration" ? found : null;
+    if (!auth) return (await checkRateLimit(unauthKey, unauthLimit, WINDOW_SEC, now())) ? unauthorized() : tooMany();
+    tokenId = auth.tokenId;
+
+    if (!(await checkRateLimit(`apps:${auth.tokenId}`, KEY_LIMIT, WINDOW_SEC, now()))) return tooMany();
+
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      return fail(400, "invalid_json", "Corpo não é um JSON válido");
+    }
+
     const out = await run({ storeId: auth.storeId, actor: { kind: "token", tokenId: auth.tokenId, role: "integration" }, origin: "api" }, body);
     return json(out.status, out.body);
   } catch (e) {
@@ -108,7 +111,7 @@ export async function handleIntegrationRequest(
         ...(e.code === "rate_limited" ? { headers: { "retry-after": String(WINDOW_SEC) } } : {}),
       });
     }
-    log.error("API de integração falhou", { tokenId: auth.tokenId, path: new URL(req.url).pathname, ...errorFields(e) });
+    log.error("API de integração falhou", { ...(tokenId ? { tokenId } : {}), path: new URL(req.url).pathname, ...errorFields(e) });
     return fail(500, "internal", "Falha interna");
   }
 }

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { runAction, type Actor } from "@/lib/actions/core";
-import { registerTrial, sweepAppTrialsJob, trialEventId } from "@/lib/apps/trials";
+import { CLOCK_SKEW_MS, MAX_START_AGE_MS, TRIAL_CLIENT_DATA_SWEEP_DAYS, TRIAL_RETENTION_SWEEP_DAYS, registerTrial, sweepAppTrialsJob, trialEventId } from "@/lib/apps/trials";
 import { sha256 } from "@/lib/crypto";
 import { withStore } from "@/lib/db/client";
 import { appCheckoutSession, appTrial, auditLog, job, mcpToken, orders } from "@/lib/db/schema";
@@ -14,7 +14,7 @@ import type { Job } from "@/lib/jobs";
 import { MCP_EXCLUDED } from "@/lib/mcp/tools";
 import { mintMcpToken } from "@/lib/mcp/tokens";
 import { mailboxHash, recoveryEmailHash } from "@/lib/recovery/rules";
-import { saveMeta, setMetaFetchForTests } from "@/lib/tracking/meta";
+import { META_MAX_EVENT_AGE_MS, saveMeta, setMetaFetchForTests } from "@/lib/tracking/meta";
 import { POST } from "@/app/api/integracao/v1/testes/route";
 import { createTestDb, seedStore, type TestDb } from "./db";
 import { createFakeMeta } from "./fakes/meta";
@@ -170,6 +170,40 @@ describe("apps.registerTrial", () => {
     expect((await trialsOf(storeId))[0]!.startedAt.toISOString()).toBe(when.toISOString());
   });
 
+  test("conta com @ (e-mail em vez do id interno) → invalid_input com mensagem clara; nada gravado", async () => {
+    const storeId = await metaStore();
+    for (const conta of ["ana@exemplo.com", "@", "tenant@1"]) {
+      const e = (await runAction(registerTrial, api(storeId), { conta, email: "ana@exemplo.com" }).catch((x: unknown) => x)) as { code: string; details: { path: string[]; message: string }[] };
+      expect([conta, e.code]).toEqual([conta, "invalid_input"]);
+      expect(e.details).toEqual([expect.objectContaining({ path: ["conta"], message: "Use o id interno da conta, não o e-mail" })]);
+    }
+    expect(await trialsOf(storeId)).toHaveLength(0);
+    // Auditoria da rejeição sem a conta nem o e-mail.
+    const rows = await withStore(storeId, (tx) => tx.select().from(auditLog).where(eq(auditLog.action, "apps.registerTrial")));
+    expect(rows.length).toBe(3);
+    expect(JSON.stringify(rows)).not.toContain("exemplo.com");
+  });
+
+  test("iniciado_em: bordas da idade (mesma constante do job do Meta) e do relógio adiantado (vale agora)", async () => {
+    const storeId = await metaStore();
+    expect(MAX_START_AGE_MS).toBe(META_MAX_EVENT_AGE_MS);
+    const code = (conta: string, ms: number) =>
+      runAction(registerTrial, api(storeId), { conta, email: "j@exemplo.com", iniciado_em: new Date(Date.now() + ms).toISOString() }).then(
+        () => "ok",
+        (e: { code?: string }) => e.code,
+      );
+    expect(await code("idade-dentro", -(MAX_START_AGE_MS - 60_000))).toBe("ok");
+    expect(await code("idade-fora", -(MAX_START_AGE_MS + 60_000))).toBe("invalid_input");
+    expect(await code("futuro-fora", CLOCK_SKEW_MS + 30_000)).toBe("invalid_input");
+    const before = Date.now();
+    expect(await code("futuro-dentro", CLOCK_SKEW_MS - 30_000)).toBe("ok");
+    const rows = new Map((await trialsOf(storeId)).map((r) => [r.account, r]));
+    expect([...rows.keys()].sort()).toEqual(["futuro-dentro", "idade-dentro"]);
+    // Futuro dentro da folga: gravado como agora (nunca adiante do relógio do funil).
+    expect(rows.get("futuro-dentro")!.startedAt.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(rows.get("futuro-dentro")!.startedAt.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
   test("só a chave integration: painel (mesmo dono) e token MCP → forbidden; fora do MCP", async () => {
     const storeId = await metaStore();
     await expect(runAction(registerTrial, { storeId, actor: owner, origin: "panel" }, { conta: "c", email: "h@exemplo.com" })).rejects.toMatchObject({
@@ -232,6 +266,22 @@ describe("sweep_app_trials", () => {
       .returning({ id: appCheckoutSession.id });
     await t.ownerDb.update(orders).set({ appAccount: account, appSessionId: session!.id }).where(eq(orders.id, o.id));
   }
+
+  test("cortes um ciclo antes dos tetos (6 e 179 dias): bordas de cada lado", async () => {
+    expect([TRIAL_CLIENT_DATA_SWEEP_DAYS, TRIAL_RETENTION_SWEEP_DAYS]).toEqual([6, 179]);
+    const s = await seedPanelStore("Bordas");
+    const hour = 1 / 24;
+    const keepIp = await seedTrial(s.storeId, "ip-fica", daysAgo(6 - hour));
+    const dropIp = await seedTrial(s.storeId, "ip-sai", daysAgo(6 + hour));
+    const keep = await seedTrial(s.storeId, "teste-fica", daysAgo(179 - hour));
+    const drop = await seedTrial(s.storeId, "teste-sai", daysAgo(179 + hour));
+    await sweepAppTrialsJob(noJob, new AbortController().signal);
+    const rows = new Map((await trialsOf(s.storeId)).map((r) => [r.id, r]));
+    expect(rows.get(keepIp.id)).toMatchObject({ clientIp: "203.0.113.5", userAgent: "UA" });
+    expect(rows.get(dropIp.id)).toMatchObject({ clientIp: null, userAgent: null });
+    expect(rows.has(keep.id)).toBe(true);
+    expect(rows.has(drop.id)).toBe(false);
+  });
 
   test("8 dias perde ip/user agent e mantém o resto; 181 dias sem pagamento some; com pedido pago (ou reembolsado) fica", async () => {
     const s = await seedPanelStore("Retenção");

@@ -211,7 +211,7 @@ export async function runAction<I, O, P = any, S = any>(
     error: error === undefined ? null : (redact(error) as string),
   });
 
-  const omitted = (code: string) => ({ omitted: code, keys: topKeys(raw) });
+  const omitted = (code: string) => ({ omitted: code, ...rawKeys(action.input, raw) });
   const rejection = (e: unknown) => omitted(e instanceof ActionError ? e.code : "error");
 
   let input: I;
@@ -253,7 +253,7 @@ export async function runAction<I, O, P = any, S = any>(
     try {
       return action.auditInput(input, prepared);
     } catch {
-      return { omitted: "audit_input_error", keys: topKeys(raw) };
+      return { omitted: "audit_input_error", ...rawKeys(action.input, raw) };
     }
   };
   const successView = (out: O): unknown => {
@@ -331,7 +331,43 @@ function publicFailure(action: string, e: unknown): void {
 
 const MAX_AUDIT_BYTES = 8 * 1024;
 
-/** Só nomes das chaves de primeiro nível (máx. 20, 64 chars); nunca valores. */
+/**
+ * Chaves de primeiro nível que o schema de entrada declara (objeto, também dentro de pipe/optional/default e uniões).
+ * Schema sem objeto (ex.: `z.record`) não declara nenhuma: todas as chaves recebidas contam como livres.
+ */
+function declaredKeys(schema: z.ZodType): Set<string> {
+  const out = new Set<string>();
+  const visit = (s: unknown, depth: number): void => {
+    const def = (s as { _zod?: { def?: Record<string, unknown> } } | undefined)?._zod?.def;
+    if (!def || depth > 8) return;
+    if (def.type === "object") for (const k of Object.keys(def.shape as object)) out.add(k);
+    else if (def.type === "pipe") visit(def.in, depth + 1);
+    else if (def.type === "union") for (const o of def.options as unknown[]) visit(o, depth + 1);
+    else if ("innerType" in def) visit(def.innerType, depth + 1);
+  };
+  visit(schema, 0);
+  return out;
+}
+
+/**
+ * Chaves da entrada CRUA para a auditoria de uma rejeição (antes da validação ou do `auditInput`): só as que o schema
+ * declara (máx. 20, 64 chars); as demais são só contadas (`extraKeys`), nunca nomeadas. Chave livre é texto do
+ * chamador e pode ser dado pessoal (ex.: um objeto indexado por e-mail).
+ */
+function rawKeys(schema: z.ZodType, raw: unknown): { keys: string[]; extraKeys?: number } {
+  const all = topKeysAll(raw);
+  const declared = declaredKeys(schema);
+  const keys = all.filter((k) => declared.has(k));
+  const extra = all.length - keys.length;
+  return { keys: keys.slice(0, 20).map((k) => k.slice(0, 64)), ...(extra > 0 ? { extraKeys: extra } : {}) };
+}
+
+function topKeysAll(v: unknown): string[] {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return [];
+  return Object.keys(v);
+}
+
+/** Só nomes das chaves de primeiro nível (máx. 20, 64 chars); nunca valores. Só para objetos já projetados pela ação. */
 function topKeys(v: unknown): string[] {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return [];
   return Object.keys(v).slice(0, 20).map((k) => k.slice(0, 64));

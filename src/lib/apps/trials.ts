@@ -14,20 +14,30 @@ import { appTrial, orders, store } from "@/lib/db/schema";
 import { enqueue, type JobHandler } from "@/lib/jobs";
 import { log } from "@/lib/log";
 import { mailboxHash, recoveryEmailHash } from "@/lib/recovery/rules";
-import { metaConnected } from "@/lib/tracking/meta";
+import { META_MAX_EVENT_AGE_MS, metaConnected } from "@/lib/tracking/meta";
 import { META_EVENT_ID_RE, REF_MAX, TOUCH_VALUE_MAX, fbcFromFbclid, type TouchRecord } from "@/lib/tracking/touch";
 import { validEmail } from "@/lib/validation/br";
 
 /** Event id do `StartTrial` quando o app não mandou o dele (o Pixel do navegador, se disparar, usa o mesmo). */
 export const trialEventId = (trialId: string): string => `trial:${trialId}`;
 
-/** Quanto tempo atrás o `iniciado_em` pode estar (o Meta recusa evento com mais de 7 dias). */
-const MAX_START_AGE_MS = 7 * 24 * 3600 * 1000;
-/** Folga para relógio adiantado do servidor do app. */
-const CLOCK_SKEW_MS = 60_000;
-/** Retenção (§7.3, §7.9): ip e user agent em até 7 dias; teste que não virou pagamento em 180 dias. */
-export const TRIAL_CLIENT_DATA_DAYS = 7;
-export const TRIAL_RETENTION_DAYS = 180;
+/**
+ * `iniciado_em` aceito até a idade em que o job do Meta ainda envia (7 dias menos a margem do job): mais antigo não
+ * viraria `StartTrial` e é recusado na entrada.
+ */
+export const MAX_START_AGE_MS = META_MAX_EVENT_AGE_MS;
+/** Folga para relógio adiantado do servidor do app: até isto no futuro é aceito e gravado como agora. */
+export const CLOCK_SKEW_MS = 60_000;
+/**
+ * Retenção (§7.3, §7.9): ip e user agent em no máximo 7 dias; teste que não virou pagamento em no máximo 180 dias.
+ * A varredura roda uma vez por dia, então um registro pode esperar até um ciclo depois de passar do corte: os cortes
+ * ficam um dia antes do teto (6 e 179 dias) para o teto valer mesmo no pior caso.
+ */
+export const TRIAL_CLIENT_DATA_MAX_DAYS = 7;
+export const TRIAL_RETENTION_MAX_DAYS = 180;
+const SWEEP_CYCLE_DAYS = 1;
+export const TRIAL_CLIENT_DATA_SWEEP_DAYS = TRIAL_CLIENT_DATA_MAX_DAYS - SWEEP_CYCLE_DAYS;
+export const TRIAL_RETENTION_SWEEP_DAYS = TRIAL_RETENTION_MAX_DAYS - SWEEP_CYCLE_DAYS;
 
 const optionalText = (max: number) =>
   z
@@ -37,8 +47,15 @@ const optionalText = (max: number) =>
     .optional()
     .transform((v) => (v ? v : undefined));
 
-/** Id da conta no app: texto opaco de 1 a 64 caracteres (o mesmo na criação do pagamento). */
-export const accountSchema = z.string().min(1, "Informe a conta").max(64, "A conta pode ter no máximo 64 caracteres");
+/**
+ * Id da conta no app: texto opaco de 1 a 64 caracteres (o mesmo na criação do pagamento). Nunca o e-mail: a conta fica
+ * em claro no registro de teste e nos pedidos, então qualquer `@` é recusado.
+ */
+export const accountSchema = z
+  .string()
+  .min(1, "Informe a conta")
+  .max(64, "A conta pode ter no máximo 64 caracteres")
+  .refine((v) => !v.includes("@"), "Use o id interno da conta, não o e-mail");
 
 /** Origem do cadastro no app (UTMs, clique, indicação e cookies do Pixel), com os limites do toque do checkout. */
 export const appOriginSchema = z.object({
@@ -76,7 +93,7 @@ const registerInput = z.object({
     .datetime({ offset: true, message: "Data e hora ISO 8601" })
     .transform((v) => new Date(v))
     .refine((d) => d.getTime() <= Date.now() + CLOCK_SKEW_MS, "Data no futuro")
-    .refine((d) => d.getTime() >= Date.now() - MAX_START_AGE_MS, "Data com mais de 7 dias")
+    .refine((d) => d.getTime() >= Date.now() - MAX_START_AGE_MS, "Data antiga demais (no máximo 7 dias)")
     .optional(),
   event_id: z.string().regex(META_EVENT_ID_RE, "event_id: 16 a 64 caracteres (letras, números, _ e -)").optional(),
 });
@@ -92,7 +109,9 @@ export const registerTrial = defineAction({
     // Sem Meta conectado o StartTrial não sai: ip e user agent não têm para que ser guardados.
     const connected = await metaConnected(ctx.tx, ctx.storeId);
     const id = randomUUID();
-    const startedAt = input.iniciado_em ?? new Date();
+    // Relógio do app até 60 s adiantado: vale agora (o `event_time` do Meta nunca fica no futuro).
+    const now = new Date();
+    const startedAt = input.iniciado_em && input.iniciado_em < now ? input.iniciado_em : now;
     const o = input.origem;
     const [created] = await ctx.tx
       .insert(appTrial)
@@ -129,7 +148,7 @@ export const registerTrial = defineAction({
 
 /**
  * `sweep_app_trials` (global, diário): loja a loja (a tabela `store` não tem RLS), zera ip e user agent dos testes com
- * mais de 7 dias e apaga os testes com mais de 180 dias cuja conta não tem pedido pago nesta loja (pago e depois
+ * mais de 6 dias e apaga os testes com mais de 179 dias (um ciclo antes dos tetos de 7 e 180) cuja conta não tem pedido pago nesta loja (pago e depois
  * reembolsado ou contestado também segura: o teste fica enquanto o pedido existir). Falha numa loja não impede as
  * demais; ao final, se alguma falhou, o job falha para tentar de novo. Log só com `storeId` e contagens.
  */
@@ -144,7 +163,7 @@ export const sweepAppTrialsJob: JobHandler = async () => {
           .set({ clientIp: null, userAgent: null })
           .where(
             and(
-              lt(appTrial.createdAt, sql`now() - make_interval(days => ${TRIAL_CLIENT_DATA_DAYS})`),
+              lt(appTrial.createdAt, sql`now() - make_interval(days => ${TRIAL_CLIENT_DATA_SWEEP_DAYS})`),
               or(isNotNull(appTrial.clientIp), isNotNull(appTrial.userAgent)),
             ),
           )
@@ -153,7 +172,7 @@ export const sweepAppTrialsJob: JobHandler = async () => {
           .delete(appTrial)
           .where(
             and(
-              lt(appTrial.createdAt, sql`now() - make_interval(days => ${TRIAL_RETENTION_DAYS})`),
+              lt(appTrial.createdAt, sql`now() - make_interval(days => ${TRIAL_RETENTION_SWEEP_DAYS})`),
               sql`not exists (select 1 from ${orders} where ${orders.storeId} = ${appTrial.storeId} and ${orders.appAccount} = ${appTrial.account} and ${orders.paidAt} is not null)`,
             ),
           )

@@ -1,12 +1,13 @@
 // Borda HTTP da API de integração (src/lib/apps/http.ts): só a chave `integration` da loja autentica, corpo até 32 KB,
 // JSON, 60 requisições por minuto por chave, ActionError → status HTTP com `{ erro: { codigo, mensagem } }`.
 // Nenhum literal com o formato do token: tudo montado em tempo de execução.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { ActionError } from "@/lib/actions/core";
 import type { Role } from "@/lib/actions/permissions";
 import { handleIntegrationRequest } from "@/lib/apps/http";
 import { mcpToken } from "@/lib/db/schema";
 import { mintMcpToken } from "@/lib/mcp/tokens";
+import * as ratelimit from "@/lib/payments/ratelimit";
 import { createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -125,6 +126,36 @@ describe("handleIntegrationRequest", () => {
       throw new ActionError("invalid_input", "Entrada inválida", [{ path: ["email"], message: "E-mail inválido", code: "custom" }]);
     }, OPTS);
     expect(await invalid.json()).toEqual({ erro: { codigo: "invalid_input", mensagem: "Entrada inválida", detalhes: [{ campo: "email", mensagem: "E-mail inválido" }] } });
+  });
+
+  test("falha de infraestrutura antes da ação (banco no limite, corpo que quebra no meio) → 500 no envelope { erro }", async () => {
+    const { storeId } = await seedStore("API F");
+    const key = await mkToken(storeId, "integration");
+    const seen: Seen[] = [];
+    const peek = spyOn(ratelimit, "peekRateLimit").mockImplementation(async () => {
+      throw new Error("connection terminated: dado interno");
+    });
+    try {
+      const res = await handleIntegrationRequest(req("{}", key.token), echo(seen), OPTS);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ erro: { codigo: "internal", mensagem: "Falha interna" } });
+    } finally {
+      peek.mockRestore();
+    }
+    const broken = new Request("http://localhost:3000/api/integracao/v1/testes", {
+      method: "POST",
+      headers: { authorization: `Bearer ${key.token}` },
+      body: new ReadableStream({
+        pull(c) {
+          c.error(new Error("socket fechado"));
+        },
+      }),
+      duplex: "half",
+    } as RequestInit);
+    const res = await handleIntegrationRequest(broken, echo(seen), OPTS);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ erro: { codigo: "internal", mensagem: "Falha interna" } });
+    expect(seen).toHaveLength(0);
   });
 
   test("só POST: outro método → 405", async () => {
