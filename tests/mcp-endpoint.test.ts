@@ -194,7 +194,7 @@ describe("tools/list e tools/call", () => {
     }
 
     const tools = await listTools(reader.token);
-    expect(tools.map((x) => x.name).sort()).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_summary", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
+    expect(tools.map((x) => x.name).sort()).toEqual(["approvals_status", "coupons_get", "coupons_list", "metrics_breakdown", "metrics_hasAppOffer", "metrics_summary", "metrics_trials", "offers_get", "offers_list", "orders_paidReport", "products_list"]);
     for (const x of tools) {
       expect(x.description.length).toBeGreaterThan(0);
       expect(x.inputSchema).toMatchObject({ type: "object" });
@@ -685,7 +685,9 @@ describe("PII", () => {
     coupons_list: {},
     coupons_update: { id: randomUUID(), active: false },
     metrics_breakdown: range,
+    metrics_hasAppOffer: {},
     metrics_summary: range,
+    metrics_trials: range,
     offers_create: { slug: `o-${randomBytes(4).toString("hex")}`, name: "Nova", productIds: [s.mainId], priceCents: 1990, methods: ["pix"], pixMode: "manual" },
     offers_get: { id: s.offerId },
     offers_list: {},
