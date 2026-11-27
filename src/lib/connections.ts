@@ -6,6 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { defineAction } from "@/lib/actions/core";
 import { hasPermission } from "@/lib/actions/permissions";
+import { parseAppWebhookConfig } from "@/lib/apps/config";
 import { env } from "@/lib/env";
 import { offer, store } from "@/lib/db/schema";
 import { loadResend, smtpConfigUsable } from "@/lib/delivery/resend";
@@ -19,7 +20,7 @@ const resendWebhookUrl = (storeId: string) => `${baseUrl()}/api/webhooks/resend/
 
 export const connectionsStatus = defineAction({
   name: "connections.status",
-  description: "Conexões da loja (Pix manual, Asaas, SMTP, Resend, Telegram, Meta) sem segredos: segredos aparecem só como configurados.",
+  description: "Conexões da loja (Pix manual, Asaas, SMTP, Resend, Telegram, Meta, app) sem segredos: segredos aparecem só como configurados.",
   input: z.object({}),
   permission: "connections.read",
   audit: false,
@@ -36,6 +37,8 @@ export const connectionsStatus = defineAction({
     const resend = await readIntegration(ctx.tx, ctx.storeId, "resend");
     // Idem para o token do Telegram.
     const telegram = await readIntegration(ctx.tx, ctx.storeId, "telegram");
+    // Idem para o segredo do webhook do app (nunca sai daqui: só "configured").
+    const app = await readIntegration(ctx.tx, ctx.storeId, "app_webhook");
     const [{ emailProvider } = { emailProvider: "smtp" }] = await ctx.tx
       .select({ emailProvider: store.emailProvider })
       .from(store)
@@ -114,6 +117,18 @@ export const connectionsStatus = defineAction({
         : null,
       meta: meta
         ? { pixelId: str(cfg(meta).pixelId) ?? "", testEventCode: str(cfg(meta).testEventCode), accessToken: meta.secret ? ("configured" as const) : null }
+        : null,
+      app: app
+        ? (() => {
+            const c = parseAppWebhookConfig(app.config);
+            return {
+              // A URL pode carregar uma credencial do app no caminho: token MCP só vê que existe (`secret`).
+              url: isToken ? null : (c.url ?? null),
+              returnHosts: c.returnHosts ?? [],
+              publicOrigin: c.publicOrigin ?? null,
+              secret: app.unreadable ? ("unreadable" as const) : app.secret ? ("configured" as const) : null,
+            };
+          })()
         : null,
       turnstile: { configured: turnstileConfigured, recommended: !turnstileConfigured && cardOffer !== undefined },
     };

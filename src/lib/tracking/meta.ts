@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { and, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import { ActionError, defineAction } from "@/lib/actions/core";
+import { readAppWebhookConfig } from "@/lib/apps/config";
 import { withStore, type Tx } from "@/lib/db/client";
 import { appTrial, conversion, customer, integration, offer, orderItem, orders, store } from "@/lib/db/schema";
 import { storeBaseUrl } from "@/lib/delivery/links";
@@ -518,8 +519,9 @@ async function startTrialJob(storeId: string, trialId: string, signal: AbortSign
       event_time: eventTime,
       event_id: tr.eventId,
       action_source: "website",
-      // O cadastro aconteceu no site do app, que o funil não conhece: vale a origem pública da loja (exigida no website).
-      event_source_url: `${storeBaseUrl(s)}/`,
+      // O cadastro aconteceu no site do app: vale a origem pública dele (config.publicOrigin da conexão do app) quando a
+      // loja a informou; senão, a origem pública da loja (exigida no website).
+      event_source_url: `${(await readAppWebhookConfig(tx, storeId))?.publicOrigin ?? storeBaseUrl(s)}/`,
       user_data: userData,
       custom_data: { value: 0, currency: "BRL" },
     };

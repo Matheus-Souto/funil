@@ -241,6 +241,22 @@ describe("testes de conexão (D5, D6)", () => {
   });
 });
 
+describe("conexão do app (Task 10): fora do MCP", () => {
+  test("saveAppWebhook, rotateAppWebhookSecret e testAppWebhook não são ferramenta; forjada → forbidden e nada na fila", async () => {
+    const { asToken, storeId } = await setup();
+    const names = ["connections_saveAppWebhook", "connections_rotateAppWebhookSecret", "connections_testAppWebhook"];
+    for (const role of ["owner", "admin", "traffic", "support", "reader"] as Role[]) {
+      const tools = mcpTools(role).map((x) => x.name);
+      expect([role, names.filter((n) => tools.includes(n))]).toEqual([role, []]);
+    }
+    for (const name of names) {
+      const forged = { name, action: name.replace("_", "."), description: "", inputSchema: {}, permission: "connections.write" as const, approval: true, project: (o: unknown) => o };
+      expect(await code(callMcpTool(forged, { storeId, tokenId: (asToken.actor as { tokenId: string }).tokenId, role: "owner" }, { url: "https://app.exemplo.com.br/webhook" }))).toBe("forbidden");
+    }
+    expect((await runAction(approvalStatus, asToken, {})).requests).toEqual([]);
+  });
+});
+
 describe("saveResend visível (D8)", () => {
   test("pelo painel em loja sem SMTP: audit_log com result.activated = true; a descrição menciona a ativação", async () => {
     const { storeId, panel } = await setup();

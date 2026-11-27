@@ -5,6 +5,7 @@
 import { redirect } from "next/navigation";
 import { ActionError, runAction, type Action } from "@/lib/actions/core";
 import { ackAlert } from "@/lib/alerts";
+import { rotateAppWebhookSecret, saveAppWebhook, testAppWebhook } from "@/lib/apps/connection";
 import { resendAppNotice } from "@/lib/apps/webhook";
 import { changePassword, revokeMemberSessions } from "@/lib/auth/account";
 import { PASSWORD_REFUSALS } from "@/lib/auth/confirm";
@@ -309,6 +310,35 @@ export async function saveMetaAction(input: unknown) {
 export async function testMetaAction() {
   const panel = await requirePanelActor();
   return call(panel, testMeta, {}, () => "Conexão com o Meta funcionando.");
+}
+
+// ---- app (integração): webhook, segredo e chaves da API. O segredo e a chave voltam só no `data`, uma vez, para o
+// cartão mostrar e esquecer; nunca na mensagem (que vai para a região aria-live). ---------------------------------
+
+export async function saveAppWebhookAction(input: unknown) {
+  const panel = await requirePanelActor();
+  return call(panel, saveAppWebhook, input, (o) => (o.secret ? "Webhook do app salvo e segredo gerado." : "Webhook do app salvo."));
+}
+
+export async function rotateAppWebhookSecretAction() {
+  const panel = await requirePanelActor();
+  return call(panel, rotateAppWebhookSecret, {}, () => "Segredo novo gerado. O anterior parou de valer.");
+}
+
+export async function testAppWebhookAction() {
+  const panel = await requirePanelActor();
+  return call(panel, testAppWebhook, {}, (o) => `O app recebeu o teste (HTTP ${o.httpStatus}).`);
+}
+
+/** Chave da API de integração = token da loja com o papel `integration` (a mesma ação dos tokens MCP). */
+export async function createIntegrationKeyAction(name: string) {
+  const panel = await requirePanelActor();
+  return call(panel, createMcpToken, { name, role: "integration" }, () => "Chave criada.");
+}
+
+export async function revokeIntegrationKeyAction(id: string) {
+  const panel = await requirePanelActor();
+  return call(panel, revokeMcpToken, { id }, () => "Chave revogada. O app deixou de acessar a API.");
 }
 
 export async function updateSettingsAction(input: unknown) {

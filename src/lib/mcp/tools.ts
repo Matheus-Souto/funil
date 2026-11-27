@@ -35,6 +35,10 @@ export const MCP_EXCLUDED: Record<string, string> = {
   "approvals.request": "usada pelo próprio MCP ao chamar uma ferramenta sensível",
   "apps.registerTrial": "API de integração do app (só a chave integration)",
   "apps.resendNotice": "reenvio do aviso ao app: só pelo painel do pedido",
+  // Devolvem o segredo do webhook do app: nem pela fila de aprovação (pedido e resposta ao alcance do agente).
+  "connections.saveAppWebhook": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
+  "connections.rotateAppWebhookSecret": "devolve o segredo do webhook do app: só pelo painel (Conexões)",
+  "connections.testAppWebhook": "teste do webhook do app: só junto da configuração, no painel",
 };
 
 /** Prefixo da descrição das ferramentas que passam pela fila de aprovação. */

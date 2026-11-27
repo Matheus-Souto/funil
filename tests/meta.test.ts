@@ -8,6 +8,7 @@ import { checkoutStart, getOrderPublic } from "@/lib/checkout";
 import { withStore } from "@/lib/db/client";
 import { appTrial, auditLog, conversion, integration, job, orders } from "@/lib/db/schema";
 import { parseEnv } from "@/lib/env";
+import { saveIntegration } from "@/lib/integrations";
 import { enqueue, type Job } from "@/lib/jobs";
 import { getHandlers } from "@/lib/jobs/handlers";
 import { createOrder } from "@/lib/orders/create";
@@ -578,6 +579,20 @@ describe("meta_event StartTrial (início do teste do app)", () => {
     await t.ownerDb.delete(appTrial).where(eq(appTrial.id, r.id));
     await runTrialJobs(r.id);
     expect(meta.requests).toHaveLength(before);
+  });
+
+  test("event_source_url: a origem pública do app (config.publicOrigin da conexão app_webhook) quando existe; senão a da loja", async () => {
+    const shop = await seedShop();
+    const a = await runAction(registerTrial, integ(shop.storeId), { conta: "c-src-1", email: "src1@exemplo.com" });
+    await runTrialJobs(a.id);
+    expect(meta.events.map((e) => e.event.event_source_url)).toEqual(["http://localhost:3000/"]);
+
+    await withStore(shop.storeId, (tx) =>
+      saveIntegration(tx, shop.storeId, "app_webhook", { url: "https://app.exemplo.com.br/webhook", publicOrigin: "https://app.exemplo.com.br" }, "segredo-do-teste"),
+    );
+    const b = await runAction(registerTrial, integ(shop.storeId), { conta: "c-src-2", email: "src2@exemplo.com" });
+    await runTrialJobs(b.id);
+    expect(meta.events.map((e) => e.event.event_source_url)).toEqual(["http://localhost:3000/", "https://app.exemplo.com.br/"]);
   });
 });
 
