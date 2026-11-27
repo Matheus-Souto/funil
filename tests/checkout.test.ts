@@ -1148,3 +1148,35 @@ describe("checkout.start: converte o contato guardado antes da compra", () => {
     expect(e.code).toBe("invalid_input");
   });
 });
+
+describe("oferta de app no checkout (Task 5)", () => {
+  async function seedApp() {
+    const fake = createFakeAsaas();
+    const { storeId } = await seedStore("PeticionaAqui");
+    const call = { storeId, actor: owner, origin: "panel" as const };
+    setAsaasFetchForTests(fake.fetch);
+    await runAction(saveAsaas, call, { env: "sandbox", apiKey: fake.apiKey });
+    await runAction(createOffer, call, {
+      slug: "start-anual", name: "Plano Start anual", delivery: "app", appCode: "start_anual",
+      productIds: [], priceCents: 49_700, methods: ["pix", "card"], pixMode: "asaas",
+    });
+    return { storeId, slug: "start-anual" };
+  }
+
+  test("checkoutOffer expõe delivery (app com o nome da oferta; download como antes)", async () => {
+    const s = await seedApp();
+    const v = checkoutOffer(await runAction(getPublicOffer, pub(s.storeId), { slug: s.slug }), ["pix", "card"]);
+    expect(v).toMatchObject({ delivery: "app", productName: "Plano Start anual", includes: null, bump: null, maxInstallments: 1 });
+    const d = await seed();
+    expect(checkoutOffer(await runAction(getPublicOffer, pub(d.storeId), { slug: d.slug }), ["pix"]).delivery).toBe("download");
+  });
+
+  test("checkout.start numa oferta app (sem sessão do app) é invalid_input e não cria pedido", async () => {
+    const s = await seedApp();
+    for (const method of ["pix", "card"]) {
+      const e = await fail(runAction(checkoutStart, pub(s.storeId), startInput(s.slug, { method, customer: { cpf: CPF } })));
+      expect([e.code, e.message]).toEqual(["invalid_input", "Abra o pagamento pelo app"]);
+    }
+    expect(await withStore(s.storeId, (tx) => tx.select().from(orders))).toEqual([]);
+  });
+});

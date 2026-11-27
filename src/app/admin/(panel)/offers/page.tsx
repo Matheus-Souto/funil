@@ -115,7 +115,7 @@ export default async function OffersPage({ searchParams }: { searchParams: Promi
                       </div>
                       <div className={s.offerMeta}>
                         <span>
-                          {names(o.products)} · <b>{brl(o.priceCents)}</b>
+                          {o.delivery === "app" ? `App · ${o.appCode}` : names(o.products)} · <b>{brl(o.priceCents)}</b>
                         </span>
                         {o.methods.includes("pix") ? (
                           <span className={s.chip}>

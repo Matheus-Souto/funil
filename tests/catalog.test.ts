@@ -459,6 +459,7 @@ describe("offers", () => {
       id: o.id,
       slug: "oferta-1",
       name: "Oferta",
+      delivery: "download",
       products: [{ name: "Principal" }],
       priceCents: 990,
       methods: ["pix", "card"],
@@ -997,5 +998,126 @@ describe("Task 4, rodada de correção 1 (editor: gravação parcial, foco, bump
     expect(emptyOptionLabel({ firstMain: true, value: "p1", hasProducts: true })).toBeNull(); // 1 produto, como hoje
     expect(emptyOptionLabel({ firstMain: false, value: "p1", hasProducts: true })).toBe("Escolha…");
     expect(emptyOptionLabel({ firstMain: false, value: "", hasProducts: true })).toBe("Escolha…");
+  });
+});
+
+describe("oferta de app (Task 5)", () => {
+  const appInput = (over: Record<string, unknown> = {}) => ({
+    slug: "start-anual",
+    name: "Plano Start anual",
+    delivery: "app",
+    appCode: "start_anual",
+    productIds: [],
+    priceCents: 49_700,
+    methods: ["pix", "card"],
+    pixMode: "asaas",
+    ...over,
+  });
+  const failure = async (p: Promise<unknown>) => (await p.catch((e: unknown) => e)) as ActionError;
+
+  test("cria oferta app sem produtos; get, list e getPublic trazem delivery e appCode", async () => {
+    const { storeId } = await seedStore();
+    const o = await call(createOffer, storeId, owner, appInput());
+    expect(o).toMatchObject({ delivery: "app", appCode: "start_anual", products: [], bump: null, maxInstallments: 1, pixMode: "asaas" });
+    expect(await call(getOffer, storeId, owner, { id: o.id })).toMatchObject({ delivery: "app", appCode: "start_anual", products: [] });
+    expect((await call(listOffers, storeId, owner, {}))[0]).toMatchObject({ delivery: "app", appCode: "start_anual" });
+    const pubOffer = await call(getPublicOffer, storeId, pub, { slug: "start-anual" }, "public");
+    expect(pubOffer).toMatchObject({ delivery: "app", products: [], bump: null, maxInstallments: 1, pixMode: "asaas" });
+    // O código do app não é público: só o webhook leva o app_code.
+    expect(JSON.stringify(pubOffer)).not.toContain("start_anual");
+  });
+
+  test("oferta download continua com delivery download, sem appCode e exigindo produto", async () => {
+    const { storeId } = await seedStore();
+    const p = await mkProduct(storeId);
+    const o = await call(createOffer, storeId, owner, offerInput(p.id));
+    expect(o).toMatchObject({ delivery: "download", appCode: null });
+    expect((await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public")).delivery).toBe("download");
+    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "sem-produto", productIds: [] })))).toBe("invalid_input");
+    expect(await code(call(createOffer, storeId, owner, offerInput(p.id, { slug: "com-codigo", appCode: "codigo" })))).toBe("invalid_input");
+  });
+
+  test("recusa oferta app com produtos, bump, parcelas, Pix manual e código ausente ou fora do formato (com o caminho do campo)", async () => {
+    const { storeId } = await seedStore();
+    const p = await mkProduct(storeId);
+    const cases: [Record<string, unknown>, string][] = [
+      [{ productIds: [p.id] }, "productIds"],
+      [{ bump: { productIds: [p.id], priceCents: 500 } }, "bump"],
+      [{ maxInstallments: 3 }, "maxInstallments"],
+      [{ pixMode: "manual" }, "pixMode"],
+      [{ appCode: undefined }, "appCode"],
+      [{ appCode: "Start Anual" }, "appCode"],
+      [{ appCode: "a".repeat(41) }, "appCode"],
+    ];
+    for (const [over, field] of cases) {
+      const e = await failure(call(createOffer, storeId, owner, appInput(over)));
+      expect([field, e.code]).toEqual([field, "invalid_input"]);
+      expect((e.details as { path: string[] }[]).some((d) => d.path[0] === field)).toBe(true);
+    }
+    expect(await call(listOffers, storeId, owner, {})).toEqual([]);
+  });
+
+  test("appCode repetido na loja é conflict; em outra loja, ok", async () => {
+    const a = await seedStore();
+    const b = await seedStore();
+    await call(createOffer, a.storeId, owner, appInput());
+    const e = await failure(call(createOffer, a.storeId, owner, appInput({ slug: "outra" })));
+    expect([e.code, e.message]).toEqual(["conflict", "Código já usado por outra oferta"]);
+    expect((await call(createOffer, b.storeId, owner, appInput())).appCode).toBe("start_anual");
+  });
+
+  test("offers.update numa oferta app: troca o código, recusa parcelas e Pix manual, e código repetido é conflict", async () => {
+    const { storeId } = await seedStore();
+    const o = await call(createOffer, storeId, owner, appInput());
+    await call(createOffer, storeId, owner, appInput({ slug: "creditos-50", appCode: "creditos_50" }));
+    expect((await call(updateOffer, storeId, owner, { id: o.id, appCode: "start_anual_2027" })).appCode).toBe("start_anual_2027");
+    for (const [over, field] of [[{ maxInstallments: 3 }, "maxInstallments"], [{ pixMode: "manual" }, "pixMode"], [{ appCode: "Ruim" }, "appCode"], [{ appCode: null }, "appCode"]] as const) {
+      const e = await failure(call(updateOffer, storeId, owner, { id: o.id, ...over }));
+      expect([field, e.code]).toEqual([field, "invalid_input"]);
+    }
+    const dup = await failure(call(updateOffer, storeId, owner, { id: o.id, appCode: "creditos_50" }));
+    expect([dup.code, dup.message]).toEqual(["conflict", "Código já usado por outra oferta"]);
+    expect((await call(getOffer, storeId, owner, { id: o.id })).appCode).toBe("start_anual_2027");
+  });
+
+  test("offers.update numa oferta download recusa appCode; offers.setProducts numa oferta app é invalid_input", async () => {
+    const { storeId } = await seedStore();
+    const p = await mkProduct(storeId);
+    const d = await call(createOffer, storeId, owner, offerInput(p.id));
+    expect(await code(call(updateOffer, storeId, owner, { id: d.id, appCode: "codigo" }))).toBe("invalid_input");
+    const a = await call(createOffer, storeId, owner, appInput());
+    expect(await code(call(setOfferProducts, storeId, owner, { id: a.id, productIds: [p.id], bump: null }))).toBe("invalid_input");
+  });
+
+  test("offers.update troca a entrega só sem pedidos: download → app tira os produtos; app → download fica sem produto até escolher", async () => {
+    const { storeId } = await seedStore();
+    const p = await mkProduct(storeId);
+    const d = await call(createOffer, storeId, owner, offerInput(p.id, { pixMode: "asaas" }));
+    // Parcelas/Pix incompatíveis com app no mesmo pedido de troca: recusa sem mudar nada.
+    expect(await code(call(updateOffer, storeId, owner, { id: d.id, delivery: "app", appCode: "plano", pixMode: "manual" }))).toBe("invalid_input");
+    expect(await code(call(updateOffer, storeId, owner, { id: d.id, delivery: "app" }))).toBe("invalid_input");
+    const app = await call(updateOffer, storeId, owner, { id: d.id, delivery: "app", appCode: "plano" });
+    expect(app).toMatchObject({ delivery: "app", appCode: "plano" });
+    expect((await call(getOffer, storeId, owner, { id: d.id })).products).toEqual([]);
+    const back = await call(updateOffer, storeId, owner, { id: d.id, delivery: "download" });
+    expect(back).toMatchObject({ delivery: "download", appCode: null });
+    // Sem produto, a oferta download não vende até alguém escolher os produtos.
+    expect(await code(call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public"))).toBe("not_found");
+    await call(setOfferProducts, storeId, owner, { id: d.id, productIds: [p.id], bump: null });
+    expect((await call(getPublicOffer, storeId, pub, { slug: "oferta-1" }, "public")).products).toEqual([{ name: "Produto" }]);
+
+    // Com pedido, a entrega não muda (o pedido já feito segue a entrega da oferta).
+    const [buyer] = await withStore(storeId, (tx) =>
+      tx.insert(customer).values({ storeId, email: "teste@example.com", name: "Pessoa Teste", phone: "00000000000" }).returning({ id: customer.id }),
+    );
+    await withStore(storeId, (tx) =>
+      tx.insert(orders).values({
+        storeId, publicId: "pedido-entrega", offerId: d.id, customerId: buyer!.id, method: "pix_manual",
+        subtotalCents: 990, totalCents: 990, clientIp: "192.0.2.1", userAgent: "teste",
+      }),
+    );
+    const e = await failure(call(updateOffer, storeId, owner, { id: d.id, delivery: "app", appCode: "plano" }));
+    expect(e.code).toBe("conflict");
+    expect((await call(getOffer, storeId, owner, { id: d.id })).delivery).toBe("download");
   });
 });

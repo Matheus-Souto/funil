@@ -5,6 +5,8 @@
 // preço por offers.updatePrice. As duas são sensíveis: diálogo de confirmação que diz o que muda. Endereço por
 // offers.setSlug (sensível; o dono no painel executa direto); os demais campos por offers.update; pixel próprio por
 // offers.setPixel (tracking.write, com diálogo). Prévia no celular ao lado. Regras puras em offer-editing.ts.
+// Entrega `app` (escolhida ao criar): sem produtos nem bump, à vista, Pix só do Asaas, com o código que vai no aviso ao
+// app (offers.create / offers.update).
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -51,6 +53,9 @@ export interface OfferData {
   id: string;
   slug: string;
   name: string;
+  delivery: "download" | "app";
+  /** Código no app (só na entrega `app`). */
+  appCode: string | null;
   /** Produtos principais, na ordem da oferta. */
   productIds: string[];
   priceCents: number;
@@ -92,6 +97,8 @@ function initialForm(offer: OfferData | null, products: ProductOption[]) {
   return {
     name: offer?.name ?? "",
     slug: offer?.slug ?? "",
+    delivery: offer?.delivery ?? ("download" as "download" | "app"),
+    appCode: offer?.appCode ?? "",
     main: (offer?.productIds ?? [products.find((p) => !p.deleted)?.id ?? ""]).map(newLine),
     price: offer ? centsToInput(offer.priceCents) : "",
     pix: offer ? offer.methods.includes("pix") : true,
@@ -114,12 +121,16 @@ function initialForm(offer: OfferData | null, products: ProductOption[]) {
 const comparable = (f: ReturnType<typeof initialForm>) => ({
   ...f,
   name: f.name.trim(),
+  appCode: f.delivery === "app" ? f.appCode.trim() : "",
   thankYouText: f.thankYouText.trim(),
   main: ids(f.main),
   bumpLines: f.bumpOn ? ids(f.bumpLines) : [],
   bumpPrice: f.bumpOn ? f.bumpPrice : "",
   bumpLabel: f.bumpOn ? f.bumpLabel.trim() : "",
 });
+
+/** Mesma regra de offers.create/update (APP_CODE_RE): o que passa aqui não volta recusado. */
+const APP_CODE = /^[a-z0-9_]{1,40}$/;
 
 /** Maior valor em centavos que o banco guarda (integer do Postgres): o campo recusa o que passar disso. */
 const MAX_CENTS = 2_147_483_647;
@@ -132,6 +143,8 @@ export function OfferEditor(props: {
   canPixel: boolean;
   /** Serviço de cartão configurado na instalação (CARD_ORIGIN). Sem ele, o cartão não liga e o editor diz por quê. */
   cardAvailable: boolean;
+  /** A loja aceita CPF ou CNPJ no checkout (Configurações → Checkout). */
+  acceptCnpj?: boolean;
   /** Acabou de ser criada (a página nova mostra a confirmação). */
   created?: boolean;
 }) {
@@ -169,15 +182,18 @@ export function OfferEditor(props: {
     else focusables.current.delete(k);
   };
 
+  /** Oferta de app: sem produtos nem bump, à vista e Pix do Asaas (o app libera o plano ou os créditos). */
+  const app = f.delivery === "app";
+  const appCode = f.appCode.trim();
   const priceCents = parseBrl(f.price);
-  const bumpCents = f.bumpOn ? parseBrl(f.bumpPrice) : null;
+  const bumpCents = !app && f.bumpOn ? parseBrl(f.bumpPrice) : null;
   const bumpLabel = f.bumpLabel.trim() || null;
   /** Bump como as ações recebem (offers.create / offers.setProducts). */
-  const bumpInput = f.bumpOn && bumpCents ? { productIds: bumpProductIds, priceCents: bumpCents, label: bumpLabel } : null;
+  const bumpInput = !app && f.bumpOn && bumpCents ? { productIds: bumpProductIds, priceCents: bumpCents, label: bumpLabel } : null;
   const changes = offer
     ? offerChanges(
         { priceCents: offer.priceCents, productIds: offer.productIds, bump: offer.bump },
-        { priceCents, productIds: productIds, bump: bumpInput },
+        { priceCents, productIds: app ? [] : productIds, bump: bumpInput },
       )
     : null;
   const slugChanged = offer !== null && f.slug !== offer.slug;
@@ -194,6 +210,12 @@ export function OfferEditor(props: {
   function problem(): string | null {
     if (!f.name.trim()) return "Informe o nome da oferta.";
     if (!/^[a-z0-9-]{3,60}$/.test(f.slug)) return "Endereço: use 3 a 60 caracteres (letras minúsculas, números e hífen).";
+    if (app) {
+      if (!APP_CODE.test(appCode)) return "Código no app: use 1 a 40 letras minúsculas, números ou _.";
+      if (!priceCents || priceCents <= 0) return "Preço inválido. Use o formato 9,90.";
+      if (methods.length === 0) return "Escolha ao menos um método de pagamento.";
+      return null;
+    }
     const lists = productsProblem({ productIds: productIds, bumpOn: f.bumpOn, bumpProductIds: bumpProductIds, bumpPriceCents: bumpCents, bumpLabel });
     if (lists) return lists;
     if (!priceCents || priceCents <= 0) return "Preço inválido. Use o formato 9,90.";
@@ -209,8 +231,9 @@ export function OfferEditor(props: {
   const common = () => ({
     name: f.name.trim(),
     methods,
-    pixMode: f.pixMode,
-    maxInstallments: f.maxInstallments,
+    pixMode: app ? ("asaas" as const) : f.pixMode,
+    maxInstallments: app ? 1 : f.maxInstallments,
+    ...(app ? { appCode } : {}),
     thankYouText: f.thankYouText.trim() || null,
     active: f.active,
   });
@@ -226,8 +249,9 @@ export function OfferEditor(props: {
         () =>
           createOfferAction({
             ...common(),
+            delivery: f.delivery,
             slug: f.slug,
-            productIds: productIds,
+            productIds: app ? [] : productIds,
             priceCents,
             bump: bumpInput,
           }),
@@ -447,8 +471,46 @@ export function OfferEditor(props: {
                     max={MAX_CENTS}
                   />
                 </div>
+                <div className={s.field} role="radiogroup" aria-label="Entrega" aria-describedby="entrega-dica">
+                  <span className={s.label}>Entrega</span>
+                  <div className={s.segment} style={{ alignSelf: "flex-start" }}>
+                    <label>
+                      <input type="radio" name="delivery" checked={!app} disabled={offer !== null} onChange={() => set("delivery", "download")} />
+                      Download (PDF)
+                    </label>
+                    <label>
+                      <input type="radio" name="delivery" checked={app} disabled={offer !== null} onChange={() => set("delivery", "app")} />
+                      App
+                    </label>
+                  </div>
+                  <span id="entrega-dica" className={s.hint}>
+                    {app
+                      ? "O comprador paga pelo link que o app abre; o funil avisa o app e não envia PDF."
+                      : "O comprador recebe os produtos por e-mail depois do pagamento."}
+                    {offer ? " Para mudar a entrega, crie outra oferta." : ""}
+                  </span>
+                </div>
                 <div className={s.formGrid}>
-                  {productList({ group: "main", firstLabel: "Produto entregue", lineLabel: (n) => `Produto ${n}` })}
+                  {app ? (
+                    <div className={s.field}>
+                      <label className={s.field}>
+                        <span className={s.label}>Código no app</span>
+                        <input
+                          className={`${s.input} ${s.mono}`}
+                          value={f.appCode}
+                          maxLength={40}
+                          placeholder="start_anual"
+                          aria-describedby="codigo-app-dica"
+                          onChange={(e) => set("appCode", e.target.value.toLowerCase())}
+                        />
+                      </label>
+                      <span id="codigo-app-dica" className={s.hint}>
+                        Vai no aviso de pagamento: o app libera o plano ou os créditos por ele. Letras minúsculas, números e _.
+                      </span>
+                    </div>
+                  ) : (
+                    productList({ group: "main", firstLabel: "Produto entregue", lineLabel: (n) => `Produto ${n}` })
+                  )}
                   <div className={s.field}>
                     <label className={s.field}>
                       <span className={s.label}>Endereço (slug)</span>
@@ -494,7 +556,7 @@ export function OfferEditor(props: {
                     </span>
                     <span className={s.payText}>
                       Pix
-                      <small>{f.pixMode === "asaas" ? "Liberado sozinho pelo Asaas" : "Você confere e libera"}</small>
+                      <small>{app || f.pixMode === "asaas" ? "Liberado sozinho pelo Asaas" : "Você confere e libera"}</small>
                     </span>
                     <input type="checkbox" checked={f.pix} onChange={(e) => set("pix", e.target.checked)} />
                   </label>
@@ -504,7 +566,7 @@ export function OfferEditor(props: {
                     </span>
                     <span className={s.payText}>
                       Cartão de crédito
-                      <small>Visa, Mastercard, Elo · {f.maxInstallments > 1 ? `até ${f.maxInstallments}x` : "à vista"}</small>
+                      <small>Visa, Mastercard, Elo · {!app && f.maxInstallments > 1 ? `até ${f.maxInstallments}x` : "à vista"}</small>
                     </span>
                     <input
                       type="checkbox"
@@ -521,102 +583,111 @@ export function OfferEditor(props: {
                     {cardBox.notice}
                   </p>
                 ) : null}
-                <div className={s.grid2}>
-                  <div className={s.field} role="radiogroup" aria-label="Modo do Pix">
-                    <span className={s.label}>Modo do Pix</span>
-                    <div className={s.segment} style={{ alignSelf: "flex-start" }}>
-                      <label>
-                        <input type="radio" name="pixMode" checked={f.pixMode === "asaas"} onChange={() => set("pixMode", "asaas")} />
-                        Asaas (automático)
-                      </label>
-                      <label>
-                        <input type="radio" name="pixMode" checked={f.pixMode === "manual"} onChange={() => set("pixMode", "manual")} />
-                        Manual
-                      </label>
+                {app ? (
+                  <p className={s.payNote} role="note">
+                    <Info size={14} strokeWidth={2} aria-hidden="true" />
+                    Oferta de app: à vista, com Pix do Asaas ou cartão. O comprador informa CPF{props.acceptCnpj ? " ou CNPJ" : ""}.
+                  </p>
+                ) : (
+                  <div className={s.grid2}>
+                    <div className={s.field} role="radiogroup" aria-label="Modo do Pix">
+                      <span className={s.label}>Modo do Pix</span>
+                      <div className={s.segment} style={{ alignSelf: "flex-start" }}>
+                        <label>
+                          <input type="radio" name="pixMode" checked={f.pixMode === "asaas"} onChange={() => set("pixMode", "asaas")} />
+                          Asaas (automático)
+                        </label>
+                        <label>
+                          <input type="radio" name="pixMode" checked={f.pixMode === "manual"} onChange={() => set("pixMode", "manual")} />
+                          Manual
+                        </label>
+                      </div>
+                      <span className={s.hint}>
+                        {f.pixMode === "asaas"
+                          ? "Com Asaas o pedido é liberado sozinho e o comprador informa CPF."
+                          : "Pix direto na sua chave: você confere no extrato e libera cada pedido."}
+                      </span>
                     </div>
-                    <span className={s.hint}>
-                      {f.pixMode === "asaas"
-                        ? "Com Asaas o pedido é liberado sozinho e o comprador informa CPF."
-                        : "Pix direto na sua chave: você confere no extrato e libera cada pedido."}
-                    </span>
+                    <Select
+                      className={s.arcField}
+                      label="Parcelas máximas no cartão"
+                      description="Parcela mínima do Asaas: R$ 5,00."
+                      value={String(f.maxInstallments)}
+                      onValueChange={(v) => set("maxInstallments", Number(v))}
+                      disabled={ro || !f.card}
+                      options={Array.from({ length: 12 }, (_, i) => i + 1).map((n) => ({
+                        value: String(n),
+                        label: n === 1 ? "1x (à vista)" : `até ${n}x`,
+                      }))}
+                    />
                   </div>
-                  <Select
-                    className={s.arcField}
-                    label="Parcelas máximas no cartão"
-                    description="Parcela mínima do Asaas: R$ 5,00."
-                    value={String(f.maxInstallments)}
-                    onValueChange={(v) => set("maxInstallments", Number(v))}
-                    disabled={ro || !f.card}
-                    options={Array.from({ length: 12 }, (_, i) => i + 1).map((n) => ({
-                      value: String(n),
-                      label: n === 1 ? "1x (à vista)" : `até ${n}x`,
-                    }))}
-                  />
-                </div>
+                )}
               </div>
             </fieldset>
 
-            <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
-              <div className={s.cardHead} style={{ marginBottom: 4 }}>
-                <legend className={s.sectionLegend}>
-                  <Art name="receita" size={24} className={s.cardArt} />
-                  Order bump
-                </legend>
-                <label className={s.switch}>
-                  <span className={s.srOnly}>Oferecer order bump</span>
-                  <input
-                    type="checkbox"
-                    checked={f.bumpOn}
-                    onChange={(e) => {
-                      const on = e.target.checked;
-                      // Ao ligar, linhas vazias ou repetidas ganham produtos livres, sem repetir entre si.
-                      const filled = fillBumpLines(productIds, bumpProductIds, available);
-                      setF((x) => ({ ...x, bumpOn: on, bumpLines: on ? x.bumpLines.map((l, i) => ({ ...l, id: filled[i]! })) : x.bumpLines }));
-                    }}
-                  />
-                </label>
-              </div>
-              <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
-                Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
-              </p>
-              {f.bumpOn ? (
-                <div className={s.stack}>
-                  {productList({
-                    group: "bumpLines",
-                    firstLabel: "Produto do bump",
-                    lineLabel: (n) => `Produto ${n} do bump`,
-                    addLabel: "Adicionar produto ao bump",
-                  })}
-                  <div className={s.grid2}>
-                    <MoneyInput
-                      className={s.arcField}
-                      label="Preço do acréscimo"
-                      value={parseBrl(f.bumpPrice)}
-                      onValueChange={(v) => set("bumpPrice", v === null ? "" : centsToInput(v))}
-                      max={MAX_CENTS}
-                      description={priceCents && bumpCents ? `Total com bump: ${brl(priceCents + bumpCents)}` : undefined}
+            {app ? null : (
+              <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
+                <div className={s.cardHead} style={{ marginBottom: 4 }}>
+                  <legend className={s.sectionLegend}>
+                    <Art name="receita" size={24} className={s.cardArt} />
+                    Order bump
+                  </legend>
+                  <label className={s.switch}>
+                    <span className={s.srOnly}>Oferecer order bump</span>
+                    <input
+                      type="checkbox"
+                      checked={f.bumpOn}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        // Ao ligar, linhas vazias ou repetidas ganham produtos livres, sem repetir entre si.
+                        const filled = fillBumpLines(productIds, bumpProductIds, available);
+                        setF((x) => ({ ...x, bumpOn: on, bumpLines: on ? x.bumpLines.map((l, i) => ({ ...l, id: filled[i]! })) : x.bumpLines }));
+                      }}
                     />
-                    <div className={s.field}>
-                      <label className={s.field}>
-                        <span className={s.label}>Título da caixa</span>
-                        <input
-                          className={s.input}
-                          value={f.bumpLabel}
-                          maxLength={200}
-                          placeholder={bumpProductIds.length > 1 ? "5 Kits Extras" : "Quero a versão completa"}
-                          aria-required={bumpProductIds.length > 1}
-                          aria-describedby="titulo-caixa-dica"
-                          onChange={(e) => set("bumpLabel", e.target.value)}
-                        />
-                      </label>
-                      <span id="titulo-caixa-dica" className={s.hint}>
-                        {bumpProductIds.length > 1 ? "Obrigatório com mais de um produto. " : ""}Quem marca recebe tudo no mesmo e-mail.
-                      </span>
+                  </label>
+                </div>
+                <p className={s.cardSub} style={{ margin: "0 0 16px" }}>
+                  Uma caixa extra antes do botão de pagar. Sempre começa desmarcada.
+                </p>
+                {f.bumpOn ? (
+                  <div className={s.stack}>
+                    {productList({
+                      group: "bumpLines",
+                      firstLabel: "Produto do bump",
+                      lineLabel: (n) => `Produto ${n} do bump`,
+                      addLabel: "Adicionar produto ao bump",
+                    })}
+                    <div className={s.grid2}>
+                      <MoneyInput
+                        className={s.arcField}
+                        label="Preço do acréscimo"
+                        value={parseBrl(f.bumpPrice)}
+                        onValueChange={(v) => set("bumpPrice", v === null ? "" : centsToInput(v))}
+                        max={MAX_CENTS}
+                        description={priceCents && bumpCents ? `Total com bump: ${brl(priceCents + bumpCents)}` : undefined}
+                      />
+                      <div className={s.field}>
+                        <label className={s.field}>
+                          <span className={s.label}>Título da caixa</span>
+                          <input
+                            className={s.input}
+                            value={f.bumpLabel}
+                            maxLength={200}
+                            placeholder={bumpProductIds.length > 1 ? "5 Kits Extras" : "Quero a versão completa"}
+                            aria-required={bumpProductIds.length > 1}
+                            aria-describedby="titulo-caixa-dica"
+                            onChange={(e) => set("bumpLabel", e.target.value)}
+                          />
+                        </label>
+                        <span id="titulo-caixa-dica" className={s.hint}>
+                          {bumpProductIds.length > 1 ? "Obrigatório com mais de um produto. " : ""}Quem marca recebe tudo no mesmo e-mail.
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ) : null}
-            </fieldset>
+                ) : null}
+              </fieldset>
+            )}
 
             <fieldset className={s.card} disabled={ro} style={{ margin: 0 }}>
               <legend className={s.sectionLegend}>

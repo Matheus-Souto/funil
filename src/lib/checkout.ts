@@ -47,6 +47,8 @@ export const PIX_UNAVAILABLE_MESSAGE = "Pix indisponível no momento, tente em a
 export { CARD_UNAVAILABLE_MESSAGE };
 /** `ActionError("conflict", NEEDS_CPF)`: Pix manual esgotado; o formulário mostra o CPF e reenvia (vira Pix do Asaas). */
 export const NEEDS_CPF = "needs_cpf";
+/** Oferta de app aberta sem a sessão de pagamento do app: nenhum pedido sai sem a conta do app. */
+export const APP_SESSION_REQUIRED_MESSAGE = "Abra o pagamento pelo app";
 export const ASAAS_LIMIT_MESSAGE = "Muitas compras seguidas. Aguarde alguns minutos e tente de novo.";
 export const PIX_MANUAL_LIMITS = { perIpPerHour: 5, perEmail: 3 } as const;
 export const ASAAS_LIMITS = { perIpPerHour: 10, perEmailPerHour: 5 } as const;
@@ -204,6 +206,8 @@ export const checkoutStart = defineAction({
   async run(ctx, input, limits, server?: CheckoutServer): Promise<StartOutput> {
     const [o] = await ctx.tx.select().from(offer).where(and(eq(offer.slug, input.slug), eq(offer.active, true)));
     if (!o) throw new ActionError("not_found", "Oferta não encontrada");
+    // Oferta de app só vende pela sessão de pagamento que o app cria (conta, nome e e-mail vêm dela).
+    if (o.delivery === "app") throw new ActionError("invalid_input", APP_SESSION_REQUIRED_MESSAGE);
     if (!o.methods.includes(input.method)) {
       throw new ActionError("invalid_input", "Forma de pagamento indisponível nesta oferta", [{ path: ["method"] }]);
     }

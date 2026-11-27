@@ -6,7 +6,9 @@ export type CheckoutMethod = "pix" | "card";
 export interface CheckoutOffer {
   slug: string;
   name: string;
-  /** Linha de produto: o nome do produto com 1 principal (como antes); com mais, o nome da oferta. */
+  /** `app`: o funil cobra e avisa o app (sem PDF); a página só abre pela sessão do app. */
+  delivery: "download" | "app";
+  /** Linha de produto: o nome do produto com 1 principal (como antes); com mais (ou na oferta de app), o nome da oferta. */
   productName: string;
   /** "Inclui: A · B · C" com mais de 1 principal, na ordem da oferta; `null` com 1. */
   includes: string | null;
@@ -25,6 +27,7 @@ type Named = { name: string };
 export interface PublicOfferLike {
   slug: string;
   name: string;
+  delivery: "download" | "app";
   products: Named[];
   priceCents: number;
   pixMode: string;
@@ -40,7 +43,8 @@ export function checkoutOffer(o: PublicOfferLike, methods: CheckoutMethod[]): Ch
   return {
     slug: o.slug,
     name: o.name,
-    productName: many ? o.name : o.products[0]!.name,
+    delivery: o.delivery,
+    productName: many || o.products.length === 0 ? o.name : o.products[0]!.name,
     includes: many ? `Inclui: ${joinNames(o.products)}` : null,
     priceCents: o.priceCents,
     methods,
