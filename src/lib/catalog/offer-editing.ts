@@ -4,6 +4,8 @@
 /** Máximo de produtos em cada lista da oferta (principais e bump). */
 export const MAX_PRODUCTS_PER_GROUP = 20;
 
+export const APP_CODE_LOCKED_MESSAGE = "O código no app não pode mudar depois da primeira venda. Crie outra oferta para outro produto.";
+
 /** Lista com o item `index` trocado de lugar com o vizinho (`delta` −1 sobe, +1 desce). Na borda, nada muda. */
 export function moveItem<T>(list: readonly T[], index: number, delta: -1 | 1): T[] {
   const to = index + delta;

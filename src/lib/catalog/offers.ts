@@ -3,7 +3,7 @@ import { z } from "zod";
 import { ActionError, defineAction, type Ctx } from "@/lib/actions/core";
 import type { Tx } from "@/lib/db/client";
 import { offer, offerProduct, orders, store } from "@/lib/db/schema";
-import { MAX_PRODUCTS_PER_GROUP } from "./offer-editing";
+import { APP_CODE_LOCKED_MESSAGE, MAX_PRODUCTS_PER_GROUP } from "./offer-editing";
 import { bumpInput, checkOfferProducts, loadOfferProducts, productsFields, refineProducts, writeOfferProducts, type ProductRef } from "./offer-products";
 import { PIXEL_ID_RE, pixelIdFor, validatePixelWithStoredToken } from "@/lib/tracking/meta";
 
@@ -90,6 +90,11 @@ function isAppCodeViolation(e: unknown): boolean {
 async function ensureAppCodeFree(ctx: Ctx, code: string, exceptId?: string): Promise<void> {
   const [row] = await ctx.tx.select({ id: offer.id }).from(offer).where(eq(offer.appCode, code));
   if (row && row.id !== exceptId) throw new ActionError("conflict", APP_CODE_TAKEN);
+}
+
+async function offerHasOrders(tx: Tx, offerId: string): Promise<boolean> {
+  const [row] = await tx.select({ id: orders.id }).from(orders).where(eq(orders.offerId, offerId)).limit(1);
+  return Boolean(row);
 }
 
 async function ensureSlugFree(ctx: Ctx, s: string, exceptId?: string): Promise<void> {
@@ -261,7 +266,7 @@ export const setOfferSlug = defineAction({
 export const updateOffer = defineAction({
   name: "offers.update",
   description:
-    "Atualiza dados da oferta, exceto endereço (use offers.setSlug), preço (use offers.updatePrice) e produtos/bump (use offers.setProducts). delivery troca a entrega (download ou app) só em oferta sem pedidos: virar app tira os produtos e o bump; voltar a download deixa a oferta sem produto até offers.setProducts. appCode só em oferta app.",
+    "Atualiza dados da oferta, exceto endereço (use offers.setSlug), preço (use offers.updatePrice) e produtos/bump (use offers.setProducts). A entrega (delivery) e o código no app (appCode) só mudam em oferta sem pedidos. Virar app tira os produtos e o bump; voltar a download deixa a oferta sem produto até offers.setProducts. appCode só em oferta app.",
   input: z.strictObject({
     id,
     name: name.optional(),
@@ -279,19 +284,20 @@ export const updateOffer = defineAction({
   sensitive: true,
   async run(ctx, input) {
     const { id: offerId, ...changes } = input;
-    // Trava a linha: a troca de entrega e o código no app são conferidos contra o estado salvo, sem corrida.
+    // FOR UPDATE serializa as mudanças com createOrder, que lê a mesma linha com FOR SHARE.
     const [current] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, offerId)).for("update");
     if (!current) throw new ActionError("not_found", "Oferta não encontrada");
     const set: Partial<typeof offer.$inferInsert> = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
     if (Object.keys(set).length === 0) return current;
     const next = { ...current, ...set };
     const switching = next.delivery !== current.delivery;
-    if (switching) {
-      // O pedido já feito segue a entrega da oferta (e-mail com PDF ou aviso ao app): com pedido, a entrega não muda.
-      const [sold] = await ctx.tx.select({ id: orders.id }).from(orders).where(eq(orders.offerId, offerId)).limit(1);
-      if (sold) throw new ActionError("conflict", "Esta oferta já tem pedidos: crie outra oferta para mudar a entrega");
-      // Voltar a download sem dizer o código: o código sai junto.
-      if (next.delivery === "download" && input.appCode === undefined) next.appCode = null;
+    // Voltar a download sem dizer o código: o código sai junto.
+    if (switching && next.delivery === "download" && input.appCode === undefined) next.appCode = null;
+    const appCodeChanged = next.appCode !== current.appCode;
+    // O pedido já feito segue a entrega da oferta, e o aviso ao app lê o código da oferta a cada envio.
+    if ((switching || appCodeChanged) && (await offerHasOrders(ctx.tx, offerId))) {
+      if (switching) throw new ActionError("conflict", "Esta oferta já tem pedidos: crie outra oferta para mudar a entrega");
+      throwProblems([{ path: ["appCode"], message: APP_CODE_LOCKED_MESSAGE }]);
     }
     const toApp = switching && next.delivery === "app";
     // Ao virar app, produtos e bump saem; até lá contam como estão.
@@ -306,7 +312,7 @@ export const updateOffer = defineAction({
         pixMode: next.pixMode,
       }),
     );
-    if (next.appCode !== null && next.appCode !== current.appCode) await ensureAppCodeFree(ctx, next.appCode, offerId);
+    if (next.appCode !== null && appCodeChanged) await ensureAppCodeFree(ctx, next.appCode, offerId);
     if (toApp) {
       await ctx.tx.delete(offerProduct).where(eq(offerProduct.offerId, offerId));
       Object.assign(set, { bumpPriceCents: null, bumpLabel: null });
@@ -353,7 +359,8 @@ export const getOffer = defineAction({
   async run(ctx, input) {
     const [row] = await ctx.tx.select(offerCols).from(offer).where(eq(offer.id, input.id));
     if (!row) throw new ActionError("not_found", "Oferta não encontrada");
-    return (await withProducts(ctx.tx, [row]))[0]!;
+    const [view] = await withProducts(ctx.tx, [row]);
+    return { ...view!, hasOrders: await offerHasOrders(ctx.tx, input.id) };
   },
 });
 

@@ -25,6 +25,7 @@ import { settingsPayload, type SettingsForm } from "@/app/admin/(panel)/settings
 import { resolveStore } from "@/lib/stores";
 import { inviteTokenHash } from "@/lib/team/rules";
 import { createTestDb, seedStore, type TestDb } from "./db";
+import { seedAppOffer, seedAppOrder } from "./app-fixtures";
 import { createFakeAsaas } from "./fakes/asaas";
 import { panelCall, seedManyOrders, seedOrder, seedPanelStore, type PanelStore } from "./panel-helpers";
 
@@ -968,15 +969,34 @@ describe("Equipe e convites: server actions", () => {
   });
 });
 
-describe("server actions das chaves de integração (cartão do app em Conexões)", () => {
-  async function ownerLoggedIn() {
-    const { storeId } = await seedStore("Loja do app");
-    const [u] = await t.ownerDb.insert(users).values({ email: `dono-${randomBytes(4).toString("hex")}@example.com`, name: "Dona", passwordHash: "x" }).returning({ id: users.id });
-    await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "owner" });
-    jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
-    return { storeId, userId: u!.id };
-  }
+async function ownerLoggedIn() {
+  const { storeId } = await seedStore("Loja do app");
+  const [u] = await t.ownerDb.insert(users).values({ email: `dono-${randomBytes(4).toString("hex")}@example.com`, name: "Dona", passwordHash: "x" }).returning({ id: users.id });
+  await t.ownerDb.insert(membership).values({ userId: u!.id, storeId, role: "owner" });
+  jar.set(SESSION_COOKIE, await createSession(u!.id, storeId));
+  return { storeId, userId: u!.id };
+}
 
+test("a página da oferta informa ao editor se já há pedidos", async () => {
+  const { default: OfferPage } = await import("@/app/admin/(panel)/offers/[id]/page");
+  const { OfferEditor } = await import("@/app/admin/(panel)/offers/[id]/editor");
+  const { storeId } = await ownerLoggedIn();
+  try {
+    const { id } = await seedAppOffer(storeId);
+    const page = () => OfferPage({ params: Promise.resolve({ id }), searchParams: Promise.resolve({}) });
+    const editor = (hasOrders: boolean) => ({
+      props: { children: { type: OfferEditor, props: { offer: { id, hasOrders } } } },
+    });
+
+    expect(await page()).toMatchObject(editor(false));
+    await seedAppOrder(storeId, { offerId: id, account: "conta-teste", status: "expired" });
+    expect(await page()).toMatchObject(editor(true));
+  } finally {
+    jar.delete(SESSION_COOKIE);
+  }
+});
+
+describe("server actions das chaves de integração (cartão do app em Conexões)", () => {
   test("createIntegrationKeyAction cria token com papel integration (a chave volta só no data); revokeIntegrationKeyAction só revoga chave integration", async () => {
     const { createIntegrationKeyAction, createMcpTokenAction, revokeIntegrationKeyAction } = await import("@/app/admin/(panel)/actions");
     const { storeId } = await ownerLoggedIn();

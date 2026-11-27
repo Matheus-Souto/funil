@@ -30,6 +30,7 @@ import {
 } from "@/lib/catalog/offer-editing";
 import { env } from "@/lib/env";
 import { HEAVY_TEST_MS, createTestDb, seedProduct, seedStore, type TestDb } from "./db";
+import { seedAppOrder } from "./app-fixtures";
 import { CORRUPT_PDF, ENCRYPTED_PDF, makePdf, VALID_PDF } from "./pdf-fixtures";
 
 let t: TestDb;
@@ -1067,7 +1068,7 @@ describe("oferta de app (Task 5)", () => {
     expect((await call(createOffer, b.storeId, owner, appInput())).appCode).toBe("start_anual");
   });
 
-  test("offers.update numa oferta app: troca o código, recusa parcelas e Pix manual, e código repetido é conflict", async () => {
+  test("offers.update numa oferta app sem pedidos: troca o código, recusa parcelas e Pix manual, e código repetido é conflict", async () => {
     const { storeId } = await seedStore();
     const o = await call(createOffer, storeId, owner, appInput());
     await call(createOffer, storeId, owner, appInput({ slug: "creditos-50", appCode: "creditos_50" }));
@@ -1088,6 +1089,18 @@ describe("oferta de app (Task 5)", () => {
     expect(await code(call(updateOffer, storeId, owner, { id: d.id, appCode: "codigo" }))).toBe("invalid_input");
     const a = await call(createOffer, storeId, owner, appInput());
     expect(await code(call(setOfferProducts, storeId, owner, { id: a.id, productIds: [p.id], bump: null }))).toBe("invalid_input");
+  });
+
+  test("offers.update mantém o código no app após um pedido pendente", async () => {
+    const { storeId } = await seedStore();
+    const o = await call(createOffer, storeId, owner, appInput());
+    await seedAppOrder(storeId, { offerId: o.id, account: "conta-teste", status: "pending" });
+
+    const error = await failure(call(updateOffer, storeId, owner, { id: o.id, appCode: "outro_plano" }));
+    const message = "O código no app não pode mudar depois da primeira venda. Crie outra oferta para outro produto.";
+    expect(error).toMatchObject({ code: "invalid_input", message, details: [{ path: ["appCode"], message }] });
+    expect(await call(updateOffer, storeId, owner, { id: o.id, name: "Novo nome", appCode: o.appCode }))
+      .toMatchObject({ name: "Novo nome", appCode: o.appCode });
   });
 
   test("offers.update troca a entrega só sem pedidos: download → app tira os produtos; app → download fica sem produto até escolher", async () => {

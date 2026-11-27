@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLeaveGuard } from "../../../leave-guard";
 import {
+  APP_CODE_LOCKED_MESSAGE,
   MAX_PRODUCTS_PER_GROUP,
   changeDialog,
   emptyOptionLabel,
@@ -56,6 +57,7 @@ export interface OfferData {
   delivery: "download" | "app";
   /** Código no app (só na entrega `app`). */
   appCode: string | null;
+  hasOrders: boolean;
   /** Produtos principais, na ordem da oferta. */
   productIds: string[];
   priceCents: number;
@@ -182,7 +184,8 @@ export function OfferEditor(props: {
 
   /** Oferta de app: sem produtos nem bump, à vista e Pix do Asaas (o app libera o plano ou os créditos). */
   const app = f.delivery === "app";
-  const appCode = f.appCode.trim();
+  const appCodeLocked = offer?.hasOrders ?? false;
+  const appCode = (appCodeLocked ? offer?.appCode ?? "" : f.appCode).trim();
   const priceCents = parseBrl(f.price);
   const bumpCents = !app && f.bumpOn ? parseBrl(f.bumpPrice) : null;
   const bumpLabel = f.bumpLabel.trim() || null;
@@ -231,7 +234,7 @@ export function OfferEditor(props: {
     methods,
     pixMode: app ? ("asaas" as const) : f.pixMode,
     maxInstallments: app ? 1 : f.maxInstallments,
-    ...(app ? { appCode } : {}),
+    ...(app && !appCodeLocked ? { appCode } : {}),
     thankYouText: f.thankYouText.trim() || null,
     active: f.active,
   });
@@ -495,15 +498,18 @@ export function OfferEditor(props: {
                         <span className={s.label}>Código no app</span>
                         <input
                           className={`${s.input} ${s.mono}`}
-                          value={f.appCode}
+                          value={appCodeLocked ? appCode : f.appCode}
                           maxLength={40}
                           placeholder="start_anual"
+                          readOnly={appCodeLocked}
                           aria-describedby="codigo-app-dica"
                           onChange={(e) => set("appCode", e.target.value.toLowerCase())}
                         />
                       </label>
                       <span id="codigo-app-dica" className={s.hint}>
-                        Vai no aviso de pagamento: o app libera o plano ou os créditos por ele. Letras minúsculas, números e _.
+                        {appCodeLocked
+                          ? APP_CODE_LOCKED_MESSAGE
+                          : "Vai no aviso de pagamento: o app libera o plano ou os créditos por ele. Letras minúsculas, números e _."}
                       </span>
                     </div>
                   ) : (

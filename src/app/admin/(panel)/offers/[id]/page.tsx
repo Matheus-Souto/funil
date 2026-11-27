@@ -43,6 +43,7 @@ export default async function OfferPage({
         name: o.name,
         delivery: o.delivery as "download" | "app",
         appCode: o.appCode,
+        hasOrders: o.hasOrders,
         productIds: o.products.map((p) => p.id),
         priceCents: o.priceCents,
         methods: o.methods,
