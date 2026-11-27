@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { boolean, check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { appCheckoutSession } from "./apps";
 import { offer, product } from "./catalog";
 import { coupon } from "./coupons";
 import { store } from "./core";
@@ -53,6 +54,8 @@ export const orders = pgTable(
     /** Cupom aplicado e o desconto em centavos (`total = subtotal - desconto`); sem cupom, 0. */
     couponId: uuid("coupon_id"),
     discountCents: integer("discount_cents").notNull().default(0),
+    appAccount: text("app_account"),
+    appSessionId: uuid("app_session_id"),
     manualAmountCents: integer("manual_amount_cents"),
     hasBump: boolean("has_bump").notNull().default(false),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
@@ -69,6 +72,7 @@ export const orders = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    unique("orders_store_id_id_unique").on(t.storeId, t.id),
     check("orders_status_check", sql`${t.status} in ('pending','paid','refunded','disputed','expired','declined')`),
     check("orders_method_check", sql`${t.method} in ('pix_manual','pix_asaas','card_asaas')`),
     check("orders_amounts_check", sql`${t.subtotalCents} > 0 and ${t.totalCents} > 0`),
@@ -79,6 +83,7 @@ export const orders = pgTable(
     ),
     // Sem cascade: um cupom com pedidos não pode ser apagado (o painel arquiva).
     foreignKey({ columns: [t.storeId, t.couponId], foreignColumns: [coupon.storeId, coupon.id], name: "orders_coupon_fk" }),
+    foreignKey({ columns: [t.storeId, t.appSessionId], foreignColumns: [appCheckoutSession.storeId, appCheckoutSession.id], name: "orders_app_session_fk" }),
     index("orders_coupon_idx").on(t.couponId).where(sql`${t.couponId} is not null`),
     index("orders_store_status_idx").on(t.storeId, t.status),
     // Valor único do Pix manual: dois pendentes da mesma loja nunca compartilham o mesmo valor.

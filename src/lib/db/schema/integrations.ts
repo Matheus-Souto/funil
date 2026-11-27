@@ -16,6 +16,6 @@ export const integration = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.storeId, t.kind] }),
-    check("integration_kind_check", sql`${t.kind} in ('pix_manual','asaas','smtp','meta','resend','telegram')`),
+    check("integration_kind_check", sql`${t.kind} in ('pix_manual','asaas','smtp','meta','resend','telegram','app_webhook')`),
   ],
 );

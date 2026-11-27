@@ -386,6 +386,16 @@ describe("colunas antigas da oferta", () => {
 });
 
 describe("offers", () => {
+  test("check do banco impede oferta de app com três parcelas", async () => {
+    const { storeId } = await seedStore();
+    const error = await withStore(storeId, (tx) => tx.execute(sql`
+      insert into offer (store_id, slug, name, price_cents, methods, pix_mode, max_installments, delivery, app_code)
+      values (${storeId}, 'plano', 'Plano', 990, array['pix', 'card'], 'asaas', 3, 'app', 'plano')
+    `)).catch((cause: unknown) => cause);
+    expect(error).toHaveProperty("cause.code", "23514");
+    expect(error).toHaveProperty("cause.constraint_name", "offer_app_checkout_check");
+  });
+
   test("caso do dono: R$ 9,90 com bump de R$ 17,10 lido por getPublic", async () => {
     const { storeId } = await seedStore();
     const main = await mkProduct(storeId, "Principal");

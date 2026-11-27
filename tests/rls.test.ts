@@ -30,6 +30,39 @@ test("loja A não lê auditoria da loja B", async () => {
   expect(rows).toHaveLength(0);
 });
 
+test("registros de cobrança de app só aparecem para a loja que os criou", async () => {
+  const a = await seedStore("A");
+  const b = await seedStore("B");
+  await withStore(b.storeId, async (tx) => {
+    const [offer] = await tx.execute<{ id: string }>(sql`
+      insert into offer (store_id, slug, name, price_cents, methods, pix_mode, delivery, app_code)
+      values (${b.storeId}, 'plano', 'Plano', 990, array['pix'], 'asaas', 'app', 'plano')
+      returning id
+    `);
+    await tx.execute(sql`
+      insert into app_trial (store_id, account, email_hash, mailbox_hash, event_id, started_at)
+      values (${b.storeId}, 'conta-teste', repeat('a', 64), repeat('b', 64), 'trial-rls', now())
+    `);
+    await tx.execute(sql`
+      insert into app_checkout_session
+        (store_id, offer_id, account, buyer_name, buyer_email, return_url, expires_at)
+      values
+        (${b.storeId}, ${offer!.id}, 'conta-teste', 'Pessoa Teste', 'teste@example.com', 'https://example.com', now() + interval '1 hour')
+    `);
+    await tx.execute(sql`
+      insert into app_webhook_delivery (store_id, event_id, event_type, status)
+      values (${b.storeId}, 'ping-rls', 'ping', 'pending')
+    `);
+  });
+
+  for (const table of ["app_trial", "app_checkout_session", "app_webhook_delivery"]) {
+    const query = sql`select store_id from ${sql.identifier(table)}`;
+    const own = await withStore(b.storeId, (tx) => tx.execute(query));
+    expect([...own]).toEqual([{ store_id: b.storeId }]);
+    expect(await withStore(a.storeId, (tx) => tx.execute(query))).toHaveLength(0);
+  }
+});
+
 test("insert com store_id de outra loja é recusado", async () => {
   const a = await seedStore("A");
   const b = await seedStore("B");

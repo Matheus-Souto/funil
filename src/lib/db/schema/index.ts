@@ -15,3 +15,4 @@ export * from "./approvals";
 export * from "./leads";
 export * from "./recovery";
 export * from "./team";
+export * from "./apps";

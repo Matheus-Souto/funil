@@ -37,6 +37,8 @@ export const offer = pgTable(
     methods: text("methods").array().notNull(),
     pixMode: text("pix_mode").notNull(),
     maxInstallments: integer("max_installments").notNull().default(1),
+    delivery: text("delivery").notNull().default("download"),
+    appCode: text("app_code"),
     bumpPriceCents: integer("bump_price_cents"),
     bumpLabel: text("bump_label"),
     thankYouText: text("thank_you_text"),
@@ -47,11 +49,19 @@ export const offer = pgTable(
   (t) => [
     unique("offer_store_slug_unique").on(t.storeId, t.slug),
     unique("offer_store_id_id_unique").on(t.storeId, t.id), // alvo da FK composta de offer_product
+    unique("offer_store_app_code_unique").on(t.storeId, t.appCode),
     check("offer_price_check", sql`${t.priceCents} > 0`),
     check("offer_methods_check", sql`cardinality(${t.methods}) > 0 and ${t.methods} <@ array['pix','card']::text[]`),
     check("offer_pix_mode_check", sql`${t.pixMode} in ('manual','asaas')`),
     check("offer_installments_check", sql`${t.maxInstallments} between 1 and 12`),
     check("offer_bump_check", sql`${t.bumpPriceCents} is null or ${t.bumpPriceCents} > 0`),
+    check("offer_delivery_check", sql`${t.delivery} in ('download','app')`),
+    check("offer_app_code_check", sql`${t.appCode} ~ '^[a-z0-9_]{1,40}$'`),
+    check("offer_app_code_required_check", sql`(${t.delivery} = 'app') = (${t.appCode} is not null)`),
+    check(
+      "offer_app_checkout_check",
+      sql`${t.delivery} <> 'app' or (${t.maxInstallments} = 1 and ${t.pixMode} = 'asaas' and ${t.bumpPriceCents} is null)`,
+    ),
   ],
 );
 
