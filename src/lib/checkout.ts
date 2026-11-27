@@ -24,7 +24,7 @@ import { and, count, desc, eq, gt, isNotNull, isNull, or, sql } from "drizzle-or
 import QRCode from "qrcode";
 import { z } from "zod";
 import { ActionError, defineAction, runAction, type ActionErrorCode, type Ctx } from "@/lib/actions/core";
-import { loadCheckoutSession, sessionInvalid, sessionOrigin, type CheckoutSession } from "@/lib/apps/sessions";
+import { checkoutSessionState, loadCheckoutSession, sessionInvalid, sessionOrigin, type CheckoutSession, type SessionClosed } from "@/lib/apps/sessions";
 import { UNKNOWN_IP } from "@/lib/client-ip";
 import { couponInvalid, isCouponRefusal, resolveCoupon } from "@/lib/coupons/apply";
 import { COUPON_INVALID_MESSAGE, COUPON_LIMIT_MESSAGE, PRICE_CHANGED_MESSAGE } from "@/lib/coupons/messages";
@@ -690,10 +690,12 @@ export const orderPublicStatus = defineAction({
   input: publicIdInput,
   permission: "public",
   audit: false,
-  async run(ctx, { publicId }) {
-    const [o] = await ctx.tx.select({ status: orders.status }).from(orders).where(eq(orders.publicId, publicId));
+  async run(ctx, { publicId }): Promise<{ status: string; sessionClosed: SessionClosed | null }> {
+    const [o] = await ctx.tx.select({ status: orders.status, appSessionId: orders.appSessionId }).from(orders).where(eq(orders.publicId, publicId));
     if (!o) throw new ActionError("not_found", "Pedido não encontrado");
-    return { status: o.status };
+    // Pedido de app: a sessão fechada (paga por outro pedido dela, ou vencida) também muda a página aberta.
+    const sessionClosed = o.appSessionId ? (await checkoutSessionState(ctx.tx, ctx.storeId, o.appSessionId)).closed : null;
+    return { status: o.status, sessionClosed };
   },
 });
 
@@ -778,23 +780,11 @@ const orderPublicView = defineAction({
     // cartão recusado). Sessão que não serve mais: a página orienta voltar ao app.
     let app: OrderPublic["app"];
     if (o.appSessionId) {
-      const [sess] = await ctx.tx
-        .select({ returnUrl: appCheckoutSession.returnUrl, expiresAt: appCheckoutSession.expiresAt })
-        .from(appCheckoutSession)
-        .where(eq(appCheckoutSession.id, o.appSessionId));
-      const usable = await loadCheckoutSession(ctx.tx, ctx.storeId, o.appSessionId);
+      const [sess] = await ctx.tx.select({ returnUrl: appCheckoutSession.returnUrl }).from(appCheckoutSession).where(eq(appCheckoutSession.id, o.appSessionId));
       // Sessão que não serve mais, dito explicitamente: "paid" se algum pedido dela foi pago (este ou outro), senão
       // "expired" (venceu). A página do pedido pendente decide por isso ANTES de mostrar qualquer meio de pagamento.
-      let sessionClosed: "paid" | "expired" | null = null;
-      if (!usable) {
-        const [paidOne] = await ctx.tx
-          .select({ id: orders.id })
-          .from(orders)
-          .where(and(eq(orders.appSessionId, o.appSessionId), isNotNull(orders.paidAt)))
-          .limit(1);
-        sessionClosed = paidOne ? "paid" : "expired";
-      }
-      app = { returnUrl: sess?.returnUrl ?? null, sessionId: usable ? o.appSessionId : null, sessionClosed };
+      const state = await checkoutSessionState(ctx.tx, ctx.storeId, o.appSessionId);
+      app = { returnUrl: sess?.returnUrl ?? null, sessionId: state.session ? o.appSessionId : null, sessionClosed: state.closed };
     }
     return { o, offer: of!, items, manual, asaas, pixelId, app, buyerFirstName: (buyerName ?? "").trim().split(/\s+/)[0] ?? "" };
   },
@@ -926,7 +916,7 @@ export async function handleOrderStatus(
   if (!store) return json(404, { error: "not_found" });
   try {
     const r = await runAction(orderPublicStatus, publicCall(store.id), { publicId });
-    return json(200, { status: r.status });
+    return json(200, { status: r.status, ...(r.sessionClosed ? { sessionClosed: r.sessionClosed } : {}) });
   } catch (e) {
     if (e instanceof ActionError) return json(e.code === "invalid_input" ? 404 : STATUS[e.code], { error: e.code === "invalid_input" ? "not_found" : e.code });
     throw e;

@@ -57,44 +57,61 @@ export interface CheckoutSession {
   expiresAt: Date;
 }
 
+/** Por que a sessão não serve mais: `paid` (algum pedido dela foi pago, mesmo se depois reembolsado ou contestado) ou `expired` (venceu, ou não existe nesta loja). */
+export type SessionClosed = "paid" | "expired";
+
 /**
- * Sessão de pagamento utilizável: da loja (RLS e filtro), não vencida em `now` e sem pedido pago (pago e depois
- * reembolsado ou contestado também conta como usada). `lock`: `FOR UPDATE` na linha, para o `checkout.start` serializar
- * pedidos da mesma sessão e reler o pedido pago depois de pegar o lock. Id malformado → `null`.
+ * Estado da sessão de pagamento: utilizável (`session`) ou encerrada (`closed`). Da loja (RLS e filtro); pedido pago
+ * tem prioridade sobre o vencimento. `lock`: `FOR UPDATE` na linha, para o `checkout.start` serializar pedidos da mesma
+ * sessão e reler o pedido pago depois de pegar o lock. Id malformado ou de outra loja → `expired`.
  */
+export async function checkoutSessionState(
+  tx: Ctx["tx"],
+  storeId: string,
+  sessionId: string,
+  opts: { now?: Date; lock?: boolean } = {},
+): Promise<{ session: CheckoutSession; closed: null } | { session: null; closed: SessionClosed }> {
+  if (!UUID_RE.test(sessionId)) return { session: null, closed: "expired" };
+  const q = tx
+    .select()
+    .from(appCheckoutSession)
+    .where(and(eq(appCheckoutSession.storeId, storeId), eq(appCheckoutSession.id, sessionId)));
+  const [row] = opts.lock ? await q.for("update") : await q;
+  if (!row) return { session: null, closed: "expired" };
+  const [paid] = await tx
+    .select({ id: orders.id })
+    .from(orders)
+    .where(and(eq(orders.storeId, storeId), eq(orders.appSessionId, row.id), isNotNull(orders.paidAt)))
+    .limit(1);
+  if (paid) return { session: null, closed: "paid" };
+  if (row.expiresAt.getTime() <= (opts.now ?? new Date()).getTime()) return { session: null, closed: "expired" };
+  return {
+    closed: null,
+    session: {
+      id: row.id,
+      offerId: row.offerId,
+      account: row.account,
+      buyerName: row.buyerName,
+      buyerEmail: row.buyerEmail,
+      buyerPhone: row.buyerPhone,
+      touch: (row.touch as TouchRecord | null) ?? null,
+      ref: row.ref,
+      fbc: row.fbc,
+      fbp: row.fbp,
+      returnUrl: row.returnUrl,
+      expiresAt: row.expiresAt,
+    },
+  };
+}
+
+/** Sessão de pagamento utilizável (ver `checkoutSessionState`), ou `null` se vencida, já paga, de outra loja ou malformada. */
 export async function loadCheckoutSession(
   tx: Ctx["tx"],
   storeId: string,
   sessionId: string,
   opts: { now?: Date; lock?: boolean } = {},
 ): Promise<CheckoutSession | null> {
-  if (!UUID_RE.test(sessionId)) return null;
-  const q = tx
-    .select()
-    .from(appCheckoutSession)
-    .where(and(eq(appCheckoutSession.storeId, storeId), eq(appCheckoutSession.id, sessionId)));
-  const [row] = opts.lock ? await q.for("update") : await q;
-  if (!row || row.expiresAt.getTime() <= (opts.now ?? new Date()).getTime()) return null;
-  const [paid] = await tx
-    .select({ id: orders.id })
-    .from(orders)
-    .where(and(eq(orders.storeId, storeId), eq(orders.appSessionId, row.id), isNotNull(orders.paidAt)))
-    .limit(1);
-  if (paid) return null;
-  return {
-    id: row.id,
-    offerId: row.offerId,
-    account: row.account,
-    buyerName: row.buyerName,
-    buyerEmail: row.buyerEmail,
-    buyerPhone: row.buyerPhone,
-    touch: (row.touch as TouchRecord | null) ?? null,
-    ref: row.ref,
-    fbc: row.fbc,
-    fbp: row.fbp,
-    returnUrl: row.returnUrl,
-    expiresAt: row.expiresAt,
-  };
+  return (await checkoutSessionState(tx, storeId, sessionId, opts)).session;
 }
 
 /**

@@ -11,6 +11,7 @@ import { APP_ACCESS_TEXT } from "../../c/[slug]/texts";
 import { regeneratePixAction } from "./actions";
 import { PurchasePixel } from "./pixel";
 import { CopyPixButton, OrderLive } from "./status";
+import { pendingView } from "./view";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Seu pedido", robots: { index: false } };
@@ -33,7 +34,7 @@ export default async function OrderPage({
 
   return (
     <BuyerShell storeName={store.name} brandColor={brandColor}>
-      {order.status === "pending" ? <OrderLive publicId={publicId} status={order.status} /> : null}
+      {order.status === "pending" ? <OrderLive publicId={publicId} status={order.status} sessionClosed={order.app?.sessionClosed ?? null} /> : null}
       <OrderBody order={order} storeName={store.name} publicId={publicId} pixNotice={typeof pixNotice === "string" ? pixNotice : undefined} />
     </BuyerShell>
   );
@@ -42,11 +43,17 @@ export default async function OrderPage({
 function OrderBody({ order, storeName, publicId, pixNotice }: { order: OrderPublic; storeName: string; publicId: string; pixNotice?: string }) {
   switch (order.status) {
     case "pending":
-      // Pedido de app cuja sessão já foi paga (por outro pedido dela) ou venceu: antes de qualquer meio de pagamento.
-      if (order.app?.sessionClosed) return <AppSessionClosed order={order} closed={order.app.sessionClosed} />;
-      if (order.method === "pix_manual") return <ManualPix order={order} storeName={storeName} />;
-      if (order.method === "pix_asaas") return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
-      return <CardPending order={order} />;
+      // Sessão do app encerrada antes de qualquer meio de pagamento (regra e exceção do cartão em `pendingView`).
+      switch (pendingView(order)) {
+        case "session_closed":
+          return <AppSessionClosed order={order} closed={order.app!.sessionClosed!} />;
+        case "pix_manual":
+          return <ManualPix order={order} storeName={storeName} />;
+        case "pix_asaas":
+          return <AsaasPix order={order} storeName={storeName} publicId={publicId} pixNotice={pixNotice} />;
+        default:
+          return <CardPending order={order} />;
+      }
     case "paid":
       return <ThankYou order={order} storeName={storeName} publicId={publicId} />;
     case "expired":

@@ -19,7 +19,8 @@ import {
 } from "@/lib/apps/sessions";
 import { registerTrial, sweepAppTrialsJob } from "@/lib/apps/trials";
 import { createOffer } from "@/lib/catalog/offers";
-import { ASAAS_LIMITS, checkoutStart, getOrderPublic, regenerateOrderPix, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { ASAAS_LIMITS, checkoutStart, getOrderPublic, handleOrderStatus, regenerateOrderPix, renewCardTicket, startCheckout } from "@/lib/checkout";
+import { liveKey, pendingView } from "@/app/o/[publicId]/view";
 import { notifyAppJob } from "@/lib/apps/webhook";
 import { enqueue } from "@/lib/jobs";
 import { payWithCard } from "@/lib/payments/asaas/card";
@@ -935,5 +936,52 @@ describe("página do pedido Pix depois de a sessão ser paga", () => {
     await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id2));
     const expired = (await getOrderPublic(s.storeId, pix2.publicId))!;
     expect([expired.app?.sessionClosed, expired.pix, expired.pixUnavailable]).toEqual(["expired", undefined, undefined]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Correção da revisão do 12fbdb2
+
+describe("cartão em análise com a sessão vencida", () => {
+  test("pendingView: cartão pendente com sessão só vencida fica em análise (não manda pagar de novo); paga desvia; Pix desvia", () => {
+    const app = (sessionClosed: "paid" | "expired" | null) => ({ returnUrl: null, sessionId: null, sessionClosed });
+    expect(pendingView({ method: "card_asaas", app: app("expired") })).toBe("card_pending");
+    expect(pendingView({ method: "card_asaas", app: app("paid") })).toBe("session_closed");
+    expect(pendingView({ method: "card_asaas", app: app(null) })).toBe("card_pending");
+    expect(pendingView({ method: "pix_asaas", app: app("expired") })).toBe("session_closed");
+    expect(pendingView({ method: "pix_asaas", app: app(null) })).toBe("pix_asaas");
+    expect(pendingView({ method: "pix_manual" })).toBe("pix_manual");
+  });
+
+  test("dados: pedido de cartão pendente depois dos 60 min → sessão 'expired', e a página continua em 'Pagamento em análise'", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "cartao-analise", retorno: `https://${s.domain}/app` }))).url);
+    const card = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id, { method: "card" }), { cardTicketKey: KEY });
+    await t.ownerDb.update(appCheckoutSession).set({ expiresAt: new Date(Date.now() - 60_000) }).where(eq(appCheckoutSession.id, id));
+    const o = (await getOrderPublic(s.storeId, card.publicId))!;
+    expect([o.status, o.method, o.app?.sessionClosed]).toEqual(["pending", "card_asaas", "expired"]);
+    expect(pendingView(o)).toBe("card_pending");
+  });
+});
+
+describe("a página Pix aberta percebe a sessão paga (polling)", () => {
+  test("o status do pedido Pix continua pendente, mas o polling vê sessionClosed 'paid' e a chave comparada muda", async () => {
+    const s = await seedAppStore();
+    const id = sessionIdOf((await runAction(createPayment, api(s.storeId), payment({ conta: "polling" }))).url);
+    const pix = await startCheckout({ storeId: s.storeId }, sessionStart("start-anual", id));
+    const poll = async () => {
+      const res = await handleOrderStatus(new Request(`http://localhost:3000/api/orders/${pix.publicId}/status`), pix.publicId, {
+        resolveStore: async () => ({ id: s.storeId, slug: "x", name: "PeticionaAqui" }) as never,
+      });
+      return (await res.json()) as { status: string; sessionClosed?: string };
+    };
+    const before = await poll();
+    expect(before).toEqual({ status: "pending" });
+    const initial = liveKey(before.status, before.sessionClosed);
+    const card = await runAction(checkoutStart, pub(s.storeId), sessionStart("start-anual", id, { method: "card" }));
+    await move(s.storeId, card.orderId, "paid");
+    const after = await poll();
+    expect(after).toEqual({ status: "pending", sessionClosed: "paid" });
+    expect(liveKey(after.status, after.sessionClosed)).not.toBe(initial);
   });
 });
