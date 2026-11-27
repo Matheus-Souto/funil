@@ -23,6 +23,7 @@ export const store = pgTable(
     recoveryLead: boolean("recovery_lead").notNull().default(true),
     recoveryPix: boolean("recovery_pix").notNull().default(true),
     recoveryCard: boolean("recovery_card").notNull().default(true),
+    acceptCnpj: boolean("accept_cnpj").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

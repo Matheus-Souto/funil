@@ -106,7 +106,18 @@ describe("papel card: atributos e o que fica de fora", () => {
     }
   });
 
-  test("conexões: só a asaas da loja aparece (smtp, meta, resend e telegram não); sem loja fixada, nenhuma", async () => {
+  test.each(["app_trial", "app_checkout_session", "app_webhook_delivery"])(
+    "%s: papel card não pode ler, inserir, atualizar nem apagar",
+    async (table) => {
+      const { storeId } = await seedStore();
+      await expect(asCardIn(storeId, (tx) => tx`select id from ${tx(table)}`)).rejects.toThrow(PERMISSION_DENIED);
+      await expect(asCardIn(storeId, (tx) => tx`insert into ${tx(table)} (store_id) values (${storeId})`)).rejects.toThrow(PERMISSION_DENIED);
+      await expect(asCardIn(storeId, (tx) => tx`update ${tx(table)} set store_id = ${storeId}`)).rejects.toThrow(PERMISSION_DENIED);
+      await expect(asCardIn(storeId, (tx) => tx`delete from ${tx(table)}`)).rejects.toThrow(PERMISSION_DENIED);
+    },
+  );
+
+  test("conexões: só a Asaas da loja aparece; sem loja fixada, nenhuma", async () => {
     const { storeId } = await seedStore("Conexões");
     await t.ownerDb.insert(integration).values([
       { storeId, kind: "asaas", config: { env: "sandbox" }, secret: "a1.selado" },
@@ -114,6 +125,7 @@ describe("papel card: atributos e o que fica de fora", () => {
       { storeId, kind: "meta", config: {}, secret: "v1.token-meta" },
       { storeId, kind: "resend", config: {}, secret: "v1.chave-resend" },
       { storeId, kind: "telegram", config: {}, secret: "v1.token-telegram" },
+      { storeId, kind: "app_webhook", config: { url: "https://example.com/webhook" }, secret: "v1.segredo-teste" },
     ]);
     const kinds = await asCardIn(storeId, (tx) => tx`select kind from integration order by kind`);
     expect(kinds.map((r) => r.kind)).toEqual(["asaas"]);

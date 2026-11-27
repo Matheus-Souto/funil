@@ -4,7 +4,7 @@ import { store, users } from "./core";
 
 // Com RLS (enable_store_rls na migration). Token MCP da loja: só o sha256 do token inteiro (`token_hash`) e os 4 últimos
 // caracteres (`last4`, para a lista do painel); o token só aparece uma vez, na criação. O papel `card` não lê nem escreve
-// aqui. `role` aceita `reader` (só tokens), diferente de `membership_role_check`.
+// aqui. Os papéis `reader` e `integration` são exclusivos dos tokens.
 export const mcpToken = pgTable(
   "mcp_token",
   {
@@ -23,6 +23,6 @@ export const mcpToken = pgTable(
   },
   (t) => [
     check("mcp_token_name_check", sql`char_length(${t.name}) between 1 and 60`),
-    check("mcp_token_role_check", sql`${t.role} in ('owner','admin','support','traffic','reader')`),
+    check("mcp_token_role_check", sql`${t.role} in ('owner','admin','support','traffic','reader','integration')`),
   ],
 );
