@@ -50,6 +50,11 @@ export interface HostResponse {
 
 export interface StartOptions {
   /**
+   * Sobe também o serviço de cartão isolado (dist/card/server.js, gerado pela etapa card-build do verify) numa outra
+   * origem, como o verify faz para o smoke: o app ganha CARD_ORIGIN e o checkout passa a oferecer cartão.
+   */
+  card?: boolean;
+  /**
    * Prazo da subida inteira (migração, Asaas falso, app). Menor que o do hook (180 s): estourado, a subida falha e a
    * limpeza ainda roda dentro do hook. Padrão 90 s.
    */
@@ -310,7 +315,13 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
     const base: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 
     // Sem CARD_DB_PASSWORD: o papel `card` (do cluster inteiro, usado pelo serviço de cartão da rodada) fica como está.
-    const mig = await run("bun", ["run", "migrate"], { ...base, OWNER_DATABASE_URL: ownerDbUrl, DATABASE_URL: appDbUrl, APP_DB_PASSWORD: "app" }, left());
+    // Com cartão, a mesma senha de desenvolvimento `card` que o verify usa (o papel vale para o cluster).
+    const mig = await run(
+      "bun",
+      ["run", "migrate"],
+      { ...base, OWNER_DATABASE_URL: ownerDbUrl, DATABASE_URL: appDbUrl, APP_DB_PASSWORD: "app", ...(opts.card ? { CARD_DB_PASSWORD: "card" } : {}) },
+      left(),
+    );
     if (mig.code !== 0) throw new Error(`migração falhou: ${mig.stderr.slice(-1500)}`);
 
     // Asaas falso na porta 0: ele mesmo escolhe e imprime a porta efetiva.
@@ -324,7 +335,35 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
     const appPort = await reservePort();
     const port = appPort.port;
     const baseUrl = `http://127.0.0.1:${port}`;
-    // Sem CARD_ORIGIN: esta instância vende só Pix (o cartão isolado é coberto pelo smoke).
+    // Serviço de cartão: como o app, precisa da própria origem (CARD_ORIGIN) antes de subir. As duas portas ficam
+    // reservadas ao mesmo tempo (não podem coincidir) e cada uma é solta logo antes do seu processo. Ambiente mínimo,
+    // sem SECRET nem papel dono (ele recusa subir com eles).
+    const cardEnv: Record<string, string> = {};
+    if (opts.card) {
+      const cardPort = await reservePort();
+      cardEnv.CARD_ORIGIN = `http://127.0.0.1:${cardPort.port}`;
+      cardEnv.CARD_TICKET_KEY = randomBytes(32).toString("hex");
+      cardEnv.ASAAS_SEAL_KEY = randomBytes(32).toString("hex");
+      await cardPort.release();
+      const card = spawnOwned("serviço de cartão", process.execPath, ["dist/card/server.js"], {
+        ...base,
+        ...cardEnv,
+        SERVICE: "card",
+        NODE_ENV: "production",
+        MODE: "multi",
+        PLATFORM_DOMAIN,
+        BASE_URL: baseUrl,
+        DATABASE_URL: `${u.protocol}//card:card@${u.host}/${dbName}`,
+        CARD_PORT: String(cardPort.port),
+        TRUST_PROXY: "0",
+        ASAAS_BASE_URL: asaasBase,
+      });
+      const cardLog = logTo(card.child, join(RUN_DIR, `multi-${name}-card.log`));
+      undo.push({ what: "fechar o log do serviço de cartão", run: () => closeLog(cardLog) });
+      undo.push({ what: "encerrar o serviço de cartão", run: () => stopProcess(card) });
+      await waitForOutput(card, /(serviço de cartão no ar)/, left());
+    }
+    // Sem `card`: sem CARD_ORIGIN, esta instância vende só Pix.
     const env: Record<string, string> = {
       ...base,
       NODE_ENV: "production",
@@ -342,6 +381,7 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
       TELEGRAM_BASE_URL: `${asaasBase}/telegram`,
       E2E_SEED_ROUTES: "1",
       APP_WEBHOOK_ALLOW_LOOPBACK: "1",
+      ...cardEnv,
       ...opts.extraEnv,
     };
     // O Next direto com node: o PID que encerramos é o do servidor que segura a porta.
