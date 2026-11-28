@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ActionError, type ActionErrorCode } from "@/lib/actions/core";
 import { verifyPassword } from "@/lib/auth/password";
 import { auditLog, membership, store, users } from "@/lib/db/schema";
-import { RESERVED_SLUGS, createStoreWithOwner, resolveStore, setStoreDomain, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
+import { RESERVED_SLUGS, createStoreWithOwner, isPanelHost, resolveStore, setStoreDomain, setupFirstRun, storeCheckoutOrigins } from "@/lib/stores";
 import { setDbForTests } from "@/lib/db/client";
 import { HEAVY_TEST_MS, createTestDb, type TestDb } from "./db";
 
@@ -124,6 +124,20 @@ describe("resolveStore", () => {
   });
 });
 
+describe("isPanelHost", () => {
+  const multi = { mode: "multi", baseUrl: "https://app.plataforma.com" } as const;
+  test("multi: o host do BASE_URL (minúsculas, sem porta e sem ponto final)", () => {
+    for (const h of ["app.plataforma.com", "APP.Plataforma.com:443", "app.plataforma.com."]) expect(isPanelHost(h, multi)).toBe(true);
+  });
+  test("outros hosts, host vazio, single e BASE_URL inválido → false", () => {
+    for (const h of ["plataforma.com", "loja.plataforma.com", "x.app.plataforma.com", "evilapp.plataforma.com", ""]) {
+      expect(isPanelHost(h, multi)).toBe(false);
+    }
+    expect(isPanelHost("app.plataforma.com", { mode: "single", baseUrl: "https://app.plataforma.com" })).toBe(false);
+    expect(isPanelHost("app.plataforma.com", { mode: "multi", baseUrl: "não é url" })).toBe(false);
+  });
+});
+
 describe("createStoreWithOwner (CLI)", () => {
   test("cria loja e dono novo com senha temporária", async () => {
     const r = await createStoreWithOwner({ name: "Nova", slug: "nova", ownerEmail: "Dono@Exemplo.com", domain: "Nova.com.br" });
@@ -222,6 +236,27 @@ describe("slug reservado", () => {
     expect((await createStoreWithOwner({ name: "X", slug: "pagar-bem", ownerEmail: "x@exemplo.com" })).storeId).toBeString();
   });
 
+  test("app está em RESERVED_SLUGS: store-create recusa e o setup do single não gera 'app'", async () => {
+    expect(RESERVED_SLUGS).toContain("app");
+    expect(await code(createStoreWithOwner({ name: "X", slug: "app", ownerEmail: "x@exemplo.com" }, "plataforma.com"))).toBe("invalid_input");
+    expect(await t.ownerDb.select().from(store)).toHaveLength(0);
+    const r = await setupFirstRun({ ...setup, storeName: "App" }, "single");
+    const [s] = await t.ownerDb.select().from(store).where(eq(store.id, r.storeId));
+    expect(s!.slug).toBe("app-loja");
+  });
+
+  test("slug cujo <slug>.<plataforma> é o host do BASE_URL → invalid_input, nada é criado", async () => {
+    const base = "https://Painel.Plataforma.com";
+    for (const platformDomain of ["plataforma.com", "Plataforma.com."]) {
+      expect(await code(createStoreWithOwner({ name: "P", slug: "painel", ownerEmail: "p@exemplo.com" }, platformDomain, base))).toBe("invalid_input");
+    }
+    expect(await t.ownerDb.select().from(store)).toHaveLength(0);
+    expect(await t.ownerDb.select().from(users)).toHaveLength(0);
+    // Outro slug passa; sem PLATFORM_DOMAIN o slug não vira host nenhum.
+    expect((await createStoreWithOwner({ name: "Q", slug: "quero", ownerEmail: "q@exemplo.com" }, "plataforma.com", base)).storeId).toBeString();
+    expect((await createStoreWithOwner({ name: "P", slug: "painel", ownerEmail: "p@exemplo.com" }, "", base)).storeId).toBeString();
+  });
+
   test("setup do modo single com nome 'Pagar' não gera o slug reservado", async () => {
     const r = await setupFirstRun({ ...setup, storeName: "Pagar" }, "single");
     const [s] = await t.ownerDb.select().from(store).where(eq(store.id, r.storeId));
@@ -231,9 +266,10 @@ describe("slug reservado", () => {
 
 describe("createStoreWithOwner: domínio da plataforma", () => {
   test("x.<plataforma> → invalid_input; o domínio exato da plataforma é aceito", async () => {
-    expect(
-      await code(createStoreWithOwner({ name: "X", slug: "xis", ownerEmail: "x@exemplo.com", domain: "x.plataforma.com" }, "plataforma.com")),
-    ).toBe("invalid_input");
+    // `app.<plataforma>` (o painel) e `pagar.<plataforma>` (o cartão) caem na mesma regra.
+    for (const domain of ["x.plataforma.com", "app.plataforma.com", "pagar.plataforma.com"]) {
+      expect(await code(createStoreWithOwner({ name: "X", slug: "xis", ownerEmail: "x@exemplo.com", domain }, "plataforma.com"))).toBe("invalid_input");
+    }
     const r = await createStoreWithOwner({ name: "Y", slug: "ipsilon", ownerEmail: "y@exemplo.com", domain: "plataforma.com" }, "plataforma.com");
     expect(r.storeId).toBeString();
   });
@@ -298,7 +334,7 @@ describe("setStoreDomain (CLI)", () => {
 
   test("subdomínios da plataforma e pagar.<plataforma> são recusados; o domínio da plataforma em si é aceito", async () => {
     await mk("alfa");
-    for (const domain of ["loja.plataforma.com", "a.b.Plataforma.com", "pagar.plataforma.com"]) {
+    for (const domain of ["loja.plataforma.com", "a.b.Plataforma.com", "pagar.plataforma.com", "App.Plataforma.com"]) {
       expect(await code(setStoreDomain({ slug: "alfa", domain }, "plataforma.com"))).toBe("invalid_input");
     }
     expect((await setStoreDomain({ slug: "alfa", domain: "plataforma.com" }, "plataforma.com")).previous).toBeNull();

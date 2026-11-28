@@ -46,6 +46,22 @@ export async function resolveStore(
   return bySlug ?? null;
 }
 
+/**
+ * Host do painel da plataforma: no MODE=multi, o host do BASE_URL (ex.: `app.plataforma.com.br`). Lá o login não tem
+ * loja pelo host (ver `loginOnPanelHost`). Quem chama confere antes o `resolveStore`: se o host também é de uma loja
+ * (instalação que passou de `single` mantendo o domínio do checkout), vale a loja.
+ */
+export function isPanelHost(host: string, opts: { mode: "single" | "multi"; baseUrl: string } = { mode: env.MODE, baseUrl: env.BASE_URL }): boolean {
+  if (opts.mode !== "multi") return false;
+  const h = normalizeHost(host);
+  if (!h) return false;
+  try {
+    return h === normalizeHost(new URL(opts.baseUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
 const SETUP_LOCK = 7_303_005;
 const email = z.string().max(254).trim().toLowerCase().pipe(z.email());
 const setupInput = z.object({
@@ -55,8 +71,11 @@ const setupInput = z.object({
   name: z.string().max(100).trim().min(1),
 });
 
-/** Slugs que a loja não pode usar: o serviço de cartão vive em `pagar.<domínio>`. */
-export const RESERVED_SLUGS: readonly string[] = ["pagar"];
+/**
+ * Slugs que a loja não pode usar: o serviço de cartão vive em `pagar.<domínio>` e o painel da plataforma costuma viver
+ * em `app.<PLATFORM_DOMAIN>`. Um BASE_URL em outro subdomínio da plataforma também é recusado (ver `createStoreWithOwner`).
+ */
+export const RESERVED_SLUGS: readonly string[] = ["pagar", "app"];
 
 const slugify = (s: string) => {
   const slug = slugifyRaw(s);
@@ -153,7 +172,7 @@ export async function createStoreWithOwner(raw: {
   slug: string;
   ownerEmail: string;
   domain?: string;
-}, platformDomain: string | undefined = env.PLATFORM_DOMAIN): Promise<{ storeId: string; userId: string; temporaryPassword: string | null }> {
+}, platformDomain: string | undefined = env.PLATFORM_DOMAIN, baseUrl: string = env.BASE_URL): Promise<{ storeId: string; userId: string; temporaryPassword: string | null }> {
   const parsed = createStoreInput.safeParse(raw);
   if (!parsed.success) {
     throw new ActionError(
@@ -163,6 +182,11 @@ export async function createStoreWithOwner(raw: {
   }
   const input = parsed.data;
   if (input.domain) assertNotPlatformSubdomain(input.domain, platformDomain);
+  // `<slug>.<PLATFORM_DOMAIN>` igual ao host do BASE_URL: a loja tomaria o host do painel (o `resolveStore` acha a loja
+  // antes do painel) e o login da plataforma passaria a entrar só nela.
+  if (platformDomain && isPanelHost(`${input.slug}.${normalizeHost(platformDomain)}`, { mode: "multi", baseUrl })) {
+    throw new ActionError("invalid_input", "slug: reservado (é o endereço do painel da plataforma)");
+  }
   const temporaryPassword = randomToken(12);
   const passwordHash = await hashPassword(temporaryPassword);
   try {

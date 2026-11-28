@@ -373,8 +373,12 @@ As migrações do banco rodam sozinhas no início do app. Confira `docker compos
 Cada loja fica em `<slug>.PLATFORM_DOMAIN`. Uma loja também pode ter domínio próprio (`store-create ... --domain
 loja.com.br`): o app reconhece o domínio, mas o Caddy só atende os nomes listados no Caddyfile (item 3).
 
-1. No `.env`: `MODE=multi`, `PLATFORM_DOMAIN=plataforma.com.br` e `DOMAIN=plataforma.com.br` (ou outro nome do
-   painel).
+1. No `.env`: `MODE=multi`, `PLATFORM_DOMAIN=plataforma.com.br` e `DOMAIN=app.plataforma.com.br` (o endereço do
+   painel da plataforma; o slug `app` é reservado para isso). O painel abre em dois lugares: no `DOMAIN`, o login
+   entra na primeira loja da pessoa (ordem do nome; as outras ficam em **Suas lojas**), e em `<host da loja>/admin`, o
+   login entra naquela loja. O login vale só no host em que foi feito: trocar de loja por **Suas lojas** abre o
+   endereço da outra loja e pede login lá. Nenhuma loja pode ter slug ou domínio igual ao `DOMAIN` quando ele é
+   subdomínio do `PLATFORM_DOMAIN` (o `store-create` recusa).
 2. Crie cada loja pela linha de comando (a senha temporária do dono aparece uma vez só):
 
    ```sh
@@ -523,6 +527,99 @@ próprio; subdomínios de `PLATFORM_DOMAIN` ficam para quem usa slugs.
      autenticação que o painel da loja nova mostra (cada loja tem o seu `/api/webhooks/asaas/<id-da-loja>`). Um
      pagamento da outra loja que chegue ao webhook errado é ignorado com resposta 200, sem mexer em pedido nem gravar
      dados da cobrança no histórico de auditoria da loja que não é dona dela; não estranhe.
+
+### Passar `single` para `multi` com a plataforma num domínio novo
+
+Variante do roteiro acima para quem quer a plataforma num domínio próprio, sem reaproveitar o do checkout: painel em
+`app.plataforma.com.br`, cartão em `pagar.plataforma.com.br` e a loja que já vende continua em
+`checkout.minhaloja.com.br`, agora como **domínio próprio** dela. A raiz `plataforma.com.br` fica livre (um site de
+apresentação, fora deste app). Diferença principal: o `CARD_ORIGIN` muda (o `pagar.` antigo,
+`pagar.checkout.minhaloja.com.br`, sai do ar). Faça a troca num horário de pouco movimento.
+
+**O que continua funcionando sem mudar nada**, desde que o DNS e o Caddy de `checkout.minhaloja.com.br` continuem no
+ar e a loja não perca esse domínio:
+
+- **Links já enviados por e-mail.** Download (`/d/<token>`), descadastro da recuperação (`/sair/<token>`) e convites
+  da equipe (`/admin/convite/<token>`) foram montados com o endereço da loja, que no `single` é o `BASE_URL`
+  (`https://checkout.minhaloja.com.br`). No `multi` o app acha a loja por esse mesmo host (`store.domain`), então os
+  links antigos abrem a loja certa. Os links novos também saem com `https://checkout.minhaloja.com.br` (o endereço da
+  loja é o domínio dela, nunca o `app.`). Se um dia a loja trocar de domínio, os links antigos deixam de abrir.
+- **Checkout, página do pedido e o `t.js`** das páginas de vendas: continuam em `checkout.minhaloja.com.br`.
+- **Webhook do Asaas** (e o do Resend): a URL cadastrada no Asaas é `https://checkout.minhaloja.com.br/api/webhooks/asaas/<id-da-loja>`.
+  A rota acha a loja pelo id no caminho e pelo token, não pelo host, e o host antigo continua servido: os avisos
+  seguem chegando. O painel passa a mostrar a URL com o `BASE_URL` novo (`https://app.plataforma.com.br/...`); troque
+  no Asaas no passo 8, para o webhook não depender do domínio da loja.
+- **Agentes de IA (MCP) e apps** com o endereço antigo (`https://checkout.minhaloja.com.br/api/mcp`): o token é que
+  identifica a loja, então seguem funcionando. Troque para o `app.` quando for conveniente.
+
+**O que muda:** uma aba de checkout aberta antes da troca carregou o formulário do cartão do `pagar.` antigo, que sai
+do ar: o comprador recarrega a página e segue (o Pix não é afetado). E o login do painel no `app.` é novo: cada pessoa
+entra de novo lá (a sessão em `checkout.minhaloja.com.br/admin` continua valendo só naquele endereço).
+
+1. **Conferências e backup:** as três do passo 1 do roteiro acima (SMTP, só uma loja e anotar o slug, backup
+   conferido com `backup conferido`). Não siga sem elas.
+2. **Imagem nesta versão**, ainda em `single` (seção 10, "Atualizar"), conferindo `migrate: ok` em
+   `docker compose logs app` e o `/api/health`.
+3. **DNS** (nuvem cinza, como na seção 2): registros `A` de `app.plataforma.com.br` e `pagar.plataforma.com.br` para
+   o servidor. O de `checkout.minhaloja.com.br` não muda. Espere propagar: `dig +short app.plataforma.com.br` e
+   `dig +short pagar.plataforma.com.br` devem mostrar o IP do servidor (sem isso o Caddy não consegue emitir os
+   certificados no passo 7).
+4. **Domínio da loja atual**, ainda com o `.env` antigo (os valores novos vão por `-e`):
+
+   ```sh
+   docker compose exec -e MODE=multi -e PLATFORM_DOMAIN=plataforma.com.br app \
+     store-domain --slug <slug da loja atual> --domain checkout.minhaloja.com.br
+   ```
+
+   Deve mostrar `Domínio da loja <slug>: (nenhum) -> checkout.minhaloja.com.br`. Sem esse passo, o `multi` não
+   reconhece o host e o checkout, os links antigos e o painel da loja deixam de abrir.
+5. **Cópias para o caminho de volta**, fora do clone: `cp .env ~/funil.env.single && chmod 600 ~/funil.env.single` e,
+   se já existir um `deploy/Caddyfile.local`, `cp deploy/Caddyfile.local ~/funil.Caddyfile.single`.
+6. **Caddy (lista fixa):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (se ainda não usa uma cópia) e troque
+   a primeira linha por `{$DOMAIN}, checkout.minhaloja.com.br {`. O `{$DOMAIN}` passa a ser o `app.`; o
+   `checkout.minhaloja.com.br` precisa estar na lista, senão a loja sai do ar. Mantenha o bloco `@legacyCard` e a
+   linha `import card/*.caddy` no fim (ela serve o `pagar.` novo a partir do `CARD_ORIGIN`). Não liste o `pagar.`
+   aqui: repetido, o Caddy recusa subir.
+7. **`.env`** (o Caddy e o app leem na mesma subida):
+
+   ```sh
+   MODE=multi
+   PLATFORM_DOMAIN=plataforma.com.br
+   DOMAIN=app.plataforma.com.br
+   BASE_URL=                      # vazia: o compose usa https://$DOMAIN
+   CARD_ORIGIN=https://pagar.plataforma.com.br
+   CADDYFILE=Caddyfile.local
+   ```
+
+   Mantenha `SECRET`, `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY` e as senhas do banco como estão. Depois
+   `docker compose up -d` e `docker compose up -d --force-recreate caddy` (o Caddyfile é montado como arquivo: só
+   recriando o container ele lê a versão editada). Atualize a cópia do `.env` no seu cofre.
+8. **Webhook do Asaas:** em **Conexões → Asaas**, copie a URL nova (`https://app.plataforma.com.br/api/webhooks/asaas/<id-da-loja>`)
+   e, no Asaas (**Integrações → Webhooks**), edite o webhook existente trocando só a URL (o token não muda). Confira
+   que ele continua **ativo** e com a **fila** ligada (seção 6). Com o Resend, faça o mesmo com a URL do webhook dele
+   (**Conexões → E-mail (Resend)**).
+9. **Turnstile:** a lista de hostnames do widget continua com `checkout.minhaloja.com.br` (é onde o desafio aparece).
+   O `app.` e o `pagar.` não precisam estar nela. Lojas novas entram com o domínio delas (ou `plataforma.com.br`, se
+   usar lojas em subdomínio da plataforma).
+10. **Conferências:**
+    - `curl -s https://app.plataforma.com.br/api/health` e `curl -s https://checkout.minhaloja.com.br/api/health`;
+    - `curl -s -o /dev/null -w '%{http_code}\n' https://pagar.plataforma.com.br/form.js` mostra `200`;
+    - o checkout de uma oferta da loja (`https://checkout.minhaloja.com.br/c/<slug da oferta>`) abre e mostra o
+      formulário do cartão;
+    - o login em `https://app.plataforma.com.br/admin` entra na loja; em **Conexões**, a URL do webhook já aparece com
+      o `app.`;
+    - um link de download de antes da troca (de uma compra de teste sua, ainda dentro dos 30 dias) abre a página do
+      download;
+    - o e-mail sai (**Enviar teste** no cartão do provedor ativo) e um Pix de teste de valor baixo é confirmado sozinho
+      (prova que o webhook chega pela URL nova).
+11. **Caminho de volta** (vale antes de criar a loja nova; depois dela, veja o passo 5 do roteiro acima):
+    `cp ~/funil.env.single .env`, devolva o `deploy/Caddyfile.local` antigo (`cp ~/funil.Caddyfile.single
+    deploy/Caddyfile.local`; se ele não existia, o `.env` antigo nem o usa), `docker compose up -d` e
+    `docker compose up -d --force-recreate caddy`. Se já trocou a URL do webhook no Asaas (passo 8), volte para a
+    antiga (`https://checkout.minhaloja.com.br/...`): no `single` o `app.` não é servido. O `pagar.` antigo volta junto
+    com o `CARD_ORIGIN` antigo. O domínio gravado na loja não atrapalha o `single`.
+12. **Loja nova** com domínio próprio: o passo 6 do roteiro acima (DNS, `Caddyfile.local` com o domínio dela na
+    primeira linha, Turnstile e um segundo webhook do Asaas, que já sai com a URL do `app.`).
 
 ## 12. Cartão (serviço isolado `pagar.`)
 
