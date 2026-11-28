@@ -552,8 +552,9 @@ ar e a loja não perca esse domínio:
   **não troque durante a migração**: a URL antiga continua servida também no caminho de volta, e a do `app.` não
   (passo 8).
 - **Agentes de IA (MCP)** (`https://checkout.minhaloja.com.br/api/mcp`) e **apps** (`https://checkout.minhaloja.com.br/api/integracao/v1/...`)
-  com o endereço antigo: o token ou a chave é que identifica a loja, então seguem funcionando. Quando for conveniente,
-  troque só o host para o `app.`, mantendo o caminho de cada um.
+  com o endereço antigo: o token ou a chave é que identifica a loja, então seguem funcionando. Mantenha o host da loja
+  enquanto o caminho de volta ainda for uma opção (o `app.` sai do ar no `single`); depois, troque só o host para o
+  `app.`, mantendo o caminho de cada um.
 
 **O que muda:** uma aba de checkout aberta antes da troca carregou o formulário do cartão do `pagar.` antigo, que sai
 do ar: o comprador recarrega a página e segue (o Pix não é afetado). E o login do painel no `app.` é novo: cada pessoa
@@ -582,9 +583,8 @@ entra de novo lá (a sessão em `checkout.minhaloja.com.br/admin` continua valen
    se já existir um `deploy/Caddyfile.local`, `cp deploy/Caddyfile.local ~/funil.Caddyfile.single`.
 6. **Caddy (lista fixa):** copie `deploy/Caddyfile` para `deploy/Caddyfile.local` (se ainda não usa uma cópia) e troque
    a linha `{$DOMAIN} {` (a primeira que não é comentário; os comentários do topo ficam como estão) por
-   `{$DOMAIN}, checkout.minhaloja.com.br {`. Confira antes de subir:
-   `docker run --rm -e DOMAIN=app.plataforma.com.br -v "$PWD/deploy:/etc/caddy:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile.local --adapter caddyfile`
-   (deve terminar com `Valid configuration`). O `{$DOMAIN}` passa a ser o `app.`; o
+   `{$DOMAIN}, checkout.minhaloja.com.br {` (a conferência do arquivo vem no passo 7, com o `.env` novo). O `{$DOMAIN}`
+   passa a ser o `app.`; o
    `checkout.minhaloja.com.br` precisa estar na lista, senão a loja sai do ar. Mantenha o bloco `@legacyCard` e a
    linha `import card/*.caddy` no fim (ela serve o `pagar.` novo a partir do `CARD_ORIGIN`). Não liste o `pagar.`
    aqui: repetido, o Caddy recusa subir.
@@ -600,8 +600,11 @@ entra de novo lá (a sessão em `checkout.minhaloja.com.br/admin` continua valen
    CADDYFILE=Caddyfile.local
    ```
 
-   Mantenha `SECRET`, `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY` e as senhas do banco como estão. Depois
-   `docker compose up -d` e `docker compose up -d --force-recreate caddy` (o Caddyfile é montado como arquivo: só
+   Mantenha `SECRET`, `CARD_TICKET_KEY`, `ASAAS_SEAL_KEY` e as senhas do banco como estão. Antes de subir, confira o
+   Caddy com as mesmas variáveis e montagens do deploy (inclui o site do `pagar.`):
+   `docker compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` deve
+   terminar com `Valid configuration`. Se reclamar de site repetido ou de sintaxe, corrija o `Caddyfile.local` antes
+   de seguir. Depois `docker compose up -d` e `docker compose up -d --force-recreate caddy` (o Caddyfile é montado como arquivo: só
    recriando o container ele lê a versão editada). Atualize a cópia do `.env` no seu cofre.
 8. **Webhooks do Asaas e do Resend:** deixe como estão. As URLs cadastradas (`https://checkout.minhaloja.com.br/...`)
    continuam funcionando no `multi` e também no caminho de volta (passo 11), em que o `app.` deixa de ser servido. O
