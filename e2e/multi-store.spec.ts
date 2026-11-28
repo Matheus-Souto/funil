@@ -3,7 +3,7 @@
 // A instância multi é própria deste arquivo (e2e/support/multi-app.ts): o app do smoke segue em MODE=single.
 import { test, expect, type Page } from "@playwright/test";
 import { hostResolverArgs, startMultiApp, type MultiApp } from "./support/multi-app";
-import { DESKTOP, codeOf, firstLogin, panelFetch, seedAction, uploadProduct } from "./support/panel";
+import { DESKTOP, codeOf, firstLogin, panelFetch, seedAction, submitPasswordForm, uploadProduct } from "./support/panel";
 
 /** Domínio próprio da loja beta (store:domain). O Chromium o leva ao loopback; o app escolhe a loja pelo Host. */
 const CUSTOM_DOMAIN = "checkout.loja-beta.test";
@@ -81,7 +81,7 @@ test.describe("várias lojas (MODE=multi)", () => {
     await intruder.goto(`${multi.storeOrigin("beta")}/admin/login`);
     await intruder.getByLabel("E-mail").fill(STORES.alfa.email);
     await intruder.getByLabel("Senha").fill(STORES.alfa.password);
-    await intruder.getByRole("button", { name: "Entrar" }).click();
+    await submitPasswordForm(intruder, "Entrar", "/admin/login");
     await expect(intruder.getByText("E-mail ou senha inválidos.")).toBeVisible();
     await intruder.close();
 

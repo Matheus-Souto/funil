@@ -8,6 +8,18 @@ export const DESKTOP = { width: 1280, height: 800 };
 export const codeOf = (publicId: string) => publicId.replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8);
 
 /**
+ * Clica no botão de um formulário do painel que confere senha (server action com hash de senha) e espera a resposta do
+ * POST. Na instância multi recém-subida e com a máquina carregada, esse POST levou ~10 s numa rodada do verify (trace):
+ * a asserção de URL logo depois (5 s) vencia antes da resposta. Esperar a resposta é esperar o evento, não um tempo.
+ */
+export async function submitPasswordForm(page: Page, button: string, path: string) {
+  await Promise.all([
+    page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === path, { timeout: 60_000 }),
+    page.getByRole("button", { name: button }).click(),
+  ]);
+}
+
+/**
  * Primeiro acesso de um dono criado pelo `store:create`: entra com a senha temporária no host da loja, o painel exige a
  * troca e a nova senha leva ao painel da loja certa.
  */
@@ -15,14 +27,14 @@ export async function firstLogin(page: Page, origin: string, o: { email: string;
   await page.goto(`${origin}/admin/login`);
   await page.getByLabel("E-mail").fill(o.email);
   await page.getByLabel("Senha").fill(o.temporaryPassword);
-  await page.getByRole("button", { name: "Entrar" }).click();
+  await submitPasswordForm(page, "Entrar", "/admin/login");
   await expect(page).toHaveURL(`${origin}/admin/senha`);
   await expect(page.getByText("Você entrou com uma senha temporária. Escolha uma senha sua para continuar.")).toBeVisible();
   await expect(page.getByText(`${o.email} · ${o.storeName}`)).toBeVisible();
   await page.getByLabel("Senha temporária").fill(o.temporaryPassword);
   await page.getByLabel("Senha nova (mínimo 10 caracteres)").fill(o.password);
   await page.getByLabel("Repita a senha nova").fill(o.password);
-  await page.getByRole("button", { name: "Trocar senha" }).click();
+  await submitPasswordForm(page, "Trocar senha", "/admin/senha");
   await expect(page.getByText("Senha trocada.", { exact: false })).toBeVisible();
   await page.getByRole("link", { name: "Ir para o painel" }).click();
   await expect(page).toHaveURL(`${origin}/admin`);
