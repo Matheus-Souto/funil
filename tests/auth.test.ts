@@ -1,9 +1,10 @@
 import { eq, sql } from "drizzle-orm";
 import { ActionError } from "@/lib/actions/core";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
+import { loginForHost } from "@/lib/auth/login-host";
 import { createSession, login, loginOnPanelHost, lookupSession, verifyCredentials } from "@/lib/auth/session";
 import { sha256 } from "@/lib/crypto";
-import { loginAttempt, membership, session, users } from "@/lib/db/schema";
+import { loginAttempt, membership, session, store, users } from "@/lib/db/schema";
 import { HEAVY_TEST_MS, createTestDb, seedStore, type TestDb } from "./db";
 
 let t: TestDb;
@@ -249,5 +250,47 @@ describe("limites de tamanho do login", () => {
     await rejects(login({ email: u.email, password: "x".repeat(256), storeId }));
     const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(u.email)));
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("loginForHost (a escolha do caminho feita pelo loginAction)", () => {
+  const multi = { mode: "multi", platformDomain: "plataforma.com", baseUrl: "https://app.plataforma.com" } as const;
+
+  test("host exclusivo do painel: entra na primeira loja da pessoa", async () => {
+    const zeta = await seedStore("Zeta");
+    const alfa = await seedStore("Alfa");
+    const u = await seedUser(zeta.storeId);
+    await t.ownerDb.insert(membership).values({ userId: u.userId, storeId: alfa.storeId, role: "owner" });
+    const token = await loginForHost("APP.plataforma.com:443", { email: u.email, password: PASSWORD }, multi);
+    expect(await lookupSession(token!)).toMatchObject({ storeId: alfa.storeId });
+  });
+
+  test("host do painel que também é loja: vale a loja do host, não a primeira por nome", async () => {
+    const alfa = await seedStore("Alfa");
+    const [zeta] = await t.ownerDb.insert(store).values({ name: "Zeta", slug: `z-${++n}`, domain: "checkout.minhaloja.com" }).returning();
+    const u = await seedUser(alfa.storeId);
+    await t.ownerDb.insert(membership).values({ userId: u.userId, storeId: zeta!.id, role: "owner" });
+    const opts = { ...multi, baseUrl: "https://checkout.minhaloja.com" };
+    const token = await loginForHost("checkout.minhaloja.com", { email: u.email, password: PASSWORD }, opts);
+    expect(await lookupSession(token!)).toMatchObject({ storeId: zeta!.id });
+  });
+
+  test("host de loja: só entra quem é da loja; host desconhecido nem confere a senha", async () => {
+    await t.ownerDb.insert(store).values({ name: "A", slug: `a-${++n}`, domain: "loja-a.com" });
+    const b = await seedStore("B");
+    const u = await seedUser(b.storeId);
+    expect(await loginForHost("loja-a.com", { email: u.email, password: PASSWORD }, multi)).toBeNull();
+    expect(await loginForHost("outra.com", { email: u.email, password: PASSWORD }, multi)).toBeNull();
+    // Só a tentativa na loja-a conta no limite; o host desconhecido sai antes de conferir a senha.
+    const rows = await t.ownerDb.select().from(loginAttempt).where(eq(loginAttempt.emailHash, sha256(u.email)));
+    expect(rows).toHaveLength(1);
+  });
+
+  test("single: sem painel à parte; o host do BASE_URL abre só a loja da instalação", async () => {
+    await seedStore("Primeira"); // em single vale a loja mais antiga (outras suítes também criam lojas)
+    const outra = await seedStore("Outra");
+    const u = await seedUser(outra.storeId);
+    const single = { ...multi, mode: "single" } as const;
+    expect(await loginForHost("app.plataforma.com", { email: u.email, password: PASSWORD }, single)).toBeNull();
   });
 });

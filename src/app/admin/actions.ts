@@ -3,10 +3,11 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
-import { createSession, destroySession, login, loginOnPanelHost, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
+import { loginForHost } from "@/lib/auth/login-host";
+import { createSession, destroySession, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
 import { clientIpFrom } from "@/lib/client-ip";
 import { env } from "@/lib/env";
-import { isPanelHost, resolveStore, setupFirstRun } from "@/lib/stores";
+import { resolveStore, setupFirstRun } from "@/lib/stores";
 import { acceptInvite } from "@/lib/team/accept";
 
 const field = (f: FormData, k: string) => (typeof f.get(k) === "string" ? (f.get(k) as string) : "");
@@ -17,19 +18,7 @@ export async function loginAction(form: FormData): Promise<void> {
     redirect("/admin/login?erro=credenciais");
   }
   const h = await headers();
-  const host = h.get("host") ?? "";
-  const found = await resolveStore(host);
-  const credentials = { email: field(form, "email"), password: field(form, "password") };
-  let token: string | null = null;
-  // Host de loja: entra nela. Host do painel da plataforma (MODE=multi, BASE_URL que não é loja): entra numa loja da
-  // pessoa. Qualquer outro host: erro genérico, sem consulta.
-  if (found || isPanelHost(host)) {
-    try {
-      token = found ? await login({ ...credentials, storeId: found.id }) : await loginOnPanelHost(credentials);
-    } catch (e) {
-      if (!(e instanceof ActionError)) throw e;
-    }
-  }
+  const token = await loginForHost(h.get("host") ?? "", { email: field(form, "email"), password: field(form, "password") });
   if (!token) redirect("/admin/login?erro=credenciais");
   await setSessionCookie(token);
   redirect("/admin");
