@@ -13,10 +13,12 @@
 // Do lado do Node (Playwright), `*.localhost` não resolve em toda máquina: `hostRequest` fala com 127.0.0.1 e manda o
 // cabeçalho Host da loja.
 //
-// Limpeza: cada recurso registra a sua desfeita ANTES de existir (o banco é apagado com `if exists`), e `stop()` roda
-// todas, cada uma isolada (uma falha não pula as outras), em ordem inversa. Processos: só os PIDs que esta instância
-// criou, TERM e, passado o prazo, KILL; a porta do app é conferida fechada no fim. Falha no meio da subida chama a
-// mesma limpeza antes de repassar o erro.
+// Limpeza: cada recurso registra a sua desfeita assim que passa a existir (processo: logo depois do spawn; banco: logo
+// depois do CREATE bem-sucedido), e `stop()` roda todas, cada uma isolada (uma falha não pula as outras), em ordem
+// inversa. Processos: só os PIDs que esta instância criou, TERM e, passado o prazo, KILL, esperando o `close` (pipes
+// fechados) antes de fechar o log; a porta do app é conferida fechada no fim. A subida inteira tem prazo próprio, menor
+// que o do hook: processo travado sem sinal de pronto, saída ou `error` do filho caem no catch, que chama a mesma
+// limpeza antes de repassar o erro.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createWriteStream, mkdirSync, mkdtempSync, rmSync, type WriteStream } from "node:fs";
@@ -47,6 +49,13 @@ export interface HostResponse {
 }
 
 export interface StartOptions {
+  /**
+   * Prazo da subida inteira (migração, Asaas falso, app). Menor que o do hook (180 s): estourado, a subida falha e a
+   * limpeza ainda roda dentro do hook. Padrão 90 s.
+   */
+  startTimeoutMs?: number;
+  /** Linha que marca o app pronto (padrão: o "Ready in" do Next). Só o teste de limpeza troca, para simular app travado. */
+  appReadyPattern?: RegExp;
   /** Variáveis a mais (ou trocadas) para o app; também usadas para induzir falha de subida ao testar a limpeza. */
   extraEnv?: Record<string, string>;
 }
@@ -82,24 +91,57 @@ export function hostResolverArgs(extraHosts: string[] = []): string[] {
 }
 
 /**
- * Porta livre agora. Só para o app: o BASE_URL (com a porta) entra no ambiente dele antes de ele subir (URL do webhook do
- * Asaas, origens do checkout), então não dá para deixar o Next escolher. Se outra coisa pegar a porta no intervalo, o
- * Next sai com EADDRINUSE e a subida falha com o log (o mesmo método do `free_port` do verify.sh).
+ * Reserva uma porta livre segurando o socket até `release()`, chamado logo antes de subir o processo que vai usá-la.
+ * Só para quem precisa saber a própria porta antes de subir: o BASE_URL (com a porta) entra no ambiente do app (URL do
+ * webhook do Asaas, origens do checkout). Entre o `release()` e o `listen` do processo há uma janela mínima; se outra
+ * coisa pegar a porta, o processo sai com EADDRINUSE e a subida falha com o log (como o `free_port` do verify.sh).
  */
-async function freePort(): Promise<number> {
+async function reservePort(): Promise<{ port: number; release: () => Promise<void> }> {
   return new Promise((resolve, reject) => {
     const s = createServer();
     s.once("error", reject);
     s.listen(0, "127.0.0.1", () => {
       const a = s.address();
-      s.close(() => (a && typeof a === "object" ? resolve(a.port) : reject(new Error("sem porta"))));
+      if (!a || typeof a !== "object") return reject(new Error("sem porta"));
+      resolve({ port: a.port, release: () => new Promise<void>((r) => s.close(() => r())) });
     });
   });
 }
 
-/** Espera uma linha que case com `re` na saída do processo e devolve o 1º grupo; falha se ele sair antes. */
-function waitForOutput(child: ChildProcess, re: RegExp, what: string): Promise<string> {
-  return new Promise((resolve, reject) => {
+/** Processo filho desta instância, com a promessa do `close` (saiu E os pipes de saída fecharam). */
+interface Owned {
+  child: ChildProcess;
+  closed: Promise<void>;
+  what: string;
+}
+
+function spawnOwned(what: string, cmd: string, args: string[], env: Record<string, string>): Owned {
+  const child = spawn(cmd, args, { env: env as unknown as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  // Sem ouvinte, um `error` (ex.: comando inexistente) derrubaria o processo do Playwright; quem espera trata.
+  child.on("error", () => {});
+  return { child, closed, what };
+}
+
+/** Promessa que rejeita depois de `ms` (e o cancelamento do relógio). */
+function deadline(ms: number, message: string): { promise: Promise<never>; cancel: () => void } {
+  let timer: NodeJS.Timeout | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  promise.catch(() => {});
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
+/**
+ * Espera uma linha que case com `re` na saída do processo e devolve o 1º grupo. Falha se ele sair, se der `error` (não
+ * subiu) ou se passar de `ms` sem sinalizar prontidão (processo vivo e travado): quem chama cai no catch e a limpeza
+ * encerra o processo.
+ */
+function waitForOutput(p: Owned, re: RegExp, ms: number): Promise<string> {
+  const { child, what } = p;
+  const limit = deadline(ms, `${what} não sinalizou prontidão em ${Math.round(ms / 1000)} s`);
+  const ready = new Promise<string>((resolve, reject) => {
     let seen = "";
     const onData = (chunk: Buffer) => {
       seen = (seen + chunk.toString()).slice(-8000);
@@ -113,54 +155,72 @@ function waitForOutput(child: ChildProcess, re: RegExp, what: string): Promise<s
       cleanup();
       reject(new Error(`${what} saiu (código ${code}, sinal ${signal}) antes de ficar pronto: ${seen.slice(-1500)}`));
     };
+    const onError = (e: Error) => {
+      cleanup();
+      reject(new Error(`${what} não subiu: ${e.message}`));
+    };
     const cleanup = () => {
       child.stdout?.off("data", onData);
       child.stderr?.off("data", onData);
       child.off("exit", onExit);
+      child.off("error", onError);
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
     child.once("exit", onExit);
+    child.once("error", onError);
   });
+  return Promise.race([ready, limit.promise]).finally(limit.cancel);
 }
 
-function run(cmd: string, args: string[], env: Record<string, string>): Promise<CliResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { env: env as unknown as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
-    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
-    child.once("error", reject);
-    child.once("exit", (code: number | null) => resolve({ code, stdout, stderr }));
+/** Roda um comando até o fim, com prazo: passado o prazo, encerra o processo (TERM → KILL) e falha. */
+async function run(cmd: string, args: string[], env: Record<string, string>, ms = 120_000): Promise<CliResult> {
+  const p = spawnOwned(cmd, cmd, args, env);
+  let stdout = "";
+  let stderr = "";
+  p.child.stdout?.on("data", (c: Buffer) => (stdout += c.toString()));
+  p.child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
+  const done = new Promise<CliResult>((resolve, reject) => {
+    p.child.once("error", reject);
+    p.child.once("close", (code: number | null) => resolve({ code, stdout, stderr }));
   });
+  const limit = deadline(ms, `${cmd} ${args.join(" ")} passou de ${Math.round(ms / 1000)} s`);
+  try {
+    return await Promise.race([done, limit.promise]);
+  } catch (e) {
+    await stopProcess(p);
+    throw e;
+  } finally {
+    limit.cancel();
+  }
 }
 
 const exited = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
 
-/** Promessa do `exit` com prazo: `true` se saiu dentro dele. */
-function exitWithin(child: ChildProcess, ms: number): Promise<boolean> {
-  if (exited(child)) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off("exit", onExit);
-      resolve(exited(child));
-    }, ms);
-    const onExit = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once("exit", onExit);
-  });
+/** `true` se a promessa resolveu dentro de `ms`. */
+async function within(promise: Promise<void>, ms: number): Promise<boolean> {
+  const limit = deadline(ms, "prazo");
+  try {
+    await Promise.race([promise, limit.promise]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    limit.cancel();
+  }
 }
 
-/** Encerra um processo que esta instância criou: TERM, prazo, KILL, prazo. Falha se nem o KILL o derrubar. */
-async function stopProcess(child: ChildProcess, what: string): Promise<void> {
-  if (exited(child)) return;
-  child.kill("SIGTERM");
-  if (await exitWithin(child, STOP_GRACE_MS)) return;
+/**
+ * Encerra um processo que esta instância criou: TERM, prazo, KILL, prazo (espera o `close`: saída e pipes fechados, então
+ * o log já recebeu tudo). Processo que nem chegou a existir (spawn falhou) não tem o que encerrar.
+ */
+async function stopProcess(p: Owned): Promise<void> {
+  const { child, closed, what } = p;
+  if (child.pid === undefined) return;
+  if (!exited(child)) child.kill("SIGTERM");
+  if (await within(closed, STOP_GRACE_MS)) return;
   child.kill("SIGKILL");
-  if (!(await exitWithin(child, STOP_GRACE_MS))) throw new Error(`${what} (PID ${child.pid}) não saiu nem com SIGKILL`);
+  if (!(await within(closed, STOP_GRACE_MS))) throw new Error(`${what} (PID ${child.pid}) não saiu nem com SIGKILL`);
 }
 
 /** `true` se ninguém aceita conexão em 127.0.0.1:<porta>. */
@@ -219,8 +279,19 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
     return stopped;
   };
 
+  const budgetEnd = Date.now() + (opts.startTimeoutMs ?? 90_000);
+  /** O que resta do prazo da subida (mínimo 1 s, para a mensagem sair do lugar certo). */
+  const left = () => Math.max(1_000, budgetEnd - Date.now());
+
   try {
-    // Banco: a desfeita vem antes da criação (drop if exists), então qualquer falha daqui em diante o apaga.
+    const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
+    try {
+      await admin.unsafe(`create database "${dbName}"`);
+    } finally {
+      await admin.end();
+    }
+    // Banco: a desfeita só entra depois do CREATE bem-sucedido (um nome que já existisse faria o CREATE falhar, e o banco
+    // não é nosso para apagar).
     undo.push({
       what: "apagar o banco",
       run: async () => {
@@ -232,12 +303,6 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
         }
       },
     });
-    const admin = postgres(adminUrl, { max: 1, onnotice: () => {} });
-    try {
-      await admin.unsafe(`create database "${dbName}"`);
-    } finally {
-      await admin.end();
-    }
 
     mkdirSync(RUN_DIR, { recursive: true });
     const dataDir = mkdtempSync(join(tmpdir(), `funil-e2e-${name}-`));
@@ -245,18 +310,19 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
     const base: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 
     // Sem CARD_DB_PASSWORD: o papel `card` (do cluster inteiro, usado pelo serviço de cartão da rodada) fica como está.
-    const mig = await run("bun", ["run", "migrate"], { ...base, OWNER_DATABASE_URL: ownerDbUrl, DATABASE_URL: appDbUrl, APP_DB_PASSWORD: "app" });
+    const mig = await run("bun", ["run", "migrate"], { ...base, OWNER_DATABASE_URL: ownerDbUrl, DATABASE_URL: appDbUrl, APP_DB_PASSWORD: "app" }, left());
     if (mig.code !== 0) throw new Error(`migração falhou: ${mig.stderr.slice(-1500)}`);
 
     // Asaas falso na porta 0: ele mesmo escolhe e imprime a porta efetiva.
-    const fake = spawn("bun", ["e2e/fakes/asaas-server.ts"], { env: { ...base, PORT: "0" } as unknown as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"] });
-    const fakeLog = logTo(fake, join(RUN_DIR, `multi-${name}-asaas-fake.log`));
+    const fake = spawnOwned("Asaas falso", "bun", ["e2e/fakes/asaas-server.ts"], { ...base, PORT: "0" });
+    const fakeLog = logTo(fake.child, join(RUN_DIR, `multi-${name}-asaas-fake.log`));
     undo.push({ what: "fechar o log do Asaas falso", run: () => closeLog(fakeLog) });
-    undo.push({ what: "encerrar o Asaas falso", run: () => stopProcess(fake, "Asaas falso") });
-    const fakePort = await waitForOutput(fake, /asaas-fake ready on (\d+)/, "Asaas falso");
+    undo.push({ what: "encerrar o Asaas falso", run: () => stopProcess(fake) });
+    const fakePort = await waitForOutput(fake, /asaas-fake ready on (\d+)/, left());
     const asaasBase = `http://127.0.0.1:${fakePort}`;
 
-    const port = await freePort();
+    const appPort = await reservePort();
+    const port = appPort.port;
     const baseUrl = `http://127.0.0.1:${port}`;
     // Sem CARD_ORIGIN: esta instância vende só Pix (o cartão isolado é coberto pelo smoke).
     const env: Record<string, string> = {
@@ -279,21 +345,19 @@ export async function startMultiApp(name: string, opts: StartOptions = {}): Prom
       ...opts.extraEnv,
     };
     // O Next direto com node: o PID que encerramos é o do servidor que segura a porta.
-    const app = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)], {
-      env: env as unknown as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const appLog = logTo(app, join(RUN_DIR, `multi-${name}-app.log`));
+    await appPort.release();
+    const app = spawnOwned("app multi", process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(port)], env);
+    const appLog = logTo(app.child, join(RUN_DIR, `multi-${name}-app.log`));
     undo.push({ what: "fechar o log do app", run: () => closeLog(appLog) });
     undo.push({
       what: "encerrar o app",
       run: async () => {
-        await stopProcess(app, "app multi");
+        await stopProcess(app);
         if (!(await portClosed(port))) throw new Error(`a porta ${port} do app continua aberta`);
       },
     });
-    await waitForOutput(app, /(Ready in)/, "app multi");
-    const health = await fetch(`${baseUrl}/api/health`);
+    await waitForOutput(app, opts.appReadyPattern ?? /(Ready in)/, left());
+    const health = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(left()) });
     if (health.status !== 200) throw new Error(`app multi: /api/health respondeu ${health.status}`);
 
     const cli = (script: string, args: string[]) => run("bun", ["run", script, ...args], env);

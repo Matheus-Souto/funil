@@ -37,6 +37,21 @@ test("subida que falha depois do banco, da migração e do Asaas falso: tudo é 
   expect(await portClosed(fakePort)).toBe(true);
 });
 
+test("app vivo que nunca sinaliza prontidão: a subida falha no prazo próprio e o processo, a porta e o banco somem", async () => {
+  // O padrão de prontidão nunca aparece: o Next sobe e fica vivo, escutando, sem o sinal que a subida espera.
+  await expect(startMultiApp("trava", { appReadyPattern: /linha-que-nunca-aparece/, startTimeoutMs: 30_000 })).rejects.toThrow(
+    /app multi não sinalizou prontidão em \d+ s/,
+  );
+  const appLog = readFileSync(join(RUN_DIR, "multi-trava-app.log"), "utf8");
+  expect(appLog).toContain("Ready in"); // estava vivo e pronto de fato
+  const appPort = Number(/Local:\s+http:\/\/127\.0\.0\.1:(\d+)/.exec(appLog)?.[1]);
+  expect(appPort).toBeGreaterThan(0);
+  expect(await portClosed(appPort)).toBe(true);
+  const fakePort = Number(/asaas-fake ready on (\d+)/.exec(readFileSync(join(RUN_DIR, "multi-trava-asaas-fake.log"), "utf8"))?.[1]);
+  expect(await portClosed(fakePort)).toBe(true);
+  expect(await leftovers("trava")).toEqual([]);
+});
+
 test("parada normal: a porta do app fecha, o banco some e parar de novo não faz nada", async () => {
   const multi = await startMultiApp("limpeza");
   let stopped = false;
