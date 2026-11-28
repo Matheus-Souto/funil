@@ -2,6 +2,7 @@
 // isolamento total no painel (pedidos, ofertas, produtos, compradores), no checkout e por URL direta.
 // A instância multi é própria deste arquivo (e2e/support/multi-app.ts): o app do smoke segue em MODE=single.
 import { test, expect, type Page } from "@playwright/test";
+import postgres from "postgres";
 import { hostResolverArgs, startMultiApp, type MultiApp } from "./support/multi-app";
 import { DESKTOP, codeOf, firstLogin, panelFetch, seedAction, submitPasswordForm, uploadProduct } from "./support/panel";
 
@@ -57,8 +58,12 @@ test.describe("várias lojas (MODE=multi)", () => {
   });
 
   test.afterAll(async () => {
-    for (const p of Object.values(owner)) await p.close();
-    await multi?.stop();
+    // Páginas e instância são limpezas independentes: falha ao fechar uma página não impede derrubar a instância.
+    try {
+      await Promise.allSettled(Object.values(owner).map((p) => p.close()));
+    } finally {
+      await multi?.stop();
+    }
   });
 
   test("store:create cria as lojas; cada dono troca a senha temporária no host da sua loja e não entra na outra", async ({ browser }) => {
@@ -85,14 +90,12 @@ test.describe("várias lojas (MODE=multi)", () => {
     await expect(intruder.getByText("E-mail ou senha inválidos.")).toBeVisible();
     await intruder.close();
 
-    // A sessão é do host: o cookie da alfa não vale no host da beta.
+    // Cookie preso ao host (comportamento do navegador com o cookie sem Domain): o navegador do dono da alfa não manda a
+    // sessão ao host da beta, que pede login.
     await owner.alfa.goto(`${multi.storeOrigin("beta")}/admin`);
     await expect(owner.alfa).toHaveURL(`${multi.storeOrigin("beta")}/admin/login`);
     await owner.alfa.goto(`${multi.storeOrigin("alfa")}/admin`);
     await expect(owner.alfa.getByRole("heading", { name: `Boas-vindas, ${STORES.alfa.name}` })).toBeVisible();
-
-    // Host sem loja (slug inexistente): nada de checkout.
-    expect((await multi.hostRequest("gama.localhost", `/c/${SHARED_SLUG}`)).status).toBe(404);
   });
 
   test("cada loja configura Pix manual, produto e ofertas pelo próprio painel (o mesmo endereço nas duas)", async () => {
@@ -133,6 +136,9 @@ test.describe("várias lojas (MODE=multi)", () => {
       await expect(page).toHaveURL(new RegExp(`^${origin.replace(/\./g, "\\.")}/o/[\\w-]+$`));
       ids[key].publicId = new URL(page.url()).pathname.split("/").pop()!;
     }
+    // O mesmo endereço responde 200 nos dois hosts de loja; num host sem loja (slug inexistente), o mesmo caminho dá 404.
+    for (const host of ["alfa.localhost", "beta.localhost"]) expect((await multi.hostRequest(host, `/c/${SHARED_SLUG}`)).status, host).toBe(200);
+    expect((await multi.hostRequest("gama.localhost", `/c/${SHARED_SLUG}`)).status).toBe(404);
     // A página do pedido só abre no host da loja dona do pedido.
     for (const key of ["alfa", "beta"] as const) {
       const mine = multi.storeOrigin(STORES[key].slug);
@@ -190,13 +196,48 @@ test.describe("várias lojas (MODE=multi)", () => {
       await expect(page.getByText("This page could not be found.")).toBeVisible();
       await expect(page.getByText(other.offer)).toHaveCount(0);
       expect((await panelFetch(page, `/admin/api/products/${theirs.productId}/file`)).status).toBe(404);
-      const release = await panelFetch(page, "/api/test-only/release", { json: { publicId: theirs.publicId } });
-      expect(release.status).toBe(404);
     }
+  });
 
-    // A tentativa de liberar o pedido da outra loja não mexeu nele: segue aguardando pagamento.
-    await owner.beta.goto(`${multi.storeOrigin("beta")}/o/${ids.beta.publicId}`);
-    await expect(owner.beta.getByTestId("unique-amount")).toBeVisible();
+  test("ação real do painel (orders.release) com o id interno do pedido da outra loja: nada é liberado, nos dois sentidos", async () => {
+    // O botão "Liberar pedido" do próprio pedido chama a server action com o id interno; aqui o POST sai do navegador do
+    // dono com o id trocado pelo do pedido da outra loja (o que um dono malicioso faria). A ação roda com a sessão e a
+    // loja do dono: o pedido da outra loja não existe para ela.
+    for (const key of ["alfa", "beta"] as const) {
+      const page = owner[key];
+      const origin = multi.storeOrigin(STORES[key].slug);
+      const mine = ids[key];
+      const theirs = ids[OTHER[key]];
+      const url = `${origin}/admin/orders/${mine.orderId}`;
+      await page.goto(url);
+      const swapped: string[] = [];
+      await page.route(url, async (route) => {
+        const body = route.request().postData() ?? "";
+        if (route.request().method() !== "POST" || !body.includes(mine.orderId)) return route.continue();
+        swapped.push(body);
+        await route.continue({ postData: body.split(mine.orderId).join(theirs.orderId) });
+      });
+      await page.getByRole("button", { name: "Liberar pedido" }).click();
+      const dialog = page.getByRole("dialog", { name: `Liberar o pedido #${codeOf(mine.publicId)}?` });
+      await dialog.getByRole("checkbox").nth(0).check();
+      await dialog.getByRole("checkbox").nth(1).check();
+      await dialog.getByRole("button", { name: "Liberar e enviar acesso" }).click();
+      await expect(dialog.getByText("Pedido não encontrado")).toBeVisible();
+      expect(swapped, "o POST da ação saiu com o id trocado").toHaveLength(1);
+      await page.unroute(url);
+    }
+    // No banco: os dois pedidos continuam pendentes, sem pagamento, e nenhuma liberação deu certo.
+    const sql = postgres(multi.ownerDbUrl, { max: 1 });
+    try {
+      const rows = await sql<{ id: string; status: string; paid_at: Date | null }[]>`
+        select id, status, paid_at from orders where id in (${ids.alfa.orderId}, ${ids.beta.orderId})`;
+      expect(rows).toHaveLength(2);
+      for (const r of rows) expect({ status: r.status, paid: r.paid_at }).toEqual({ status: "pending", paid: null });
+      const audits = await sql<{ store_id: string; ok: boolean }[]>`select store_id, ok from audit_log where action = 'orders.release'`;
+      expect(audits.filter((a) => a.ok)).toHaveLength(0);
+    } finally {
+      await sql.end();
+    }
   });
 
   test("domínio próprio pelo store:domain: o checkout da beta abre no domínio dela e só lá; ao tirar, o domínio para de abrir", async ({ page }) => {
@@ -226,6 +267,9 @@ test.describe("várias lojas (MODE=multi)", () => {
     const cleared = await multi.cli("store:domain", ["--slug", "beta", "--clear"]);
     expect(cleared.code, cleared.stderr).toBe(0);
     expect(cleared.stdout).toContain(`Domínio da loja beta: ${CUSTOM_DOMAIN} -> (nenhum)`);
+    // Depois de tirar: o mesmo endereço segue 200 nos hosts das lojas e só o domínio removido dá 404.
+    for (const host of ["alfa.localhost", "beta.localhost"]) expect((await multi.hostRequest(host, `/c/${SHARED_SLUG}`)).status, host).toBe(200);
+    expect((await multi.hostRequest(CUSTOM_DOMAIN, `/c/${SHARED_SLUG}`)).status).toBe(404);
     expect((await page.goto(`${custom}/c/oferta-beta`))?.status()).toBe(404);
   });
 });
