@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ActionError, type Actor } from "@/lib/actions/core";
@@ -128,6 +128,29 @@ export async function login(input: { email: string; password: string; storeId: s
   if (!cred || !member) throw bad();
   await clearLoginAttempts(input.email);
   return createSession(cred.userId, input.storeId);
+}
+
+/**
+ * Login no host do painel da plataforma (MODE=multi, host do BASE_URL que não é loja, ex.: `app.plataforma.com.br`):
+ * mesmas regras do `login` (limite de tentativas, erro único e genérico), mas sem loja fixa pelo host. A sessão abre na
+ * primeira loja da pessoa na ordem da lista "Suas lojas" (nome, depois id); as outras abrem pelo endereço de cada uma.
+ * Conta sem vínculo com nenhuma loja dá o mesmo erro de senha errada.
+ */
+export async function loginOnPanelHost(input: { email: string; password: string }): Promise<string> {
+  if (tooLong(input.email, input.password)) throw bad();
+  const cred = await verifyCredentials(input.email, input.password);
+  const [member] = cred
+    ? await db
+        .select({ storeId: membership.storeId })
+        .from(membership)
+        .innerJoin(store, eq(store.id, membership.storeId))
+        .where(eq(membership.userId, cred.userId))
+        .orderBy(asc(store.name), asc(store.id))
+        .limit(1)
+    : [];
+  if (!cred || !member) throw bad();
+  await clearLoginAttempts(input.email);
+  return createSession(cred.userId, member.storeId);
 }
 
 /** Grava o cookie de sessão (só em server action ou route handler). */

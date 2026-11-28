@@ -3,7 +3,8 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ActionError, runAction } from "@/lib/actions/core";
-import { createSession, destroySession, login, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
+import { loginForHost } from "@/lib/auth/login-host";
+import { createSession, destroySession, MAX_EMAIL_LENGTH, MAX_PASSWORD_LENGTH, setSessionCookie } from "@/lib/auth/session";
 import { clientIpFrom } from "@/lib/client-ip";
 import { env } from "@/lib/env";
 import { resolveStore, setupFirstRun } from "@/lib/stores";
@@ -17,15 +18,7 @@ export async function loginAction(form: FormData): Promise<void> {
     redirect("/admin/login?erro=credenciais");
   }
   const h = await headers();
-  const found = await resolveStore(h.get("host") ?? "");
-  let token: string | null = null;
-  if (found) {
-    try {
-      token = await login({ email: field(form, "email"), password: field(form, "password"), storeId: found.id });
-    } catch (e) {
-      if (!(e instanceof ActionError)) throw e;
-    }
-  }
+  const token = await loginForHost(h.get("host") ?? "", { email: field(form, "email"), password: field(form, "password") });
   if (!token) redirect("/admin/login?erro=credenciais");
   await setSessionCookie(token);
   redirect("/admin");
